@@ -1,0 +1,11 @@
+{
+  "name": "AI音频设计助手",
+  "description": "专业的游戏与视频音频设计辅助工具，提供音效设计需求表、背景音乐推荐及音乐提示词生成。",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
