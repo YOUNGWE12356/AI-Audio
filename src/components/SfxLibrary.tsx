@@ -43,6 +43,8 @@ import {
 } from 'lucide-react';
 import { HistoryItem } from '../types';
 import { optimizeImportMetadata } from '../services/geminiService';
+import { DEFAULT_CATEGORIES, INITIAL_SOUNDS } from '../data/sfxData';
+import type { SoundEffect, SubCategory, CategoryGroup } from '../data/sfxData';
 
 interface ImportItem {
   id: string;
@@ -59,39 +61,7 @@ interface ImportItem {
   status?: 'pending' | 'uploading' | 'success' | 'error';
 }
 
-interface SoundEffect {
-  id: string;
-  name: string;
-  fileName: string;
-  category: string;
-  subcategory?: string;
-  tags: string[];
-  duration: number; // in seconds
-  format: 'WAV' | 'OGG' | 'MP3';
-  size: string;
-  sampleRate: string;
-  channels: 'Mono' | 'Stereo';
-  designer: string;
-  path: string;
-  url: string;
-  isFavorite?: boolean;
-}
-
-interface SubCategory {
-  id: string;
-  name: string;
-  english: string;
-  description: string;
-}
-
-interface CategoryGroup {
-  id: string;
-  name: string;
-  english: string;
-  subCategories: SubCategory[];
-}
-
-export const DEFAULT_CATEGORIES: CategoryGroup[] = [
+export const LOCAL_DEFAULT_CATEGORIES: CategoryGroup[] = [
   {
     id: 'music_all',
     name: '全部音乐',
@@ -180,7 +150,7 @@ export const DEFAULT_CATEGORIES: CategoryGroup[] = [
 
 export const AUDIO_CATEGORIES = DEFAULT_CATEGORIES;
 
-export const INITIAL_SOUNDS: SoundEffect[] = [
+export const LOCAL_INITIAL_SOUNDS: SoundEffect[] = [
   {
     id: 'sfx-company-1',
     name: '公司以往制作：荒野战机飞跃轰鸣',
@@ -549,21 +519,18 @@ export default function SfxLibrary() {
 
   // Dynamic Categories state
   const [categories, setCategories] = useState<CategoryGroup[]>(() => {
-    const saved = localStorage.getItem('sfx_library_categories');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        console.error("Failed to load sfx categories from localStorage:", e);
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('sfx_library_categories');
+      if (saved) {
+        try {
+          return JSON.parse(saved);
+        } catch (e) {
+          console.error("Failed to parse saved categories from localStorage", e);
+        }
       }
     }
     return DEFAULT_CATEGORIES;
   });
-
-  // Save categories to localStorage
-  useEffect(() => {
-    localStorage.setItem('sfx_library_categories', JSON.stringify(categories));
-  }, [categories]);
 
   // Category management helper states
   const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
@@ -581,22 +548,88 @@ export default function SfxLibrary() {
   const [filterDesigner, setFilterDesigner] = useState<string>('全部'); // 全部, AD_Design, Gemini_AI, ElevenLabs_Bot
   const [filterSampleRate, setFilterSampleRate] = useState<string>('全部'); // 全部, 44.1, 48.0, 96.0
 
-  // Dynamic Sounds state with localStorage persistence
+  // Dynamic Sounds state with backend synchronization
   const [sounds, setSounds] = useState<SoundEffect[]>(() => {
-    const saved = localStorage.getItem('sfx_library_sounds');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        console.error("Failed to load sounds from localStorage:", e);
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('sfx_library_sounds');
+      if (saved) {
+        try {
+          return JSON.parse(saved);
+        } catch (e) {
+          console.error("Failed to parse saved sounds from localStorage", e);
+        }
       }
     }
     return INITIAL_SOUNDS;
   });
 
-  // Save sounds to localStorage
+  const isLoadedFromServer = useRef(false);
+
+  // Load categories and sounds from full-stack backend on mount
   useEffect(() => {
+    const loadServerData = async () => {
+      try {
+        const [catRes, soundRes] = await Promise.all([
+          fetch('/api/sfx/categories'),
+          fetch('/api/sfx/sounds')
+        ]);
+        if (catRes.ok) {
+          const catData = await catRes.json();
+          setCategories(catData);
+          localStorage.setItem('sfx_library_categories', JSON.stringify(catData));
+        }
+        if (soundRes.ok) {
+          const soundData = await soundRes.json();
+          setSounds(soundData);
+          localStorage.setItem('sfx_library_sounds', JSON.stringify(soundData));
+        }
+      } catch (err) {
+        console.error("Failed to load sfx library database from server:", err);
+      } finally {
+        isLoadedFromServer.current = true;
+      }
+    };
+    loadServerData();
+  }, []);
+
+  // Save categories to localStorage and server
+  useEffect(() => {
+    if (!isLoadedFromServer.current) return;
+    localStorage.setItem('sfx_library_categories', JSON.stringify(categories));
+    const syncCategories = async () => {
+      try {
+        await fetch('/api/sfx/categories', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(categories)
+        });
+      } catch (err) {
+        console.error("Failed to sync categories with backend:", err);
+      }
+    };
+    if (categories && categories.length > 0) {
+      syncCategories();
+    }
+  }, [categories]);
+
+  // Save sounds to localStorage and server
+  useEffect(() => {
+    if (!isLoadedFromServer.current) return;
     localStorage.setItem('sfx_library_sounds', JSON.stringify(sounds));
+    const syncSounds = async () => {
+      try {
+        await fetch('/api/sfx/sounds', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(sounds)
+        });
+      } catch (err) {
+        console.error("Failed to sync sounds with backend:", err);
+      }
+    };
+    if (sounds && sounds.length > 0) {
+      syncSounds();
+    }
   }, [sounds]);
 
   // Edit Sound state
@@ -1108,11 +1141,12 @@ export default function SfxLibrary() {
   };
 
   const [selectedSoundId, setSelectedSoundId] = useState<string>('sfx-1');
-  const selectedSound = sounds.find(s => s.id === selectedSoundId) || sounds[0];
+  const selectedSound = sounds.find(s => s.id === selectedSoundId) || sounds[0] || { duration: 1, name: '', fileName: '', format: '', tags: [], size: '', channels: '', sampleRate: '', designer: '', path: '' };
 
   // Global playback control states
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [currentTime, setCurrentTime] = useState<number>(0);
+  const [loadedDuration, setLoadedDuration] = useState<number | null>(null);
   const [volume, setVolume] = useState<number>(0.8);
   const [isLooping, setIsLooping] = useState<boolean>(false);
   const [copiedPath, setCopiedPath] = useState<boolean>(false);
@@ -1322,12 +1356,18 @@ export default function SfxLibrary() {
 
   // --- HTML5 Audio Control Sync ---
   useEffect(() => {
-    // Whenever selectedSound changes, load and pause
+    // Whenever selectedSound changes, load, pause, and reset progress indicators
     setIsPlaying(false);
     setCurrentTime(0);
+    setLoadedDuration(null);
     if (audioPlayerRef.current) {
       audioPlayerRef.current.load();
     }
+    // Instantly reset playback progress of the selected item to prevent stale visualization
+    setPlaybackProgress(prev => ({
+      ...prev,
+      [selectedSoundId]: 0
+    }));
   }, [selectedSoundId]);
 
   useEffect(() => {
@@ -1395,6 +1435,7 @@ export default function SfxLibrary() {
     } else {
       setSelectedSoundId(soundId);
       setIsPlaying(false);
+      setLoadedDuration(null);
 
       const targetSound = stateRef.current.sounds.find(s => s.id === soundId);
       if (targetSound) {
@@ -1421,8 +1462,17 @@ export default function SfxLibrary() {
   const handleTimeUpdate = () => {
     if (audioPlayerRef.current) {
       const cur = audioPlayerRef.current.currentTime;
-      const dur = audioPlayerRef.current.duration || 1;
+      const dur = audioPlayerRef.current.duration;
+      
+      // Safeguard against NaN/Infinity/unloaded audio metadata
+      if (isNaN(cur) || isNaN(dur) || !isFinite(dur) || dur <= 0) {
+        return;
+      }
+      
       setCurrentTime(cur);
+      
+      // Keep loadedDuration in sync with the real audio element
+      setLoadedDuration(dur);
       
       // Update progress map for current selected item
       setPlaybackProgress(prev => ({
@@ -2000,12 +2050,33 @@ export default function SfxLibrary() {
       item.status = 'uploading';
       setImportItems([...itemsToUpload]);
 
-      // 2. Wait for a short duration
-      await new Promise(resolve => setTimeout(resolve, 400 + Math.random() * 500));
+      // 2. Perform actual file upload to Express backend
+      let isSuccess = false;
+      let finalFileUrl = '';
+      let cleanFilenameOnServer = '';
 
-      // 3. Determine success or failure
-      // 90% success rate, 10% failure rate
-      const isSuccess = Math.random() > 0.1;
+      if (item.originalFile) {
+        try {
+          const response = await fetch('/api/sfx/upload', {
+            method: 'POST',
+            headers: {
+              'Content-Type': item.originalFile.type || 'application/octet-stream',
+              'x-filename': encodeURIComponent(item.fileName)
+            },
+            body: item.originalFile
+          });
+          if (response.ok) {
+            const uploadRes = await response.json();
+            finalFileUrl = uploadRes.url;
+            cleanFilenameOnServer = uploadRes.fileName;
+            isSuccess = true;
+          }
+        } catch (uploadErr) {
+          console.error("Failed to upload audio file to server:", uploadErr);
+        }
+      } else {
+        isSuccess = true; // fallback
+      }
 
       if (isSuccess) {
         item.status = 'success';
@@ -2019,12 +2090,12 @@ export default function SfxLibrary() {
         else if (item.category === '系统与界面') slug = 'ui';
         else if (item.category === '全部音乐') slug = 'music';
 
-        const fileUrl = item.originalFile ? URL.createObjectURL(item.originalFile) : 'https://assets.mixkit.co/active_storage/sfx/2568/2568-84.wav';
+        const fileUrl = finalFileUrl || (item.originalFile ? URL.createObjectURL(item.originalFile) : 'https://assets.mixkit.co/active_storage/sfx/2568/2568-84.wav');
 
         const newSound: SoundEffect = {
           id: `sfx-${Date.now()}-${i}-${Math.random().toString(36).substr(2, 5)}`,
-          name: item.name.trim() || item.originalFile.name,
-          fileName: item.fileName.trim() || item.originalFile.name,
+          name: item.name.trim() || (item.originalFile ? item.originalFile.name : 'Unknown'),
+          fileName: cleanFilenameOnServer || item.fileName.trim() || (item.originalFile ? item.originalFile.name : 'Unknown'),
           category: item.category,
           subcategory: item.subcategory,
           tags: item.tags,
@@ -2034,7 +2105,7 @@ export default function SfxLibrary() {
           sampleRate: '48.0 kHz',
           channels: Math.random() > 0.4 ? 'Stereo' : 'Mono',
           designer: 'AD_Design (音效师)',
-          path: item.category === '全部音乐' ? `assets/music/${slug}/${item.fileName}` : `assets/sfx/${slug}/${item.fileName}`,
+          path: item.category === '全部音乐' ? `assets/music/${slug}/${cleanFilenameOnServer || item.fileName}` : `assets/sfx/${slug}/${cleanFilenameOnServer || item.fileName}`,
           url: fileUrl,
         };
 
@@ -3576,7 +3647,7 @@ export default function SfxLibrary() {
                       }`}
                     >
                       {/* Left Block: Audio trigger & Names */}
-                      <div className="flex items-center gap-3 min-w-0">
+                      <div className="flex items-center gap-3 min-w-0 flex-1">
                         <button
                           type="button"
                           onClick={(e) => {
@@ -3596,20 +3667,20 @@ export default function SfxLibrary() {
                           )}
                         </button>
 
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className={`text-[11px] font-black truncate ${isSelected ? 'text-emerald-700' : 'text-slate-700 group-hover:text-slate-900'}`}>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className={`text-[11px] font-black truncate ${isSelected ? 'text-emerald-700' : 'text-slate-700 group-hover:text-slate-900'}`} title={sound.name}>
                               {sound.name}
                             </span>
                             <span className="text-[8px] bg-slate-100 text-slate-500 border border-slate-200 px-1 rounded-sm uppercase font-mono font-bold shrink-0">
                               {sound.format}
                             </span>
                           </div>
-                          <span className="text-[10px] text-slate-400 font-mono flex items-center gap-1.5 mt-0.5">
-                            <span className="text-slate-500">{sound.category}</span>
-                            <span>·</span>
-                            <span>{sound.fileName}</span>
-                          </span>
+                          <div className="text-[10px] text-slate-400 font-mono flex items-center gap-1.5 mt-0.5 min-w-0">
+                            <span className="text-slate-500 whitespace-nowrap shrink-0">{sound.category}</span>
+                            <span className="text-slate-300 shrink-0">·</span>
+                            <span className="truncate min-w-0" title={sound.fileName}>{sound.fileName}</span>
+                          </div>
                         </div>
                       </div>
 
@@ -3695,7 +3766,7 @@ export default function SfxLibrary() {
                   正在试听试用: {selectedSound.name}
                 </span>
                 <span className="text-slate-500">
-                  {currentTime.toFixed(2)}s / {(selectedSound.duration).toFixed(1)}s
+                  {currentTime.toFixed(2)}s / {(loadedDuration !== null ? loadedDuration : (selectedSound.duration || 1)).toFixed(1)}s
                 </span>
               </div>
               
@@ -3707,14 +3778,18 @@ export default function SfxLibrary() {
                   const clickX = e.clientX - rect.left;
                   const ratio = clickX / rect.width;
                   if (audioPlayerRef.current) {
-                    audioPlayerRef.current.currentTime = ratio * audioPlayerRef.current.duration;
+                    const dur = audioPlayerRef.current.duration;
+                    if (dur && !isNaN(dur) && isFinite(dur)) {
+                      audioPlayerRef.current.currentTime = ratio * dur;
+                    }
                   }
                 }}
               >
                 {/* Simulated interactive waves */}
                 {[20, 40, 60, 30, 80, 50, 90, 70, 85, 40, 20, 60, 80, 50, 30, 70, 95, 60, 40, 80, 70, 50, 90, 40, 20, 60, 80, 30, 50, 40, 60, 30, 80, 50, 90, 40, 20].map((h, i) => {
                   const barLimit = (i / 37) * 100;
-                  const progressRatio = (currentTime / (selectedSound.duration || 1)) * 100;
+                  const displayDur = loadedDuration !== null ? loadedDuration : (selectedSound.duration || 1);
+                  const progressRatio = (currentTime / displayDur) * 100;
                   const isBarActive = progressRatio >= barLimit;
                   return (
                     <div
@@ -3731,7 +3806,7 @@ export default function SfxLibrary() {
                 {/* Floating progress indicator */}
                 <div 
                   className="absolute top-0 bottom-0 w-0.5 bg-emerald-600 pointer-events-none"
-                  style={{ left: `${(currentTime / (selectedSound.duration || 1)) * 100}%` }}
+                  style={{ left: `${(currentTime / (loadedDuration !== null ? loadedDuration : (selectedSound.duration || 1))) * 100}%` }}
                 />
               </div>
             </div>

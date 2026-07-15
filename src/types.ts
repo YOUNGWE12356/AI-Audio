@@ -5,7 +5,7 @@
 
 import { AudioDesignResult } from './services/geminiService';
 
-export type TabType = 'workbench' | 'audio-director' | 'music-studio' | 'sfx-studio' | 'dubbing-studio' | 'settings' | 'sfx-library' | 'sfx-requirements';
+export type TabType = 'workbench' | 'audio-director' | 'music-studio' | 'sfx-studio' | 'dubbing-studio' | 'settings' | 'sfx-library' | 'sfx-requirements' | 'audio-tools';
 
 export interface FileItem {
   file: File;

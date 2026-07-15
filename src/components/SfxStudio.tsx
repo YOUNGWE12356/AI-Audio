@@ -16,9 +16,11 @@ import {
   CheckCircle2, 
   AlertCircle,
   Sparkles,
-  Volume2
+  Volume2,
+  Languages
 } from 'lucide-react';
 import { HistoryItem } from '../types';
+import { translateToEnglish } from '../services/geminiService';
 
 interface SfxStudioProps {
   standalonePrompt: string;
@@ -49,6 +51,22 @@ export default function SfxStudio({
 }: SfxStudioProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [playingHistoryId, setPlayingHistoryId] = useState<string | null>(null);
+  const [isTranslating, setIsTranslating] = useState(false);
+
+  const handleTranslate = async () => {
+    if (!standalonePrompt.trim()) return;
+    setIsTranslating(true);
+    try {
+      const translated = await translateToEnglish(standalonePrompt);
+      if (translated) {
+        setStandalonePrompt(translated);
+      }
+    } catch (err) {
+      console.error("Translation error:", err);
+    } finally {
+      setIsTranslating(false);
+    }
+  };
   
   const historyAudioRefs = useRef<{ [key: string]: HTMLAudioElement | null }>({});
 
@@ -120,7 +138,27 @@ export default function SfxStudio({
           <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-5 shadow-sm">
             {/* Description textarea */}
             <div className="space-y-2">
-              <label className="text-xs font-bold text-slate-700 block uppercase tracking-wider">音效声音画面描述</label>
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-slate-700 block uppercase tracking-wider">音效声音画面描述</label>
+                <button
+                  type="button"
+                  onClick={handleTranslate}
+                  disabled={isTranslating || !standalonePrompt.trim()}
+                  className="text-[10px] text-emerald-600 hover:text-emerald-700 disabled:text-slate-400 font-bold flex items-center gap-1.5 transition-all bg-emerald-50 hover:bg-emerald-100 disabled:bg-slate-50 px-2.5 py-1 rounded-lg border border-emerald-200/50 disabled:border-slate-200 cursor-pointer"
+                >
+                  {isTranslating ? (
+                    <>
+                      <Loader2 className="w-3 h-3 animate-spin text-emerald-600" />
+                      <span>正在翻译...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Languages className="w-3 h-3 text-emerald-600" />
+                      <span>翻译为英文</span>
+                    </>
+                  )}
+                </button>
+              </div>
               <textarea
                 value={standalonePrompt}
                 onChange={(e) => setStandalonePrompt(e.target.value)}

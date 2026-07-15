@@ -26,12 +26,17 @@ import {
   Info,
   PlusCircle,
   Trash2,
-  Languages
+  Languages,
+  UploadCloud,
+  FileAudio
 } from 'lucide-react';
 import { HistoryItem } from '../types';
 import { ELEVENLABS_VOICES, VoiceItem } from '../data/voices';
-import { fetchAvailableVoices } from '../services/elevenLabsService';
+import { fetchAvailableVoices, generateSpeechToSpeech } from '../services/elevenLabsService';
 import { translateToEnglish } from '../services/geminiService';
+import SpeechToSpeech from './SpeechToSpeech';
+import SpeechToText from './SpeechToText';
+import { downloadAudioHelper } from '../utils/downloadHelper';
 
 interface PendingVoiceOption {
   url: string;
@@ -98,6 +103,144 @@ export default function DubbingStudio({
   const [playingHistoryId, setPlayingHistoryId] = useState<string | null>(null);
   const [editingHistoryId, setEditingHistoryId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
+
+  // Active sub-tab state ('tts' = Text-to-Speech, 'sts' = Speech-to-Speech, 'stt' = Speech-to-Text)
+  const [activeSubTab, setActiveSubTab] = useState<'tts' | 'sts' | 'stt'>('tts');
+
+  // STS File Upload & Playing States
+  const [stsFile, setStsFile] = useState<File | null>(null);
+  const [stsFileUrl, setStsFileUrl] = useState<string | null>(null);
+  const [stsDragActive, setStsDragActive] = useState(false);
+  const stsInputRef = useRef<HTMLInputElement | null>(null);
+  const [stsInputIsPlaying, setStsInputIsPlaying] = useState(false);
+  const stsInputAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  // STS Voice Selection States
+  const [stsVoiceRole, setStsVoiceRole] = useState('21m00Tcm4TlvDq8ikWAM'); // Rachel
+  const [stsVoiceGender, setStsVoiceGender] = useState<'male' | 'female'>('female');
+  const [stsVoiceSearchQuery, setStsVoiceSearchQuery] = useState('');
+  const [stsVoiceActiveCategory, setStsVoiceActiveCategory] = useState('全部');
+  const [stsVoiceGenderFilter, setStsVoiceGenderFilter] = useState<'all' | 'male' | 'female'>('all');
+  const [stsShowVoiceDropdown, setStsShowVoiceDropdown] = useState(false);
+
+  // STS Conversion API & Playing States
+  const [stsLoading, setStsLoading] = useState(false);
+  const [stsAudioUrl, setStsAudioUrl] = useState<string | null>(null);
+  const [stsError, setStsError] = useState<string | null>(null);
+  const [stsIsPlaying, setStsIsPlaying] = useState(false);
+  const stsAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (stsFileUrl) {
+        URL.revokeObjectURL(stsFileUrl);
+      }
+      if (stsAudioUrl) {
+        URL.revokeObjectURL(stsAudioUrl);
+      }
+    };
+  }, []);
+
+  const handleStsDrag = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") {
+      setStsDragActive(true);
+    } else if (e.type === "dragleave") {
+      setStsDragActive(false);
+    }
+  };
+
+  const handleStsDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setStsDragActive(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      handleStsFileChange(e.dataTransfer.files[0]);
+    }
+  };
+
+  const handleStsFileChange = (file: File) => {
+    if (stsFileUrl) {
+      URL.revokeObjectURL(stsFileUrl);
+    }
+    setStsFile(file);
+    setStsFileUrl(URL.createObjectURL(file));
+    setStsInputIsPlaying(false);
+    setStsAudioUrl(null); // Reset converted url when new file uploaded
+  };
+
+  const toggleStsInputPlay = () => {
+    if (stsInputAudioRef.current) {
+      if (stsInputIsPlaying) {
+        stsInputAudioRef.current.pause();
+        setStsInputIsPlaying(false);
+      } else {
+        // Pause other active playbacks to keep audio environment clean
+        if (stsAudioRef.current) {
+          stsAudioRef.current.pause();
+          setStsIsPlaying(false);
+        }
+        if (standaloneVoiceAudioRef.current) {
+          standaloneVoiceAudioRef.current.pause();
+          setIsPlaying(false);
+        }
+        stsInputAudioRef.current.play().catch(err => console.error(err));
+        setStsInputIsPlaying(true);
+      }
+    }
+  };
+
+  const handleStsGenerate = async () => {
+    const hasKey = Boolean(
+      (typeof window !== 'undefined' && localStorage.getItem('ELEVENLABS_API_KEY')) || 
+      (typeof process !== 'undefined' && process.env?.ELEVENLABS_API_KEY)
+    );
+    if (!hasKey) {
+      setStsError('ELEVENLABS_API_KEY 未配置，请前往设置页面或 Secrets 面板添加。');
+      return;
+    }
+    if (!stsFile) {
+      setStsError('请先上传需要变声的源音频文件');
+      return;
+    }
+
+    setStsLoading(true);
+    setStsError(null);
+    try {
+      const blob = await generateSpeechToSpeech(stsFile, stsVoiceRole);
+      const url = URL.createObjectURL(blob);
+      setStsAudioUrl(url);
+
+      const matchedVoice = displayVoices.find(v => v.id === stsVoiceRole);
+      const voiceLabel = matchedVoice ? matchedVoice.name : '自定义声线';
+      
+      const newHistoryItem: HistoryItem = {
+        id: `sts-${Date.now()}`,
+        type: 'voice',
+        title: `语音变声 - ${voiceLabel}`,
+        prompt: `源音频：${stsFile.name} ➡️ 变声目标：${voiceLabel}`,
+        url: url,
+        timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
+        details: `${(stsFile.size / 1024 / 1024).toFixed(2)}MB · ${stsVoiceGender === 'male' ? '男声' : '女声'}`,
+        speed: 1.0
+      };
+      setHistoryList(prev => [newHistoryItem, ...prev]);
+
+      // Auto play the converted audio to give instant feedback
+      setTimeout(() => {
+        if (stsAudioRef.current) {
+          stsAudioRef.current.src = url;
+          stsAudioRef.current.play().catch(e => console.error(e));
+          setStsIsPlaying(true);
+        }
+      }, 150);
+    } catch (err: any) {
+      setStsError(err.message || '语音变声生成失败，请重试');
+    } finally {
+      setStsLoading(false);
+    }
+  };
 
   // Dual option play states & ref
   const [playingOptionId, setPlayingOptionId] = useState<'A' | 'B' | null>(null);
@@ -603,6 +746,14 @@ export default function DubbingStudio({
       standaloneVoiceAudioRef.current.pause();
       setIsPlaying(false);
     }
+    if (stsInputIsPlaying && stsInputAudioRef.current) {
+      stsInputAudioRef.current.pause();
+      setStsInputIsPlaying(false);
+    }
+    if (stsIsPlaying && stsAudioRef.current) {
+      stsAudioRef.current.pause();
+      setStsIsPlaying(false);
+    }
 
     if (playingHistoryId && playingHistoryId !== id && historyAudioRefs.current[playingHistoryId]) {
       historyAudioRefs.current[playingHistoryId]?.pause();
@@ -670,22 +821,82 @@ export default function DubbingStudio({
   const voiceHistory = historyList.filter(item => item.type === 'voice');
 
   return (
-    <div id="dubbingstudio-view" className="flex-1 p-6 space-y-6 max-w-6xl mx-auto w-full">
-      {/* Workspace Banner */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-6">
-        <div>
-          <div className="flex items-center gap-2">
-            <Mic className="w-4 h-4 text-emerald-600" />
-            <span className="text-xs font-bold text-emerald-600 uppercase tracking-widest">AI Character Dubbing Studio</span>
-          </div>
-          <h2 className="text-xl font-black text-slate-800 mt-1">AI 配音</h2>
-          <p className="text-xs text-slate-500 mt-1">输入任意文字配音，自动检测输入语种；自定义文字输入描述您心仪的声线与情感，一键渲染拟真人声。</p>
+    <div id="dubbingstudio-view" className="flex-1 flex flex-col md:flex-row bg-slate-50 min-h-screen overflow-hidden">
+      {/* Sub-navigation Sidebar */}
+      <div className="w-full md:w-60 bg-white border-b md:border-b-0 md:border-r border-slate-200 flex flex-col p-4 md:p-5 shrink-0 select-none">
+        <div className="space-y-1.5">
+          <p className="px-3 text-[10px] font-bold text-emerald-800/80 tracking-wider uppercase mb-2">AI配音</p>
+          
+          {/* Subtab Button 1: 文本转语音 */}
+          <button
+            onClick={() => {
+              setActiveSubTab('tts');
+              if (optionAudioRef.current) optionAudioRef.current.pause();
+            }}
+            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 cursor-pointer ${
+              activeSubTab === 'tts'
+                ? 'bg-emerald-50 text-emerald-700 shadow-sm border border-emerald-100'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+            }`}
+          >
+            <Mic className={`w-4 h-4 transition-colors ${activeSubTab === 'tts' ? 'text-emerald-600' : 'text-slate-400'}`} />
+            <span>文本转语音</span>
+          </button>
+
+          {/* Subtab Button 2: 语音转语音 */}
+          <button
+            onClick={() => {
+              setActiveSubTab('sts');
+              if (standaloneVoiceAudioRef.current) standaloneVoiceAudioRef.current.pause();
+              setIsPlaying(false);
+            }}
+            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 cursor-pointer ${
+              activeSubTab === 'sts'
+                ? 'bg-emerald-50 text-emerald-700 shadow-sm border border-emerald-100'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+            }`}
+          >
+            <Volume2 className={`w-4 h-4 transition-colors ${activeSubTab === 'sts' ? 'text-emerald-600' : 'text-slate-400'}`} />
+            <span>语音转语音</span>
+          </button>
+
+          {/* Subtab Button 3: 语音转文本 */}
+          <button
+            onClick={() => {
+              setActiveSubTab('stt');
+              if (standaloneVoiceAudioRef.current) standaloneVoiceAudioRef.current.pause();
+              setIsPlaying(false);
+            }}
+            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 cursor-pointer ${
+              activeSubTab === 'stt'
+                ? 'bg-emerald-50 text-emerald-700 shadow-sm border border-emerald-100'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+            }`}
+          >
+            <FileAudio className={`w-4 h-4 transition-colors ${activeSubTab === 'stt' ? 'text-emerald-600' : 'text-slate-400'}`} />
+            <span>语音转文本</span>
+          </button>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* Core parameters */}
-        <div className="lg:col-span-7 space-y-5">
+      {/* Main Workspace Panel */}
+      <div className="flex-1 overflow-y-auto p-6 md:p-8">
+        {/* Workspace Banner */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-6 mb-6">
+          <div>
+            <div className="flex items-center gap-2">
+              <Mic className="w-4 h-4 text-emerald-600" />
+              <span className="text-xs font-bold text-emerald-600 uppercase tracking-widest">AI Character Dubbing Studio</span>
+            </div>
+            <h2 className="text-xl font-black text-slate-800 mt-1">AI 配音</h2>
+            <p className="text-xs text-slate-500 mt-1">输入文字或上传语音，自定义声音库，多场景拟真人声配音、跨音色变声体验。</p>
+          </div>
+        </div>
+
+        {activeSubTab === 'tts' ? (
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+              {/* Core parameters */}
+              <div className="lg:col-span-7 space-y-5">
           <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-5 shadow-sm">
             {/* Dialogue textarea with dynamic bracket highlighting */}
             <div className="space-y-2">
@@ -776,27 +987,6 @@ export default function DubbingStudio({
                   style={{ WebkitTextFillColor: 'transparent' }}
                 />
               </div>
-            </div>
-
-            {/* Config Dials: Speed control takes full width or a nice layout */}
-            <div className="space-y-2">
-              <label className="text-[11px] font-bold text-slate-700 flex items-center gap-1">
-                <Sliders className="w-3.5 h-3.5 text-emerald-600" />
-                <span>语速调控 ({standaloneVoiceSpeed.toFixed(1)}x)</span>
-              </label>
-              <select
-                value={standaloneVoiceSpeed}
-                onChange={(e) => setStandaloneVoiceSpeed(parseFloat(e.target.value))}
-                className="w-full bg-slate-50 border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all cursor-pointer"
-              >
-                <option value="0.5">0.5x (极慢)</option>
-                <option value="0.8">0.8x (慢速)</option>
-                <option value="1">1.0x (正常默认)</option>
-                <option value="1.2">1.2x (稍快)</option>
-                <option value="1.5">1.5x (快速)</option>
-                <option value="1.8">1.8x (极快)</option>
-                <option value="2">2.0x (飞快)</option>
-              </select>
             </div>
 
             {/* Premium Voice Library vs Custom Voice Setting block */}
@@ -1356,14 +1546,13 @@ export default function DubbingStudio({
                 </div>
 
                 <div className="flex items-center gap-2 pt-1">
-                  <a
-                    href={standaloneVoiceAudioUrl}
-                    download="generated_voiceover.mp3"
-                    className="w-full bg-white hover:bg-emerald-50 border border-slate-200 text-slate-700 hover:text-emerald-700 py-2 rounded-xl text-[10px] font-bold text-center transition-all flex items-center justify-center gap-1.5 shadow-sm"
+                  <button
+                    onClick={() => standaloneVoiceAudioUrl && downloadAudioHelper(standaloneVoiceAudioUrl, 'generated_voiceover.mp3')}
+                    className="w-full bg-white hover:bg-emerald-50 border border-slate-200 text-slate-700 hover:text-emerald-700 py-2 rounded-xl text-[10px] font-bold text-center transition-all flex items-center justify-center gap-1.5 shadow-sm cursor-pointer"
                   >
                     <Download className="w-3.5 h-3.5" />
                     <span>下载 MP3 配音</span>
-                  </a>
+                  </button>
                 </div>
               </div>
             ) : (
@@ -1454,14 +1643,13 @@ export default function DubbingStudio({
                       </div>
                       <div className="flex items-center gap-1.5 shrink-0">
                         <span className="text-[9px] text-slate-400 font-mono hidden sm:inline">{item.timestamp.split(' ')[1]}</span>
-                        <a
-                          href={item.url}
-                          download={`${item.id}.mp3`}
-                          className="p-1 hover:bg-emerald-50 hover:text-emerald-700 text-slate-400 rounded transition-colors"
+                        <button
+                          onClick={() => downloadAudioHelper(item.url, `${item.id}.mp3`)}
+                          className="p-1 hover:bg-emerald-50 hover:text-emerald-700 text-slate-400 rounded transition-colors cursor-pointer"
                           title="下载"
                         >
                           <Download className="w-3.5 h-3.5" />
-                        </a>
+                        </button>
                       </div>
                     </div>
                   );
@@ -1470,6 +1658,24 @@ export default function DubbingStudio({
             )}
           </div>
         </div>
+      </div>
+          ) : activeSubTab === 'sts' ? (
+            <SpeechToSpeech
+              historyList={historyList}
+              setHistoryList={setHistoryList}
+              displayVoices={displayVoices}
+              playingVoiceId={playingVoiceId}
+              handlePlayVoicePreview={handlePlayVoicePreview}
+              onAudioPlay={() => {
+                if (standaloneVoiceAudioRef.current) {
+                  standaloneVoiceAudioRef.current.pause();
+                  setIsPlaying(false);
+                }
+              }}
+            />
+          ) : (
+            <SpeechToText />
+          )}
       </div>
     </div>
   );

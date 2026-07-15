@@ -17,7 +17,8 @@ import {
   History,
   Volume2,
   Database,
-  ClipboardList
+  ClipboardList,
+  SlidersHorizontal
 } from 'lucide-react';
 import { TabType } from '../types';
 
@@ -33,6 +34,7 @@ export default function Sidebar({ currentTab, setCurrentTab }: SidebarProps) {
     { id: 'music-studio' as const, label: 'AI 音乐', icon: Music },
     { id: 'sfx-studio' as const, label: 'AI 音效', icon: Waves },
     { id: 'dubbing-studio' as const, label: 'AI 配音', icon: Mic },
+    { id: 'audio-tools' as const, label: '音频工具', icon: SlidersHorizontal },
     { id: 'sfx-requirements' as const, label: '音效需求表', icon: ClipboardList },
     { id: 'sfx-library' as const, label: '音效库', icon: Database },
     { id: 'settings' as const, label: '设置', icon: Settings },

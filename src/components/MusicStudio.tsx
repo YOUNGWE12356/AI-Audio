@@ -16,9 +16,11 @@ import {
   CheckCircle2, 
   AlertCircle,
   Sparkles,
-  Volume2
+  Volume2,
+  Languages
 } from 'lucide-react';
 import { HistoryItem } from '../types';
+import { translateToEnglish } from '../services/geminiService';
 
 interface MusicStudioProps {
   standaloneMusicPrompt: string;
@@ -27,6 +29,8 @@ interface MusicStudioProps {
   setStandaloneMusicDuration: (dur: number) => void;
   standaloneMusicType: 'instrumental' | 'vocal';
   setStandaloneMusicType: (type: 'instrumental' | 'vocal') => void;
+  standaloneMusicLyrics: string;
+  setStandaloneMusicLyrics: (lyrics: string) => void;
   standaloneMusicLoading: boolean;
   standaloneMusicAudioUrl: string | null;
   setStandaloneMusicAudioUrl: (url: string | null) => void;
@@ -43,6 +47,8 @@ export default function MusicStudio({
   setStandaloneMusicDuration,
   standaloneMusicType,
   setStandaloneMusicType,
+  standaloneMusicLyrics,
+  setStandaloneMusicLyrics,
   standaloneMusicLoading,
   standaloneMusicAudioUrl,
   setStandaloneMusicAudioUrl,
@@ -53,6 +59,22 @@ export default function MusicStudio({
 }: MusicStudioProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [playingHistoryId, setPlayingHistoryId] = useState<string | null>(null);
+  const [isTranslating, setIsTranslating] = useState(false);
+
+  const handleTranslate = async () => {
+    if (!standaloneMusicPrompt.trim()) return;
+    setIsTranslating(true);
+    try {
+      const translated = await translateToEnglish(standaloneMusicPrompt);
+      if (translated) {
+        setStandaloneMusicPrompt(translated);
+      }
+    } catch (err) {
+      console.error("Translation error:", err);
+    } finally {
+      setIsTranslating(false);
+    }
+  };
   
   const historyAudioRefs = useRef<{ [key: string]: HTMLAudioElement | null }>({});
 
@@ -125,7 +147,27 @@ export default function MusicStudio({
           <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-5 shadow-sm">
             {/* Textarea description */}
             <div className="space-y-2">
-              <label className="text-xs font-bold text-slate-700 block uppercase tracking-wider">配乐风格与情感描述</label>
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-slate-700 block uppercase tracking-wider">配乐风格与情感描述</label>
+                <button
+                  type="button"
+                  onClick={handleTranslate}
+                  disabled={isTranslating || !standaloneMusicPrompt.trim()}
+                  className="text-[10px] text-emerald-600 hover:text-emerald-700 disabled:text-slate-400 font-bold flex items-center gap-1.5 transition-all bg-emerald-50 hover:bg-emerald-100 disabled:bg-slate-50 px-2.5 py-1 rounded-lg border border-emerald-200/50 disabled:border-slate-200 cursor-pointer"
+                >
+                  {isTranslating ? (
+                    <>
+                      <Loader2 className="w-3 h-3 animate-spin text-emerald-600" />
+                      <span>正在翻译...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Languages className="w-3 h-3 text-emerald-600" />
+                      <span>翻译为英文</span>
+                    </>
+                  )}
+                </button>
+              </div>
               <textarea
                 value={standaloneMusicPrompt}
                 onChange={(e) => setStandaloneMusicPrompt(e.target.value)}
@@ -197,11 +239,29 @@ export default function MusicStudio({
                         : 'text-slate-500 hover:text-slate-800'
                     }`}
                   >
-                    带词/合唱
+                    歌词
                   </button>
                 </div>
               </div>
             </div>
+
+            {/* Lyrics Input Box - Shows when "vocal" is selected */}
+            {standaloneMusicType === 'vocal' && (
+              <div className="space-y-2 border-t border-slate-100 pt-3">
+                <label className="text-xs font-bold text-slate-700 block uppercase tracking-wider">
+                  输入背景歌词
+                </label>
+                <textarea
+                  value={standaloneMusicLyrics}
+                  onChange={(e) => setStandaloneMusicLyrics(e.target.value)}
+                  placeholder="请输入您希望 AI 歌唱的歌词文本（例如：[Verse] 在深夜的街头... [Chorus] 奔跑吧，迎着风...）"
+                  className="w-full h-24 bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500 transition-all resize-none placeholder-slate-400"
+                />
+                <p className="text-[10px] text-slate-400 italic">
+                  支持使用 [Verse] 或 [Chorus] 等标签来标注结构，生成效果更佳。
+                </p>
+              </div>
+            )}
 
             {/* Error logs */}
             {standaloneMusicError && (
@@ -275,7 +335,7 @@ export default function MusicStudio({
                   <div className="min-w-0 flex-1">
                     <p className="text-xs font-bold text-slate-800 truncate">AI 独立音乐作品</p>
                     <p className="text-[10px] text-slate-500 truncate italic mt-0.5">"{standaloneMusicPrompt}"</p>
-                    <span className="text-[9px] text-emerald-600 font-semibold mt-1 block">时长：{standaloneMusicDuration}秒 · {standaloneMusicType === 'instrumental' ? '纯伴奏' : '有声人声'}</span>
+                    <span className="text-[9px] text-emerald-600 font-semibold mt-1 block">时长：{standaloneMusicDuration}秒 · {standaloneMusicType === 'instrumental' ? '纯伴奏' : '歌词人声'}</span>
                   </div>
 
                   <button

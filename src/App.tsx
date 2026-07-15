@@ -16,6 +16,7 @@ import AudioDirector from './components/AudioDirector';
 import MusicStudio from './components/MusicStudio';
 import SfxStudio from './components/SfxStudio';
 import DubbingStudio from './components/DubbingStudio';
+import AudioTools from './components/AudioTools';
 import SettingsComponent from './components/Settings';
 import SfxLibrary from './components/SfxLibrary';
 import SfxRequirements from './components/SfxRequirements';
@@ -94,6 +95,7 @@ export default function App() {
   const [standaloneMusicPrompt, setStandaloneMusicPrompt] = useState('');
   const [standaloneMusicDuration, setStandaloneMusicDuration] = useState(30);
   const [standaloneMusicType, setStandaloneMusicType] = useState<'instrumental' | 'vocal'>('instrumental');
+  const [standaloneMusicLyrics, setStandaloneMusicLyrics] = useState('');
   const [standaloneMusicLoading, setStandaloneMusicLoading] = useState(false);
   const [standaloneMusicAudioUrl, setStandaloneMusicAudioUrl] = useState<string | null>(null);
   const [standaloneMusicError, setStandaloneMusicError] = useState<string | null>(null);
@@ -374,7 +376,8 @@ export default function App() {
       const blob = await generateMusic(
         standaloneMusicPrompt.trim(), 
         standaloneMusicDuration, 
-        standaloneMusicType === 'instrumental'
+        standaloneMusicType === 'instrumental',
+        standaloneMusicLyrics.trim()
       );
       const url = URL.createObjectURL(blob);
       setStandaloneMusicAudioUrl(url);
@@ -386,7 +389,7 @@ export default function App() {
         prompt: standaloneMusicPrompt.trim(),
         url: url,
         timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
-        details: `${standaloneMusicDuration}秒 · ${standaloneMusicType === 'instrumental' ? '纯伴奏' : '带歌词人声'}`
+        details: `${standaloneMusicDuration}秒 · ${standaloneMusicType === 'instrumental' ? '纯伴奏' : '歌词人声'}`
       };
       setHistoryList(prev => [newHistoryItem, ...prev]);
 
@@ -594,6 +597,8 @@ export default function App() {
             setStandaloneMusicDuration={setStandaloneMusicDuration}
             standaloneMusicType={standaloneMusicType}
             setStandaloneMusicType={setStandaloneMusicType}
+            standaloneMusicLyrics={standaloneMusicLyrics}
+            setStandaloneMusicLyrics={setStandaloneMusicLyrics}
             standaloneMusicLoading={standaloneMusicLoading}
             standaloneMusicAudioUrl={standaloneMusicAudioUrl}
             setStandaloneMusicAudioUrl={setStandaloneMusicAudioUrl}
@@ -643,6 +648,10 @@ export default function App() {
             pendingVoiceOptions={pendingVoiceOptions}
             setPendingVoiceOptions={setPendingVoiceOptions}
           />
+        )}
+
+        {currentTab === 'audio-tools' && (
+          <AudioTools />
         )}
 
         {currentTab === 'settings' && (

@@ -68,7 +68,7 @@ export async function generateSoundEffect(text: string, duration?: number): Prom
   return await response.blob();
 }
 
-export async function generateMusic(text: string, duration?: number, isInstrumental: boolean = true): Promise<Blob> {
+export async function generateMusic(text: string, duration?: number, isInstrumental: boolean = true, lyrics?: string): Promise<Blob> {
   const apiKey = getApiKey();
   if (!apiKey) {
     throw new Error("ElevenLabs API Key is not configured. Please add it in the Secrets panel.");
@@ -90,7 +90,9 @@ export async function generateMusic(text: string, duration?: number, isInstrumen
 
   const musicPrompt = isInstrumental
     ? `AI Music, full background instrumental track, no vocals, no speech: ${cleanText}`
-    : `AI Music, complete song with expressive vocals and lyrics, vocal track, full mix: ${cleanText}`;
+    : (lyrics 
+        ? `AI Music, complete song with expressive vocals and lyrics, vocal track, full mix. Lyrics: "${lyrics}". Style: ${cleanText}`
+        : `AI Music, complete song with expressive vocals and lyrics, vocal track, full mix: ${cleanText}`);
 
   console.log(`Generating music (instrumental=${isInstrumental}) with English prompt:`, musicPrompt);
 
@@ -129,8 +131,8 @@ export async function generateVoice(
 
   console.log(`Generating TTS Voice with ID ${voiceId} for text:`, text.substring(0, 30));
 
-  // Try the "eleven_multilingual_v3" model first as requested. If not supported or returns error, fallback to the stable "eleven_multilingual_v2"
-  const modelsToTry = ["eleven_multilingual_v3", "eleven_multilingual_v2"];
+  // Use highly stable and officially supported multilingual models
+  const modelsToTry = ["eleven_multilingual_v2", "eleven_turbo_v2_5", "eleven_flash_v1"];
   let lastError: any = null;
   let successfulBlob: Blob | null = null;
 
@@ -184,7 +186,7 @@ export async function generateVoice(
   // Fallback if voice ID was not found: try with guaranteed default voice Rachel and stable v2 model
   const isVoiceNotFoundError = lastError && (lastError.message.toLowerCase().includes("not found") || lastError.message.toLowerCase().includes("voice_id"));
   if ((isVoiceNotFoundError || !successfulBlob) && voiceId !== '21m00Tcm4TlvDq8ikWAM') {
-    console.warn(`Voice ID '${voiceId}' or model failed. Retrying with guaranteed default voice (Rachel: 21m00Tcm4TlvDq8ikWAM) and stable multilingual_v2...`);
+    console.warn(`Voice ID '${voiceId}' or model failed. Retrying with guaranteed default voice (Rachel: 21m00Tcm4TlvDq8ikWAM) and eleven_multilingual_v2...`);
     
     try {
       const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM`, {
@@ -256,4 +258,120 @@ export async function fetchAvailableVoices(): Promise<ElevenLabsVoice[]> {
     return [];
   }
 }
+
+export async function generateSpeechToSpeech(
+  audioFile: File | Blob,
+  voiceId: string,
+  stability: number = 0.5,
+  similarity: number = 0.75,
+  style: number = 0.05
+): Promise<Blob> {
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    throw new Error("ElevenLabs API Key is not configured. Please add it in the Secrets panel.");
+  }
+
+  console.log(`Generating Speech to Speech with voice ID ${voiceId}`);
+
+  const formData = new FormData();
+  formData.append("audio", audioFile);
+  formData.append("model_id", "eleven_multilingual_sts_v2");
+  formData.append(
+    "voice_settings",
+    JSON.stringify({
+      stability: stability,
+      similarity_boost: similarity,
+      style: style,
+      use_speaker_boost: true,
+    })
+  );
+
+  const response = await fetch(`https://api.elevenlabs.io/v1/speech-to-speech/${voiceId}`, {
+    method: "POST",
+    headers: {
+      "xi-api-key": apiKey,
+    },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({ detail: { message: "Unknown error" } }));
+    throw new Error(`ElevenLabs API error: ${errorData.detail?.message || response.statusText}`);
+  }
+
+  return await response.blob();
+}
+
+/**
+ * Isolates vocals from an audio file (removes background noise, music, etc.)
+ * using ElevenLabs Audio Isolation API.
+ */
+export async function isolateAudio(audioFile: File | Blob): Promise<Blob> {
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    throw new Error("ElevenLabs API Key is not configured. Please add it in the Secrets panel.");
+  }
+
+  console.log(`Isolating audio / vocals...`);
+
+  const formData = new FormData();
+  formData.append("audio", audioFile);
+
+  const response = await fetch("https://api.elevenlabs.io/v1/audio-isolation", {
+    method: "POST",
+    headers: {
+      "xi-api-key": apiKey,
+    },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({ detail: { message: "Unknown error" } }));
+    throw new Error(`ElevenLabs API error (Audio Isolation): ${errorData.detail?.message || response.statusText}`);
+  }
+
+  return await response.blob();
+}
+
+/**
+ * Transcribes speech from an audio file to text
+ * using ElevenLabs Speech to Text API (Scribe model).
+ */
+export async function transcribeSpeech(
+  audioFile: File | Blob,
+  languageCode?: string,
+  tagAudioEvents: boolean = true
+): Promise<{ text: string; language_code?: string; language_probability?: number }> {
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    throw new Error("ElevenLabs API Key is not configured. Please add it in the Secrets panel.");
+  }
+
+  console.log("Transcribing speech to text...");
+
+  const formData = new FormData();
+  formData.append("file", audioFile, audioFile instanceof File ? audioFile.name : "audio.wav");
+  formData.append("model_id", "scribe_v1");
+  if (languageCode && languageCode !== "auto") {
+    formData.append("language_code", languageCode);
+  }
+  formData.append("tag_audio_events", String(tagAudioEvents));
+
+  const response = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
+    method: "POST",
+    headers: {
+      "xi-api-key": apiKey,
+    },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({ detail: { message: "Unknown error" } }));
+    throw new Error(`ElevenLabs STT API error: ${errorData.detail?.message || response.statusText}`);
+  }
+
+  return await response.json();
+}
+
+
 
