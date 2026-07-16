@@ -399,7 +399,7 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
         <div>
           <div className="flex items-center gap-2 mb-1.5">
             <ClipboardList className="text-emerald-600 w-5 h-5" />
-            <h2 id="sfx-req-title" className="text-xl font-bold tracking-tight text-slate-800">AI 音效配乐需求表生成器</h2>
+            <h2 id="sfx-req-title" className="text-xl font-bold tracking-tight text-slate-800">音效需求表优化</h2>
           </div>
           <p className="text-xs text-slate-500">
             支持输入简短想法或上传已有需求表的草稿截图，通过 AI 精准识别、翻译并一键优化为标准化、工业级的音频制作排程需求表。

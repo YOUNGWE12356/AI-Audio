@@ -39,7 +39,11 @@ import {
   Edit2,
   ArrowUp,
   ArrowDown,
-  FolderPlus
+  FolderPlus,
+  Lock,
+  LockOpen,
+  ShieldAlert,
+  ShieldCheck
 } from 'lucide-react';
 import { HistoryItem } from '../types';
 import { optimizeImportMetadata } from '../services/geminiService';
@@ -495,7 +499,34 @@ export const LOCAL_INITIAL_SOUNDS: SoundEffect[] = [
 
 export default function SfxLibrary() {
   // --- States ---
-  const [role, setRole] = useState<'designer' | 'planner'>('designer'); // Permission: designer (can upload/edit), planner (read-only)
+  // Security lock states
+  const [isAuthorized, setIsAuthorized] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('OWNER_AUTHORIZED') === 'true';
+    }
+    return false;
+  });
+
+  const checkOwnerPermission = (): boolean => {
+    const authorized = localStorage.getItem('OWNER_AUTHORIZED') === 'true';
+    if (!authorized) {
+      showCustomAlert("需要验证", "此修改操作需要所有者身份验证。请前往“设置”面板并输入您的管理邮箱解锁全部高级权限。");
+      return false;
+    }
+    return true;
+  };
+
+  // Sync security authorization reactively
+  useEffect(() => {
+    const handleStateChange = () => {
+      const authorized = localStorage.getItem('OWNER_AUTHORIZED') === 'true';
+      setIsAuthorized(authorized);
+    };
+    window.addEventListener('security-state-changed', handleStateChange);
+    return () => {
+      window.removeEventListener('security-state-changed', handleStateChange);
+    };
+  }, []);
   const [selectedCategory, setSelectedCategory] = useState<string>('全部');
   const [expandedGroups, setExpandedGroups] = useState<{ [key: string]: boolean }>({
     'char_foley': true,
@@ -1014,6 +1045,7 @@ export default function SfxLibrary() {
   };
 
   const handleAddSubCategory = (groupId: string) => {
+    if (!checkOwnerPermission()) return;
     if (!newSubNameInput.trim()) return;
     const newSubName = newSubNameInput.trim();
     const newSub = {
@@ -1034,6 +1066,7 @@ export default function SfxLibrary() {
   };
 
   const handleAddGroup = () => {
+    if (!checkOwnerPermission()) return;
     if (!newGroupNameInput.trim()) return;
     const newGroup: CategoryGroup = {
       id: `custom_group_${Date.now()}`,
@@ -1047,6 +1080,7 @@ export default function SfxLibrary() {
   };
 
   const handleDeleteCategory = (catId: string, catName: string) => {
+    if (!checkOwnerPermission()) return;
     // Count sounds to delete
     const soundsToDeleteCount = sounds.filter(s => s.category === catName).length;
     showCustomConfirm(
@@ -1072,6 +1106,7 @@ export default function SfxLibrary() {
   };
 
   const handleDeleteSubCategory = (groupId: string, subId: string, subName: string) => {
+    if (!checkOwnerPermission()) return;
     // Count sounds to delete
     const soundsToDeleteCount = sounds.filter(s => s.subcategory === subName).length;
     showCustomConfirm(
@@ -1103,11 +1138,13 @@ export default function SfxLibrary() {
   };
 
   const startRenameCategory = (catId: string, name: string) => {
+    if (!checkOwnerPermission()) return;
     setEditingCategoryId(catId);
     setEditNameInput(name);
   };
 
   const confirmRenameCategory = (catId: string, oldName: string) => {
+    if (!checkOwnerPermission()) return;
     if (!editNameInput.trim()) return;
     const newName = editNameInput.trim();
     setCategories(prev => prev.map(c => c.id === catId ? { ...c, name: newName } : c));
@@ -1119,11 +1156,13 @@ export default function SfxLibrary() {
   };
 
   const startRenameSubCategory = (subId: string, name: string) => {
+    if (!checkOwnerPermission()) return;
     setEditingSubCategoryId(subId);
     setEditNameInput(name);
   };
 
   const confirmRenameSubCategory = (groupId: string, subId: string, oldName: string) => {
+    if (!checkOwnerPermission()) return;
     if (!editNameInput.trim()) return;
     const newName = editNameInput.trim();
     setCategories(prev => prev.map(group => {
@@ -1676,8 +1715,7 @@ export default function SfxLibrary() {
 
   const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
-    if (role === 'planner') {
-      alert("⚠️ 策划与程序员目前为[只读模式]，请在右上角切换为[设计师模式]即可上传导入新音效！");
+    if (!checkOwnerPermission()) {
       return;
     }
 
@@ -2209,10 +2247,7 @@ export default function SfxLibrary() {
 
   const removeSound = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (role === 'planner') {
-      showCustomAlert("无权限", "策划与程序员目前处于[只读模式]，无法进行资产删除操作。");
-      return;
-    }
+    if (!checkOwnerPermission()) return;
     showCustomConfirm(
       "确定要移除此文件吗？",
       "此操作将从音效资产库中永久删除此文件元数据，此操作不可撤销。",
@@ -2288,27 +2323,11 @@ export default function SfxLibrary() {
           </div>
         </div>
 
-        {/* Role Permissions Switch */}
+        {/* Help Guidelines */}
         <div className="flex items-center gap-3">
-          <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200 text-[11px] font-bold">
-            <button
-              onClick={() => setRole('designer')}
-              className={`px-3 py-1.5 rounded-lg transition-all flex items-center gap-1 ${role === 'designer' ? 'bg-white text-emerald-700 shadow-sm border border-slate-200/50' : 'text-slate-600 hover:text-slate-850'}`}
-            >
-              <User className="w-3 h-3" />
-              <span>设计师 (可上传/编辑)</span>
-            </button>
-            <button
-              onClick={() => setRole('planner')}
-              className={`px-3 py-1.5 rounded-lg transition-all flex items-center gap-1 ${role === 'planner' ? 'bg-white text-indigo-700 shadow-sm border border-slate-200/50' : 'text-slate-600 hover:text-slate-850'}`}
-            >
-              <Shield className="w-3 h-3" />
-              <span>策划与程序 (只读检索)</span>
-            </button>
-          </div>
 
           <button 
-            onClick={() => showCustomAlert("💡 操作使用指南", "1. 双轨制目录设计：左侧为“音效分类”、“全部音乐”与“公司游戏音效”树形目录树，支持无限层级拓展与手动删减/重命名，右侧支持一键AI智能标签匹配检索。\n\n2. 模糊意图智能搜索：输入“低频重击”等人类描述词时，Gemini 会自动分析声音情绪、物理特性并映射对齐 #低频、#撞击等对应资产标签。\n\n3. 键盘空格键热键：在浏览任何界面时，按下键盘“空格键 (Space)”可以一键控制当前选中音频文件的播放或暂停试听。\n\n4. 工作站拖动桥接：支持将右侧的资产卡片直接通过鼠标拖动投递到正在运行中的 Unity / Unreal 引擎及 Reaper DAW 轨道中自动同步。")}
+            onClick={() => showCustomAlert("💡 操作使用指南", "1. 双轨制目录设计：左侧为“音效分类”、“全部音乐”与“公司游戏音效”树形目录树，支持无限层级拓展与手动删减/重命名，右侧支持一键AI智能标签匹配检索。\n\n2. 模糊意图智能搜索：输入“低频重击”等人类描述词时，Gemini 会自动声音情绪、物理特性并映射对齐 #低频、#撞击等对应资产标签。\n\n3. 键盘空格键热键：在浏览任何界面时，按下键盘“空格键 (Space)”可以一键控制当前选中音频文件的播放或暂停试听。\n\n4. 工作站拖动桥接：支持将右侧的资产卡片直接通过鼠标拖动投递到正在运行中的 Unity / Unreal 引擎及 Reaper DAW 轨道中自动同步。")}
             className="p-2 bg-slate-100 border border-slate-200 text-slate-500 hover:text-slate-800 rounded-xl hover:bg-slate-200/50 transition-all"
             title="操作指南"
           >
@@ -2436,7 +2455,7 @@ export default function SfxLibrary() {
                                       >
                                         <Download className="w-2.5 h-2.5" />
                                       </button>
-                                      {role === 'designer' && (
+                                      {isAuthorized && (
                                         <>
                                           {/* Rename */}
                                           <button
@@ -2530,7 +2549,7 @@ export default function SfxLibrary() {
                                   {group.subCategories.length === 0 ? (
                                     <div className="text-[9.5px] text-slate-400 italic py-1 px-1 flex items-center gap-1">
                                       <span>空文件夹目录</span>
-                                      {role === 'designer' && (
+                                      {isAuthorized && (
                                         <span onClick={() => { setIsAddingSubToId(group.id); setNewSubNameInput(''); }} className="text-indigo-600 font-bold underline cursor-pointer">添加</span>
                                       )}
                                     </div>
@@ -2600,7 +2619,7 @@ export default function SfxLibrary() {
                                               >
                                                 <Download className="w-2 h-2" />
                                               </button>
-                                              {role === 'designer' && (
+                                              {isAuthorized && (
                                                 <>
                                                   {/* Move Up */}
                                                   <button
@@ -2745,7 +2764,7 @@ export default function SfxLibrary() {
                                       >
                                         <Download className="w-2.5 h-2.5" />
                                       </button>
-                                      {role === 'designer' && (
+                                      {isAuthorized && (
                                         <>
                                           {/* Rename */}
                                           <button
@@ -2839,7 +2858,7 @@ export default function SfxLibrary() {
                                   {group.subCategories.length === 0 ? (
                                     <div className="text-[9.5px] text-slate-400 italic py-1 px-1 flex items-center gap-1">
                                       <span>空文件夹目录</span>
-                                      {role === 'designer' && (
+                                      {isAuthorized && (
                                         <span onClick={() => { setIsAddingSubToId(group.id); setNewSubNameInput(''); }} className="text-indigo-600 font-bold underline cursor-pointer">添加</span>
                                       )}
                                     </div>
@@ -2909,7 +2928,7 @@ export default function SfxLibrary() {
                                               >
                                                 <Download className="w-2 h-2" />
                                               </button>
-                                              {role === 'designer' && (
+                                              {isAuthorized && (
                                                 <>
                                                   {/* Move Up */}
                                                   <button
@@ -3054,7 +3073,7 @@ export default function SfxLibrary() {
                                       >
                                         <Download className="w-2.5 h-2.5" />
                                       </button>
-                                      {role === 'designer' && (
+                                      {isAuthorized && (
                                         <>
                                           {/* Move Up */}
                                           <button
@@ -3172,7 +3191,7 @@ export default function SfxLibrary() {
                                   {group.subCategories.length === 0 ? (
                                     <div className="text-[9.5px] text-slate-400 italic py-1 px-1 flex items-center gap-1">
                                       <span>空文件夹目录</span>
-                                      {role === 'designer' && (
+                                      {isAuthorized && (
                                         <span onClick={() => { setIsAddingSubToId(group.id); setNewSubNameInput(''); }} className="text-indigo-600 font-bold underline cursor-pointer">添加</span>
                                       )}
                                     </div>
@@ -3242,7 +3261,7 @@ export default function SfxLibrary() {
                                               >
                                                 <Download className="w-2 h-2" />
                                               </button>
-                                              {role === 'designer' && (
+                                              {isAuthorized && (
                                                 <>
                                                   {/* Move Up */}
                                                   <button
@@ -3301,7 +3320,7 @@ export default function SfxLibrary() {
                   )}
 
                   {/* Add parent category input (only for designer) */}
-                  {role === 'designer' && (
+                  {isAuthorized && (
                     <div className="pt-2 px-1 border-t border-slate-100">
                       {isAddingGroup ? (
                         <div className="flex items-center gap-1.5 p-1 bg-slate-50 rounded-lg border border-slate-200">
@@ -3403,52 +3422,43 @@ export default function SfxLibrary() {
           </div>
 
           {/* Quick Import Box at Bottom left */}
-          {role === 'designer' ? (
-            <div className="p-4 border-t border-slate-200 bg-white space-y-2">
-              <span className="text-[9px] font-bold text-slate-400 block uppercase tracking-wider">批量资产入库</span>
-              <div 
-                className="border border-dashed border-slate-300 hover:border-emerald-500 bg-slate-50 hover:bg-slate-100 rounded-xl p-3.5 text-center cursor-default transition-all flex flex-col items-center gap-1.5 group"
-              >
-                <UploadCloud className="w-5.5 h-5.5 text-slate-400 group-hover:text-emerald-600 transition-colors" />
-                <p className="text-[10px] font-bold text-slate-500 group-hover:text-slate-850">拖拽文件或文件夹至此</p>
-                <div className="flex gap-2 w-full justify-center mt-1">
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (role === 'planner') {
-                        alert("⚠️ 策划与程序员目前为[只读模式]，请在右上角切换为[设计师模式]即可上传导入新音效！");
-                        return;
-                      }
-                      fileInputRef.current?.click();
-                    }}
-                    className="px-2 py-1 bg-emerald-50 border border-emerald-200 text-emerald-700 hover:bg-emerald-600 hover:text-white rounded-md text-[9px] font-bold transition-all"
-                  >
-                    + 选文件
-                  </button>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (role === 'planner') {
-                        alert("⚠️ 策划与程序员目前为[只读模式]，请在右上角切换为[设计师模式]即可上传导入新音效！");
-                        return;
-                      }
-                      folderInputRef.current?.click();
-                    }}
-                    className="px-2 py-1 bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-600 hover:text-white rounded-md text-[9px] font-bold transition-all"
-                  >
-                    + 选文件夹
-                  </button>
-                </div>
+          <div className="p-4 border-t border-slate-200 bg-white space-y-2">
+            <span className="text-[9px] font-bold text-slate-400 block uppercase tracking-wider">批量资产入库</span>
+            <div 
+              className="border border-dashed border-slate-300 hover:border-emerald-500 bg-slate-50 hover:bg-slate-100 rounded-xl p-3.5 text-center cursor-default transition-all flex flex-col items-center gap-1.5 group"
+            >
+              <UploadCloud className="w-5.5 h-5.5 text-slate-400 group-hover:text-emerald-600 transition-colors" />
+              <p className="text-[10px] font-bold text-slate-500 group-hover:text-slate-850">拖拽文件或文件夹至此</p>
+              <div className="flex gap-2 w-full justify-center mt-1">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (!checkOwnerPermission()) {
+                      return;
+                    }
+                    fileInputRef.current?.click();
+                  }}
+                  className="px-2 py-1 bg-emerald-50 border border-emerald-200 text-emerald-700 hover:bg-emerald-600 hover:text-white rounded-md text-[9px] font-bold transition-all"
+                >
+                  + 选文件
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (!checkOwnerPermission()) {
+                      return;
+                    }
+                    folderInputRef.current?.click();
+                  }}
+                  className="px-2 py-1 bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-600 hover:text-white rounded-md text-[9px] font-bold transition-all"
+                >
+                  + 选文件夹
+                </button>
               </div>
             </div>
-          ) : (
-            <div className="p-4 border-t border-slate-200 bg-slate-50/50 text-center">
-              <span className="text-[9px] text-slate-400 block">🔒 您目前处于只读策划模式</span>
-              <span className="text-[9px] text-emerald-600 mt-1 block">切换为[设计师]解锁上传</span>
-            </div>
-          )}
+          </div>
         </aside>
 
         {/* ==================== MIDDLE COLUMN: Search & Results List ==================== */}
@@ -3738,7 +3748,7 @@ export default function SfxLibrary() {
                             <Heart className={`w-3.5 h-3.5 ${sound.isFavorite ? 'fill-current' : ''}`} />
                           </button>
                           
-                          {role === 'designer' && (
+                          {isAuthorized && (
                             <button
                               onClick={(e) => removeSound(sound.id, e)}
                               className="p-1.5 bg-slate-50 hover:bg-red-50 hover:text-red-600 border border-slate-200 rounded-lg text-slate-400 transition-colors"
@@ -4012,6 +4022,8 @@ export default function SfxLibrary() {
         </aside>
 
       </div>
+
+
 
 
 

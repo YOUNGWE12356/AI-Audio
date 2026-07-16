@@ -1,6 +1,8 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
+import { exec } from 'child_process';
+import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import { DEFAULT_CATEGORIES, INITIAL_SOUNDS } from './src/data/sfxData';
 
@@ -136,6 +138,298 @@ async function startServer() {
       return fs.createReadStream(absolutePath).pipe(res);
     } catch (err: any) {
       console.error('Error downloading file:', err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Helper to initialize GoogleGenAI on the server
+  const getGoogleAI = () => {
+    const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error("GEMINI_API_KEY environment variable is not configured.");
+    }
+    return new GoogleGenAI({ 
+      apiKey: apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        }
+      }
+    });
+  };
+
+  // 7. Video AI Multi-modal Analysis
+  app.post('/api/video/analyze', async (req, res) => {
+    try {
+      const { fileName, bgmEnabled, sfxEnabled, dubbingEnabled } = req.body;
+      if (!fileName) {
+        return res.status(400).json({ error: 'fileName is required' });
+      }
+      
+      const filePath = path.join(uploadsDir, fileName);
+      if (!fs.existsSync(filePath)) {
+        return res.status(404).json({ error: 'Video file not found' });
+      }
+      
+      // Read video file as base64 for Gemini multimodal analysis
+      const videoBuffer = fs.readFileSync(filePath);
+      const base64Video = videoBuffer.toString('base64');
+      
+      const ai = getGoogleAI();
+      
+      const prompt = `你是一个顶级的多模态AI视频音效与配乐设计师。
+请分析上传的视频（包含画面、镜头、动作、情节、情绪），并针对此视频生成一份极其精确的“音效、配乐和配音时间轴清单 (JSON格式)”。
+请提供以下轨道的元素（你可以根据视频画面的时间长度和事件，智能规划最合适的开始时间 startTime 和时长 duration，单位为秒）：
+${bgmEnabled ? '1. 背景音乐轨 (bgm): 通常是一段大气合适的 background music，覆盖视频主要时间。' : ''}
+${sfxEnabled ? '2. 音效轨 (sfx): 根据视频中的关键动势、场景变化或特效出现，生成对应的短音效。' : ''}
+${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白或人物台词的情景，生成对应的台词文本 (text)。' : ''}
+
+返回的 JSON 必须包含一个 \`clips\` 数组，每项符合以下定义：
+{
+  id: string (唯一标识，如 "clip-1", "clip-2" 等),
+  trackId: "bgm" | "sfx" | "dubbing",
+  name: string (简短直观的中文显示名称，如 "科技感启动音效", "深邃太空背景音"),
+  prompt: string (详细的英文提示词，用于 ElevenLabs 音效或音乐生成，要求是专业地道的英文描述，如 "deep cinematic low boom synth impact", "lofi chill hip hop background track"),
+  text?: string (仅在 trackId 为 "dubbing" 时需要，配音台词的中文文本内容),
+  voiceId?: string (仅在 trackId 为 "dubbing" 时需要，推荐的 ElevenLabs 声音ID，Rachel女声为 "21m00Tcm4TlvDq8ikWAM", Adam男声为 "pNInz6obpg7IdgWAs6g8"),
+  startTime: number (在时间轴上的起始时间，单位为秒，必须大于等于 0 且小于视频时长),
+  duration: number (该音频块的时长，单位秒，BGM通常在10-30s，SFX通常在2-4s，Dubbing通常在2-6s)
+}
+
+请确保 clips 数组中只包含启用的轨道类型：
+- bgmEnabled: ${bgmEnabled ? '开启' : '关闭'}
+- sfxEnabled: ${sfxEnabled ? '开启' : '关闭'}
+- dubbingEnabled: ${dubbingEnabled ? '开启' : '关闭'}
+
+请只返回符合 JSON 语法的纯数据，不要用 markdown 格式包裹，也不要带 \`\`\`json 开头。`;
+
+      console.log(`Analyzing video: ${fileName}, bgm=${bgmEnabled}, sfx=${sfxEnabled}, dubbing=${dubbingEnabled}`);
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3.5-flash",
+        contents: [
+          {
+            inlineData: {
+              data: base64Video,
+              mimeType: "video/mp4"
+            }
+          },
+          prompt
+        ],
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            required: ["clips"],
+            properties: {
+              clips: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  required: ["id", "trackId", "name", "prompt", "startTime", "duration"],
+                  properties: {
+                    id: { type: Type.STRING },
+                    trackId: { type: Type.STRING },
+                    name: { type: Type.STRING },
+                    prompt: { type: Type.STRING },
+                    text: { type: Type.STRING },
+                    voiceId: { type: Type.STRING },
+                    startTime: { type: Type.NUMBER },
+                    duration: { type: Type.NUMBER }
+                  }
+                }
+              }
+            }
+          }
+        }
+      });
+
+      if (!response.text) {
+        throw new Error("AI did not return text");
+      }
+      
+      const parsed = JSON.parse(response.text.trim());
+      console.log(`Video analysis complete. Found ${parsed.clips?.length || 0} clips.`);
+      return res.json(parsed);
+      
+    } catch (err: any) {
+      console.error('Error analyzing video:', err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 8. Generate Timeline Clip Audio using ElevenLabs API
+  app.post('/api/video/generate-clip', async (req, res) => {
+    try {
+      const { prompt, trackId, text, voiceId, duration } = req.body;
+      
+      const apiKey = process.env.ELEVENLABS_API_KEY || process.env.VITE_ELEVENLABS_API_KEY;
+      if (!apiKey) {
+        return res.status(400).json({ error: 'ElevenLabs API Key is not configured on the server. Please configure it in Settings.' });
+      }
+      
+      const cleanFilename = `el_${trackId}_${Date.now()}.mp3`;
+      const filePath = path.join(uploadsDir, cleanFilename);
+      
+      if (trackId === 'dubbing') {
+        // Text to Speech
+        const targetVoice = voiceId || "21m00Tcm4TlvDq8ikWAM"; // Rachel fallback
+        console.log(`ElevenLabs server TTS: text="${text}" voiceId=${targetVoice}`);
+        const apiResponse = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${targetVoice}`, {
+          method: "POST",
+          headers: {
+            "xi-api-key": apiKey,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            text: text,
+            model_id: "eleven_multilingual_v2",
+            voice_settings: {
+              stability: 0.5,
+              similarity_boost: 0.75,
+              style: 0.05,
+              use_speaker_boost: true,
+            },
+          }),
+        });
+        
+        if (!apiResponse.ok) {
+          const errJson = await apiResponse.json().catch(() => ({}));
+          throw new Error(`ElevenLabs TTS Error: ${errJson.detail?.message || apiResponse.statusText}`);
+        }
+        
+        const buffer = Buffer.from(await apiResponse.arrayBuffer());
+        fs.writeFileSync(filePath, buffer);
+        
+      } else if (trackId === 'bgm') {
+        // Background music (Sound generation)
+        const sfxPrompt = `AI Music, full background instrumental track, no vocals, no speech: ${prompt}`;
+        console.log(`ElevenLabs server Music Gen: prompt="${sfxPrompt}" duration=${duration}`);
+        
+        const apiResponse = await fetch("https://api.elevenlabs.io/v1/sound-generation", {
+          method: "POST",
+          headers: {
+            "xi-api-key": apiKey,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            text: sfxPrompt,
+            duration_seconds: duration || 20,
+            prompt_influence: 0.4,
+          }),
+        });
+        
+        if (!apiResponse.ok) {
+          const errJson = await apiResponse.json().catch(() => ({}));
+          throw new Error(`ElevenLabs Music Gen Error: ${errJson.detail?.message || apiResponse.statusText}`);
+        }
+        
+        const buffer = Buffer.from(await apiResponse.arrayBuffer());
+        fs.writeFileSync(filePath, buffer);
+        
+      } else {
+        // Sound effect (Sound generation)
+        const sfxPrompt = `Pure sound effect, instrumental, no vocals, no speech: ${prompt}`;
+        console.log(`ElevenLabs server SFX Gen: prompt="${sfxPrompt}" duration=${duration}`);
+        
+        const apiResponse = await fetch("https://api.elevenlabs.io/v1/sound-generation", {
+          method: "POST",
+          headers: {
+            "xi-api-key": apiKey,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            text: sfxPrompt,
+            duration_seconds: duration || 4,
+            prompt_influence: 0.3,
+          }),
+        });
+        
+        if (!apiResponse.ok) {
+          const errJson = await apiResponse.json().catch(() => ({}));
+          throw new Error(`ElevenLabs SFX Gen Error: ${errJson.detail?.message || apiResponse.statusText}`);
+        }
+        
+        const buffer = Buffer.from(await apiResponse.arrayBuffer());
+        fs.writeFileSync(filePath, buffer);
+      }
+      
+      return res.json({
+        audioUrl: `/uploads/${cleanFilename}`
+      });
+      
+    } catch (err: any) {
+      console.error('Error generating clip:', err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 9. Mix Video with Audio Timeline Clips using FFmpeg
+  app.post('/api/video/mix', (req, res) => {
+    try {
+      const { videoFileName, clips } = req.body;
+      if (!videoFileName) {
+        return res.status(400).json({ error: 'videoFileName is required' });
+      }
+
+      const inputVideoPath = path.join(uploadsDir, videoFileName);
+      if (!fs.existsSync(inputVideoPath)) {
+        return res.status(404).json({ error: 'Video file not found' });
+      }
+
+      const validClips = (clips || []).filter((c: any) => c.audioUrl && typeof c.audioUrl === 'string');
+      if (validClips.length === 0) {
+        // No valid audio clips, just return the video directly
+        return res.json({ videoUrl: `/uploads/${videoFileName}` });
+      }
+
+      // Generate a unique output file name
+      const ext = path.extname(videoFileName) || '.mp4';
+      const base = path.basename(videoFileName, ext);
+      const outputFileName = `mixed_${base}_${Date.now()}${ext}`;
+      const outputFilePath = path.join(uploadsDir, outputFileName);
+
+      // Assemble FFmpeg command arguments
+      const inputArgs = [`-i "${inputVideoPath}"`];
+      
+      validClips.forEach((clip: any) => {
+        const clipFileName = path.basename(clip.audioUrl);
+        const clipPath = path.join(uploadsDir, clipFileName);
+        inputArgs.push(`-i "${clipPath}"`);
+      });
+
+      // Filter complex to adjust volumes and apply delays
+      const filterParts: string[] = [];
+      validClips.forEach((clip: any, idx: number) => {
+        const delayMs = Math.round((clip.startTime || 0) * 1000);
+        // [idx+1:a] represents the idx-th audio input stream. Delay it and adjust volume
+        filterParts.push(`[${idx + 1}:a]volume=${clip.volume || 1.0},adelay=${delayMs}|${delayMs}[aud${idx}]`);
+      });
+
+      // Mix all delayed streams together
+      const mixInputs = validClips.map((_, idx) => `[aud${idx}]`).join('');
+      filterParts.push(`${mixInputs}amix=inputs=${validClips.length}:duration=first[aout]`);
+
+      const filterComplexString = filterParts.join('; ');
+
+      // Assemble FFmpeg command
+      // -c:v copy copies the video stream directly without re-encoding, extremely fast!
+      // -c:a aac encodes the mixed audio stream to AAC
+      const cmd = `ffmpeg -y ${inputArgs.join(' ')} -filter_complex "${filterComplexString}" -map 0:v -map "[aout]" -c:v copy -c:a aac "${outputFilePath}"`;
+
+      console.log('Running FFmpeg Command:', cmd);
+
+      exec(cmd, (err, stdout, stderr) => {
+        if (err) {
+          console.error('FFmpeg execution failed:', err, stderr);
+          return res.status(500).json({ error: `FFmpeg mixing failed: ${err.message}.` });
+        }
+        console.log('FFmpeg mixed video successfully created:', outputFileName);
+        return res.json({ videoUrl: `/uploads/${outputFileName}` });
+      });
+
+    } catch (err: any) {
+      console.error('Error in video mixing:', err);
       return res.status(500).json({ error: err.message });
     }
   });

@@ -20,6 +20,7 @@ import AudioTools from './components/AudioTools';
 import SettingsComponent from './components/Settings';
 import SfxLibrary from './components/SfxLibrary';
 import SfxRequirements from './components/SfxRequirements';
+import VideoSoundtrack from './components/VideoSoundtrack';
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState<TabType>('workbench');
@@ -668,6 +669,10 @@ export default function App() {
           <SfxRequirements 
             hasGeminiKey={hasGeminiKey}
           />
+        )}
+
+        {currentTab === 'video-soundtrack' && (
+          <VideoSoundtrack />
         )}
       </main>
     </div>

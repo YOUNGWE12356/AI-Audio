@@ -642,7 +642,18 @@ export default function AudioTools() {
                   )}
 
                 </div>
+
+                {/* Compression Recommendation Note */}
+                <div className="mt-4 bg-emerald-50/60 border border-emerald-100/80 p-3.5 rounded-xl flex items-start gap-2.5 text-[11px] text-emerald-800 font-medium leading-relaxed">
+                  <Sparkles className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-bold block text-emerald-900 mb-0.5">💡 格式与参数压缩建议</span>
+                    <span>压缩文件建议使用：<strong className="underline decoration-emerald-400 decoration-2 font-black">32.000hz，96kbps</strong>。该配置在保持极高语音清晰度与人声还原度的同时，能够将文件体积降至最低，非常适合批量发布或低带宽网络传输。</span>
+                  </div>
+                </div>
+
               </div>
+
 
               {/* Progress and status */}
               {factoryStatus && (
