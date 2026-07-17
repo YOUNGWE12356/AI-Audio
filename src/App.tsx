@@ -72,7 +72,7 @@ export default function App() {
   // Audio Director States
   const [files, setFiles] = useState<FileItem[]>([]);
   const [requirements, setRequirements] = useState('');
-  const [target, setTarget] = useState({ game: true, video: false });
+  const [target, setTarget] = useState({ game: true, video: false, avatar: false, sunnyIsland: false });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AudioDesignResult | null>(null);

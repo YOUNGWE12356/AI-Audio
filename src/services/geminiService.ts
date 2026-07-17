@@ -67,11 +67,34 @@ export interface AudioDesignResult {
 export async function analyzeAudioDesign(
   files: { data: string; mimeType: string }[],
   requirements: string,
-  target: { game: boolean; video: boolean },
+  target: { game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean },
   isInstrumental: boolean
 ): Promise<AudioDesignResult> {
-  const targetDesc = target.game && target.video ? "游戏CG宣传片" : target.game ? "游戏" : "视频";
+  let targetDesc = target.game && target.video ? "游戏CG宣传片" : target.game ? "游戏" : target.video ? "视频" : "音频设计";
+  if (target.avatar) {
+    targetDesc = "科幻巨制《阿凡达》(Avatar) 风格奇幻自然场景";
+  } else if (target.sunnyIsland) {
+    targetDesc = "治愈系田园日常《小岛有晴天》(Sunny Day on the Island) 温暖舒缓场景";
+  }
   
+  let additionalSpecialInstructions = "";
+  if (target.avatar) {
+    additionalSpecialInstructions = `
+    【阿凡达 (Avatar) 风格特别设计要求（最高优先级）】：
+    1. **极度细致的时间线设计 (timelineDesign)**：你必须针对视频/关键帧中的动作进行逐秒、更细致的音效和配乐时间轴对齐，至少规划 5-6 段以上的细分时间轴块（例如 0-3s, 3-7s, 7-12s, 12-18s, 18-24s, 24-30s 等），每一段的时间精确规划到毫秒或整秒。
+    2. **外星奇幻生态声景 (Foley)**：音效命名和设计应该充满潘多拉星球外星动植物的奇特生命律动、夜光森林荧光植物的发光嗡嗡声（ambient bioluminescent glow）、斑溪兽（Banshee）的飞掠振翅与嘶鸣、灵魂之树的空灵触碰共鸣（使用神秘高频合成器与奇异声学共鸣音效）。
+    3. **宏大管弦交响与土著部落打击乐 (BGM)**：配乐必须融合詹姆斯·霍纳 (James Horner) 风格的宏大交响乐、原野木管（原野木笛）、原始部落大鼓打击乐（wood drum, hand percussion），以及土著男女的高亢吟唱和呼喊，传递人与大自然的灵性连接，空灵、原始而极其震撼。
+    `;
+  } else if (target.sunnyIsland) {
+    additionalSpecialInstructions = `
+    【小岛有晴天 (Sunny Day on the Island) 风格特别设计要求（最高优先级）】：
+    1. **治治愈、田园、温暖的总体风格**：输出的所有音效设计描述（description）、背景音乐风格（style）、音效命名（name）、乐器和合成技术（logic），**都必须往治愈、舒缓、安宁、田园、温暖方向倾斜，彻底避免任何惊悚、机械或突兀的噪音**。
+    2. **田园大自然日常音效 (Foley)**：音效设计应聚焦于清爽海风吹拂、海浪拍打沙滩的细软声音、微风拂过花草麦浪的沙沙沙声、自行车链条及轮轴转动的轻快咔哒声、日系风铃随风摆动的清脆铜铃音、温水煮热咖啡气泡破裂的汩汩咕嘟声、以及远方小猫撒娇的温柔细叫与草丛鸟鸣。
+    3. **温暖安宁的小品式乐器配乐 (BGM)**：音乐推荐必须是极度慵懒舒缓的。推荐的主奏与辅奏乐器为：尤克里里 (ukulele)、木吉他温暖扫弦 (acoustic guitar strumming)、马林巴木琴 (marimba)、手风琴 (accordion)、轻快的手碟 (handpan) 及带大厅混响的经典立式原声钢琴 (piano)。
+    4. **Suno Prompt 必须温润治愈**：生成的英文提示词（english）必须体现温暖田园，如 "healing acoustic folk, bright cute marimba, breezy summer afternoon, warm acoustic guitar strumming, cozy seaside village, peaceful sunny island bgm, soft, emotional, beautiful, 85 BPM"。
+    `;
+  }
+
   const prompt = `
     你是一个顶级的音频设计师和视频分析专家。请深度分析上传的内容，并提供极其详尽且专业的音效设计需求表与背景音乐方案。
     
@@ -82,8 +105,8 @@ export async function analyzeAudioDesign(
     4. **双重BGM**：提供两个差异巨大的风格方案。
     5. **无语音**：音效严禁出现人声对白。
     
-    ${target.video ? `
-    【影视广告级特别设计要求（最高优先级）】：
+    ${target.video || target.avatar ? `
+    【高精度影视级特别设计要求（最高优先级）】：
     由于本项目定属于“影视广告”创作类型，我们的音画同步和配乐设计方案需要达到最顶尖的专业精度：
     1. **音效命名细致化 (name)**：
        - 所有生成的音效命名（name）必须采用统一且高精度的英文规范命名（如: sfx_foley_footstep_wood_01, sfx_ambient_wind_howl_loop_02, sfx_scifi_laser_shot_03），禁止使用模糊词，应区分出类型、材质、道具、变化序号等。
@@ -99,6 +122,8 @@ export async function analyzeAudioDesign(
     【通用场景设计要求】：
     1. 即使不是纯影视广告，也请在 bgmRecommendations 的 timelineDesign 中提供 3-4 段故事线或时间轴段落配乐设计（如 0-10s、10-30s 等），写明各时间点的情感表达和主导乐器，让设计更立体。
     `}
+
+    ${additionalSpecialInstructions}
 
     目标方向：${targetDesc}
     补充需求：${requirements}

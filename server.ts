@@ -5,6 +5,7 @@ import { exec } from 'child_process';
 import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import { DEFAULT_CATEGORIES, INITIAL_SOUNDS } from './src/data/sfxData';
+import multer from 'multer';
 
 async function startServer() {
   const app = express();
@@ -91,27 +92,170 @@ async function startServer() {
     }
   });
 
-  // 5. Raw File Upload Endpoint
-  app.post('/api/sfx/upload', express.raw({ type: '*/*', limit: '100mb' }), (req, res) => {
-    try {
-      const originalFilename = req.headers['x-filename'] as string || `upload_${Date.now()}.wav`;
-      
-      // Clean and generate a unique safe filename to avoid overwrites and path injections
-      const ext = path.extname(originalFilename) || '.wav';
-      const base = path.basename(originalFilename, ext).replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_');
+  // Configure multer disk storage for multipart/form-data
+  const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+      cb(null, uploadsDir);
+    },
+    filename: (req, file, cb) => {
+      let originalname = file.originalname;
+      try {
+        originalname = decodeURIComponent(originalname);
+      } catch (e) {}
+      const ext = path.extname(originalname) || '.wav';
+      const base = path.basename(originalname, ext).replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_');
       const cleanFilename = `${base}_${Date.now()}${ext}`;
-      
-      const filePath = path.join(uploadsDir, cleanFilename);
-      
-      fs.writeFileSync(filePath, req.body);
-      
-      console.log(`Successfully uploaded file: ${cleanFilename} (${req.body.length} bytes)`);
-      return res.json({ 
-        url: `/uploads/${cleanFilename}`,
-        fileName: cleanFilename
+      cb(null, cleanFilename);
+    }
+  });
+
+  const upload = multer({ 
+    storage,
+    limits: { fileSize: 100 * 1024 * 1024 } // 100MB
+  });
+
+  // 5. File Upload Endpoint (Supports both raw binary stream and multipart/form-data)
+  app.post('/api/sfx/upload', (req, res, next) => {
+    const contentType = req.headers['content-type'] || '';
+    if (contentType.includes('multipart/form-data')) {
+      upload.single('file')(req, res, (err) => {
+        if (err) {
+          console.error('Multer upload error:', err);
+          return res.status(500).json({ error: err.message });
+        }
+        if (!req.file) {
+          return res.status(400).json({ error: 'No file uploaded via multipart' });
+        }
+        console.log(`Successfully uploaded file via multipart: ${req.file.filename} (${req.file.size} bytes)`);
+        return res.json({
+          url: `/uploads/${req.file.filename}`,
+          fileName: req.file.filename
+        });
       });
+    } else {
+      express.raw({ type: '*/*', limit: '100mb' })(req, res, async () => {
+        try {
+          let originalFilename = req.headers['x-filename'] as string || '';
+          try {
+            originalFilename = decodeURIComponent(originalFilename);
+          } catch (e) {}
+          if (!originalFilename) {
+            originalFilename = `upload_${Date.now()}.wav`;
+          }
+          
+          const ext = path.extname(originalFilename) || '.wav';
+          const base = path.basename(originalFilename, ext).replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_');
+          const cleanFilename = `${base}_${Date.now()}${ext}`;
+          
+          const filePath = path.join(uploadsDir, cleanFilename);
+          
+          let fileBuffer: Buffer;
+          if (Buffer.isBuffer(req.body)) {
+            fileBuffer = req.body;
+          } else if (req.body && typeof req.body === 'object' && Object.keys(req.body).length === 0) {
+            fileBuffer = await new Promise<Buffer>((resolve, reject) => {
+              const chunks: Buffer[] = [];
+              req.on('data', (chunk) => chunks.push(chunk));
+              req.on('end', () => resolve(Buffer.concat(chunks)));
+              req.on('error', (err) => reject(err));
+            });
+          } else if (typeof req.body === 'string') {
+            fileBuffer = Buffer.from(req.body);
+          } else {
+            fileBuffer = Buffer.alloc(0);
+          }
+
+          fs.writeFileSync(filePath, fileBuffer);
+          console.log(`Successfully uploaded file via raw: ${cleanFilename} (${fileBuffer.length} bytes)`);
+          return res.json({ 
+            url: `/uploads/${cleanFilename}`,
+            fileName: cleanFilename
+          });
+        } catch (err: any) {
+          console.error('Error processing raw upload:', err);
+          return res.status(500).json({ error: err.message });
+        }
+      });
+    }
+  });
+
+  // 5.1. Chunked File Upload Endpoint (Bypasses proxy size limitations for large files)
+  app.post('/api/sfx/upload-chunk', upload.single('file'), (req, res) => {
+    try {
+      const { chunkIndex, totalChunks, fileName, uploadId } = req.body;
+      if (!req.file) {
+        return res.status(400).json({ error: 'No chunk file uploaded' });
+      }
+
+      const index = parseInt(chunkIndex, 10);
+      const total = parseInt(totalChunks, 10);
+      
+      if (isNaN(index) || isNaN(total) || !uploadId || !fileName) {
+        return res.status(400).json({ error: 'Missing chunk metadata' });
+      }
+
+      // Temp directory for this upload session
+      const tempChunkDir = path.join(uploadsDir, `temp_${uploadId}`);
+      if (!fs.existsSync(tempChunkDir)) {
+        fs.mkdirSync(tempChunkDir, { recursive: true });
+      }
+
+      // Move the uploaded file from multer destination to our temp chunk path
+      const chunkPath = path.join(tempChunkDir, `chunk_${index}`);
+      if (fs.existsSync(chunkPath)) {
+        fs.unlinkSync(chunkPath);
+      }
+      fs.renameSync(req.file.path, chunkPath);
+
+      // Check if all chunks have been uploaded
+      let allChunksUploaded = true;
+      for (let i = 0; i < total; i++) {
+        if (!fs.existsSync(path.join(tempChunkDir, `chunk_${i}`))) {
+          allChunksUploaded = false;
+          break;
+        }
+      }
+
+      if (allChunksUploaded) {
+        // Merge all chunks
+        const ext = path.extname(fileName) || '.mp4';
+        const base = path.basename(fileName, ext).replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_');
+        const cleanFilename = `${base}_${Date.now()}${ext}`;
+        const finalFilePath = path.join(uploadsDir, cleanFilename);
+
+        const writeStream = fs.createWriteStream(finalFilePath);
+        
+        for (let i = 0; i < total; i++) {
+          const chunkFilePath = path.join(tempChunkDir, `chunk_${i}`);
+          const data = fs.readFileSync(chunkFilePath);
+          writeStream.write(data);
+          // Delete temp chunk file
+          try {
+            fs.unlinkSync(chunkFilePath);
+          } catch (e) {}
+        }
+        writeStream.end();
+
+        // Remove temp directory
+        try {
+          fs.rmdirSync(tempChunkDir);
+        } catch (e) {}
+
+        console.log(`Successfully assembled chunked upload: ${cleanFilename}`);
+        return res.json({
+          url: `/uploads/${cleanFilename}`,
+          fileName: cleanFilename,
+          completed: true
+        });
+      }
+
+      return res.json({
+        completed: false,
+        chunkReceived: index
+      });
+
     } catch (err: any) {
-      console.error('Error processing upload:', err);
+      console.error('Error during chunk upload:', err);
       return res.status(500).json({ error: err.message });
     }
   });
@@ -125,16 +269,29 @@ async function startServer() {
         return res.status(400).json({ error: 'Path parameter is required' });
       }
       
-      // Prevent path traversal
-      const safePath = path.normalize(filePathParam).replace(/^(\.\.(\/|\\))+/, '');
-      const absolutePath = path.join(process.cwd(), safePath);
+      // Prevent path traversal & resolve safely
+      const cleanPath = filePathParam.replace(/^\/+/, '').replace(/^(\.\.(\/|\\))+/, '');
+      const absolutePath = path.join(process.cwd(), cleanPath);
       
       if (!fs.existsSync(absolutePath)) {
         return res.status(404).json({ error: 'File not found' });
       }
       
+      // Handle file extension and mime-type dynamically
+      const ext = path.extname(absolutePath).toLowerCase();
+      let contentType = 'application/octet-stream';
+      if (ext === '.mp4') {
+        contentType = 'video/mp4';
+      } else if (ext === '.mp3') {
+        contentType = 'audio/mpeg';
+      } else if (ext === '.wav') {
+        contentType = 'audio/wav';
+      } else if (ext === '.json') {
+        contentType = 'application/json';
+      }
+
       res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(downloadName)}"`);
-      res.setHeader('Content-Type', 'audio/mpeg');
+      res.setHeader('Content-Type', contentType);
       return fs.createReadStream(absolutePath).pipe(res);
     } catch (err: any) {
       console.error('Error downloading file:', err);
@@ -161,24 +318,12 @@ async function startServer() {
   // 7. Video AI Multi-modal Analysis
   app.post('/api/video/analyze', async (req, res) => {
     try {
-      const { fileName, bgmEnabled, sfxEnabled, dubbingEnabled } = req.body;
-      if (!fileName) {
-        return res.status(400).json({ error: 'fileName is required' });
-      }
-      
-      const filePath = path.join(uploadsDir, fileName);
-      if (!fs.existsSync(filePath)) {
-        return res.status(404).json({ error: 'Video file not found' });
-      }
-      
-      // Read video file as base64 for Gemini multimodal analysis
-      const videoBuffer = fs.readFileSync(filePath);
-      const base64Video = videoBuffer.toString('base64');
+      const { fileName, keyframes, bgmEnabled, sfxEnabled, dubbingEnabled } = req.body;
       
       const ai = getGoogleAI();
       
       const prompt = `你是一个顶级的多模态AI视频音效与配乐设计师。
-请分析上传的视频（包含画面、镜头、动作、情节、情绪），并针对此视频生成一份极其精确的“音效、配乐和配音时间轴清单 (JSON格式)”。
+请分析提供的信息（包含视频文件或关键帧画面序列、时间点），并针对此视频生成一份极其精确的“音效、配乐和配音时间轴清单 (JSON格式)”。
 请提供以下轨道的元素（你可以根据视频画面的时间长度和事件，智能规划最合适的开始时间 startTime 和时长 duration，单位为秒）：
 ${bgmEnabled ? '1. 背景音乐轨 (bgm): 通常是一段大气合适的 background music，覆盖视频主要时间。' : ''}
 ${sfxEnabled ? '2. 音效轨 (sfx): 根据视频中的关键动势、场景变化或特效出现，生成对应的短音效。' : ''}
@@ -203,19 +348,43 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
 
 请只返回符合 JSON 语法的纯数据，不要用 markdown 格式包裹，也不要带 \`\`\`json 开头。`;
 
-      console.log(`Analyzing video: ${fileName}, bgm=${bgmEnabled}, sfx=${sfxEnabled}, dubbing=${dubbingEnabled}`);
+      const contents: any[] = [prompt];
 
+      if (keyframes && Array.isArray(keyframes) && keyframes.length > 0) {
+        console.log(`Analyzing video using ${keyframes.length} keyframes sent from client.`);
+        contents.push({ text: "\n下面是该视频在不同时间点提取出的关键帧截图序列，请仔细结合画面内容及对应的时间轴位置进行配乐和音轨规划设计：\n" });
+        for (const kf of keyframes) {
+          contents.push({ text: `\n[视频时间轴位置: ${kf.timestamp} 秒]` });
+          contents.push({
+            inlineData: {
+              data: kf.base64,
+              mimeType: "image/jpeg"
+            }
+          });
+        }
+      } else {
+        if (!fileName) {
+          return res.status(400).json({ error: 'fileName or keyframes is required' });
+        }
+        const filePath = path.join(uploadsDir, fileName);
+        if (!fs.existsSync(filePath)) {
+          return res.status(404).json({ error: 'Video file not found' });
+        }
+        console.log(`Analyzing video using uploaded file: ${fileName}`);
+        const videoBuffer = fs.readFileSync(filePath);
+        const base64Video = videoBuffer.toString('base64');
+        contents.push({
+          inlineData: {
+            data: base64Video,
+            mimeType: "video/mp4"
+          }
+        });
+      }
+
+      console.log(`Sending content generation request to Gemini (models/gemini-3.5-flash)...`);
       const response = await ai.models.generateContent({
         model: "gemini-3.5-flash",
-        contents: [
-          {
-            inlineData: {
-              data: base64Video,
-              mimeType: "video/mp4"
-            }
-          },
-          prompt
-        ],
+        contents,
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -304,7 +473,8 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
       } else if (trackId === 'bgm') {
         // Background music (Sound generation)
         const sfxPrompt = `AI Music, full background instrumental track, no vocals, no speech: ${prompt}`;
-        console.log(`ElevenLabs server Music Gen: prompt="${sfxPrompt}" duration=${duration}`);
+        const elevenLabsDuration = Math.min(22, duration || 20);
+        console.log(`ElevenLabs server Music Gen: prompt="${sfxPrompt}" elevenLabsDuration=${elevenLabsDuration}, targetDuration=${duration}`);
         
         const apiResponse = await fetch("https://api.elevenlabs.io/v1/sound-generation", {
           method: "POST",
@@ -314,7 +484,7 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
           },
           body: JSON.stringify({
             text: sfxPrompt,
-            duration_seconds: duration || 20,
+            duration_seconds: elevenLabsDuration,
             prompt_influence: 0.4,
           }),
         });
@@ -325,7 +495,33 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
         }
         
         const buffer = Buffer.from(await apiResponse.arrayBuffer());
-        fs.writeFileSync(filePath, buffer);
+        
+        if (duration && duration > 22) {
+          // Write ElevenLabs response to a temporary file, then loop it using FFmpeg
+          const tempFileName = `temp_el_bgm_${Date.now()}.mp3`;
+          const tempPath = path.join(uploadsDir, tempFileName);
+          fs.writeFileSync(tempPath, buffer);
+          
+          const loopCmd = `ffmpeg -y -stream_loop -1 -i "${tempPath}" -t ${duration} "${filePath}"`;
+          console.log(`Looping BGM to ${duration}s using command: ${loopCmd}`);
+          
+          await new Promise<void>((resolve) => {
+            exec(loopCmd, (err, stdout, stderr) => {
+              // Delete temp file
+              try { fs.unlinkSync(tempPath); } catch (e) {}
+              if (err) {
+                console.error('Failed to loop BGM with ffmpeg, falling back to original segment:', err);
+                // Fallback: write original buffer directly
+                fs.writeFileSync(filePath, buffer);
+              } else {
+                console.log(`Successfully generated looped BGM at ${filePath}`);
+              }
+              resolve();
+            });
+          });
+        } else {
+          fs.writeFileSync(filePath, buffer);
+        }
         
       } else {
         // Sound effect (Sound generation)
@@ -401,21 +597,21 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
       // Filter complex to adjust volumes and apply delays
       const filterParts: string[] = [];
       validClips.forEach((clip: any, idx: number) => {
-        const delayMs = Math.round((clip.startTime || 0) * 1000);
-        // [idx+1:a] represents the idx-th audio input stream. Delay it and adjust volume
-        filterParts.push(`[${idx + 1}:a]volume=${clip.volume || 1.0},adelay=${delayMs}|${delayMs}[aud${idx}]`);
+        const delayMs = Math.max(1, Math.round((clip.startTime || 0) * 1000));
+        // Force sample rate of 44100 and channel layout to stereo, then apply volume and adelay
+        filterParts.push(`[${idx + 1}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=${clip.volume || 1.0},adelay=${delayMs}|${delayMs}[aud${idx}]`);
       });
 
       // Mix all delayed streams together
       const mixInputs = validClips.map((_, idx) => `[aud${idx}]`).join('');
-      filterParts.push(`${mixInputs}amix=inputs=${validClips.length}:duration=first[aout]`);
+      filterParts.push(`${mixInputs}amix=inputs=${validClips.length}:duration=longest:dropout_transition=0[aout]`);
 
       const filterComplexString = filterParts.join('; ');
 
       // Assemble FFmpeg command
       // -c:v copy copies the video stream directly without re-encoding, extremely fast!
       // -c:a aac encodes the mixed audio stream to AAC
-      const cmd = `ffmpeg -y ${inputArgs.join(' ')} -filter_complex "${filterComplexString}" -map 0:v -map "[aout]" -c:v copy -c:a aac "${outputFilePath}"`;
+      const cmd = `ffmpeg -y ${inputArgs.join(' ')} -filter_complex "${filterComplexString}" -map 0:v -map "[aout]" -c:v copy -c:a aac -shortest "${outputFilePath}"`;
 
       console.log('Running FFmpeg Command:', cmd);
 
@@ -434,11 +630,73 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
     }
   });
 
+  // 10. Mix only audio tracks (all mixed or filtered by trackId) for professional exporting
+  app.post('/api/audio/mix-tracks', (req, res) => {
+    try {
+      const { clips, trackId } = req.body;
+      const validClips = (clips || []).filter((c: any) => {
+        if (!c.audioUrl || typeof c.audioUrl !== 'string') return false;
+        if (trackId && c.trackId !== trackId) return false;
+        
+        const clipFileName = path.basename(c.audioUrl);
+        const clipPath = path.join(uploadsDir, clipFileName);
+        return fs.existsSync(clipPath);
+      });
+      
+      if (validClips.length === 0) {
+        return res.status(400).json({ error: '没有已生成的、存在于服务器上的音频片段可供导出。请先合成对应的音轨。' });
+      }
+
+      const outputFileName = `exported_audio_${trackId || 'mixed'}_${Date.now()}.mp3`;
+      const outputFilePath = path.join(uploadsDir, outputFileName);
+
+      const inputArgs: string[] = [];
+      validClips.forEach((clip: any) => {
+        const clipFileName = path.basename(clip.audioUrl);
+        const clipPath = path.join(uploadsDir, clipFileName);
+        inputArgs.push(`-i "${clipPath}"`);
+      });
+
+      const filterParts: string[] = [];
+      validClips.forEach((clip: any, idx: number) => {
+        const delayMs = Math.max(1, Math.round((clip.startTime || 0) * 1000));
+        // Force sample rate of 44100 and channel layout to stereo, then apply volume and adelay
+        filterParts.push(`[${idx}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=${clip.volume || 1.0},adelay=${delayMs}|${delayMs}[aud${idx}]`);
+      });
+
+      const mixInputs = validClips.map((_, idx) => `[aud${idx}]`).join('');
+      filterParts.push(`${mixInputs}amix=inputs=${validClips.length}:duration=longest:dropout_transition=0[aout]`);
+
+      const filterComplexString = filterParts.join('; ');
+      const cmd = `ffmpeg -y ${inputArgs.join(' ')} -filter_complex "${filterComplexString}" -map "[aout]" -c:a libmp3lame -q:a 2 "${outputFilePath}"`;
+      
+      console.log('Running Audio Mix FFmpeg Command:', cmd);
+
+      exec(cmd, (err, stdout, stderr) => {
+        if (err) {
+          console.error('Audio FFmpeg mixing failed:', err, stderr);
+          return res.status(500).json({ error: `音频合成失败: ${err.message}` });
+        }
+        console.log('FFmpeg mixed audio successfully created:', outputFileName);
+        return res.json({ audioUrl: `/uploads/${outputFileName}` });
+      });
+
+    } catch (err: any) {
+      console.error('Error in audio mixing endpoint:', err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // --- Vite & SPA integration ---
   if (process.env.NODE_ENV !== "production") {
     console.log("Starting server in DEVELOPMENT mode with Vite proxy...");
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { 
+        middlewareMode: true,
+        watch: {
+          ignored: ['**/uploads/**', '**/data/**']
+        }
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);

@@ -22,7 +22,8 @@ import {
   Sliders,
   Sparkles,
   DownloadCloud,
-  Clock
+  Clock,
+  Sun
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { FileItem } from '../types';
@@ -261,8 +262,8 @@ interface AudioDirectorProps {
   setFiles: React.Dispatch<React.SetStateAction<FileItem[]>>;
   requirements: string;
   setRequirements: (req: string) => void;
-  target: { game: boolean; video: boolean };
-  setTarget: React.Dispatch<React.SetStateAction<{ game: boolean; video: boolean }>>;
+  target: { game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean };
+  setTarget: React.Dispatch<React.SetStateAction<{ game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean }>>;
   loading: boolean;
   error: string | null;
   setError: (err: string | null) => void;
@@ -479,27 +480,51 @@ export default function AudioDirector({
               <div className="grid grid-cols-2 gap-3">
                 <button
                   type="button"
-                  onClick={() => setTarget(prev => ({ ...prev, game: !prev.game }))}
+                  onClick={() => setTarget({ game: true, video: false, avatar: false, sunnyIsland: false })}
                   className={`flex items-center justify-center gap-2 py-2 px-3 border rounded-xl text-xs font-semibold transition-all ${
                     target.game 
-                      ? 'bg-emerald-50 border-emerald-500 text-emerald-700' 
+                      ? 'bg-emerald-50 border-emerald-500 text-emerald-700 font-bold shadow-sm' 
                       : 'bg-slate-50 border-slate-200 text-slate-500 hover:text-slate-800'
                   }`}
                 >
-                  <Gamepad2 className="w-4 h-4" />
+                  <Gamepad2 className="w-4 h-4 shrink-0" />
                   <span>游戏音轨</span>
                 </button>
                 <button
                   type="button"
-                  onClick={() => setTarget(prev => ({ ...prev, video: !prev.video }))}
+                  onClick={() => setTarget({ game: false, video: true, avatar: false, sunnyIsland: false })}
                   className={`flex items-center justify-center gap-2 py-2 px-3 border rounded-xl text-xs font-semibold transition-all ${
                     target.video 
-                      ? 'bg-emerald-50 border-emerald-500 text-emerald-700' 
+                      ? 'bg-emerald-50 border-emerald-500 text-emerald-700 font-bold shadow-sm' 
                       : 'bg-slate-50 border-slate-200 text-slate-500 hover:text-slate-800'
                   }`}
                 >
-                  <Clapperboard className="w-4 h-4" />
+                  <Clapperboard className="w-4 h-4 shrink-0" />
                   <span>影视/广告</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTarget({ game: false, video: false, avatar: true, sunnyIsland: false })}
+                  className={`flex items-center justify-center gap-2 py-2 px-3 border rounded-xl text-xs font-semibold transition-all ${
+                    target.avatar 
+                      ? 'bg-emerald-50 border-emerald-500 text-emerald-700 font-bold shadow-sm' 
+                      : 'bg-slate-50 border-slate-200 text-slate-500 hover:text-slate-800'
+                  }`}
+                >
+                  <Sparkles className="w-4 h-4 shrink-0 text-sky-500" />
+                  <span>Avatar</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTarget({ game: false, video: false, avatar: false, sunnyIsland: true })}
+                  className={`flex items-center justify-center gap-2 py-2 px-3 border rounded-xl text-xs font-semibold transition-all ${
+                    target.sunnyIsland 
+                      ? 'bg-emerald-50 border-emerald-500 text-emerald-700 font-bold shadow-sm' 
+                      : 'bg-slate-50 border-slate-200 text-slate-500 hover:text-slate-800'
+                  }`}
+                >
+                  <Sun className="w-4 h-4 shrink-0 text-amber-500 animate-pulse" />
+                  <span>小岛有晴天</span>
                 </button>
               </div>
             </div>
@@ -624,7 +649,7 @@ export default function AudioDirector({
                   <button
                     type="button"
                     onClick={() => {
-                      setTarget({ game: false, video: true });
+                      setTarget({ game: false, video: true, avatar: false, sunnyIsland: false });
                       onLoadDemo(filmDemoResult);
                     }}
                     className="bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 text-xs font-bold px-4 py-2.5 rounded-xl transition-all flex items-center gap-2 shadow-sm cursor-pointer"

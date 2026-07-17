@@ -31,7 +31,7 @@ interface SidebarProps {
 export default function Sidebar({ currentTab, setCurrentTab }: SidebarProps) {
   const mainFeatures = [
     { id: 'workbench' as const, label: '工作台', icon: LayoutDashboard },
-    { id: 'video-soundtrack' as const, label: '视频配音配乐', icon: Film },
+    { id: 'video-soundtrack' as const, label: '视频生成音频', icon: Film },
     { id: 'audio-director' as const, label: 'AI 音频设计', icon: Sparkles },
     { id: 'music-studio' as const, label: 'AI 音乐', icon: Music },
     { id: 'sfx-studio' as const, label: 'AI 音效', icon: Waves },

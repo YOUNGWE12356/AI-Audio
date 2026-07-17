@@ -21,18 +21,145 @@ import {
   Check, 
   Loader2, 
   Sliders,
-  AlertCircle
+  AlertCircle,
+  ChevronDown,
+  ChevronUp,
+  FileVideo,
+  Search,
+  X,
+  Info,
+  CheckCircle2,
+  FolderOpen,
+  Save,
+  FileDown
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { TimelineClip } from '../types';
+import { ELEVENLABS_VOICES, VoiceItem } from '../data/voices';
+import { fetchAvailableVoices } from '../services/elevenLabsService';
+
+
+// Helper to extract keyframes from a video file in the browser using canvas
+async function extractVideoKeyframes(file: File, numFrames: number = 8): Promise<Array<{ timestamp: number; base64: string }>> {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement('video');
+    video.src = URL.createObjectURL(file);
+    video.muted = true;
+    video.playsInline = true;
+    video.crossOrigin = 'anonymous';
+
+    // Set a global timeout of 15 seconds in case seeking gets stuck
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error('提取视频帧超时'));
+    }, 15000);
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      try {
+        URL.revokeObjectURL(video.src);
+      } catch (e) {}
+    };
+
+    video.onloadedmetadata = async () => {
+      try {
+        const duration = video.duration || 10;
+        const keyframes: Array<{ timestamp: number; base64: string }> = [];
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        // Target width of 400px for balanced size and fast upload
+        const targetWidth = 400;
+        const aspect = video.videoWidth / video.videoHeight || 16/9;
+        canvas.width = targetWidth;
+        canvas.height = Math.round(targetWidth / aspect);
+
+        // Generate timestamps evenly distributed
+        const timestamps: number[] = [];
+        for (let i = 0; i < numFrames; i++) {
+          const t = (i + 0.5) * (duration / numFrames);
+          if (t < duration) {
+            timestamps.push(t);
+          }
+        }
+
+        for (const t of timestamps) {
+          await new Promise<void>((res) => {
+            const onSeeked = () => {
+              video.removeEventListener('seeked', onSeeked);
+              res();
+            };
+            video.addEventListener('seeked', onSeeked);
+            video.currentTime = t;
+            // Seeked fallback timeout
+            setTimeout(res, 800);
+          });
+
+          if (ctx) {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.65);
+            const base64 = dataUrl.split(',')[1];
+            if (base64) {
+              keyframes.push({
+                timestamp: parseFloat(t.toFixed(1)),
+                base64: base64
+              });
+            }
+          }
+        }
+
+        cleanup();
+        resolve(keyframes);
+      } catch (err) {
+        cleanup();
+        reject(err);
+      }
+    };
+
+    video.onerror = () => {
+      cleanup();
+      reject(new Error('无法加载视频元数据进行帧提取'));
+    };
+  });
+}
+
+export interface SoundtrackProject {
+  id: string;
+  name: string;
+  createdAt: number;
+  videoFile: { name: string; url: string; isUploaded?: boolean } | null;
+  videoDuration: number;
+  clips: TimelineClip[];
+  bgmEnabled: boolean;
+  sfxEnabled: boolean;
+  dubbingEnabled: boolean;
+  mixedVideoUrl: string | null;
+  exportedMixedUrl?: string | null;
+  exportedBgmUrl?: string | null;
+  exportedSfxUrl?: string | null;
+  exportedDubbingUrl?: string | null;
+}
 
 export default function VideoSoundtrack() {
+  // Project saving and loading states
+  const [isProjectActive, setIsProjectActive] = useState<boolean>(false);
+  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
+  const [showSaveProjectModal, setShowSaveProjectModal] = useState<boolean>(false);
+  const [showOpenProjectModal, setShowOpenProjectModal] = useState<boolean>(false);
+  const [projectNameInput, setProjectNameInput] = useState<string>('');
+  const [savedProjectsList, setSavedProjectsList] = useState<SoundtrackProject[]>([]);
+
   // Video and file states
-  const [videoFile, setVideoFile] = useState<{ name: string; url: string } | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [videoFile, setVideoFile] = useState<{ name: string; url: string; isUploaded?: boolean } | null>(null);
   const [videoDuration, setVideoDuration] = useState<number>(30); // Default placeholder duration
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [isUploading, setIsUploading] = useState<boolean>(false);
+  const [isDraggingOver, setIsDraggingOver] = useState<boolean>(false);
+  const [uploadProgress, setUploadProgress] = useState<number>(0);
+  const [isUploadingToServer, setIsUploadingToServer] = useState<boolean>(false);
+  const [videoLoadFailed, setVideoLoadFailed] = useState<boolean>(false);
   
   // AI Generation configuration options
   const [bgmEnabled, setBgmEnabled] = useState<boolean>(true);
@@ -45,14 +172,585 @@ export default function VideoSoundtrack() {
   const [mixedVideoUrl, setMixedVideoUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Audio export and tracks stem states
+  const [isExportingMixed, setIsExportingMixed] = useState<boolean>(false);
+  const [isExportingBgm, setIsExportingBgm] = useState<boolean>(false);
+  const [isExportingSfx, setIsExportingSfx] = useState<boolean>(false);
+  const [isExportingDubbing, setIsExportingDubbing] = useState<boolean>(false);
+
+  const [exportedMixedUrl, setExportedMixedUrl] = useState<string | null>(null);
+  const [exportedBgmUrl, setExportedBgmUrl] = useState<string | null>(null);
+  const [exportedSfxUrl, setExportedSfxUrl] = useState<string | null>(null);
+  const [exportedDubbingUrl, setExportedDubbingUrl] = useState<string | null>(null);
+
+  const [isExportDropdownOpen, setIsExportDropdownOpen] = useState<boolean>(false);
+
+  // Premium voice selection states & audio preview states for Dubbing select
+  const [fetchedVoices, setFetchedVoices] = useState<VoiceItem[]>([]);
+  const [isLoadingVoices, setIsLoadingVoices] = useState<boolean>(false);
+  const [showVoiceDropdown, setShowVoiceDropdown] = useState<boolean>(false);
+  const [voiceSearchQuery, setVoiceSearchQuery] = useState<string>('');
+  const [voiceGenderFilter, setVoiceGenderFilter] = useState<'all' | 'male' | 'female'>('all');
+  const [voiceActiveCategory, setVoiceActiveCategory] = useState<string>('全部');
+  const [playingVoiceId, setPlayingVoiceId] = useState<string | null>(null);
+
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Floating notification / prompt toast state
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+
+  const loadVoices = async () => {
+    setIsLoadingVoices(true);
+    try {
+      const apiVoices = await fetchAvailableVoices();
+      if (apiVoices && apiVoices.length > 0) {
+        const allowedCategories = ['premade', 'cloned', 'professional'];
+        const filteredApiVoices = apiVoices.filter(av => allowedCategories.includes(av.category));
+
+        const mapped: VoiceItem[] = filteredApiVoices.map(av => {
+          const existing = ELEVENLABS_VOICES.find(ev => ev.id === av.voice_id);
+          if (existing) return existing;
+
+          const genderLabel = (av.labels?.gender || '').toLowerCase();
+          let isMale = false;
+          if (genderLabel) {
+            if (genderLabel.includes('female')) {
+              isMale = false;
+            } else if (genderLabel.includes('male')) {
+              isMale = true;
+            }
+          } else {
+            isMale = /\b(adam|arnold|josh|clyde|antoni|sam|drew|paul|george|thomas|michael|marcus|ethan|henry)\b/i.test(av.name);
+          }
+          const category = av.category === 'premade' ? '经典人声' : (av.category === 'cloned' || av.category === 'professional') ? '我的克隆' : '自定义声线';
+
+          return {
+            id: av.voice_id,
+            name: av.name,
+            englishName: av.name,
+            gender: isMale ? 'male' as const : 'female' as const,
+            category: category,
+            tags: Object.values(av.labels || {}).filter(Boolean) as string[],
+            description: av.labels?.description || `您在 ElevenLabs 中配置的${category}`,
+            previewUrl: av.preview_url || ''
+          };
+        });
+        setFetchedVoices(mapped);
+      } else {
+        setFetchedVoices([]);
+      }
+    } catch (err) {
+      console.error("Failed to load voices from ElevenLabs:", err);
+    } finally {
+      setIsLoadingVoices(false);
+    }
+  };
+
+  const loadSavedProjects = () => {
+    try {
+      const stored = localStorage.getItem('video_soundtrack_projects');
+      if (stored) {
+        setSavedProjectsList(JSON.parse(stored));
+      } else {
+        setSavedProjectsList([]);
+      }
+    } catch (err) {
+      console.error('Failed to load projects from localStorage:', err);
+    }
+  };
+
+  const handleCreateNewProject = () => {
+    // Reset workspace states to clean slate
+    setVideoFile(null);
+    setSelectedFile(null);
+    setVideoDuration(30);
+    setClips([]);
+    setBgmEnabled(true);
+    setSfxEnabled(true);
+    setDubbingEnabled(true);
+    setMixedVideoUrl(null);
+    setExportedMixedUrl(null);
+    setExportedBgmUrl(null);
+    setExportedSfxUrl(null);
+    setExportedDubbingUrl(null);
+    setCurrentProjectId(null); // No active project ID yet
+    setIsProjectActive(true); // Open the DAW workspace
+    
+    // Stop and clear any existing playing instances
+    Object.keys(audioInstancesRef.current).forEach(clipId => {
+      try {
+        audioInstancesRef.current[clipId].pause();
+      } catch (e) {}
+      delete audioInstancesRef.current[clipId];
+    });
+
+    setToast({
+      message: '已新建声剪辑工程！请导入您的视频开始制作。',
+      type: 'success'
+    });
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  // Real-time Save (保存 / 覆盖当前)
+  const handleSaveProject = () => {
+    if (!videoFile) {
+      setToast({
+        message: '请先导入并上传视频，再保存工程。',
+        type: 'info'
+      });
+      setTimeout(() => setToast(null), 3000);
+      return;
+    }
+
+    if (currentProjectId) {
+      try {
+        const stored = localStorage.getItem('video_soundtrack_projects');
+        let projects: SoundtrackProject[] = [];
+        if (stored) {
+          projects = JSON.parse(stored);
+        }
+        
+        const existingIdx = projects.findIndex(p => p.id === currentProjectId);
+        if (existingIdx !== -1) {
+          const currentName = projects[existingIdx].name;
+          const updatedProject: SoundtrackProject = {
+            id: currentProjectId,
+            name: currentName,
+            createdAt: Date.now(),
+            videoFile,
+            videoDuration,
+            clips,
+            bgmEnabled,
+            sfxEnabled,
+            dubbingEnabled,
+            mixedVideoUrl,
+            exportedMixedUrl,
+            exportedBgmUrl,
+            exportedSfxUrl,
+            exportedDubbingUrl
+          };
+          projects[existingIdx] = updatedProject;
+          localStorage.setItem('video_soundtrack_projects', JSON.stringify(projects));
+          
+          setToast({
+            message: `已实时保存工程“${currentName}”！`,
+            type: 'success'
+          });
+          setTimeout(() => setToast(null), 3000);
+          loadSavedProjects();
+          return;
+        }
+      } catch (err: any) {
+        setError(`实时保存失败: ${err.message}`);
+        return;
+      }
+    }
+
+    // No currentProjectId loaded, default to Save As / Save New
+    setProjectNameInput(`未命名工程_${new Date().toLocaleDateString()}`);
+    setShowSaveProjectModal(true);
+  };
+
+  // Save As / Save New Confirm
+  const handleSaveProjectConfirm = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const name = projectNameInput.trim() || `工程_${new Date().toLocaleDateString()}`;
+    const newId = `project-${Date.now()}`;
+    
+    const newProject: SoundtrackProject = {
+      id: newId,
+      name,
+      createdAt: Date.now(),
+      videoFile,
+      videoDuration,
+      clips,
+      bgmEnabled,
+      sfxEnabled,
+      dubbingEnabled,
+      mixedVideoUrl,
+      exportedMixedUrl,
+      exportedBgmUrl,
+      exportedSfxUrl,
+      exportedDubbingUrl
+    };
+
+    try {
+      const stored = localStorage.getItem('video_soundtrack_projects');
+      let projects: SoundtrackProject[] = [];
+      if (stored) {
+        projects = JSON.parse(stored);
+      }
+      projects.unshift(newProject);
+      localStorage.setItem('video_soundtrack_projects', JSON.stringify(projects));
+      
+      setCurrentProjectId(newId); // Now working on this saved project
+      
+      setToast({
+        message: `成功保存并创建新工程“${name}”！`,
+        type: 'success'
+      });
+      setTimeout(() => setToast(null), 3000);
+
+      setShowSaveProjectModal(false);
+      setProjectNameInput('');
+      loadSavedProjects();
+    } catch (err: any) {
+      setError(`保存工程失败: ${err.message}`);
+    }
+  };
+
+  const handleOpenProject = (project: SoundtrackProject) => {
+    try {
+      setVideoLoadFailed(false);
+      setVideoFile(project.videoFile);
+      setVideoDuration(project.videoDuration);
+      setClips(project.clips);
+      setBgmEnabled(project.bgmEnabled);
+      setSfxEnabled(project.sfxEnabled);
+      setDubbingEnabled(project.dubbingEnabled);
+      setMixedVideoUrl(project.mixedVideoUrl);
+      setExportedMixedUrl(project.exportedMixedUrl || null);
+      setExportedBgmUrl(project.exportedBgmUrl || null);
+      setExportedSfxUrl(project.exportedSfxUrl || null);
+      setExportedDubbingUrl(project.exportedDubbingUrl || null);
+      
+      setCurrentProjectId(project.id);
+      setIsProjectActive(true); // Go to workspace
+
+      // Re-initialize audio instances if any clip has audioUrl
+      Object.keys(audioInstancesRef.current).forEach(clipId => {
+        try {
+          audioInstancesRef.current[clipId].pause();
+        } catch (e) {}
+        delete audioInstancesRef.current[clipId];
+      });
+
+      project.clips.forEach(clip => {
+        if (clip.audioUrl) {
+          const audio = new Audio(clip.audioUrl);
+          audio.volume = clip.volume || 1.0;
+          audioInstancesRef.current[clip.id] = audio;
+        }
+      });
+
+      setToast({
+        message: `成功加载工程“${project.name}”！`,
+        type: 'success'
+      });
+      setTimeout(() => setToast(null), 3000);
+
+      setShowOpenProjectModal(false);
+    } catch (err: any) {
+      setError(`打开工程失败: ${err.message}`);
+    }
+  };
+
+  const handleDeleteProject = (projectId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const stored = localStorage.getItem('video_soundtrack_projects');
+      if (stored) {
+        let projects: SoundtrackProject[] = JSON.parse(stored);
+        const targetProj = projects.find(p => p.id === projectId);
+        projects = projects.filter(p => p.id !== projectId);
+        localStorage.setItem('video_soundtrack_projects', JSON.stringify(projects));
+        setSavedProjectsList(projects);
+        
+        setToast({
+          message: `已删除工程“${targetProj?.name || ''}”`,
+          type: 'info' as any
+        });
+        setTimeout(() => {
+          setToast(null);
+        }, 3000);
+      }
+    } catch (err: any) {
+      setError(`删除工程失败: ${err.message}`);
+    }
+  };
+
+  const handleExportProjectToFile = (project: SoundtrackProject, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(project, null, 2));
+      const downloadAnchor = document.createElement('a');
+      downloadAnchor.setAttribute("href", dataStr);
+      downloadAnchor.setAttribute("download", `${project.name}.vsa.json`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      downloadAnchor.remove();
+    } catch (err: any) {
+      setError(`导出工程文件失败: ${err.message}`);
+    }
+  };
+
+  const handleImportProjectFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const content = event.target?.result as string;
+        const project = JSON.parse(content) as SoundtrackProject;
+        
+        if (!project.id || !project.name || !Array.isArray(project.clips)) {
+          throw new Error('无效的工程文件格式');
+        }
+
+        project.id = `project-imported-${Date.now()}`;
+        project.name = `${project.name} (导入)`;
+
+        const stored = localStorage.getItem('video_soundtrack_projects');
+        let projects: SoundtrackProject[] = [];
+        if (stored) {
+          projects = JSON.parse(stored);
+        }
+        projects.unshift(project);
+        localStorage.setItem('video_soundtrack_projects', JSON.stringify(projects));
+        
+        handleOpenProject(project);
+      } catch (err: any) {
+        setToast({
+          message: `导入工程失败: ${err.message}`,
+          type: 'error'
+        });
+        setTimeout(() => {
+          setToast(null);
+        }, 3000);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  useEffect(() => {
+    loadVoices();
+    loadSavedProjects();
+  }, []);
+
+  useEffect(() => {
+    if (showVoiceDropdown) {
+      loadVoices();
+    }
+  }, [showVoiceDropdown]);
+
+  useEffect(() => {
+    return () => {
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause();
+      }
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
+
+  const playWebSpeechFallback = (voiceName: string, gender: 'male' | 'female', category: string, tags: string[]) => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) {
+      setPlayingVoiceId(null);
+      return;
+    }
+    try {
+      window.speechSynthesis.cancel();
+      const text = `你好！我是 AI 配音助理 ${voiceName}。这是我为您准备的专属声线。我擅长 ${tags.join('、')}等不同风格的拟真配音，期待能为您生成完美的音频。`;
+      const utterance = new SpeechSynthesisUtterance(text);
+      const nativeVoices = window.speechSynthesis.getVoices();
+      let chineseVoices = nativeVoices.filter(v => v.lang.includes('zh') || v.lang.includes('ZH'));
+      if (chineseVoices.length === 0) {
+        chineseVoices = nativeVoices;
+      }
+      let selectedNativeVoice = null;
+      if (gender === 'female') {
+        selectedNativeVoice = chineseVoices.find(v => 
+          v.name.includes('Xiaoxiao') || 
+          v.name.includes('Tingting') || 
+          v.name.includes('female') || 
+          v.name.includes('Female') ||
+          v.name.includes('Huihui') ||
+          v.name.includes('Yaoyao') ||
+          v.name.includes('Meijia')
+        ) || chineseVoices[0];
+      } else {
+        selectedNativeVoice = chineseVoices.find(v => 
+          v.name.includes('Yunxi') || 
+          v.name.includes('Kangkang') || 
+          v.name.includes('male') || 
+          v.name.includes('Male') ||
+          v.name.includes('Zhiwei')
+        ) || chineseVoices[0];
+      }
+      if (selectedNativeVoice) {
+        utterance.voice = selectedNativeVoice;
+      }
+      utterance.rate = 1.0;
+      utterance.pitch = gender === 'female' ? 1.15 : 0.9;
+      utterance.onend = () => {
+        setPlayingVoiceId(null);
+      };
+      utterance.onerror = () => {
+        setPlayingVoiceId(null);
+      };
+      window.speechSynthesis.speak(utterance);
+    } catch (err) {
+      console.error("Speech synthesis fallback failed:", err);
+      setPlayingVoiceId(null);
+    }
+  };
+
+  const handlePlayVoicePreview = (voiceId: string, url: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (playingVoiceId === voiceId) {
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause();
+      }
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+      setPlayingVoiceId(null);
+    } else {
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause();
+      }
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+      setPlayingVoiceId(voiceId);
+      if (!url) {
+        console.warn("No preview URL provided. Running local synthesis fallback...");
+        const voiceObj = displayVoices.find(v => v.id === voiceId);
+        if (voiceObj) {
+          playWebSpeechFallback(voiceObj.name, voiceObj.gender, voiceObj.category, voiceObj.tags);
+        } else {
+          setPlayingVoiceId(null);
+        }
+        return;
+      }
+      const audio = new Audio(url);
+      previewAudioRef.current = audio;
+      let fallbackTriggered = false;
+      const triggerFallback = () => {
+        if (fallbackTriggered) return;
+        fallbackTriggered = true;
+        const voiceObj = displayVoices.find(v => v.id === voiceId);
+        if (voiceObj) {
+          playWebSpeechFallback(voiceObj.name, voiceObj.gender, voiceObj.category, voiceObj.tags);
+        } else {
+          setPlayingVoiceId(null);
+        }
+      };
+      audio.onerror = () => {
+        console.warn(`Audio error event fired for URL: ${url}. Triggering fallback...`);
+        triggerFallback();
+      };
+      audio.onended = () => {
+        if (!fallbackTriggered) {
+          setPlayingVoiceId(null);
+        }
+      };
+      audio.play().catch(err => {
+        console.warn("Autoplay or preview playback failed:", err);
+        triggerFallback();
+      });
+    }
+  };
+
+  // Compute final voices list
+  const displayVoices = fetchedVoices.length > 0 
+    ? [...ELEVENLABS_VOICES, ...fetchedVoices.filter(fv => !ELEVENLABS_VOICES.some(ev => ev.id === fv.id))]
+    : ELEVENLABS_VOICES;
+
+  // Safe duration variable to prevent any division by zero, NaN or Infinity layout errors
+  const safeDuration = (typeof videoDuration === 'number' && !isNaN(videoDuration) && isFinite(videoDuration) && videoDuration > 0) ? videoDuration : 30;
+
   // Timeline tracks & clips
   const [clips, setClips] = useState<TimelineClip[]>([]);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   
-  // Mouse interaction state for dragging clips
-  const [draggingClipId, setDraggingClipId] = useState<string | null>(null);
+  // Scale / Zoom factor for horizontal scrolling (pixels per second)
+  const [pixelsPerSecond, setPixelsPerSecond] = useState<number>(30);
+
+  // Mouse interaction state for dragging and stretching clips
+  const [activeClipId, setActiveClipId] = useState<string | null>(null);
+  const [interactionType, setInteractionType] = useState<'drag' | 'resize-left' | 'resize-right' | null>(null);
   const [dragStartX, setDragStartX] = useState<number>(0);
-  const [dragStartOffset, setDragStartOffset] = useState<number>(0);
+  const [initialClipState, setInitialClipState] = useState<{ startTime: number; duration: number } | null>(null);
+
+  const startDragOrResize = (e: React.MouseEvent, clipId: string, type: 'drag' | 'resize-left' | 'resize-right') => {
+    e.stopPropagation();
+    e.preventDefault();
+    const targetClip = clips.find(c => c.id === clipId);
+    if (!targetClip) return;
+
+    setSelectedClipId(clipId);
+    setActiveClipId(clipId);
+    setInteractionType(type);
+    setDragStartX(e.clientX);
+    setInitialClipState({
+      startTime: targetClip.startTime,
+      duration: targetClip.duration
+    });
+  };
+
+  // Handle mouse move & up on window for smooth dragging/resizing experience
+  useEffect(() => {
+    if (!activeClipId || !interactionType || !initialClipState) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const deltaX = e.clientX - dragStartX;
+      const deltaTime = deltaX / pixelsPerSecond;
+
+      setClips(prev => prev.map(clip => {
+        if (clip.id !== activeClipId) return clip;
+
+        let newStartTime = clip.startTime;
+        let newDuration = clip.duration;
+
+        if (interactionType === 'drag') {
+          newStartTime = initialClipState.startTime + deltaTime;
+          // Clamp startTime so clip stays within video duration bounds
+          newStartTime = Math.max(0, Math.min(newStartTime, safeDuration - clip.duration));
+          // Round to 2 decimal places for neatness
+          newStartTime = parseFloat(newStartTime.toFixed(2));
+        } else if (interactionType === 'resize-right') {
+          newDuration = initialClipState.duration + deltaTime;
+          newDuration = Math.max(0.5, Math.min(newDuration, safeDuration - clip.startTime));
+          newDuration = parseFloat(newDuration.toFixed(2));
+        } else if (interactionType === 'resize-left') {
+          newStartTime = initialClipState.startTime + deltaTime;
+          newDuration = initialClipState.duration - deltaTime;
+
+          if (newStartTime < 0) {
+            newStartTime = 0;
+            newDuration = initialClipState.startTime + initialClipState.duration;
+          }
+          if (newDuration < 0.5) {
+            newDuration = 0.5;
+            newStartTime = initialClipState.startTime + initialClipState.duration - 0.5;
+          }
+
+          newStartTime = parseFloat(newStartTime.toFixed(2));
+          newDuration = parseFloat(newDuration.toFixed(2));
+        }
+
+        return { ...clip, startTime: newStartTime, duration: newDuration };
+      }));
+    };
+
+    const handleMouseUp = () => {
+      setActiveClipId(null);
+      setInteractionType(null);
+      setInitialClipState(null);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [activeClipId, interactionType, initialClipState, pixelsPerSecond, safeDuration]);
 
   // Refs for audio synchronization
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -65,10 +763,41 @@ export default function VideoSoundtrack() {
   useEffect(() => {
     return () => {
       (Object.values(audioInstancesRef.current) as HTMLAudioElement[]).forEach(audio => {
-        audio.pause();
+        try {
+          audio.pause();
+        } catch (e) {
+          console.warn(e);
+        }
       });
     };
   }, []);
+
+  // Clean up local object URL when videoFile changes or unmounts
+  useEffect(() => {
+    const currentUrl = videoFile?.url;
+    return () => {
+      if (currentUrl && currentUrl.startsWith('blob:')) {
+        try {
+          URL.revokeObjectURL(currentUrl);
+        } catch (e) {
+          console.error('Failed to revoke object URL:', e);
+        }
+      }
+    };
+  }, [videoFile?.url]);
+
+  // Helper to safely set currentTime on media elements without throwing DOMExceptions
+  const setMediaTimeSafely = (media: HTMLMediaElement | null, time: number) => {
+    if (!media) return;
+    try {
+      // Check readyState (must be > 0: HAVE_METADATA, HAVE_CURRENT_DATA, HAVE_FUTURE_DATA, HAVE_ENOUGH_DATA)
+      if (media.readyState > 0 && isFinite(time) && !isNaN(time) && time >= 0) {
+        media.currentTime = time;
+      }
+    } catch (e) {
+      console.warn('Failed to set media currentTime safely:', e);
+    }
+  };
 
   // Sync play/pause of audio clips with video state
   useEffect(() => {
@@ -84,22 +813,35 @@ export default function VideoSoundtrack() {
           audioInstancesRef.current[clip.id] = audio;
         }
         
+        // Configure loops
+        if (clip.trackId === 'bgm') {
+          audio.loop = true;
+        } else {
+          audio.loop = false;
+        }
+
         audio.volume = clip.volume;
         const offset = currentTime - clip.startTime;
         
-        if (offset >= 0 && offset < clip.duration) {
+        // Determine maximum playable duration for non-BGM clips (e.g. dubbing/sfx shouldn't loop/replay)
+        let maxPlayableDuration = clip.duration;
+        if (clip.trackId !== 'bgm' && audio.duration && !isNaN(audio.duration) && isFinite(audio.duration)) {
+          maxPlayableDuration = Math.min(clip.duration, audio.duration);
+        }
+
+        if (offset >= 0 && offset < maxPlayableDuration) {
           // Clip should be playing
           if (audio.paused) {
-            audio.currentTime = offset;
+            setMediaTimeSafely(audio, offset);
             audio.play().catch(e => console.log('Audio play blocked:', e));
           } else {
             // Adjust current time if it drifts by more than 0.2s
             if (Math.abs(audio.currentTime - offset) > 0.2) {
-              audio.currentTime = offset;
+              setMediaTimeSafely(audio, offset);
             }
           }
         } else {
-          // Clip should not be playing
+          // Clip should not be playing (or has naturally finished)
           if (!audio.paused) {
             audio.pause();
           }
@@ -128,9 +870,15 @@ export default function VideoSoundtrack() {
       if (!audio) return;
 
       const offset = t - clip.startTime;
-      if (offset >= 0 && offset < clip.duration) {
+      
+      let maxPlayableDuration = clip.duration;
+      if (clip.trackId !== 'bgm' && audio.duration && !isNaN(audio.duration) && isFinite(audio.duration)) {
+        maxPlayableDuration = Math.min(clip.duration, audio.duration);
+      }
+
+      if (offset >= 0 && offset < maxPlayableDuration) {
         if (isPlaying && audio.paused) {
-          audio.currentTime = offset;
+          setMediaTimeSafely(audio, offset);
           audio.volume = clip.volume;
           audio.play().catch(e => console.log('Audio sync play failed:', e));
         }
@@ -155,42 +903,411 @@ export default function VideoSoundtrack() {
 
   const handleVideoLoaded = () => {
     if (videoRef.current) {
-      setVideoDuration(videoRef.current.duration || 30);
+      const d = videoRef.current.duration;
+      if (typeof d === 'number' && !isNaN(d) && isFinite(d) && d > 0) {
+        setVideoDuration(d);
+      } else {
+        setVideoDuration(30);
+      }
     }
   };
 
-  // Upload video via existing multipart API
+  // Automatic fallback in case the local object URL fails inside iframe sandbox
+  const handleVideoError = () => {
+    if (videoFile && videoFile.url.startsWith('blob:')) {
+      console.warn('Blob URL playback failed, falling back to server URL.');
+      setVideoFile({
+        name: videoFile.name,
+        url: `/uploads/${videoFile.name}`,
+        isUploaded: videoFile.isUploaded
+      });
+    } else {
+      console.warn('Video element error - both local blob and server URL are inaccessible.');
+      setVideoLoadFailed(true);
+    }
+  };
+
+  // Upload video via chunked uploads with a progress tracker (instant local playback, background sync with fallback to single upload)
+  const uploadVideoFile = (file: File) => {
+    setVideoLoadFailed(false);
+    setSelectedFile(file);
+    setIsUploading(true);
+    setUploadProgress(0);
+    setIsUploadingToServer(true);
+    setError(null);
+    setMixedVideoUrl(null);
+
+    // Pause and clean up any playing audio instances from previous session
+    (Object.values(audioInstancesRef.current) as HTMLAudioElement[]).forEach(audio => {
+      try {
+        audio.pause();
+      } catch (e) {
+        console.warn('Error pausing audio:', e);
+      }
+    });
+    audioInstancesRef.current = {};
+    setClips([]);
+
+    // 1. Instantly load locally using object URL for seamless, lag-free user experience
+    let localUrl = '';
+    try {
+      localUrl = URL.createObjectURL(file);
+    } catch (e) {
+      console.error('Failed to create local Object URL:', e);
+    }
+
+    setVideoFile({
+      name: file.name,
+      url: localUrl,
+      isUploaded: false
+    });
+    setCurrentTime(0);
+    setIsPlaying(false);
+
+    // 2. Perform chunked upload to bypass proxy and server size limits
+    const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB chunks
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    const uploadId = `${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+    const fileName = file.name;
+
+    let currentChunk = 0;
+
+    const uploadNextChunk = () => {
+      if (currentChunk >= totalChunks) return;
+
+      const start = currentChunk * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, file.size);
+      const chunk = file.slice(start, end);
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/sfx/upload-chunk', true);
+
+      // Track individual chunk upload progress to make progress bar smoother
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const chunkProgress = event.loaded / event.total;
+          const totalProgress = Math.round(((currentChunk + chunkProgress) / totalChunks) * 100);
+          setUploadProgress(Math.min(99, totalProgress));
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            if (data.completed) {
+              // Entire file uploaded and assembled successfully!
+              setUploadProgress(100);
+              setIsUploadingToServer(false);
+              setIsUploading(false);
+              setVideoFile(prev => {
+                if (!prev) return null;
+                return {
+                  ...prev,
+                  name: data.fileName, // Map to server's unique safe filename for API calls
+                  isUploaded: true
+                };
+              });
+              setToast({
+                message: '视频文件已成功同步到服务器！',
+                type: 'success'
+              });
+              setTimeout(() => setToast(null), 3000);
+            } else {
+              // Proceed to next chunk
+              currentChunk++;
+              const percent = Math.round((currentChunk / totalChunks) * 100);
+              setUploadProgress(percent);
+              uploadNextChunk();
+            }
+          } catch (e) {
+            console.error('Failed to parse chunk upload response:', e);
+            fallbackToSingleUpload();
+          }
+        } else {
+          console.warn(`Chunk upload failed on chunk ${currentChunk}. Falling back to single-request upload...`);
+          fallbackToSingleUpload();
+        }
+      };
+
+      xhr.onerror = () => {
+        console.warn(`XHR network error during chunk ${currentChunk} upload. Falling back to single-request upload...`);
+        fallbackToSingleUpload();
+      };
+
+      const formData = new FormData();
+      formData.append('file', chunk, `${fileName}.chunk`);
+      formData.append('chunkIndex', currentChunk.toString());
+      formData.append('totalChunks', totalChunks.toString());
+      formData.append('fileName', fileName);
+      formData.append('uploadId', uploadId);
+
+      xhr.send(formData);
+    };
+
+    // Fallback to standard upload if chunked upload fails or is not supported
+    const fallbackToSingleUpload = () => {
+      console.log('Initiating fallback standard upload...');
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/sfx/upload', true);
+
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const percentComplete = Math.round((event.loaded / event.total) * 100);
+          setUploadProgress(percentComplete);
+        }
+      };
+
+      xhr.onload = () => {
+        setIsUploadingToServer(false);
+        setIsUploading(false);
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            console.log('Fallback upload success:', data);
+            setVideoFile(prev => {
+              if (!prev) return null;
+              return {
+                ...prev,
+                name: data.fileName,
+                isUploaded: true
+              };
+            });
+            setToast({
+              message: '视频文件已成功同步到服务器！',
+              type: 'success'
+            });
+            setTimeout(() => setToast(null), 3000);
+          } catch (e: any) {
+            console.error('Failed to parse fallback response:', e);
+            setError('服务器上传成功，但解析响应失败。AI 画面分析与 FFmpeg 混音可能不可用。');
+          }
+        } else {
+          let errMsg = '视频上传服务器失败';
+          try {
+            const resJson = JSON.parse(xhr.responseText);
+            errMsg = resJson.error || errMsg;
+          } catch (e) {}
+          setError(`视频已在本地加载：服务器上传未成功（${errMsg}）。由于网络传输受限，AI 分析及混音合成功能暂不可用，但您依然可以完美播放并手动设计、预览音轨。`);
+        }
+      };
+
+      xhr.onerror = () => {
+        setIsUploadingToServer(false);
+        setIsUploading(false);
+        setError('视频已在本地加载：网络连接失败，未成功同步到服务器。AI 画面多模态分析不可用，但您依然可以手动设计、预览音轨。');
+      };
+
+      const formData = new FormData();
+      formData.append('file', file);
+      xhr.send(formData);
+    };
+
+    // Start with chunked upload if file is larger than 1MB
+    if (file.size > 1 * 1024 * 1024) {
+      uploadNextChunk();
+    } else {
+      fallbackToSingleUpload();
+    }
+  };
+
+  const relinkVideoFile = (file: File) => {
+    setVideoLoadFailed(false);
+    setSelectedFile(file);
+    setIsUploading(true);
+    setUploadProgress(0);
+    setIsUploadingToServer(true);
+    setError(null);
+    setMixedVideoUrl(null);
+
+    // Pause any playing audio instances
+    (Object.values(audioInstancesRef.current) as HTMLAudioElement[]).forEach(audio => {
+      try {
+        audio.pause();
+      } catch (e) {
+        console.warn('Error pausing audio:', e);
+      }
+    });
+
+    let localUrl = '';
+    try {
+      localUrl = URL.createObjectURL(file);
+    } catch (e) {
+      console.error('Failed to create local Object URL:', e);
+    }
+
+    setVideoFile({
+      name: file.name,
+      url: localUrl,
+      isUploaded: false
+    });
+    setCurrentTime(0);
+    setIsPlaying(false);
+
+    const CHUNK_SIZE = 2 * 1024 * 1024;
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    const uploadId = `${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+    const fileName = file.name;
+
+    let currentChunk = 0;
+
+    const uploadNextChunk = () => {
+      if (currentChunk >= totalChunks) return;
+
+      const start = currentChunk * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, file.size);
+      const chunk = file.slice(start, end);
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/sfx/upload-chunk', true);
+
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const chunkProgress = event.loaded / event.total;
+          const totalProgress = Math.round(((currentChunk + chunkProgress) / totalChunks) * 100);
+          setUploadProgress(Math.min(99, totalProgress));
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            if (data.completed) {
+              setUploadProgress(100);
+              setIsUploadingToServer(false);
+              setIsUploading(false);
+              setVideoFile(prev => {
+                if (!prev) return null;
+                return {
+                  ...prev,
+                  name: data.fileName,
+                  isUploaded: true
+                };
+              });
+              setToast({
+                message: '关联视频文件已成功同步到服务器！',
+                type: 'success'
+              });
+              setTimeout(() => setToast(null), 3000);
+            } else {
+              currentChunk++;
+              const percent = Math.round((currentChunk / totalChunks) * 100);
+              setUploadProgress(percent);
+              uploadNextChunk();
+            }
+          } catch (e) {
+            console.error('Failed to parse chunk upload response:', e);
+            fallbackToSingleUpload();
+          }
+        } else {
+          fallbackToSingleUpload();
+        }
+      };
+
+      xhr.onerror = () => {
+        fallbackToSingleUpload();
+      };
+
+      const formData = new FormData();
+      formData.append('file', chunk, `${fileName}.chunk`);
+      formData.append('chunkIndex', currentChunk.toString());
+      formData.append('totalChunks', totalChunks.toString());
+      formData.append('fileName', fileName);
+      formData.append('uploadId', uploadId);
+
+      xhr.send(formData);
+    };
+
+    const fallbackToSingleUpload = () => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/sfx/upload', true);
+
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const percentComplete = Math.round((event.loaded / event.total) * 100);
+          setUploadProgress(percentComplete);
+        }
+      };
+
+      xhr.onload = () => {
+        setIsUploadingToServer(false);
+        setIsUploading(false);
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            setVideoFile(prev => {
+              if (!prev) return null;
+              return {
+                ...prev,
+                name: data.fileName,
+                isUploaded: true
+              };
+            });
+            setToast({
+              message: '关联视频文件已成功同步到服务器！',
+              type: 'success'
+            });
+            setTimeout(() => setToast(null), 3000);
+          } catch (e: any) {
+            setError('服务器上传成功，但解析响应失败。AI 画面分析与 FFmpeg 混音可能不可用。');
+          }
+        } else {
+          let errMsg = '视频上传服务器失败';
+          try {
+            const resJson = JSON.parse(xhr.responseText);
+            errMsg = resJson.error || errMsg;
+          } catch (e) {}
+          setError(`视频已在本地加载：服务器上传未成功（${errMsg}）。由于网络传输受限，AI 分析及混音合成功能暂不可用，但您依然可以完美播放并手动设计、预览音轨。`);
+        }
+      };
+
+      xhr.onerror = () => {
+        setIsUploadingToServer(false);
+        setIsUploading(false);
+        setError('视频已在本地加载：网络连接失败，未成功同步到服务器。AI 画面多模态分析不可用，但您依然可以手动设计、预览音轨。');
+      };
+
+      const formData = new FormData();
+      formData.append('file', file);
+      xhr.send(formData);
+    };
+
+    if (file.size > 1 * 1024 * 1024) {
+      uploadNextChunk();
+    } else {
+      fallbackToSingleUpload();
+    }
+  };
+
+  const handleVideoRelink = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    await relinkVideoFile(file);
+  };
+
   const handleVideoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    await uploadVideoFile(file);
+  };
 
-    setIsUploading(true);
-    setError(null);
-    setMixedVideoUrl(null);
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
+  // Drag and drop events
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDraggingOver(true);
+  };
 
-      const res = await fetch('/api/sfx/upload', {
-        method: 'POST',
-        body: formData,
-      });
+  const handleDragLeave = () => {
+    setIsDraggingOver(false);
+  };
 
-      if (!res.ok) {
-        throw new Error('视频文件上传失败，请稍后重试');
-      }
-
-      const data = await res.json();
-      setVideoFile({
-        name: data.fileName,
-        url: data.url
-      });
-      setCurrentTime(0);
-      setIsPlaying(false);
-    } catch (err: any) {
-      setError(err.message || '上传视频时出错');
-    } finally {
-      setIsUploading(false);
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDraggingOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      await uploadVideoFile(file);
     }
   };
 
@@ -201,11 +1318,28 @@ export default function VideoSoundtrack() {
     setIsAnalyzing(true);
     setError(null);
     try {
+      let keyframes: any[] = [];
+      if (selectedFile) {
+        try {
+          console.log('Extracting video keyframes client-side...');
+          keyframes = await extractVideoKeyframes(selectedFile, 8);
+          console.log(`Successfully extracted ${keyframes.length} keyframes.`);
+        } catch (kfErr) {
+          console.warn('Failed to extract keyframes client-side, falling back to server video:', kfErr);
+        }
+      }
+
+      // Fallback check: if no keyframes could be extracted, and the video hasn't uploaded to server yet, block
+      if (keyframes.length === 0 && (isUploadingToServer || !videoFile.isUploaded)) {
+        throw new Error('由于您的视频文件尚未成功同步到服务器，且浏览器端未能成功抓取关键帧，暂无法进行 AI 自动分析。请等待同步完成，或者您可以直接在下方轨道中手动设计并添加音轨块。');
+      }
+
       const res = await fetch('/api/video/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           fileName: videoFile.name,
+          keyframes: keyframes.length > 0 ? keyframes : undefined,
           bgmEnabled,
           sfxEnabled,
           dubbingEnabled
@@ -278,12 +1412,29 @@ export default function VideoSoundtrack() {
       const audio = new Audio(data.audioUrl);
       audioInstancesRef.current[clipId] = audio;
 
+      // Trigger success toast
+      setToast({
+        message: `成功为“${clip.name}”合成 ${clip.trackId === 'dubbing' ? '旁白配音' : clip.trackId === 'bgm' ? '配乐BGM' : '专属音效'}！`,
+        type: 'success'
+      });
+      setTimeout(() => {
+        setToast(current => current?.message.includes(clip.name) ? null : current);
+      }, 3500);
+
     } catch (err: any) {
       setClips(prev => prev.map(c => c.id === clipId ? { 
         ...c, 
         isGenerating: false, 
         error: err.message 
       } : c));
+      
+      setToast({
+        message: `“${clip.name}”合成失败：${err.message}`,
+        type: 'error'
+      });
+      setTimeout(() => {
+        setToast(current => current?.message.includes(clip.name) ? null : current);
+      }, 4500);
     }
   };
 
@@ -299,6 +1450,11 @@ export default function VideoSoundtrack() {
   // Mix all audio layers into original video using high performance ffmpeg
   const handleExportVideo = async () => {
     if (!videoFile) return;
+
+    if (isUploadingToServer || !videoFile.isUploaded) {
+      setError('视频文件尚未成功同步到服务器，无法在服务器端运行 FFmpeg 混音。请等待视频上传完成。');
+      return;
+    }
 
     const ungenerated = clips.filter(c => !c.audioUrl);
     if (ungenerated.length > 0) {
@@ -333,16 +1489,79 @@ export default function VideoSoundtrack() {
     }
   };
 
+  // Export Master Soundtrack (mixed) or Individual Track Stems (bgm / sfx / dubbing)
+  const handleExportAudio = async (trackId: 'mixed' | 'bgm' | 'sfx' | 'dubbing') => {
+    // Determine which loading state to set
+    if (trackId === 'mixed') {
+      setIsExportingMixed(true);
+      setExportedMixedUrl(null);
+    } else if (trackId === 'bgm') {
+      setIsExportingBgm(true);
+      setExportedBgmUrl(null);
+    } else if (trackId === 'sfx') {
+      setIsExportingSfx(true);
+      setExportedSfxUrl(null);
+    } else if (trackId === 'dubbing') {
+      setIsExportingDubbing(true);
+      setExportedDubbingUrl(null);
+    }
+
+    setError(null);
+
+    try {
+      const generatedClips = clips.filter(c => c.audioUrl);
+      const targetClips = trackId === 'mixed' ? generatedClips : generatedClips.filter(c => c.trackId === trackId);
+      
+      if (targetClips.length === 0) {
+        throw new Error(`当前轨道没有任何已生成的音频片段。请先合成所需音频。`);
+      }
+
+      const res = await fetch('/api/audio/mix-tracks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clips: generatedClips,
+          trackId: trackId === 'mixed' ? undefined : trackId
+        })
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || '音频分轨导出失败，请重试');
+      }
+
+      const data = await res.json();
+      
+      // Store output URL in corresponding state
+      if (trackId === 'mixed') {
+        setExportedMixedUrl(data.audioUrl);
+      } else if (trackId === 'bgm') {
+        setExportedBgmUrl(data.audioUrl);
+      } else if (trackId === 'sfx') {
+        setExportedSfxUrl(data.audioUrl);
+      } else if (trackId === 'dubbing') {
+        setExportedDubbingUrl(data.audioUrl);
+      }
+
+    } catch (err: any) {
+      setError(err.message || 'FFmpeg 音频合成出错');
+    } finally {
+      if (trackId === 'mixed') setIsExportingMixed(false);
+      else if (trackId === 'bgm') setIsExportingBgm(false);
+      else if (trackId === 'sfx') setIsExportingSfx(false);
+      else if (trackId === 'dubbing') setIsExportingDubbing(false);
+    }
+  };
+
   // Timeline seeking by clicking ruler
   const handleRulerClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!timelineRef.current || !videoRef.current) return;
-    const rect = timelineRef.current.getBoundingClientRect();
-    const clickX = e.clientX - rect.left - 128; // Adjust for track titles width
-    const trackWidth = rect.width - 128;
+    if (!videoRef.current) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const targetTime = (clickX / rect.width) * safeDuration;
     
-    if (clickX >= 0 && clickX <= trackWidth) {
-      const targetTime = (clickX / trackWidth) * videoDuration;
-      videoRef.current.currentTime = targetTime;
+    if (targetTime >= 0 && targetTime <= safeDuration) {
+      setMediaTimeSafely(videoRef.current, targetTime);
       setCurrentTime(targetTime);
     }
   };
@@ -371,7 +1590,7 @@ export default function VideoSoundtrack() {
       prompt: trackId === 'bgm' ? 'acoustic light background music' : trackId === 'sfx' ? 'soft swoop impact' : 'please input narration prompt',
       text: trackId === 'dubbing' ? '这是一段配音台词旁白' : undefined,
       voiceId: trackId === 'dubbing' ? '21m00Tcm4TlvDq8ikWAM' : undefined,
-      startTime: Math.min(currentTime, videoDuration - 5),
+      startTime: Math.min(currentTime, safeDuration - 5),
       duration: trackId === 'bgm' ? 10 : trackId === 'sfx' ? 2 : 4,
       volume: trackId === 'bgm' ? 0.4 : 0.8
     };
@@ -392,17 +1611,228 @@ export default function VideoSoundtrack() {
     }
   };
 
+  if (!isProjectActive) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[500px] h-full bg-slate-900 text-slate-100 p-8 relative overflow-hidden select-none">
+        {/* Decorative ambient gradients */}
+        <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-indigo-500/10 rounded-full filter blur-[100px] pointer-events-none" />
+        <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-purple-500/10 rounded-full filter blur-[100px] pointer-events-none" />
+
+        <div className="max-w-2xl w-full bg-slate-950/60 border border-slate-800/80 rounded-2xl p-8 backdrop-blur-md shadow-2xl relative z-10 text-center space-y-8">
+          <div className="space-y-3">
+            <div className="inline-flex p-3 bg-gradient-to-br from-indigo-500/20 to-purple-500/20 text-indigo-400 rounded-2xl shadow-inner border border-indigo-500/10">
+              <Film className="w-10 h-10" />
+            </div>
+            <h1 className="text-2xl font-black text-white tracking-tight">视频声剪辑与音轨合成工程</h1>
+            <p className="text-sm text-slate-400 max-w-md mx-auto leading-relaxed">
+              融合多模态 AI 画面内容分析，一键智能编排配乐、音效及语音旁白，助您打造电影级原声大片。
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 pt-4">
+            {/* Create New Project */}
+            <button
+              onClick={handleCreateNewProject}
+              className="group flex flex-col items-center justify-center p-6 bg-slate-900/60 hover:bg-indigo-600/10 border border-slate-800 hover:border-indigo-500/40 rounded-xl cursor-pointer transition-all duration-300 hover:shadow-xl hover:shadow-indigo-500/5 hover:-translate-y-0.5"
+            >
+              <div className="p-3 bg-indigo-500/10 group-hover:bg-indigo-500/20 text-indigo-400 rounded-xl mb-4 transition-colors">
+                <Plus className="w-6 h-6" />
+              </div>
+              <span className="text-sm font-bold text-slate-200 group-hover:text-white">新建声剪辑工程</span>
+              <span className="text-[11px] text-slate-500 mt-2 text-center leading-relaxed">从零开始上传您的视频，由 AI 自动解析画面并进行全轨道音轨编排。</span>
+            </button>
+
+            {/* Open Existing Project */}
+            <button
+              onClick={() => {
+                loadSavedProjects();
+                setShowOpenProjectModal(true);
+              }}
+              className="group flex flex-col items-center justify-center p-6 bg-slate-900/60 hover:bg-emerald-600/10 border border-slate-800 hover:border-emerald-500/40 rounded-xl cursor-pointer transition-all duration-300 hover:shadow-xl hover:shadow-emerald-500/5 hover:-translate-y-0.5"
+            >
+              <div className="p-3 bg-emerald-500/10 group-hover:bg-emerald-500/20 text-emerald-400 rounded-xl mb-4 transition-colors">
+                <FolderOpen className="w-6 h-6" />
+              </div>
+              <span className="text-sm font-bold text-slate-200 group-hover:text-emerald-400">打开已有工程</span>
+              <span className="text-[11px] text-slate-500 mt-2 text-center leading-relaxed">加载您之前在浏览器本地保存的工程配置，实时还原时间轴、音效及历史生成。</span>
+            </button>
+          </div>
+
+          {/* Quick Stats / Recent projects */}
+          {savedProjectsList.length > 0 && (
+            <div className="pt-4 border-t border-slate-900 text-left">
+              <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block mb-3">最近编辑的工程</span>
+              <div className="space-y-2 max-h-40 overflow-y-auto custom-scrollbar pr-1">
+                {savedProjectsList.slice(0, 3).map((proj) => (
+                  <div
+                    key={proj.id}
+                    onClick={() => handleOpenProject(proj)}
+                    className="flex items-center justify-between p-2.5 bg-slate-900/40 hover:bg-slate-900 border border-slate-800/60 hover:border-slate-800 rounded-lg cursor-pointer transition-colors"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <FolderOpen className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                      <span className="text-xs font-bold text-slate-300 truncate">{proj.name}</span>
+                    </div>
+                    <div className="flex items-center gap-4 text-[10px] text-slate-500 font-mono">
+                      <span>{proj.clips.length} 个音轨片段</span>
+                      <span>{new Date(proj.createdAt).toLocaleDateString()}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Startup view Open Project modal */}
+        {showOpenProjectModal && (
+          <div className="fixed inset-0 z-[9990] flex items-center justify-center p-4">
+            <div className="absolute inset-0 bg-slate-950/85 backdrop-blur-sm" onClick={() => setShowOpenProjectModal(false)} />
+            <div className="relative w-full max-w-2xl bg-slate-900 border border-slate-800 rounded-xl shadow-2xl p-6 overflow-hidden z-10 flex flex-col max-h-[85vh]">
+              <div className="flex items-center justify-between mb-4 shrink-0">
+                <div className="flex items-center gap-2">
+                  <FolderOpen className="w-5 h-5 text-indigo-400" />
+                  <h3 className="text-sm font-bold text-slate-200">工程库管理</h3>
+                </div>
+                <button onClick={() => setShowOpenProjectModal(false)} className="text-slate-400 hover:text-slate-200 transition-colors cursor-pointer">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="bg-slate-950 border border-slate-800/80 rounded-xl p-4 mb-4 shrink-0 flex items-center justify-between gap-4">
+                <div>
+                  <h4 className="text-xs font-bold text-slate-300">从本地文件导入</h4>
+                  <p className="text-[10px] text-slate-500 mt-0.5">选择备份的工程配置文件（*.vsa.json）载入当前工作区</p>
+                </div>
+                <label className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs px-3.5 py-1.5 rounded-lg shadow-lg shadow-indigo-500/15 cursor-pointer transition-colors shrink-0">
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>导入本地工程</span>
+                  <input type="file" accept=".json" onChange={handleImportProjectFile} className="hidden" />
+                </label>
+              </div>
+              <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2 shrink-0">
+                本地已保存的工程 ({savedProjectsList.length})
+              </div>
+              <div className="flex-1 overflow-y-auto space-y-2.5 pr-1 min-h-[220px]">
+                {savedProjectsList.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-12 text-slate-500 border border-dashed border-slate-800 rounded-xl bg-slate-950/30">
+                    <FolderOpen className="w-8 h-8 opacity-30 mb-2 text-slate-500" />
+                    <p className="text-xs">还没有保存过任何工程</p>
+                  </div>
+                ) : (
+                  savedProjectsList.map((project) => (
+                    <div key={project.id} onClick={() => handleOpenProject(project)} className="group flex items-center justify-between p-3.5 bg-slate-950 hover:bg-slate-950/60 border border-slate-800 hover:border-indigo-500/50 rounded-lg transition-all duration-200 cursor-pointer text-left">
+                      <div className="min-w-0 flex-1 pr-4">
+                        <div className="flex items-baseline gap-2">
+                          <span className="text-xs font-bold text-slate-200 truncate group-hover:text-indigo-400 transition-colors">{project.name}</span>
+                          <span className="text-[9px] text-slate-500 shrink-0 font-mono">{new Date(project.createdAt).toLocaleString()}</span>
+                        </div>
+                        <div className="flex items-center gap-4 mt-1.5 text-[10px] text-slate-400">
+                          <span className="flex items-center gap-1">
+                            <Film className="w-3 h-3 text-slate-500" />
+                            <span className="truncate max-w-[150px]">{project.videoFile?.name || '未加载视频'}</span>
+                          </span>
+                          <span className="font-mono">{project.clips.length} 个音轨片段</span>
+                          <span className="font-mono">{(project.videoDuration || 0).toFixed(1)}s 时长</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                        <button onClick={(e) => handleExportProjectToFile(project, e)} title="备份并导出为文件" className="p-1.5 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded transition-colors cursor-pointer">
+                          <FileDown className="w-3.5 h-3.5" />
+                        </button>
+                        <button onClick={(e) => handleDeleteProject(project.id, e)} title="删除此工程" className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors cursor-pointer">
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div id="video-soundtrack-container" className="flex flex-col h-full bg-slate-900 text-slate-100 overflow-hidden">
       {/* 顶部工具栏 */}
-      <header id="daw-header" className="px-6 py-4 border-b border-slate-800 bg-slate-950 flex items-center justify-between shadow-md shrink-0">
-        <div className="flex items-center gap-3">
-          <div className="p-2 bg-indigo-500/10 text-indigo-400 rounded-lg">
-            <Film className="w-5 h-5" />
+      <header id="daw-header" className="px-6 py-4 border-b border-slate-800 bg-slate-950 flex items-center justify-between shadow-md shrink-0 select-none">
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-indigo-500/10 text-indigo-400 rounded-lg">
+              <Film className="w-5 h-5" />
+            </div>
+            <div>
+              <h1 className="text-sm font-bold text-slate-200">视频生成音频</h1>
+              <p className="text-[10px] text-slate-400 flex items-center gap-1">
+                <span>当前工程：</span>
+                <span className="text-indigo-400 font-bold px-1.5 py-0.5 bg-indigo-950/50 border border-indigo-900/30 rounded">
+                  {currentProjectId 
+                    ? (savedProjectsList.find(p => p.id === currentProjectId)?.name || '已保存工程')
+                    : '未保存的工程 (新)'
+                  }
+                </span>
+              </p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-sm font-bold text-slate-200">视频一键自动配音配乐</h1>
-            <p className="text-[10px] text-slate-400">基于多模态 AI 智能画面解析与 ElevenLabs DAW 音频合成</p>
+
+          {/* 工程管理控制 */}
+          <div className="flex items-center gap-2 pl-4 border-l border-slate-800">
+            <button
+              onClick={handleCreateNewProject}
+              className="flex items-center gap-1 bg-slate-900 hover:bg-slate-800 text-slate-300 font-bold text-[11px] px-2.5 py-1.5 rounded-lg border border-slate-800 transition-all cursor-pointer"
+              title="新建工程"
+            >
+              <Plus className="w-3.5 h-3.5 text-indigo-400" />
+              <span>新建工程</span>
+            </button>
+
+            <button
+              onClick={() => {
+                loadSavedProjects();
+                setShowOpenProjectModal(true);
+              }}
+              className="flex items-center gap-1 bg-slate-900 hover:bg-slate-800 text-slate-300 font-bold text-[11px] px-2.5 py-1.5 rounded-lg border border-slate-800 transition-all cursor-pointer"
+              title="打开已保存的工程"
+            >
+              <FolderOpen className="w-3.5 h-3.5 text-indigo-400" />
+              <span>打开工程</span>
+            </button>
+
+            <button
+              onClick={handleSaveProject}
+              className="flex items-center gap-1 bg-slate-900 hover:bg-slate-800 text-slate-300 font-bold text-[11px] px-2.5 py-1.5 rounded-lg border border-slate-800 transition-all cursor-pointer"
+              title="实时保存当前工程"
+            >
+              <Save className="w-3.5 h-3.5 text-emerald-400" />
+              <span>实时保存</span>
+            </button>
+
+            <button
+              onClick={() => {
+                setProjectNameInput(
+                  currentProjectId 
+                    ? `${savedProjectsList.find(p => p.id === currentProjectId)?.name || '工程'}_副本`
+                    : `未命名工程_${new Date().toLocaleDateString()}`
+                );
+                setShowSaveProjectModal(true);
+              }}
+              className="flex items-center gap-1 bg-slate-900 hover:bg-slate-800 text-slate-300 font-bold text-[11px] px-2.5 py-1.5 rounded-lg border border-slate-800 transition-all cursor-pointer"
+              title="工程另存为新工程"
+            >
+              <FileDown className="w-3.5 h-3.5 text-blue-400" />
+              <span>另存为</span>
+            </button>
+
+            <button
+              onClick={() => setIsProjectActive(false)}
+              className="flex items-center gap-1 bg-slate-900 hover:bg-red-950/40 hover:text-red-400 text-slate-400 font-bold text-[11px] px-2.5 py-1.5 rounded-lg border border-slate-800 transition-all cursor-pointer"
+              title="关闭当前工程并返回首页"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>返回首页</span>
+            </button>
           </div>
         </div>
 
@@ -470,24 +1900,206 @@ export default function VideoSoundtrack() {
                 <span>一键合成全部音轨</span>
               </button>
 
-              <button
-                id="btn-export-mix"
-                onClick={handleExportVideo}
-                disabled={isMixing || clips.length === 0}
-                className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-3.5 py-1.5 rounded-lg shadow-lg shadow-emerald-500/10 disabled:opacity-50 transition-all cursor-pointer"
-              >
-                {isMixing ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    <span>音画重组中...</span>
-                  </>
-                ) : (
-                  <>
-                    <Download className="w-3.5 h-3.5" />
-                    <span>混音并导出视频</span>
-                  </>
+              <div className="relative">
+                {isExportDropdownOpen && (
+                  <div className="fixed inset-0 z-40" onClick={() => setIsExportDropdownOpen(false)} />
                 )}
-              </button>
+                <button
+                  id="btn-export-dropdown"
+                  onClick={() => setIsExportDropdownOpen(!isExportDropdownOpen)}
+                  disabled={clips.length === 0}
+                  className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-3.5 py-1.5 rounded-lg shadow-lg shadow-emerald-500/10 disabled:opacity-50 transition-all cursor-pointer z-50 relative"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>导出</span>
+                  <ChevronDown className="w-3 h-3 ml-0.5" />
+                </button>
+
+                {isExportDropdownOpen && (
+                  <div className="absolute right-0 mt-2 w-80 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-3.5 space-y-3.5 animate-fade-in text-left">
+                    <div className="border-b border-slate-800 pb-2">
+                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">选择导出格式与音轨</span>
+                    </div>
+
+                    <div className="space-y-2.5">
+                      {/* 1. Mix & Export Video */}
+                      <div className="p-2.5 bg-slate-950 hover:bg-slate-950/80 rounded-lg border border-slate-800/60 transition-all">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <FileVideo className="w-3.5 h-3.5 text-emerald-400" />
+                            <div>
+                              <p className="text-[11px] font-bold text-slate-200">导出已混音视频</p>
+                              <p className="text-[9px] text-slate-500">将合成音轨混入视频画面</p>
+                            </div>
+                          </div>
+                          {isMixing ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+                          ) : (
+                            <button
+                              onClick={() => {
+                                handleExportVideo();
+                                setIsExportDropdownOpen(false);
+                              }}
+                              disabled={clips.length === 0}
+                              className="text-[10px] font-bold bg-emerald-600/20 hover:bg-emerald-600 text-emerald-400 hover:text-white px-2 py-1 rounded transition-colors cursor-pointer"
+                            >
+                              开始合成
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* 2. Master Mixed Audio */}
+                      <div className="p-2.5 bg-slate-950 hover:bg-slate-950/80 rounded-lg border border-slate-800/60 transition-all">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <Sliders className="w-3.5 h-3.5 text-indigo-400" />
+                            <div>
+                              <p className="text-[11px] font-bold text-slate-200">Master 完整混合音轨</p>
+                              <p className="text-[9px] text-slate-500">配乐/音效/配音 全部合并 (.mp3)</p>
+                            </div>
+                          </div>
+                          {isExportingMixed ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400" />
+                          ) : exportedMixedUrl ? (
+                            <a
+                              href={`/api/sfx/download-file?path=${encodeURIComponent(exportedMixedUrl)}&name=${encodeURIComponent('master_mixed_soundtrack.mp3')}`}
+                              className="text-[10px] font-bold bg-indigo-600 text-white px-2 py-1 rounded transition-colors flex items-center gap-1 cursor-pointer"
+                            >
+                              <Download className="w-2.5 h-2.5" />
+                              下载
+                            </a>
+                          ) : (
+                            <button
+                              onClick={() => handleExportAudio('mixed')}
+                              disabled={clips.filter(c => c.audioUrl).length === 0}
+                              className="text-[10px] font-bold bg-indigo-600/20 hover:bg-indigo-600 text-indigo-400 hover:text-white px-2 py-1 rounded transition-colors disabled:opacity-50 cursor-pointer"
+                            >
+                              导出
+                            </button>
+                          )}
+                        </div>
+                        {exportedMixedUrl && (
+                          <div className="mt-2 pt-1.5 border-t border-slate-800/40">
+                            <audio src={exportedMixedUrl} controls className="w-full h-6 rounded bg-slate-900" />
+                          </div>
+                        )}
+                      </div>
+
+                      {/* 3. BGM Stem */}
+                      <div className="p-2.5 bg-slate-950 hover:bg-slate-950/80 rounded-lg border border-slate-800/60 transition-all">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <Music className="w-3.5 h-3.5 text-emerald-400" />
+                            <div>
+                              <p className="text-[11px] font-bold text-slate-200">BGM 背景配乐分轨</p>
+                              <p className="text-[9px] text-slate-500">仅包含配乐音轨 (.mp3)</p>
+                            </div>
+                          </div>
+                          {isExportingBgm ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+                          ) : exportedBgmUrl ? (
+                            <a
+                              href={`/api/sfx/download-file?path=${encodeURIComponent(exportedBgmUrl)}&name=${encodeURIComponent('bgm_track_stem.mp3')}`}
+                              className="text-[10px] font-bold bg-emerald-600 text-white px-2 py-1 rounded transition-colors flex items-center gap-1 cursor-pointer"
+                            >
+                              <Download className="w-2.5 h-2.5" />
+                              下载
+                            </a>
+                          ) : (
+                            <button
+                              onClick={() => handleExportAudio('bgm')}
+                              disabled={clips.filter(c => c.audioUrl && c.trackId === 'bgm').length === 0}
+                              className="text-[10px] font-bold bg-emerald-600/20 hover:bg-emerald-600 text-emerald-400 hover:text-white px-2 py-1 rounded transition-colors disabled:opacity-50 cursor-pointer"
+                            >
+                              导出
+                            </button>
+                          )}
+                        </div>
+                        {exportedBgmUrl && (
+                          <div className="mt-2 pt-1.5 border-t border-slate-800/40">
+                            <audio src={exportedBgmUrl} controls className="w-full h-6 rounded bg-slate-900" />
+                          </div>
+                        )}
+                      </div>
+
+                      {/* 4. SFX Stem */}
+                      <div className="p-2.5 bg-slate-950 hover:bg-slate-950/80 rounded-lg border border-slate-800/60 transition-all">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <Waves className="w-3.5 h-3.5 text-blue-400" />
+                            <div>
+                              <p className="text-[11px] font-bold text-slate-200">SFX 独立音效分轨</p>
+                              <p className="text-[9px] text-slate-500">仅包含短音效音轨 (.mp3)</p>
+                            </div>
+                          </div>
+                          {isExportingSfx ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-400" />
+                          ) : exportedSfxUrl ? (
+                            <a
+                              href={`/api/sfx/download-file?path=${encodeURIComponent(exportedSfxUrl)}&name=${encodeURIComponent('sfx_track_stem.mp3')}`}
+                              className="text-[10px] font-bold bg-blue-600 text-white px-2 py-1 rounded transition-colors flex items-center gap-1 cursor-pointer"
+                            >
+                              <Download className="w-2.5 h-2.5" />
+                              下载
+                            </a>
+                          ) : (
+                            <button
+                              onClick={() => handleExportAudio('sfx')}
+                              disabled={clips.filter(c => c.audioUrl && c.trackId === 'sfx').length === 0}
+                              className="text-[10px] font-bold bg-blue-600/20 hover:bg-blue-600 text-blue-400 hover:text-white px-2 py-1 rounded transition-colors disabled:opacity-50 cursor-pointer"
+                            >
+                              导出
+                            </button>
+                          )}
+                        </div>
+                        {exportedSfxUrl && (
+                          <div className="mt-2 pt-1.5 border-t border-slate-800/40">
+                            <audio src={exportedSfxUrl} controls className="w-full h-6 rounded bg-slate-900" />
+                          </div>
+                        )}
+                      </div>
+
+                      {/* 5. Dubbing Stem */}
+                      <div className="p-2.5 bg-slate-950 hover:bg-slate-950/80 rounded-lg border border-slate-800/60 transition-all">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <Mic className="w-3.5 h-3.5 text-purple-400" />
+                            <div>
+                              <p className="text-[11px] font-bold text-slate-200">Dubbing 旁白配音分轨</p>
+                              <p className="text-[9px] text-slate-500">仅包含旁白台词音轨 (.mp3)</p>
+                            </div>
+                          </div>
+                          {isExportingDubbing ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-purple-400" />
+                          ) : exportedDubbingUrl ? (
+                            <a
+                              href={`/api/sfx/download-file?path=${encodeURIComponent(exportedDubbingUrl)}&name=${encodeURIComponent('dubbing_track_stem.mp3')}`}
+                              className="text-[10px] font-bold bg-purple-600 text-white px-2 py-1 rounded transition-colors flex items-center gap-1 cursor-pointer"
+                            >
+                              <Download className="w-2.5 h-2.5" />
+                              下载
+                            </a>
+                          ) : (
+                            <button
+                              onClick={() => handleExportAudio('dubbing')}
+                              disabled={clips.filter(c => c.audioUrl && c.trackId === 'dubbing').length === 0}
+                              className="text-[10px] font-bold bg-purple-600/20 hover:bg-purple-600 text-purple-400 hover:text-white px-2 py-1 rounded transition-colors disabled:opacity-50 cursor-pointer"
+                            >
+                              导出
+                            </button>
+                          )}
+                        </div>
+                        {exportedDubbingUrl && (
+                          <div className="mt-2 pt-1.5 border-t border-slate-800/40">
+                            <audio src={exportedDubbingUrl} controls className="w-full h-6 rounded bg-slate-900" />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -511,17 +2123,26 @@ export default function VideoSoundtrack() {
                 上传您的视频（支持 MP4 格式），多模态 AI 将自动解析视频并推荐完美的音效、BGM 与配音时间轴。
               </p>
 
-              <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-slate-800 hover:border-indigo-500/50 bg-slate-900/50 hover:bg-indigo-500/5 rounded-xl cursor-pointer group transition-all">
-                <div className="flex flex-col items-center justify-center pt-5 pb-6 px-4">
+              <label 
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+                className={`flex flex-col items-center justify-center w-full h-32 border-2 border-dashed rounded-xl cursor-pointer group transition-all ${
+                  isDraggingOver 
+                    ? 'border-indigo-500 bg-indigo-500/10 scale-[1.02]' 
+                    : 'border-slate-800 hover:border-indigo-500/50 bg-slate-900/50 hover:bg-indigo-500/5'
+                }`}
+              >
+                <div className="flex flex-col items-center justify-center pt-5 pb-6 px-4 pointer-events-none">
                   {isUploading ? (
                     <Loader2 className="w-8 h-8 text-indigo-400 animate-spin mb-3" />
                   ) : (
-                    <Upload className="w-8 h-8 text-slate-500 group-hover:text-indigo-400 mb-3 transition-colors" />
+                    <Upload className={`w-8 h-8 mb-3 transition-colors ${isDraggingOver ? 'text-indigo-400' : 'text-slate-500 group-hover:text-indigo-400'}`} />
                   )}
-                  <p className="text-xs font-semibold text-slate-400 group-hover:text-slate-200">
-                    {isUploading ? '正在上传您的视频并提取时长...' : '点击或拖拽视频到此处上传'}
+                  <p className={`text-xs font-semibold transition-colors ${isDraggingOver ? 'text-indigo-300' : 'text-slate-400 group-hover:text-slate-200'}`}>
+                    {isUploading ? '正在上传您的视频并提取时长...' : isDraggingOver ? '松开鼠标立即上传视频' : '点击或拖拽视频到此处上传'}
                   </p>
-                  <p className="text-[10px] text-slate-500 mt-1">推荐 MP4 格式，建议文件小于 30MB</p>
+                  <p className="text-[10px] text-slate-500 mt-1">推荐 MP4 格式，建议文件小于 50MB</p>
                 </div>
                 <input 
                   type="file" 
@@ -545,15 +2166,63 @@ export default function VideoSoundtrack() {
           <div className="flex-1 flex flex-col md:flex-row overflow-hidden min-h-0">
             {/* 左侧：播放器与波形面板 */}
             <div className="flex-1 flex flex-col bg-slate-950 border-r border-slate-800 overflow-y-auto custom-scrollbar p-6">
+              
+              {/* 后台同步上传进度条 */}
+              {isUploadingToServer && (
+                <div className="mb-4 bg-slate-900 border border-indigo-500/20 rounded-xl p-3 flex items-center justify-between shadow-lg">
+                  <div className="flex items-center gap-2.5">
+                    <Loader2 className="w-4 h-4 text-indigo-400 animate-spin shrink-0" />
+                    <div className="flex flex-col">
+                      <span className="text-xs font-bold text-slate-200">正在后台传输视频到服务器...</span>
+                      <span className="text-[10px] text-slate-400">大视频需要时间上传。传输完成后即可开启 AI 自动解析及混音。</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-bold font-mono text-indigo-400 shrink-0">{uploadProgress}%</span>
+                    <div className="w-24 bg-slate-800 rounded-full h-1.5 overflow-hidden hidden sm:block">
+                      <div 
+                        className="bg-gradient-to-r from-indigo-500 to-violet-500 h-full transition-all duration-300"
+                        style={{ width: `${uploadProgress}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {videoFile?.isUploaded && (
+                <div className="mb-4 bg-emerald-950/20 border border-emerald-500/20 rounded-xl p-3 flex items-center gap-2.5 shadow-sm animate-fade-in">
+                  <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse shrink-0" />
+                  <span className="text-xs text-emerald-400 font-medium">视频文件已成功同步至服务器！所有 AI 功能与 FFmpeg 混音已就绪。</span>
+                </div>
+              )}
+
               <div className="flex-1 flex flex-col items-center justify-center min-h-[280px] bg-slate-900 border border-slate-800 rounded-xl overflow-hidden relative shadow-inner">
-                <video
-                  ref={videoRef}
-                  src={videoFile.url}
-                  className="max-h-full max-w-full object-contain"
-                  onTimeUpdate={handleTimeUpdate}
-                  onLoadedMetadata={handleVideoLoaded}
-                  onClick={togglePlay}
-                />
+                {videoLoadFailed ? (
+                  <div className="absolute inset-0 bg-slate-950/95 flex flex-col items-center justify-center p-6 text-center z-20">
+                    <AlertCircle className="w-12 h-12 text-amber-500 mb-3" />
+                    <h3 className="text-sm font-bold text-slate-200 mb-1">视频无法加载播放</h3>
+                    <p className="text-xs text-slate-400 max-w-sm mb-4">
+                      这可能是因为本地临时缓存已失效、浏览器被清理、或服务器已重启。
+                    </p>
+                    <label className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs px-4 py-2 rounded-xl shadow-lg shadow-indigo-600/20 cursor-pointer transition-colors">
+                      <Upload className="w-4 h-4" />
+                      <span>重新关联并再次上传本地视频</span>
+                      <input type="file" accept="video/mp4,video/*" onChange={handleVideoRelink} className="hidden" />
+                    </label>
+                    <p className="text-[10px] text-slate-500 mt-2">重新关联相同的视频文件即可恢复画面播放，您的已有音轨片段将不受影响。</p>
+                  </div>
+                ) : (
+                  <video
+                    ref={videoRef}
+                    src={videoFile.url}
+                    className="max-h-full max-w-full object-contain"
+                    onTimeUpdate={handleTimeUpdate}
+                    onLoadedMetadata={handleVideoLoaded}
+                    onDurationChange={handleVideoLoaded}
+                    onError={handleVideoError}
+                    onClick={togglePlay}
+                  />
+                )}
 
                 {/* 视频浮动控制条 */}
                 <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-4 bg-slate-950/90 border border-slate-800/80 px-4 py-2 rounded-full shadow-2xl">
@@ -565,7 +2234,7 @@ export default function VideoSoundtrack() {
                   </button>
 
                   <div className="text-xs font-mono text-slate-300 select-none">
-                    {currentTime.toFixed(2)}s / {videoDuration.toFixed(2)}s
+                    {currentTime.toFixed(2)}s / {safeDuration.toFixed(2)}s
                   </div>
                 </div>
               </div>
@@ -583,8 +2252,7 @@ export default function VideoSoundtrack() {
                       <span className="text-xs font-bold text-emerald-400">已混音视频生成完毕！</span>
                     </div>
                     <a 
-                      href={mixedVideoUrl} 
-                      download={`mixed_${videoFile.name}`}
+                      href={`/api/sfx/download-file?path=${encodeURIComponent(mixedVideoUrl)}&name=${encodeURIComponent(`mixed_${videoFile.name}`)}`}
                       className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold px-2.5 py-1 rounded-md transition-colors"
                     >
                       <Download className="w-3 h-3" />
@@ -598,6 +2266,8 @@ export default function VideoSoundtrack() {
                   />
                 </motion.div>
               )}
+
+
 
               {error && (
                 <div className="mt-4 p-3 bg-red-500/10 border border-red-500/20 rounded-lg flex items-start gap-2.5 text-xs text-red-400">
@@ -660,18 +2330,220 @@ export default function VideoSoundtrack() {
                             className="w-full h-16 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 resize-none custom-scrollbar"
                           />
                         </div>
-                        <div>
-                          <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">选择配音音色</label>
-                          <select
-                            value={selectedClip.voiceId || '21m00Tcm4TlvDq8ikWAM'}
-                            onChange={(e) => updateClipField(selectedClip.id, 'voiceId', e.target.value)}
-                            className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
-                          >
-                            <option value="21m00Tcm4TlvDq8ikWAM">Rachel (柔美女声)</option>
-                            <option value="pNInz6obpg7IdgWAs6g8">Adam (磁性男声)</option>
-                            <option value="iP95p4xoKVk53GoZ742B">Domi (活泼女声)</option>
-                            <option value="VR6AHRvj9K9Ge6v96XmY">Glinda (童音女声)</option>
-                          </select>
+                        <div className="relative">
+                          <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">选择配音音色 (ElevenLabs 官方音色库)</label>
+                          
+                          {/* Selected Voice Display & Trigger Button */}
+                          {(() => {
+                            const selectedVoiceId = selectedClip.voiceId || '21m00Tcm4TlvDq8ikWAM';
+                            const selectedVoiceObj = displayVoices.find(v => v.id === selectedVoiceId);
+                            return (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => setShowVoiceDropdown(!showVoiceDropdown)}
+                                  className="w-full bg-slate-950 hover:bg-slate-900 border border-slate-800 rounded-lg py-2 px-3 text-xs text-left text-slate-200 focus:outline-none focus:border-indigo-500 transition-all flex items-center justify-between cursor-pointer"
+                                >
+                                  {selectedVoiceObj ? (
+                                    <div className="flex items-center gap-2">
+                                      <span className={`w-1.5 h-1.5 rounded-full ${selectedVoiceObj.gender === 'male' ? 'bg-blue-500' : 'bg-pink-500'}`} />
+                                      <div className="flex items-center gap-1.5">
+                                        <span className="font-bold text-slate-200">{selectedVoiceObj.name}</span>
+                                        <span className="text-[9px] text-slate-400 bg-slate-900 border border-slate-800 px-1.5 py-0.2 rounded font-bold">
+                                          {selectedVoiceObj.category}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <span className="text-slate-500">请选择精品配音角色...</span>
+                                  )}
+                                  <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform duration-200 ${showVoiceDropdown ? 'rotate-180' : ''}`} />
+                                </button>
+
+                                {/* Interactive Voice Dropdown Popover */}
+                                {showVoiceDropdown && (
+                                  <div className="absolute top-full left-0 right-0 mt-1.5 bg-slate-900 border border-slate-800 rounded-xl shadow-xl z-50 p-3 space-y-2.5">
+                                    {/* Keyword Search Input */}
+                                    <div className="relative">
+                                      <Search className="absolute left-2.5 top-2 w-3.5 h-3.5 text-slate-500" />
+                                      <input
+                                        type="text"
+                                        value={voiceSearchQuery}
+                                        onChange={(e) => setVoiceSearchQuery(e.target.value)}
+                                        placeholder="搜索音色名称、分类、标签..."
+                                        className="w-full bg-slate-950 border border-slate-800 rounded-lg py-1.5 pl-8 pr-7 text-[11px] text-slate-200 focus:ring-1 focus:ring-indigo-500 focus:outline-none transition-all placeholder-slate-500"
+                                      />
+                                      {voiceSearchQuery && (
+                                        <button
+                                          type="button"
+                                          onClick={() => setVoiceSearchQuery('')}
+                                          className="absolute right-2.5 top-2 text-slate-500 hover:text-slate-300"
+                                        >
+                                          <X className="w-3 h-3" />
+                                        </button>
+                                      )}
+                                    </div>
+
+                                    {/* Gender filters */}
+                                    <div className="flex items-center gap-1 border-b border-slate-800 pb-1.5">
+                                      <span className="text-[9px] font-bold text-slate-500 uppercase mr-1">声弹性别:</span>
+                                      {['all', 'male', 'female'].map(g => (
+                                        <button
+                                          key={g}
+                                          type="button"
+                                          onClick={() => setVoiceGenderFilter(g as any)}
+                                          className={`text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
+                                            voiceGenderFilter === g
+                                              ? g === 'male' ? 'bg-blue-600 text-white' : g === 'female' ? 'bg-pink-600 text-white' : 'bg-indigo-600 text-white'
+                                              : 'bg-slate-950 hover:bg-slate-800 text-slate-400'
+                                          }`}
+                                        >
+                                          {g === 'all' ? '全部' : g === 'male' ? '男声' : '女声'}
+                                        </button>
+                                      ))}
+                                    </div>
+
+                                    {/* Category Filter Tabs */}
+                                    <div className="flex items-center gap-1 overflow-x-auto no-scrollbar pb-1">
+                                      {['全部', '经典人声', '游戏动漫', '叙事小说', '媒体广告', '高雅格调', '我的克隆'].map(cat => {
+                                        if (cat === '我的克隆' && !displayVoices.some(v => v.category === '我的克隆')) {
+                                          return null;
+                                        }
+                                        return (
+                                          <button
+                                            key={cat}
+                                            type="button"
+                                            onClick={() => setVoiceActiveCategory(cat)}
+                                            className={`text-[9px] font-bold px-2 py-0.5 rounded-full border whitespace-nowrap transition-all shrink-0 ${
+                                              voiceActiveCategory === cat
+                                                ? 'bg-indigo-950/40 border-indigo-500/40 text-indigo-300 font-bold'
+                                                : 'bg-slate-950 border-slate-800 hover:border-slate-700 text-slate-400'
+                                            }`}
+                                          >
+                                            {cat}
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+
+                                    {/* Scrollable List container */}
+                                    <div className="max-h-48 overflow-y-auto divide-y divide-slate-800/60 custom-scrollbar pr-0.5">
+                                      {isLoadingVoices ? (
+                                        <div className="py-8 flex flex-col items-center justify-center gap-1.5 text-slate-500 text-[11px]">
+                                          <Loader2 className="w-4 h-4 animate-spin text-indigo-500" />
+                                          <span>正在同步 ElevenLabs 声线库...</span>
+                                        </div>
+                                      ) : (() => {
+                                        const filteredVoices = displayVoices.filter(voice => {
+                                          if (voiceActiveCategory !== '全部' && voice.category !== voiceActiveCategory) return false;
+                                          if (voiceGenderFilter !== 'all' && voice.gender !== voiceGenderFilter) return false;
+                                          if (voiceSearchQuery.trim()) {
+                                            const q = voiceSearchQuery.toLowerCase();
+                                            return voice.name.toLowerCase().includes(q) ||
+                                                   voice.englishName.toLowerCase().includes(q) ||
+                                                   voice.category.toLowerCase().includes(q) ||
+                                                   voice.description.toLowerCase().includes(q) ||
+                                                   voice.tags.some(t => t.toLowerCase().includes(q));
+                                          }
+                                          return true;
+                                        });
+
+                                        if (filteredVoices.length === 0) {
+                                          return (
+                                            <div className="py-6 text-center text-slate-500 text-[11px]">
+                                              未找到匹配的优质声线
+                                            </div>
+                                          );
+                                        }
+
+                                        return filteredVoices.map(voice => {
+                                          const isSelected = selectedVoiceId === voice.id;
+                                          const isVoicePlaying = playingVoiceId === voice.id;
+                                          return (
+                                            <div
+                                              key={voice.id}
+                                              onClick={() => {
+                                                updateClipField(selectedClip.id, 'voiceId', voice.id);
+                                                setShowVoiceDropdown(false);
+                                              }}
+                                              className={`py-1.5 px-2 rounded-lg flex items-start justify-between gap-2.5 cursor-pointer transition-colors ${
+                                                isSelected ? 'bg-indigo-500/10' : 'hover:bg-slate-800/40'
+                                              }`}
+                                            >
+                                              <div className="min-w-0 flex-1 space-y-0.5">
+                                                <div className="flex items-center flex-wrap gap-1">
+                                                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${voice.gender === 'male' ? 'bg-blue-500' : 'bg-pink-500'}`} />
+                                                  <span className="text-xs font-bold text-slate-200">{voice.name}</span>
+                                                  <span className="text-[9px] text-slate-400 bg-slate-950 px-1 py-0.2 rounded border border-slate-800 font-mono">
+                                                    {voice.category}
+                                                  </span>
+                                                </div>
+                                                <p className="text-[10px] text-slate-400 truncate leading-normal">{voice.description}</p>
+                                                <div className="flex flex-wrap gap-1">
+                                                  {voice.tags.slice(0, 3).map((tag, tIdx) => (
+                                                    <span key={tIdx} className="text-[9px] text-indigo-400 bg-indigo-500/10 px-1 rounded-sm">
+                                                      #{tag}
+                                                    </span>
+                                                  ))}
+                                                </div>
+                                              </div>
+
+                                              <div className="flex items-center gap-1 shrink-0 pt-0.5">
+                                                {/* Play Preview */}
+                                                <button
+                                                  type="button"
+                                                  onClick={(e) => handlePlayVoicePreview(voice.id, voice.previewUrl, e)}
+                                                  className={`w-6 h-6 rounded-full flex items-center justify-center border transition-all ${
+                                                    isVoicePlaying
+                                                      ? 'bg-indigo-600 text-white border-indigo-500 shadow-sm animate-pulse'
+                                                      : 'bg-slate-950 text-slate-400 hover:text-slate-200 border-slate-800 hover:bg-slate-800'
+                                                  }`}
+                                                  title={isVoicePlaying ? '暂停试听' : '点击试听音质'}
+                                                >
+                                                  {isVoicePlaying ? (
+                                                    <Pause className="w-3 h-3 fill-current" />
+                                                  ) : (
+                                                    <Play className="w-3 h-3 fill-current ml-0.5" />
+                                                  )}
+                                                </button>
+
+                                                {/* Selection mark */}
+                                                <div className={`w-4 h-4 rounded-full flex items-center justify-center border ${
+                                                  isSelected ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-800 bg-slate-950'
+                                                }`}>
+                                                  {isSelected && <Check className="w-2.5 h-2.5 stroke-[3]" />}
+                                                </div>
+                                              </div>
+                                            </div>
+                                          );
+                                        });
+                                      })()}
+                                    </div>
+                                  </div>
+                                )}
+
+                                {/* Selected Voice Detailed Card */}
+                                {selectedVoiceObj && (
+                                  <div className="mt-1.5 p-2 bg-gradient-to-br from-indigo-950/25 to-slate-950/40 border border-indigo-500/20 rounded-lg text-[10px] text-slate-400 space-y-1">
+                                    <div className="flex items-center justify-between">
+                                      <span className="font-semibold text-indigo-300">已选声线：{selectedVoiceObj.name}</span>
+                                      <span className="text-[9px] text-slate-400 font-mono bg-slate-950 px-1 py-0.2 rounded border border-slate-800">{selectedVoiceObj.category}</span>
+                                    </div>
+                                    <p className="text-[10px] text-slate-400 leading-relaxed">
+                                      {selectedVoiceObj.description}
+                                    </p>
+                                    <div className="flex flex-wrap gap-1 pt-0.5">
+                                      {selectedVoiceObj.tags.map((tag, idx) => (
+                                        <span key={idx} className="text-[9px] text-indigo-400 bg-indigo-500/10 px-1 rounded-sm">
+                                          #{tag}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </>
+                            );
+                          })()}
                         </div>
                       </>
                     )}
@@ -703,7 +2575,7 @@ export default function VideoSoundtrack() {
                         <input
                           type="number"
                           min="0"
-                          max={videoDuration}
+                          max={safeDuration}
                           step="0.1"
                           value={parseFloat(selectedClip.startTime.toFixed(2))}
                           onChange={(e) => updateClipField(selectedClip.id, 'startTime', Math.max(0, parseFloat(e.target.value) || 0))}
@@ -783,230 +2655,568 @@ export default function VideoSoundtrack() {
       {/* 下部：多轨道时间轴 (DAW Timeline) */}
       {videoFile && (
         <div id="daw-timeline-section" className="bg-slate-950 border-t border-slate-800 p-4 flex flex-col shrink-0 select-none">
-          {/* 时间轴标尺与播放控制 */}
-          <div className="flex items-center mb-3 text-slate-400 text-xs px-2 select-none">
-            <span className="w-32 font-bold text-[10px] text-slate-500 uppercase tracking-wider text-right pr-4">时间轨道</span>
+          {/* Timeline Header with Zoom Controls */}
+          <div className="flex items-center justify-between mb-3 px-2">
+            <div className="flex items-center gap-2">
+              <Sliders className="w-4 h-4 text-indigo-400" />
+              <span className="text-xs font-bold text-slate-300">多轨时间轴剪辑区</span>
+              <span className="text-[10px] text-slate-500 font-medium">（支持拖拽移动位置、左右边缘拉伸长度）</span>
+            </div>
             
-            <div 
-              ref={timelineRef}
-              onClick={handleRulerClick}
-              className="flex-1 h-6 bg-slate-900 rounded border border-slate-800 relative cursor-col-resize overflow-hidden"
-            >
-              {/* 刻度渲染 */}
-              {Array.from({ length: Math.ceil(videoDuration) }).map((_, i) => {
-                const percent = (i / videoDuration) * 100;
-                if (i % 2 === 0) {
-                  return (
-                    <div 
-                      key={i} 
-                      className="absolute top-0 bottom-0 border-l border-slate-800 text-[9px] font-mono pl-1 text-slate-600 flex items-end pb-0.5"
-                      style={{ left: `${percent}%` }}
-                    >
-                      {i}s
-                    </div>
-                  );
-                }
-                return (
-                  <div 
-                    key={i} 
-                    className="absolute top-2 bottom-0 border-l border-slate-800/50"
-                    style={{ left: `${percent}%` }}
-                  />
-                );
-              })}
-
-              {/* 移动播放红线 */}
-              <div 
-                className="absolute top-0 bottom-0 w-[2px] bg-red-500 z-10 pointer-events-none"
-                style={{ left: `${(currentTime / videoDuration) * 100}%` }}
+            {/* Zoom Controls */}
+            <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 px-2 py-1 rounded-lg">
+              <span className="text-[10px] text-slate-400 font-bold">时间轴缩放:</span>
+              <button 
+                type="button"
+                onClick={() => setPixelsPerSecond(prev => Math.max(10, prev - 5))}
+                className="text-slate-400 hover:text-white p-0.5 rounded hover:bg-slate-800 transition-colors cursor-pointer text-[10px]"
+                title="缩小"
               >
-                <div className="w-2.5 h-2.5 bg-red-500 rounded-full absolute -top-1 -left-1 shadow-lg shadow-red-500/50" />
-              </div>
+                缩小 -
+              </button>
+              <input 
+                type="range"
+                min="10"
+                max="100"
+                value={pixelsPerSecond}
+                onChange={(e) => setPixelsPerSecond(parseInt(e.target.value))}
+                className="w-20 accent-indigo-500 h-1 bg-slate-800 rounded-lg cursor-pointer"
+              />
+              <button 
+                type="button"
+                onClick={() => setPixelsPerSecond(prev => Math.min(100, prev + 5))}
+                className="text-slate-400 hover:text-white p-0.5 rounded hover:bg-slate-800 transition-colors cursor-pointer text-[10px]"
+                title="放大"
+              >
+                放大 +
+              </button>
             </div>
           </div>
 
-          {/* 轨道层 */}
-          <div className="space-y-2.5 max-h-56 overflow-y-auto custom-scrollbar pr-1">
-            {/* 1. 视频预览轨道 */}
-            <div className="flex items-center">
-              <div className="w-32 flex items-center justify-between pr-4 select-none">
-                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5 ml-auto">
-                  <Film className="w-3.5 h-3.5 text-indigo-400" />
-                  视频预览轨
-                </span>
+          {/* Main DAW Editor Layout */}
+          <div className="flex border border-slate-800 rounded-xl overflow-hidden bg-slate-950">
+            
+            {/* Left Column: Track Headers */}
+            <div className="w-32 shrink-0 bg-slate-900/80 border-r border-slate-800 flex flex-col">
+              {/* Spacer for ruler height (32px) */}
+              <div className="h-8 bg-slate-950/40 border-b border-slate-800/60 flex items-center justify-end pr-3 select-none text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                轨道列表
               </div>
-              <div className="flex-1 h-9 bg-indigo-950/20 rounded-lg border border-indigo-900/30 overflow-hidden relative">
-                {/* 简单的背景色分段或模拟帧图 */}
-                <div className="absolute inset-0 flex items-center justify-around opacity-20 text-[10px] text-indigo-300 font-mono">
-                  <span>镜头 A</span>
-                  <span>镜头 B</span>
-                  <span>镜头 C</span>
-                  <span>镜头 D</span>
+              
+              {/* Row headers corresponding to each track */}
+              <div className="flex-1 flex flex-col space-y-2.5 p-2 bg-slate-900">
+                {/* 1. Video Preview Track Header */}
+                <div className="h-9 flex items-center justify-end pr-2 text-right">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5 justify-end">
+                    <Film className="w-3 h-3 text-indigo-400" />
+                    视频画面
+                  </span>
+                </div>
+                
+                {/* 2. BGM Track Header */}
+                <div className="h-12 flex items-center justify-between px-1 bg-slate-950/45 border border-slate-800/40 rounded-lg">
+                  <button
+                    type="button"
+                    onClick={() => handleAddNewClip('bgm')}
+                    className="p-1 hover:bg-slate-800 text-indigo-400 hover:text-white rounded transition-colors cursor-pointer"
+                    title="添加背景配乐片段"
+                  >
+                    <Plus className="w-3 h-3" />
+                  </button>
+                  <span className="text-[10px] font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1">
+                    <Music className="w-3 h-3 text-emerald-400" />
+                    配乐 BGM
+                  </span>
+                </div>
+                
+                {/* 3. SFX Track Header */}
+                <div className="h-12 flex items-center justify-between px-1 bg-slate-950/45 border border-slate-800/40 rounded-lg">
+                  <button
+                    type="button"
+                    onClick={() => handleAddNewClip('sfx')}
+                    className="p-1 hover:bg-slate-800 text-indigo-400 hover:text-white rounded transition-colors cursor-pointer"
+                    title="添加短音效片段"
+                  >
+                    <Plus className="w-3 h-3" />
+                  </button>
+                  <span className="text-[10px] font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1">
+                    <Waves className="w-3 h-3 text-blue-400" />
+                    音效 SFX
+                  </span>
+                </div>
+                
+                {/* 4. Dubbing Track Header */}
+                <div className="h-12 flex items-center justify-between px-1 bg-slate-950/45 border border-slate-800/40 rounded-lg">
+                  <button
+                    type="button"
+                    onClick={() => handleAddNewClip('dubbing')}
+                    className="p-1 hover:bg-slate-800 text-indigo-400 hover:text-white rounded transition-colors cursor-pointer"
+                    title="添加旁白配音片段"
+                  >
+                    <Plus className="w-3 h-3" />
+                  </button>
+                  <span className="text-[10px] font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1">
+                    <Mic className="w-3 h-3 text-purple-400" />
+                    配音旁白
+                  </span>
                 </div>
               </div>
             </div>
-
-            {/* 2. 背景音乐 BGM 轨道 */}
-            <div className="flex items-center">
-              <div className="w-32 flex items-center justify-between pr-4">
-                <button
-                  onClick={() => handleAddNewClip('bgm')}
-                  className="p-1 hover:bg-slate-800 text-indigo-400 hover:text-white rounded ml-1 transition-colors"
-                  title="添加背景音乐片段"
+            
+            {/* Right Column: Horizontally Scrollable Timeline Body */}
+            <div className="flex-1 overflow-x-auto custom-scrollbar bg-slate-950/20" ref={timelineRef}>
+              <div 
+                className="relative flex flex-col select-none"
+                style={{ width: '100%', minWidth: `${safeDuration * pixelsPerSecond}px` }}
+              >
+                
+                {/* Timeline Ruler Row */}
+                <div 
+                  onClick={handleRulerClick}
+                  className="h-8 bg-slate-900 border-b border-slate-800 relative cursor-col-resize select-none overflow-hidden shrink-0"
                 >
-                  <Plus className="w-3.5 h-3.5" />
-                </button>
-                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
-                  <Music className="w-3.5 h-3.5 text-emerald-400" />
-                  背景音乐轨
-                </span>
-              </div>
-              <div className="flex-1 h-12 bg-slate-900 rounded-lg border border-slate-800 relative overflow-hidden">
-                {clips
-                  .filter(c => c.trackId === 'bgm')
-                  .map(clip => {
-                    const left = (clip.startTime / videoDuration) * 100;
-                    const width = (clip.duration / videoDuration) * 100;
-                    const isSelected = clip.id === selectedClipId;
-                    return (
-                      <div
-                        key={clip.id}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedClipId(clip.id);
-                        }}
-                        className={`absolute top-1 bottom-1 rounded-md px-2 py-1 cursor-pointer flex flex-col justify-between text-left select-none transition-all ${
-                          isSelected 
-                            ? 'bg-emerald-600/95 text-white ring-2 ring-emerald-300 shadow-lg shadow-emerald-600/20' 
-                            : 'bg-emerald-950/50 hover:bg-emerald-950/80 text-emerald-300 border border-emerald-800/60'
-                        }`}
-                        style={{ left: `${left}%`, width: `${width}%` }}
-                      >
-                        <div className="flex items-center justify-between min-w-0">
-                          <span className="text-[10px] font-bold truncate pr-1">{clip.name}</span>
-                          {clip.isGenerating ? (
-                            <Loader2 className="w-2.5 h-2.5 animate-spin text-emerald-400" />
-                          ) : clip.audioUrl ? (
-                            <Check className="w-2.5 h-2.5 text-emerald-300" />
-                          ) : null}
+                  {/* Ticks rendering */}
+                  {Array.from({ length: Math.ceil(safeDuration) + 1 }).map((_, i) => {
+                    const percent = (i / safeDuration) * 100;
+                    if (i % 2 === 0) {
+                      return (
+                        <div 
+                          key={i} 
+                          className="absolute top-0 bottom-0 border-l border-slate-800 text-[9px] font-mono pl-1 text-slate-500 flex items-end pb-0.5 select-none"
+                          style={{ left: `${percent}%` }}
+                        >
+                          {i}s
                         </div>
-                        <span className="text-[8px] font-mono truncate opacity-60">
-                          {clip.prompt}
-                        </span>
-                      </div>
+                      );
+                    }
+                    return (
+                      <div 
+                        key={i} 
+                        className="absolute top-3.5 bottom-0 border-l border-slate-800/60"
+                        style={{ left: `${percent}%` }}
+                      />
                     );
                   })}
-              </div>
-            </div>
+                </div>
+                
+                {/* Track rows corresponding directly to headers */}
+                <div className="flex-1 flex flex-col space-y-2.5 p-2 bg-slate-950/30 relative">
+                  
+                  {/* Vertical Playhead Line running across ALL rows! */}
+                  <div 
+                    className="absolute top-0 bottom-0 w-[1.5px] bg-rose-500 z-30 pointer-events-none"
+                    style={{ left: `${(currentTime / safeDuration) * 100}%` }}
+                  >
+                    <div className="w-2.5 h-2.5 bg-rose-500 rounded-full absolute -top-1 -left-1 shadow-lg shadow-rose-500/50" />
+                  </div>
 
-            {/* 3. 音效 SFX 轨道 */}
-            <div className="flex items-center">
-              <div className="w-32 flex items-center justify-between pr-4">
-                <button
-                  onClick={() => handleAddNewClip('sfx')}
-                  className="p-1 hover:bg-slate-800 text-indigo-400 hover:text-white rounded ml-1 transition-colors"
-                  title="添加短音效片段"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                </button>
-                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
-                  <Waves className="w-3.5 h-3.5 text-blue-400" />
-                  音效SFX轨
-                </span>
-              </div>
-              <div className="flex-1 h-12 bg-slate-900 rounded-lg border border-slate-800 relative overflow-hidden">
-                {clips
-                  .filter(c => c.trackId === 'sfx')
-                  .map(clip => {
-                    const left = (clip.startTime / videoDuration) * 100;
-                    const width = (clip.duration / videoDuration) * 100;
-                    const isSelected = clip.id === selectedClipId;
-                    return (
-                      <div
-                        key={clip.id}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedClipId(clip.id);
-                        }}
-                        className={`absolute top-1 bottom-1 rounded-md px-2 py-1 cursor-pointer flex flex-col justify-between text-left select-none transition-all ${
-                          isSelected 
-                            ? 'bg-blue-600/95 text-white ring-2 ring-blue-300 shadow-lg shadow-blue-600/20' 
-                            : 'bg-blue-950/50 hover:bg-blue-950/80 text-blue-300 border border-blue-800/60'
-                        }`}
-                        style={{ left: `${left}%`, width: `${width}%` }}
-                      >
-                        <div className="flex items-center justify-between min-w-0">
-                          <span className="text-[10px] font-bold truncate pr-1">{clip.name}</span>
-                          {clip.isGenerating ? (
-                            <Loader2 className="w-2.5 h-2.5 animate-spin text-blue-400" />
-                          ) : clip.audioUrl ? (
-                            <Check className="w-2.5 h-2.5 text-blue-300" />
-                          ) : null}
-                        </div>
-                        <span className="text-[8px] font-mono truncate opacity-60">
-                          {clip.prompt}
-                        </span>
-                      </div>
-                    );
-                  })}
-              </div>
-            </div>
+                  {/* 1. Video Preview Track Row */}
+                  <div className="h-9 bg-indigo-950/10 rounded-lg border border-indigo-900/20 overflow-hidden relative">
+                    <div className="absolute inset-0 flex items-center justify-around opacity-15 text-[9px] text-indigo-400 font-mono">
+                      <span>镜头 A</span>
+                      <span>镜头 B</span>
+                      <span>镜头 C</span>
+                      <span>镜头 D</span>
+                    </div>
+                  </div>
+                  
+                  {/* 2. BGM Track Row */}
+                  <div className="h-12 bg-slate-900/50 rounded-lg border border-slate-800 relative">
+                    {clips
+                      .filter(c => c.trackId === 'bgm')
+                      .map(clip => {
+                        const left = (clip.startTime / safeDuration) * 100;
+                        const width = (clip.duration / safeDuration) * 100;
+                        const isSelected = clip.id === selectedClipId;
+                        return (
+                          <div
+                            key={clip.id}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedClipId(clip.id);
+                            }}
+                            className={`absolute top-1 bottom-1 rounded-md px-2 py-1 cursor-grab active:cursor-grabbing flex flex-col justify-between text-left select-none transition-all group/clip ${
+                              isSelected 
+                                ? 'bg-emerald-600/95 text-white ring-2 ring-emerald-300 shadow-lg shadow-emerald-600/20 z-10' 
+                                : 'bg-emerald-950/50 hover:bg-emerald-950/80 text-emerald-300 border border-emerald-800/60 hover:border-emerald-700'
+                            }`}
+                            style={{ left: `${left}%`, width: `${width}%` }}
+                            onMouseDown={(e) => startDragOrResize(e, clip.id, 'drag')}
+                          >
+                            {/* Left stretch handle */}
+                            <div 
+                              className="absolute left-0 top-0 bottom-0 w-2.5 cursor-ew-resize opacity-0 group-hover/clip:opacity-100 hover:bg-white/30 transition-opacity rounded-l-md z-20"
+                              onMouseDown={(e) => startDragOrResize(e, clip.id, 'resize-left')}
+                            />
 
-            {/* 4. 配音 Dubbing 轨道 */}
-            <div className="flex items-center">
-              <div className="w-32 flex items-center justify-between pr-4">
-                <button
-                  onClick={() => handleAddNewClip('dubbing')}
-                  className="p-1 hover:bg-slate-800 text-indigo-400 hover:text-white rounded ml-1 transition-colors"
-                  title="添加旁白配音片段"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                </button>
-                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
-                  <Mic className="w-3.5 h-3.5 text-purple-400" />
-                  配音旁白轨
-                </span>
-              </div>
-              <div className="flex-1 h-12 bg-slate-900 rounded-lg border border-slate-800 relative overflow-hidden">
-                {clips
-                  .filter(c => c.trackId === 'dubbing')
-                  .map(clip => {
-                    const left = (clip.startTime / videoDuration) * 100;
-                    const width = (clip.duration / videoDuration) * 100;
-                    const isSelected = clip.id === selectedClipId;
-                    return (
-                      <div
-                        key={clip.id}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedClipId(clip.id);
-                        }}
-                        className={`absolute top-1 bottom-1 rounded-md px-2 py-1 cursor-pointer flex flex-col justify-between text-left select-none transition-all ${
-                          isSelected 
-                            ? 'bg-purple-600/95 text-white ring-2 ring-purple-300 shadow-lg shadow-purple-600/20' 
-                            : 'bg-purple-950/50 hover:bg-purple-950/80 text-purple-300 border border-purple-800/60'
-                        }`}
-                        style={{ left: `${left}%`, width: `${width}%` }}
-                      >
-                        <div className="flex items-center justify-between min-w-0">
-                          <span className="text-[10px] font-bold truncate pr-1">{clip.name}</span>
-                          {clip.isGenerating ? (
-                            <Loader2 className="w-2.5 h-2.5 animate-spin text-purple-400" />
-                          ) : clip.audioUrl ? (
-                            <Check className="w-2.5 h-2.5 text-purple-300" />
-                          ) : null}
-                        </div>
-                        <span className="text-[8px] font-mono truncate opacity-60">
-                          "{clip.text || clip.prompt}"
-                        </span>
-                      </div>
-                    );
-                  })}
+                            <div className="flex items-center justify-between min-w-0 pointer-events-none px-0.5">
+                              <span className="text-[10px] font-bold truncate pr-1">{clip.name}</span>
+                              {clip.isGenerating ? (
+                                <Loader2 className="w-2.5 h-2.5 animate-spin text-emerald-400 shrink-0" />
+                              ) : clip.audioUrl ? (
+                                <Check className="w-2.5 h-2.5 text-emerald-300 shrink-0" />
+                              ) : null}
+                            </div>
+                            <span className="text-[8px] font-mono truncate opacity-60 px-0.5 pointer-events-none">
+                              {clip.prompt}
+                            </span>
+
+                            {/* Right stretch handle */}
+                            <div 
+                              className="absolute right-0 top-0 bottom-0 w-2.5 cursor-ew-resize opacity-0 group-hover/clip:opacity-100 hover:bg-white/30 transition-opacity rounded-r-md z-20"
+                              onMouseDown={(e) => startDragOrResize(e, clip.id, 'resize-right')}
+                            />
+                          </div>
+                        );
+                      })}
+                  </div>
+                  
+                  {/* 3. SFX Track Row */}
+                  <div className="h-12 bg-slate-900/50 rounded-lg border border-slate-800 relative">
+                    {clips
+                      .filter(c => c.trackId === 'sfx')
+                      .map(clip => {
+                        const left = (clip.startTime / safeDuration) * 100;
+                        const width = (clip.duration / safeDuration) * 100;
+                        const isSelected = clip.id === selectedClipId;
+                        return (
+                          <div
+                            key={clip.id}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedClipId(clip.id);
+                            }}
+                            className={`absolute top-1 bottom-1 rounded-md px-2 py-1 cursor-grab active:cursor-grabbing flex flex-col justify-between text-left select-none transition-all group/clip ${
+                              isSelected 
+                                ? 'bg-blue-600/95 text-white ring-2 ring-blue-300 shadow-lg shadow-blue-600/20 z-10' 
+                                : 'bg-blue-950/50 hover:bg-blue-950/80 text-blue-300 border border-blue-800/60 hover:border-blue-700'
+                            }`}
+                            style={{ left: `${left}%`, width: `${width}%` }}
+                            onMouseDown={(e) => startDragOrResize(e, clip.id, 'drag')}
+                          >
+                            {/* Left stretch handle */}
+                            <div 
+                              className="absolute left-0 top-0 bottom-0 w-2.5 cursor-ew-resize opacity-0 group-hover/clip:opacity-100 hover:bg-white/30 transition-opacity rounded-l-md z-20"
+                              onMouseDown={(e) => startDragOrResize(e, clip.id, 'resize-left')}
+                            />
+
+                            <div className="flex items-center justify-between min-w-0 pointer-events-none px-0.5">
+                              <span className="text-[10px] font-bold truncate pr-1">{clip.name}</span>
+                              {clip.isGenerating ? (
+                                <Loader2 className="w-2.5 h-2.5 animate-spin text-blue-400 shrink-0" />
+                              ) : clip.audioUrl ? (
+                                <Check className="w-2.5 h-2.5 text-blue-300 shrink-0" />
+                              ) : null}
+                            </div>
+                            <span className="text-[8px] font-mono truncate opacity-60 px-0.5 pointer-events-none">
+                              {clip.prompt}
+                            </span>
+
+                            {/* Right stretch handle */}
+                            <div 
+                              className="absolute right-0 top-0 bottom-0 w-2.5 cursor-ew-resize opacity-0 group-hover/clip:opacity-100 hover:bg-white/30 transition-opacity rounded-r-md z-20"
+                              onMouseDown={(e) => startDragOrResize(e, clip.id, 'resize-right')}
+                            />
+                          </div>
+                        );
+                      })}
+                  </div>
+                  
+                  {/* 4. Dubbing Track Row */}
+                  <div className="h-12 bg-slate-900/50 rounded-lg border border-slate-800 relative">
+                    {clips
+                      .filter(c => c.trackId === 'dubbing')
+                      .map(clip => {
+                        const left = (clip.startTime / safeDuration) * 100;
+                        const width = (clip.duration / safeDuration) * 100;
+                        const isSelected = clip.id === selectedClipId;
+                        return (
+                          <div
+                            key={clip.id}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedClipId(clip.id);
+                            }}
+                            className={`absolute top-1 bottom-1 rounded-md px-2 py-1 cursor-grab active:cursor-grabbing flex flex-col justify-between text-left select-none transition-all group/clip ${
+                              isSelected 
+                                ? 'bg-purple-600/95 text-white ring-2 ring-purple-300 shadow-lg shadow-purple-600/20 z-10' 
+                                : 'bg-purple-950/50 hover:bg-purple-950/80 text-purple-300 border border-purple-800/60 hover:border-purple-700'
+                            }`}
+                            style={{ left: `${left}%`, width: `${width}%` }}
+                            onMouseDown={(e) => startDragOrResize(e, clip.id, 'drag')}
+                          >
+                            {/* Left stretch handle */}
+                            <div 
+                              className="absolute left-0 top-0 bottom-0 w-2.5 cursor-ew-resize opacity-0 group-hover/clip:opacity-100 hover:bg-white/30 transition-opacity rounded-l-md z-20"
+                              onMouseDown={(e) => startDragOrResize(e, clip.id, 'resize-left')}
+                            />
+
+                            <div className="flex items-center justify-between min-w-0 pointer-events-none px-0.5">
+                              <span className="text-[10px] font-bold truncate pr-1">{clip.name}</span>
+                              {clip.isGenerating ? (
+                                <Loader2 className="w-2.5 h-2.5 animate-spin text-purple-400 shrink-0" />
+                              ) : clip.audioUrl ? (
+                                <Check className="w-2.5 h-2.5 text-purple-300 shrink-0" />
+                              ) : null}
+                            </div>
+                            <span className="text-[8px] font-mono truncate opacity-60 px-0.5 pointer-events-none font-bold">
+                              "{clip.text || clip.prompt}"
+                            </span>
+
+                            {/* Right stretch handle */}
+                            <div 
+                              className="absolute right-0 top-0 bottom-0 w-2.5 cursor-ew-resize opacity-0 group-hover/clip:opacity-100 hover:bg-white/30 transition-opacity rounded-r-md z-20"
+                              onMouseDown={(e) => startDragOrResize(e, clip.id, 'resize-right')}
+                            />
+                          </div>
+                        );
+                      })}
+                  </div>
+                  
+                </div>
               </div>
             </div>
           </div>
         </div>
       )}
+
+      {/* Toast Notification Banner */}
+      <AnimatePresence>
+        {toast && (
+          <motion.div
+            initial={{ opacity: 0, y: 30, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.95 }}
+            transition={{ duration: 0.25, ease: 'easeOut' }}
+            className="fixed bottom-6 right-6 z-[9999] flex items-center gap-3 bg-slate-900/95 backdrop-blur-md border border-slate-800 p-4 rounded-xl shadow-2xl max-w-sm"
+          >
+            <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
+              toast.type === 'success' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-red-500/10 text-red-400 border border-red-500/20'
+            }`}>
+              {toast.type === 'success' ? (
+                <CheckCircle2 className="w-4.5 h-4.5" />
+              ) : (
+                <AlertCircle className="w-4.5 h-4.5" />
+              )}
+            </div>
+            <div className="flex-1 min-w-0">
+              <h4 className="text-xs font-bold text-slate-200">
+                {toast.type === 'success' ? '成功' : toast.type === 'error' ? '出错' : '提示'}
+              </h4>
+              <p className="text-[10px] text-slate-400 mt-0.5 leading-relaxed">{toast.message}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setToast(null)}
+              className="text-slate-500 hover:text-slate-300 transition-colors p-1"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* 保存工程 Modal */}
+      <AnimatePresence>
+        {showSaveProjectModal && (
+          <div className="fixed inset-0 z-[9990] flex items-center justify-center p-4">
+            {/* Backdrop */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowSaveProjectModal(false)}
+              className="absolute inset-0 bg-slate-950/85 backdrop-blur-sm"
+            />
+
+            {/* Modal Content */}
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              className="relative w-full max-w-md bg-slate-900 border border-slate-800 rounded-xl shadow-2xl p-6 overflow-hidden z-10"
+            >
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <Save className="w-5 h-5 text-emerald-400" />
+                  <h3 className="text-sm font-bold text-slate-200">保存当前工程</h3>
+                </div>
+                <button
+                  onClick={() => setShowSaveProjectModal(false)}
+                  className="text-slate-400 hover:text-slate-200 transition-colors cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveProjectConfirm} className="space-y-4">
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
+                    工程名称
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={projectNameInput}
+                    onChange={(e) => setProjectNameInput(e.target.value)}
+                    placeholder="请输入工程名称..."
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 transition-colors"
+                    autoFocus
+                  />
+                </div>
+
+                <div className="bg-slate-950/60 rounded-lg p-3 border border-slate-800/60 text-[10px] text-slate-400 space-y-1.5">
+                  <div className="flex justify-between">
+                    <span>视频文件:</span>
+                    <span className="text-slate-200 truncate max-w-[200px]">{videoFile?.name}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>音轨片段数:</span>
+                    <span className="text-slate-200 font-mono">{clips.length} 个片段</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>视频总时长:</span>
+                    <span className="text-slate-200 font-mono">{safeDuration.toFixed(1)} 秒</span>
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2.5 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowSaveProjectModal(false)}
+                    className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs rounded-lg transition-colors cursor-pointer"
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs rounded-lg shadow-lg shadow-emerald-500/10 transition-colors cursor-pointer"
+                  >
+                    保存工程
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* 打开工程 Modal */}
+      <AnimatePresence>
+        {showOpenProjectModal && (
+          <div className="fixed inset-0 z-[9990] flex items-center justify-center p-4">
+            {/* Backdrop */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowOpenProjectModal(false)}
+              className="absolute inset-0 bg-slate-950/85 backdrop-blur-sm"
+            />
+
+            {/* Modal Content */}
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              className="relative w-full max-w-2xl bg-slate-900 border border-slate-800 rounded-xl shadow-2xl p-6 overflow-hidden z-10 flex flex-col max-h-[85vh]"
+            >
+              <div className="flex items-center justify-between mb-4 shrink-0">
+                <div className="flex items-center gap-2">
+                  <FolderOpen className="w-5 h-5 text-indigo-400" />
+                  <h3 className="text-sm font-bold text-slate-200">工程库管理</h3>
+                </div>
+                <button
+                  onClick={() => setShowOpenProjectModal(false)}
+                  className="text-slate-400 hover:text-slate-200 transition-colors cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Import project from file */}
+              <div className="bg-slate-950 border border-slate-800/80 rounded-xl p-4 mb-4 shrink-0 flex items-center justify-between gap-4">
+                <div>
+                  <h4 className="text-xs font-bold text-slate-300">从本地文件导入</h4>
+                  <p className="text-[10px] text-slate-500 mt-0.5">选择备份的工程配置文件（*.vsa.json）载入当前工作区</p>
+                </div>
+                <label className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs px-3.5 py-1.5 rounded-lg shadow-lg shadow-indigo-500/15 cursor-pointer transition-colors shrink-0">
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>导入本地工程</span>
+                  <input
+                    type="file"
+                    accept=".json"
+                    onChange={handleImportProjectFile}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+
+              <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2 shrink-0">
+                本地已保存的工程 ({savedProjectsList.length})
+              </div>
+
+              {/* Projects List */}
+              <div className="flex-1 overflow-y-auto space-y-2.5 pr-1 min-h-[220px]">
+                {savedProjectsList.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-12 text-slate-500 border border-dashed border-slate-800 rounded-xl bg-slate-950/30">
+                    <FolderOpen className="w-8 h-8 opacity-30 mb-2 text-slate-500" />
+                    <p className="text-xs">还没有保存过任何工程</p>
+                    <p className="text-[10px] opacity-70 mt-0.5">在工作区配置配乐后点击“保存工程”按钮将自动存入此列表</p>
+                  </div>
+                ) : (
+                  savedProjectsList.map((project) => (
+                    <div
+                      key={project.id}
+                      onClick={() => handleOpenProject(project)}
+                      className="group flex items-center justify-between p-3.5 bg-slate-950 hover:bg-slate-950/60 border border-slate-800 hover:border-indigo-500/50 rounded-lg transition-all duration-200 cursor-pointer text-left"
+                    >
+                      <div className="min-w-0 flex-1 pr-4">
+                        <div className="flex items-baseline gap-2">
+                          <span className="text-xs font-bold text-slate-200 truncate group-hover:text-indigo-400 transition-colors">
+                            {project.name}
+                          </span>
+                          <span className="text-[9px] text-slate-500 shrink-0 font-mono">
+                            {new Date(project.createdAt).toLocaleString()}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-4 mt-1.5 text-[10px] text-slate-400">
+                          <span className="flex items-center gap-1">
+                            <Film className="w-3 h-3 text-slate-500" />
+                            <span className="truncate max-w-[150px]">{project.videoFile?.name || '未加载视频'}</span>
+                          </span>
+                          <span className="font-mono">{project.clips.length} 个音轨片段</span>
+                          <span className="font-mono">{(project.videoDuration || 0).toFixed(1)}s 时长</span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                        {/* Export to File Button */}
+                        <button
+                          onClick={(e) => handleExportProjectToFile(project, e)}
+                          title="备份并导出为文件"
+                          className="p-1.5 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded transition-colors cursor-pointer"
+                        >
+                          <FileDown className="w-3.5 h-3.5" />
+                        </button>
+                        
+                        {/* Delete Button */}
+                        <button
+                          onClick={(e) => handleDeleteProject(project.id, e)}
+                          title="删除此工程"
+                          className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
