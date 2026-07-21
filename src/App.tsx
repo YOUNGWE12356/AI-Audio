@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { lazy, Suspense, useState, useRef, useEffect } from 'react';
 import { analyzeAudioDesign, AudioDesignResult, regenerateLyrics, translateToEnglish } from './services/geminiService';
 import { generateSoundEffect, generateMusic, generateVoice } from './services/elevenLabsService';
 import { FileItem, HistoryItem, TabType } from './types';
@@ -13,15 +13,27 @@ import { fetchPlatformHealth } from './services/platformService';
 // Modular Components
 import Sidebar from './components/Sidebar';
 import Workbench from './components/Workbench';
-import AudioDirector from './components/AudioDirector';
-import MusicStudio from './components/MusicStudio';
-import SfxStudio from './components/SfxStudio';
-import DubbingStudio from './components/DubbingStudio';
-import AudioTools from './components/AudioTools';
-import SettingsComponent from './components/Settings';
-import SfxLibrary from './components/SfxLibrary';
-import SfxRequirements from './components/SfxRequirements';
-import VideoSoundtrack from './components/VideoSoundtrack';
+
+const AudioDirector = lazy(() => import('./components/AudioDirector'));
+const MusicStudio = lazy(() => import('./components/MusicStudio'));
+const SfxStudio = lazy(() => import('./components/SfxStudio'));
+const DubbingStudio = lazy(() => import('./components/DubbingStudio'));
+const AudioTools = lazy(() => import('./components/AudioTools'));
+const SettingsComponent = lazy(() => import('./components/Settings'));
+const SfxLibrary = lazy(() => import('./components/SfxLibrary'));
+const SfxRequirements = lazy(() => import('./components/SfxRequirements'));
+const VideoSoundtrack = lazy(() => import('./components/VideoSoundtrack'));
+
+function WorkspaceLoading() {
+  return (
+    <div className="flex min-h-full items-center justify-center p-8" role="status" aria-live="polite">
+      <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-5 py-4 text-sm font-medium text-slate-600 shadow-sm">
+        <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-blue-500" aria-hidden="true" />
+        正在加载工作空间…
+      </div>
+    </div>
+  );
+}
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState<TabType>('workbench');
@@ -557,6 +569,7 @@ export default function App() {
       
       {/* Right Side Workspace Frame */}
       <main id="app-workspace-viewport" className="flex-1 overflow-y-auto bg-slate-50 relative custom-scrollbar">
+        <Suspense fallback={<WorkspaceLoading />}>
         {currentTab === 'workbench' && (
           <Workbench 
             setCurrentTab={setCurrentTab} 
@@ -683,6 +696,7 @@ export default function App() {
         {currentTab === 'video-soundtrack' && (
           <VideoSoundtrack />
         )}
+        </Suspense>
       </main>
     </div>
   );

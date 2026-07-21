@@ -1,6 +1,13 @@
-import { GoogleGenAI, GenerateContentResponse, ThinkingLevel, Type } from "@google/genai";
-
 const isBrowser = typeof window !== 'undefined';
+
+type GeminiModule = typeof import('@google/genai');
+
+let geminiModulePromise: Promise<GeminiModule> | null = null;
+
+const loadGeminiModule = () => {
+  geminiModulePromise ??= import('@google/genai');
+  return geminiModulePromise;
+};
 
 async function postJson<T>(path: string, body: unknown): Promise<T> {
   const response = await fetch(path, {
@@ -20,12 +27,18 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   return response.json();
 }
 
-const getAI = () => {
+const getAI = async () => {
   const key = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
   if (!key) {
     throw new Error("服务端 GEMINI_API_KEY 未配置。");
   }
-  return new GoogleGenAI({ apiKey: key });
+
+  const { GoogleGenAI, Type, ThinkingLevel } = await loadGeminiModule();
+  return {
+    ai: new GoogleGenAI({ apiKey: key }),
+    Type,
+    ThinkingLevel,
+  };
 };
 
 export interface AudioDesignResult {
@@ -165,7 +178,7 @@ export async function analyzeAudioDesign(
     }))
   ];
 
-  const ai = getAI();
+  const { ai, Type } = await getAI();
   const response = await ai.models.generateContent({
     model: "gemini-3-flash-preview",
     contents: [{ parts }],
@@ -310,7 +323,7 @@ export async function regenerateLyrics(
     return result.text;
   }
 
-  const ai = getAI();
+  const { ai, ThinkingLevel } = await getAI();
   const prompt = `
     原始歌词：
     ${originalLyrics}
@@ -354,6 +367,7 @@ export async function generateSfxRequirements(
     });
   }
 
+  const { ai, Type } = await getAI();
   let schema: any;
   let templateDescription = "";
 
@@ -540,7 +554,6 @@ export async function generateSfxRequirements(
     });
   }
 
-  const ai = getAI();
   const response = await ai.models.generateContent({
     model: "gemini-3.5-flash",
     contents: [{ parts }],
@@ -578,6 +591,7 @@ export async function optimizeImportMetadata(
     return result.items;
   }
 
+  const { ai, Type } = await getAI();
   const schema = {
     type: Type.OBJECT,
     required: ["items"],
@@ -643,7 +657,6 @@ export async function optimizeImportMetadata(
     请将列表中的每一项进行智能转换，并且必须保留和返回对应的 \`id\`（以便客户端能够精确匹配回对应的文件）。
   `;
 
-  const ai = getAI();
   const response = await ai.models.generateContent({
     model: "gemini-3.5-flash",
     contents: [{ parts: [{ text: prompt }] }],
@@ -680,7 +693,7 @@ export async function translateToEnglish(text: string): Promise<string> {
   }
 
   try {
-    const ai = getAI();
+    const { ai, ThinkingLevel } = await getAI();
     const prompt = `你是一个专业的翻译专家。请将以下文本翻译成地道、简洁的英文，用于描述 AI 声线或情感。
 请只返回翻译后的英文文本，不要包含任何解释、说明或标点引号。
 
@@ -720,7 +733,7 @@ export async function matchBestVoice(
   }
 
   try {
-    const ai = getAI();
+    const { ai, ThinkingLevel } = await getAI();
     // Prepare a simplified list of voices of the same gender for Gemini to consider
     const simplifiedVoices = voices
       .filter(v => v.gender === gender)
