@@ -192,14 +192,6 @@ export default function DubbingStudio({
   };
 
   const handleStsGenerate = async () => {
-    const hasKey = Boolean(
-      (typeof window !== 'undefined' && localStorage.getItem('ELEVENLABS_API_KEY')) || 
-      (typeof process !== 'undefined' && process.env?.ELEVENLABS_API_KEY)
-    );
-    if (!hasKey) {
-      setStsError('ELEVENLABS_API_KEY 未配置，请前往设置页面或 Secrets 面板添加。');
-      return;
-    }
     if (!stsFile) {
       setStsError('请先上传需要变声的源音频文件');
       return;
@@ -1136,7 +1128,6 @@ export default function DubbingStudio({
                                 });
 
                                 if (displayVoices.length === 0) {
-                                  const hasKey = Boolean(process.env.ELEVENLABS_API_KEY || (typeof window !== 'undefined' && localStorage.getItem('ELEVENLABS_API_KEY')));
                                   return (
                                     <div className="py-12 px-4 text-center flex flex-col items-center justify-center gap-3">
                                       <div className="w-10 h-10 rounded-full bg-amber-50 flex items-center justify-center text-amber-600 border border-amber-100">
@@ -1145,16 +1136,9 @@ export default function DubbingStudio({
                                       <div className="space-y-1">
                                         <p className="text-xs font-bold text-slate-700">精品人声库为空</p>
                                         <p className="text-[11px] text-slate-500 max-w-xs leading-relaxed">
-                                          {hasKey 
-                                            ? "您的 ElevenLabs 账户中暂无声线资产。请登录 ElevenLabs 官网添加、订阅或克隆您的声线。"
-                                            : "尚未配置 ElevenLabs API Key。请前往“设置”页面配置您的 API Key 以同步真实 ElevenLabs 声线。"}
+                                          服务端未返回可用声线。请在“设置”页面检查 ElevenLabs 服务状态，或登录 ElevenLabs 添加声线资产。
                                         </p>
                                       </div>
-                                      {!hasKey && (
-                                        <span className="text-[9px] bg-slate-100 border border-slate-200 text-slate-600 px-2 py-1 rounded-md font-mono mt-1">
-                                          ELEVENLABS_API_KEY 未配置
-                                        </span>
-                                      )}
                                     </div>
                                   );
                                 }

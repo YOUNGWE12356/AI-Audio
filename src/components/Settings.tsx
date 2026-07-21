@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   Settings, 
   CheckCircle2, 
@@ -14,6 +14,7 @@ import {
   Sparkles,
   HelpCircle
 } from 'lucide-react';
+import { fetchPlatformHealth, PlatformHealth } from '../services/platformService';
 
 interface SettingsProps {
   onKeysUpdated?: () => void;
@@ -21,6 +22,56 @@ interface SettingsProps {
 
 export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
   const [cleared, setCleared] = useState(false);
+  const [platformHealth, setPlatformHealth] = useState<PlatformHealth | null>(null);
+  const [healthError, setHealthError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    fetchPlatformHealth(controller.signal)
+      .then((health) => {
+        setPlatformHealth(health);
+        setHealthError(null);
+      })
+      .catch((error: Error) => {
+        if (error.name !== 'AbortError') {
+          setHealthError(error.message || '无法连接服务端');
+        }
+      });
+
+    return () => controller.abort();
+  }, []);
+
+  const renderServiceStatus = (configured?: boolean) => {
+    if (healthError) {
+      return (
+        <div className="flex items-center gap-1.5 text-red-600 font-bold text-xs shrink-0 bg-red-50 px-2 py-1 rounded-lg">
+          <AlertCircle className="w-3.5 h-3.5" />
+          <span>服务不可用</span>
+        </div>
+      );
+    }
+
+    if (!platformHealth) {
+      return (
+        <div className="flex items-center gap-1.5 text-slate-500 font-bold text-xs shrink-0 bg-slate-100 px-2 py-1 rounded-lg">
+          <span>检测中...</span>
+        </div>
+      );
+    }
+
+    return configured ? (
+      <div className="flex items-center gap-1.5 text-emerald-600 font-bold text-xs shrink-0 bg-emerald-50 px-2 py-1 rounded-lg">
+        <CheckCircle2 className="w-3.5 h-3.5" />
+        <span>服务端已配置</span>
+      </div>
+    ) : (
+      <div className="flex items-center gap-1.5 text-amber-600 font-bold text-xs shrink-0 bg-amber-50 px-2 py-1 rounded-lg">
+        <AlertCircle className="w-3.5 h-3.5" />
+        <span>服务端未配置</span>
+      </div>
+    );
+  };
 
   const handleClearCache = () => {
     if (typeof window !== 'undefined' && confirm('确定要清空本地浏览器缓存与历史工程记录吗？这不会影响服务器已保存的文件，但会清空您的本地操作历史。')) {
@@ -69,10 +120,7 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
                     <p className="text-[10px] text-slate-400 mt-0.5">负责多模态创意素材分析、声音排程规划与提示词优化</p>
                   </div>
                 </div>
-                <div className="flex items-center gap-1.5 text-emerald-600 font-bold text-xs shrink-0 bg-emerald-50 px-2 py-1 rounded-lg">
-                  <CheckCircle2 className="w-3.5 h-3.5" />
-                  <span>已启用 (云端托管)</span>
-                </div>
+                {renderServiceStatus(platformHealth?.services.gemini)}
               </div>
 
               {/* ElevenLabs status */}
@@ -86,18 +134,26 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
                     <p className="text-[10px] text-slate-400 mt-0.5">负责高保真声音合成、环境音效与角色克隆配音生成</p>
                   </div>
                 </div>
-                <div className="flex items-center gap-1.5 text-emerald-600 font-bold text-xs shrink-0 bg-emerald-50 px-2 py-1 rounded-lg">
-                  <CheckCircle2 className="w-3.5 h-3.5" />
-                  <span>已启用 (云端托管)</span>
-                </div>
+                {renderServiceStatus(platformHealth?.services.elevenLabs)}
               </div>
             </div>
 
-            <div className="bg-emerald-50/50 border border-emerald-100 rounded-xl p-4 text-xs text-emerald-800 leading-relaxed">
+            <div className={`rounded-xl border p-4 text-xs leading-relaxed ${
+              healthError
+                ? 'bg-red-50/50 border-red-100 text-red-800'
+                : 'bg-amber-50/50 border-amber-100 text-amber-800'
+            }`}>
               <div className="flex items-start gap-2">
-                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                {healthError ? (
+                  <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                )}
                 <p>
-                  <strong>安全须知：</strong>当前系统的所有 API 密钥与敏感凭证均已通过服务器后台环境变量（Secrets）进行安全托管，且均处于健康运行状态。您在前端无需手动输入、保存或管理任何密钥。
+                  <strong>HTML5 服务状态：</strong>
+                  {healthError
+                    ? ` ${healthError}。请检查网页 API 服务是否已经启动。`
+                    : ' 上方状态来自服务端实时检测。浏览器端不保存或接收第三方 API 密钥；公开部署前仍需完成用户认证、限流和正式文件存储。'}
                 </p>
               </div>
             </div>

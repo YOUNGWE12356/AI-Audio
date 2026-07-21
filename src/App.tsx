@@ -8,6 +8,7 @@ import { analyzeAudioDesign, AudioDesignResult, regenerateLyrics, translateToEng
 import { generateSoundEffect, generateMusic, generateVoice } from './services/elevenLabsService';
 import { FileItem, HistoryItem, TabType } from './types';
 import { ELEVENLABS_VOICES } from './data/voices';
+import { fetchPlatformHealth } from './services/platformService';
 
 // Modular Components
 import Sidebar from './components/Sidebar';
@@ -25,18 +26,26 @@ import VideoSoundtrack from './components/VideoSoundtrack';
 export default function App() {
   const [currentTab, setCurrentTab] = useState<TabType>('workbench');
   
-  // API key states & dynamic check
-  const [hasGeminiKey, setHasGeminiKey] = useState(() => 
-    Boolean(process.env.GEMINI_API_KEY || (typeof window !== 'undefined' && localStorage.getItem('GEMINI_API_KEY')))
-  );
-  const [hasElevenLabsKey, setHasElevenLabsKey] = useState(() => 
-    Boolean(process.env.ELEVENLABS_API_KEY || (typeof window !== 'undefined' && localStorage.getItem('ELEVENLABS_API_KEY')))
-  );
+  // The HTML5 client only reads service availability from the same-origin API.
+  // Secret values remain on the server and are never embedded into the bundle.
+  const [hasGeminiKey, setHasGeminiKey] = useState(false);
+  const [hasElevenLabsKey, setHasElevenLabsKey] = useState(false);
 
   const handleKeysUpdated = () => {
-    setHasGeminiKey(Boolean(process.env.GEMINI_API_KEY || (typeof window !== 'undefined' && localStorage.getItem('GEMINI_API_KEY'))));
-    setHasElevenLabsKey(Boolean(process.env.ELEVENLABS_API_KEY || (typeof window !== 'undefined' && localStorage.getItem('ELEVENLABS_API_KEY'))));
+    fetchPlatformHealth()
+      .then((health) => {
+        setHasGeminiKey(health.services.gemini);
+        setHasElevenLabsKey(health.services.elevenLabs);
+      })
+      .catch(() => {
+        setHasGeminiKey(false);
+        setHasElevenLabsKey(false);
+      });
   };
+
+  useEffect(() => {
+    handleKeysUpdated();
+  }, []);
 
   // Pre-filled sample historic creations for a complete look on first load
   const [historyList, setHistoryList] = useState<HistoryItem[]>([

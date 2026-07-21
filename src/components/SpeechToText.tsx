@@ -200,14 +200,6 @@ export default function SpeechToText() {
   };
 
   const handleTranscribe = async () => {
-    const hasKey = Boolean(
-      (typeof window !== 'undefined' && localStorage.getItem('ELEVENLABS_API_KEY')) || 
-      (typeof process !== 'undefined' && process.env?.ELEVENLABS_API_KEY)
-    );
-    if (!hasKey) {
-      setError('ELEVENLABS_API_KEY 未配置，请前往设置页面或 Secrets 面板添加。');
-      return;
-    }
     if (!file) {
       setError('请先上传或录制需要转录的音频文件');
       return;

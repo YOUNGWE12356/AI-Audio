@@ -1,7 +1,11 @@
 node_modules/
+bun.lock
 build/
 dist/
 coverage/
+data/
+uploads/*
+!uploads/.gitkeep
 .DS_Store
 *.log
 .env*

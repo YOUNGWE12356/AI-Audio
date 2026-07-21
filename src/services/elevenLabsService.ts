@@ -3,15 +3,30 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-const getApiKey = () => {
-  if (typeof window !== 'undefined') {
-    const localKey = localStorage.getItem('ELEVENLABS_API_KEY');
-    if (localKey) return localKey;
+const isBrowser = typeof window !== 'undefined';
+
+async function requestBlob(path: string, init: RequestInit): Promise<Blob> {
+  const response = await fetch(path, init);
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => ({}));
+    throw new Error(errorBody.error || `音频服务请求失败 (${response.status})`);
   }
-  return process.env.ELEVENLABS_API_KEY || "";
+  return response.blob();
+}
+
+const getApiKey = () => {
+  return process.env.ELEVENLABS_API_KEY || process.env.VITE_ELEVENLABS_API_KEY || "";
 };
 
 export async function generateSoundEffect(text: string, duration?: number): Promise<Blob> {
+  if (isBrowser) {
+    return requestBlob('/api/ai/elevenlabs/sound-effect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, duration }),
+    });
+  }
+
   const apiKey = getApiKey();
   if (!apiKey) {
     throw new Error("ElevenLabs API Key is not configured. Please add it in the Secrets panel.");
@@ -69,6 +84,14 @@ export async function generateSoundEffect(text: string, duration?: number): Prom
 }
 
 export async function generateMusic(text: string, duration?: number, isInstrumental: boolean = true, lyrics?: string): Promise<Blob> {
+  if (isBrowser) {
+    return requestBlob('/api/ai/elevenlabs/music', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, duration, isInstrumental, lyrics }),
+    });
+  }
+
   const apiKey = getApiKey();
   if (!apiKey) {
     throw new Error("ElevenLabs API Key is not configured. Please add it in the Secrets panel.");
@@ -124,6 +147,14 @@ export async function generateVoice(
   similarity: number = 0.75,
   style: number = 0.05
 ): Promise<Blob> {
+  if (isBrowser) {
+    return requestBlob('/api/ai/elevenlabs/voice', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, voiceId, stability, similarity, style }),
+    });
+  }
+
   const apiKey = getApiKey();
   if (!apiKey) {
     throw new Error("ElevenLabs API Key is not configured. Please add it in the Secrets panel.");
@@ -236,6 +267,17 @@ export interface ElevenLabsVoice {
 }
 
 export async function fetchAvailableVoices(): Promise<ElevenLabsVoice[]> {
+  if (isBrowser) {
+    const response = await fetch('/api/ai/elevenlabs/voices', {
+      headers: { Accept: 'application/json' },
+    });
+    if (!response.ok) {
+      return [];
+    }
+    const data = await response.json();
+    return data.voices || [];
+  }
+
   const apiKey = getApiKey();
   if (!apiKey) {
     return [];
@@ -266,6 +308,19 @@ export async function generateSpeechToSpeech(
   similarity: number = 0.75,
   style: number = 0.05
 ): Promise<Blob> {
+  if (isBrowser) {
+    const proxyFormData = new FormData();
+    proxyFormData.append('audio', audioFile);
+    proxyFormData.append('voiceId', voiceId);
+    proxyFormData.append('stability', String(stability));
+    proxyFormData.append('similarity', String(similarity));
+    proxyFormData.append('style', String(style));
+    return requestBlob('/api/ai/elevenlabs/speech-to-speech', {
+      method: 'POST',
+      body: proxyFormData,
+    });
+  }
+
   const apiKey = getApiKey();
   if (!apiKey) {
     throw new Error("ElevenLabs API Key is not configured. Please add it in the Secrets panel.");
@@ -307,6 +362,15 @@ export async function generateSpeechToSpeech(
  * using ElevenLabs Audio Isolation API.
  */
 export async function isolateAudio(audioFile: File | Blob): Promise<Blob> {
+  if (isBrowser) {
+    const proxyFormData = new FormData();
+    proxyFormData.append('audio', audioFile);
+    return requestBlob('/api/ai/elevenlabs/audio-isolation', {
+      method: 'POST',
+      body: proxyFormData,
+    });
+  }
+
   const apiKey = getApiKey();
   if (!apiKey) {
     throw new Error("ElevenLabs API Key is not configured. Please add it in the Secrets panel.");
@@ -342,6 +406,25 @@ export async function transcribeSpeech(
   languageCode?: string,
   tagAudioEvents: boolean = true
 ): Promise<{ text: string; language_code?: string; language_probability?: number }> {
+  if (isBrowser) {
+    const proxyFormData = new FormData();
+    proxyFormData.append('audio', audioFile, audioFile instanceof File ? audioFile.name : 'audio.wav');
+    if (languageCode) {
+      proxyFormData.append('languageCode', languageCode);
+    }
+    proxyFormData.append('tagAudioEvents', String(tagAudioEvents));
+
+    const response = await fetch('/api/ai/elevenlabs/speech-to-text', {
+      method: 'POST',
+      body: proxyFormData,
+    });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({}));
+      throw new Error(errorBody.error || `转录服务请求失败 (${response.status})`);
+    }
+    return response.json();
+  }
+
   const apiKey = getApiKey();
   if (!apiKey) {
     throw new Error("ElevenLabs API Key is not configured. Please add it in the Secrets panel.");

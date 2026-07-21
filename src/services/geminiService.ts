@@ -1,13 +1,29 @@
 import { GoogleGenAI, GenerateContentResponse, ThinkingLevel, Type } from "@google/genai";
 
-const getAI = () => {
-  let key = process.env.GEMINI_API_KEY;
-  if (typeof window !== 'undefined') {
-    const localKey = localStorage.getItem('GEMINI_API_KEY');
-    if (localKey) key = localKey;
+const isBrowser = typeof window !== 'undefined';
+
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => ({}));
+    throw new Error(errorBody.error || `AI 服务请求失败 (${response.status})`);
   }
+
+  return response.json();
+}
+
+const getAI = () => {
+  const key = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
   if (!key) {
-    throw new Error("GEMINI_API_KEY 未妥善配置，请检查环境或在设置页面中配置。");
+    throw new Error("服务端 GEMINI_API_KEY 未配置。");
   }
   return new GoogleGenAI({ apiKey: key });
 };
@@ -70,6 +86,15 @@ export async function analyzeAudioDesign(
   target: { game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean },
   isInstrumental: boolean
 ): Promise<AudioDesignResult> {
+  if (isBrowser) {
+    return postJson<AudioDesignResult>('/api/ai/gemini/audio-design', {
+      files,
+      requirements,
+      target,
+      isInstrumental,
+    });
+  }
+
   let targetDesc = target.game && target.video ? "游戏CG宣传片" : target.game ? "游戏" : target.video ? "视频" : "音频设计";
   if (target.avatar) {
     targetDesc = "科幻巨制《阿凡达》(Avatar) 风格奇幻自然场景";
@@ -276,6 +301,15 @@ export async function regenerateLyrics(
   selectedPart: string,
   direction: string
 ): Promise<string> {
+  if (isBrowser) {
+    const result = await postJson<{ text: string }>('/api/ai/gemini/regenerate-lyrics', {
+      originalLyrics,
+      selectedPart,
+      direction,
+    });
+    return result.text;
+  }
+
   const ai = getAI();
   const prompt = `
     原始歌词：
@@ -312,6 +346,14 @@ export async function generateSfxRequirements(
   screenshot: { data: string; mimeType: string } | null,
   templateType: 'game_sfx_general' | 'game_sfx_middleware' | 'voiceover_general' | 'voiceover_multilang'
 ): Promise<{ items: any[] }> {
+  if (isBrowser) {
+    return postJson<{ items: any[] }>('/api/ai/gemini/sfx-requirements', {
+      inputText,
+      screenshot,
+      templateType,
+    });
+  }
+
   let schema: any;
   let templateDescription = "";
 
@@ -531,6 +573,11 @@ export interface OptimizedImportItem {
 export async function optimizeImportMetadata(
   items: Array<{ id: string; originalName: string; path: string; size: string; type: string }>
 ): Promise<OptimizedImportItem[]> {
+  if (isBrowser) {
+    const result = await postJson<{ items: OptimizedImportItem[] }>('/api/ai/gemini/optimize-metadata', { items });
+    return result.items;
+  }
+
   const schema = {
     type: Type.OBJECT,
     required: ["items"],
@@ -627,6 +674,11 @@ export async function translateToEnglish(text: string): Promise<string> {
     return text.trim();
   }
 
+  if (isBrowser) {
+    const result = await postJson<{ text: string }>('/api/ai/gemini/translate', { text });
+    return result.text;
+  }
+
   try {
     const ai = getAI();
     const prompt = `你是一个专业的翻译专家。请将以下文本翻译成地道、简洁的英文，用于描述 AI 声线或情感。
@@ -656,6 +708,15 @@ export async function matchBestVoice(
 ): Promise<string> {
   if (!description || !description.trim()) {
     return gender === 'male' ? 'pNInz6obpg7IdgWAs6g8' : '21m00Tcm4TlvDq8ikWAM';
+  }
+
+  if (isBrowser) {
+    const result = await postJson<{ voiceId: string }>('/api/ai/gemini/match-voice', {
+      description,
+      gender,
+      voices,
+    });
+    return result.voiceId;
   }
 
   try {

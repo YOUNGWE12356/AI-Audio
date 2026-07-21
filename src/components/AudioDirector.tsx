@@ -37,18 +37,12 @@ const ElevenLabsPlayer = ({ text, id, type = 'sfx' }: { text: string; id: string
   const [error, setError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  const hasKey = Boolean(process.env.ELEVENLABS_API_KEY || (typeof window !== 'undefined' && localStorage.getItem('ELEVENLABS_API_KEY')));
-
   const extractDuration = (input: string) => {
     const match = input.match(/\[Duration:\s*(\d+)s\]/i);
     return match ? parseInt(match[1]) : (type === 'music' ? 30 : 5);
   };
 
   const handleGenerate = async () => {
-    if (!hasKey) {
-      setError('ElevenLabs API Key 未配置。请前往设置页面添加。');
-      return;
-    }
     setLoading(true);
     setError(null);
     try {

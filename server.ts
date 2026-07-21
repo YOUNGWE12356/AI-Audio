@@ -6,10 +6,35 @@ import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import { DEFAULT_CATEGORIES, INITIAL_SOUNDS } from './src/data/sfxData';
 import multer from 'multer';
+import {
+  analyzeAudioDesign,
+  generateSfxRequirements,
+  matchBestVoice,
+  optimizeImportMetadata,
+  regenerateLyrics,
+  translateToEnglish,
+} from './src/services/geminiService';
+import {
+  fetchAvailableVoices,
+  generateMusic,
+  generateSoundEffect,
+  generateSpeechToSpeech,
+  generateVoice,
+  isolateAudio,
+  transcribeSpeech,
+} from './src/services/elevenLabsService';
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number.parseInt(process.env.PORT || '3000', 10);
+
+  app.disable('x-powered-by');
+
+  const asyncRoute = (
+    handler: (req: express.Request, res: express.Response) => Promise<unknown>
+  ) => (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    Promise.resolve(handler(req, res)).catch(next);
+  };
 
   // Use JSON middleware with large payload support for categories/sounds state
   app.use(express.json({ limit: '50mb' }));
@@ -33,6 +58,21 @@ async function startServer() {
   app.use('/uploads', express.static(uploadsDir));
 
   // --- API Endpoints ---
+
+  // HTML5 client bootstrapping and deployment diagnostics.
+  // This endpoint only reports whether server-side secrets exist; it never
+  // returns secret values to the browser.
+  app.get('/api/health', (req, res) => {
+    return res.json({
+      ok: true,
+      runtime: 'server',
+      services: {
+        gemini: Boolean(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY),
+        elevenLabs: Boolean(process.env.ELEVENLABS_API_KEY || process.env.VITE_ELEVENLABS_API_KEY),
+      },
+      timestamp: new Date().toISOString(),
+    });
+  });
 
   // 1. Get Categories
   app.get('/api/sfx/categories', (req, res) => {
@@ -113,6 +153,144 @@ async function startServer() {
     storage,
     limits: { fileSize: 100 * 1024 * 1024 } // 100MB
   });
+
+  const aiUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 100 * 1024 * 1024 },
+  });
+
+  const sendAudioBlob = async (res: express.Response, blob: Blob) => {
+    res.setHeader('Content-Type', blob.type || 'audio/mpeg');
+    return res.send(Buffer.from(await blob.arrayBuffer()));
+  };
+
+  const parseNumber = (value: unknown, fallback: number, min: number, max: number) => {
+    const parsed = typeof value === 'number' ? value : Number.parseFloat(String(value));
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.min(max, Math.max(min, parsed));
+  };
+
+  const validateVoiceId = (value: unknown) => {
+    const voiceId = String(value || '');
+    if (!/^[a-zA-Z0-9_-]{10,64}$/.test(voiceId)) {
+      throw Object.assign(new Error('Invalid voiceId'), { status: 400 });
+    }
+    return voiceId;
+  };
+
+  // --- Server-side AI gateway for the HTML5 client ---
+  app.post('/api/ai/gemini/audio-design', asyncRoute(async (req, res) => {
+    const { files, requirements = '', target = {}, isInstrumental = true } = req.body || {};
+    if (!Array.isArray(files)) {
+      return res.status(400).json({ error: 'files must be an array' });
+    }
+    const result = await analyzeAudioDesign(files, String(requirements), target, Boolean(isInstrumental));
+    return res.json(result);
+  }));
+
+  app.post('/api/ai/gemini/regenerate-lyrics', asyncRoute(async (req, res) => {
+    const { originalLyrics = '', selectedPart = '', direction = '' } = req.body || {};
+    const text = await regenerateLyrics(String(originalLyrics), String(selectedPart), String(direction));
+    return res.json({ text });
+  }));
+
+  app.post('/api/ai/gemini/sfx-requirements', asyncRoute(async (req, res) => {
+    const { inputText = '', screenshot = null, templateType } = req.body || {};
+    const allowedTemplates = ['game_sfx_general', 'game_sfx_middleware', 'voiceover_general', 'voiceover_multilang'];
+    if (!allowedTemplates.includes(templateType)) {
+      return res.status(400).json({ error: 'Invalid templateType' });
+    }
+    const result = await generateSfxRequirements(String(inputText), screenshot, templateType);
+    return res.json(result);
+  }));
+
+  app.post('/api/ai/gemini/optimize-metadata', asyncRoute(async (req, res) => {
+    const items = req.body?.items;
+    if (!Array.isArray(items)) {
+      return res.status(400).json({ error: 'items must be an array' });
+    }
+    const optimizedItems = await optimizeImportMetadata(items);
+    return res.json({ items: optimizedItems });
+  }));
+
+  app.post('/api/ai/gemini/translate', asyncRoute(async (req, res) => {
+    const text = await translateToEnglish(String(req.body?.text || ''));
+    return res.json({ text });
+  }));
+
+  app.post('/api/ai/gemini/match-voice', asyncRoute(async (req, res) => {
+    const { description = '', gender, voices } = req.body || {};
+    if ((gender !== 'male' && gender !== 'female') || !Array.isArray(voices)) {
+      return res.status(400).json({ error: 'Invalid voice matching request' });
+    }
+    const voiceId = await matchBestVoice(String(description), gender, voices);
+    return res.json({ voiceId });
+  }));
+
+  app.post('/api/ai/elevenlabs/sound-effect', asyncRoute(async (req, res) => {
+    const text = String(req.body?.text || '').trim();
+    if (!text) return res.status(400).json({ error: 'text is required' });
+    const duration = parseNumber(req.body?.duration, 10, 0.5, 60);
+    return sendAudioBlob(res, await generateSoundEffect(text, duration));
+  }));
+
+  app.post('/api/ai/elevenlabs/music', asyncRoute(async (req, res) => {
+    const text = String(req.body?.text || '').trim();
+    if (!text) return res.status(400).json({ error: 'text is required' });
+    const duration = parseNumber(req.body?.duration, 30, 1, 60);
+    return sendAudioBlob(res, await generateMusic(
+      text,
+      duration,
+      req.body?.isInstrumental !== false,
+      typeof req.body?.lyrics === 'string' ? req.body.lyrics : undefined,
+    ));
+  }));
+
+  app.post('/api/ai/elevenlabs/voice', asyncRoute(async (req, res) => {
+    const text = String(req.body?.text || '').trim();
+    if (!text) return res.status(400).json({ error: 'text is required' });
+    const voiceId = validateVoiceId(req.body?.voiceId);
+    return sendAudioBlob(res, await generateVoice(
+      text,
+      voiceId,
+      parseNumber(req.body?.stability, 0.5, 0, 1),
+      parseNumber(req.body?.similarity, 0.75, 0, 1),
+      parseNumber(req.body?.style, 0.05, 0, 1),
+    ));
+  }));
+
+  app.get('/api/ai/elevenlabs/voices', asyncRoute(async (req, res) => {
+    return res.json({ voices: await fetchAvailableVoices() });
+  }));
+
+  app.post('/api/ai/elevenlabs/speech-to-speech', aiUpload.single('audio'), asyncRoute(async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'audio is required' });
+    const audio = new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype });
+    return sendAudioBlob(res, await generateSpeechToSpeech(
+      audio,
+      validateVoiceId(req.body?.voiceId),
+      parseNumber(req.body?.stability, 0.5, 0, 1),
+      parseNumber(req.body?.similarity, 0.75, 0, 1),
+      parseNumber(req.body?.style, 0.05, 0, 1),
+    ));
+  }));
+
+  app.post('/api/ai/elevenlabs/audio-isolation', aiUpload.single('audio'), asyncRoute(async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'audio is required' });
+    const audio = new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype });
+    return sendAudioBlob(res, await isolateAudio(audio));
+  }));
+
+  app.post('/api/ai/elevenlabs/speech-to-text', aiUpload.single('audio'), asyncRoute(async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'audio is required' });
+    const audio = new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype });
+    const result = await transcribeSpeech(
+      audio,
+      typeof req.body?.languageCode === 'string' ? req.body.languageCode : undefined,
+      req.body?.tagAudioEvents !== 'false',
+    );
+    return res.json(result);
+  }));
 
   // 5. File Upload Endpoint (Supports both raw binary stream and multipart/form-data)
   app.post('/api/sfx/upload', (req, res, next) => {

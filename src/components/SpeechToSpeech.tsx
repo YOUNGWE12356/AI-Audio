@@ -131,14 +131,6 @@ export default function SpeechToSpeech({
   };
 
   const handleStsGenerate = async () => {
-    const hasKey = Boolean(
-      (typeof window !== 'undefined' && localStorage.getItem('ELEVENLABS_API_KEY')) || 
-      (typeof process !== 'undefined' && process.env?.ELEVENLABS_API_KEY)
-    );
-    if (!hasKey) {
-      setStsError('ELEVENLABS_API_KEY 未配置，请前往设置页面或 Secrets 面板添加。');
-      return;
-    }
     if (!stsFile) {
       setStsError('请先上传需要变声的源音频文件');
       return;
