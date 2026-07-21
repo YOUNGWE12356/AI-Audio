@@ -180,84 +180,97 @@ async function startServer() {
   });
 
   // 5.1. Chunked File Upload Endpoint (Bypasses proxy size limitations for large files)
-  app.post('/api/sfx/upload-chunk', upload.single('file'), (req, res) => {
-    try {
-      const { chunkIndex, totalChunks, fileName, uploadId } = req.body;
-      if (!req.file) {
-        return res.status(400).json({ error: 'No chunk file uploaded' });
+  app.post('/api/sfx/upload-chunk', (req, res) => {
+    upload.single('file')(req, res, (err) => {
+      if (err) {
+        console.error('Multer chunk upload error:', err);
+        return res.status(500).json({ error: err.message });
       }
 
-      const index = parseInt(chunkIndex, 10);
-      const total = parseInt(totalChunks, 10);
-      
-      if (isNaN(index) || isNaN(total) || !uploadId || !fileName) {
-        return res.status(400).json({ error: 'Missing chunk metadata' });
-      }
-
-      // Temp directory for this upload session
-      const tempChunkDir = path.join(uploadsDir, `temp_${uploadId}`);
-      if (!fs.existsSync(tempChunkDir)) {
-        fs.mkdirSync(tempChunkDir, { recursive: true });
-      }
-
-      // Move the uploaded file from multer destination to our temp chunk path
-      const chunkPath = path.join(tempChunkDir, `chunk_${index}`);
-      if (fs.existsSync(chunkPath)) {
-        fs.unlinkSync(chunkPath);
-      }
-      fs.renameSync(req.file.path, chunkPath);
-
-      // Check if all chunks have been uploaded
-      let allChunksUploaded = true;
-      for (let i = 0; i < total; i++) {
-        if (!fs.existsSync(path.join(tempChunkDir, `chunk_${i}`))) {
-          allChunksUploaded = false;
-          break;
+      try {
+        const { chunkIndex, totalChunks, fileName, uploadId } = req.body;
+        if (!req.file) {
+          return res.status(400).json({ error: 'No chunk file uploaded' });
         }
-      }
 
-      if (allChunksUploaded) {
-        // Merge all chunks
-        const ext = path.extname(fileName) || '.mp4';
-        const base = path.basename(fileName, ext).replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_');
-        const cleanFilename = `${base}_${Date.now()}${ext}`;
-        const finalFilePath = path.join(uploadsDir, cleanFilename);
-
-        const writeStream = fs.createWriteStream(finalFilePath);
+        const index = parseInt(chunkIndex, 10);
+        const total = parseInt(totalChunks, 10);
         
-        for (let i = 0; i < total; i++) {
-          const chunkFilePath = path.join(tempChunkDir, `chunk_${i}`);
-          const data = fs.readFileSync(chunkFilePath);
-          writeStream.write(data);
-          // Delete temp chunk file
-          try {
-            fs.unlinkSync(chunkFilePath);
-          } catch (e) {}
+        if (isNaN(index) || isNaN(total) || !uploadId || !fileName) {
+          if (req.file && req.file.path) {
+            try { fs.unlinkSync(req.file.path); } catch (e) {}
+          }
+          return res.status(400).json({ error: 'Missing chunk metadata' });
         }
-        writeStream.end();
 
-        // Remove temp directory
-        try {
-          fs.rmdirSync(tempChunkDir);
-        } catch (e) {}
+        // Temp directory for this upload session
+        const tempChunkDir = path.join(uploadsDir, `temp_${uploadId}`);
+        if (!fs.existsSync(tempChunkDir)) {
+          fs.mkdirSync(tempChunkDir, { recursive: true });
+        }
 
-        console.log(`Successfully assembled chunked upload: ${cleanFilename}`);
+        // Move the uploaded file from multer destination to our temp chunk path
+        const chunkPath = path.join(tempChunkDir, `chunk_${index}`);
+        if (fs.existsSync(chunkPath)) {
+          try { fs.unlinkSync(chunkPath); } catch (e) {}
+        }
+        fs.renameSync(req.file.path, chunkPath);
+
+        // Check if all chunks have been uploaded
+        let allChunksUploaded = true;
+        for (let i = 0; i < total; i++) {
+          if (!fs.existsSync(path.join(tempChunkDir, `chunk_${i}`))) {
+            allChunksUploaded = false;
+            break;
+          }
+        }
+
+        if (allChunksUploaded) {
+          // Merge all chunks
+          const ext = path.extname(fileName) || '.mp4';
+          const base = path.basename(fileName, ext).replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_');
+          const cleanFilename = `${base}_${Date.now()}${ext}`;
+          const finalFilePath = path.join(uploadsDir, cleanFilename);
+
+          const writeStream = fs.createWriteStream(finalFilePath);
+          
+          for (let i = 0; i < total; i++) {
+            const chunkFilePath = path.join(tempChunkDir, `chunk_${i}`);
+            const data = fs.readFileSync(chunkFilePath);
+            writeStream.write(data);
+            // Delete temp chunk file
+            try {
+              fs.unlinkSync(chunkFilePath);
+            } catch (e) {}
+          }
+          writeStream.end();
+
+          // Remove temp directory
+          try {
+            fs.rmdirSync(tempChunkDir);
+          } catch (e) {}
+
+          console.log(`Successfully assembled chunked upload: ${cleanFilename}`);
+          return res.json({
+            url: `/uploads/${cleanFilename}`,
+            fileName: cleanFilename,
+            completed: true
+          });
+        }
+
         return res.json({
-          url: `/uploads/${cleanFilename}`,
-          fileName: cleanFilename,
-          completed: true
+          completed: false,
+          chunkReceived: index
         });
+
+      } catch (err: any) {
+        console.error('Error during chunk upload:', err);
+        if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+          try { fs.unlinkSync(req.file.path); } catch (e) {}
+        }
+        return res.status(500).json({ error: err.message });
       }
-
-      return res.json({
-        completed: false,
-        chunkReceived: index
-      });
-
-    } catch (err: any) {
-      console.error('Error during chunk upload:', err);
-      return res.status(500).json({ error: err.message });
-    }
+    });
   });
 
   // 6. Download File as Attachment (to bypass iframe download sandbox constraints)
@@ -697,6 +710,14 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
       console.error('Error in audio mixing endpoint:', err);
       return res.status(500).json({ error: err.message });
     }
+  });
+
+  // --- Global API Error Handler ---
+  app.use('/api', (err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error('Unhandled API Error:', err);
+    res.status(err.status || 500).json({
+      error: err.message || 'Internal Server Error'
+    });
   });
 
   // --- Vite & SPA integration ---
