@@ -430,7 +430,7 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
   // 8. Generate Timeline Clip Audio using ElevenLabs API
   app.post('/api/video/generate-clip', async (req, res) => {
     try {
-      const { prompt, trackId, text, voiceId, duration } = req.body;
+      const { prompt, trackId, trackType, text, voiceId, duration } = req.body;
       
       const apiKey = process.env.ELEVENLABS_API_KEY || process.env.VITE_ELEVENLABS_API_KEY;
       if (!apiKey) {
@@ -440,7 +440,9 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
       const cleanFilename = `el_${trackId}_${Date.now()}.mp3`;
       const filePath = path.join(uploadsDir, cleanFilename);
       
-      if (trackId === 'dubbing') {
+      const resolvedType = trackType || (trackId === 'dubbing' ? 'dubbing' : trackId === 'bgm' ? 'bgm' : 'sfx');
+      
+      if (resolvedType === 'dubbing') {
         // Text to Speech
         const targetVoice = voiceId || "21m00Tcm4TlvDq8ikWAM"; // Rachel fallback
         console.log(`ElevenLabs server TTS: text="${text}" voiceId=${targetVoice}`);
@@ -470,7 +472,7 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
         const buffer = Buffer.from(await apiResponse.arrayBuffer());
         fs.writeFileSync(filePath, buffer);
         
-      } else if (trackId === 'bgm') {
+      } else if (resolvedType === 'bgm') {
         // Background music (Sound generation)
         const sfxPrompt = `AI Music, full background instrumental track, no vocals, no speech: ${prompt}`;
         const elevenLabsDuration = Math.min(22, duration || 20);
@@ -598,8 +600,13 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
       const filterParts: string[] = [];
       validClips.forEach((clip: any, idx: number) => {
         const delayMs = Math.max(1, Math.round((clip.startTime || 0) * 1000));
-        // Force sample rate of 44100 and channel layout to stereo, then apply volume and adelay
-        filterParts.push(`[${idx + 1}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=${clip.volume || 1.0},adelay=${delayMs}|${delayMs}[aud${idx}]`);
+        let speedFilter = '';
+        if (clip.speed && clip.speed !== 1.0) {
+          const clampedSpeed = Math.max(0.5, Math.min(2.0, clip.speed));
+          speedFilter = `,atempo=${clampedSpeed}`;
+        }
+        // Force sample rate of 44100 and channel layout to stereo, then apply speed filter, volume and adelay
+        filterParts.push(`[${idx + 1}:a]aformat=sample_rates=44100:channel_layouts=stereo${speedFilter},volume=${clip.volume || 1.0},adelay=${delayMs}|${delayMs}[aud${idx}]`);
       });
 
       // Mix all delayed streams together
@@ -660,8 +667,13 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
       const filterParts: string[] = [];
       validClips.forEach((clip: any, idx: number) => {
         const delayMs = Math.max(1, Math.round((clip.startTime || 0) * 1000));
-        // Force sample rate of 44100 and channel layout to stereo, then apply volume and adelay
-        filterParts.push(`[${idx}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=${clip.volume || 1.0},adelay=${delayMs}|${delayMs}[aud${idx}]`);
+        let speedFilter = '';
+        if (clip.speed && clip.speed !== 1.0) {
+          const clampedSpeed = Math.max(0.5, Math.min(2.0, clip.speed));
+          speedFilter = `,atempo=${clampedSpeed}`;
+        }
+        // Force sample rate of 44100 and channel layout to stereo, then apply speed filter, volume and adelay
+        filterParts.push(`[${idx}:a]aformat=sample_rates=44100:channel_layouts=stereo${speedFilter},volume=${clip.volume || 1.0},adelay=${delayMs}|${delayMs}[aud${idx}]`);
       });
 
       const mixInputs = validClips.map((_, idx) => `[aud${idx}]`).join('');

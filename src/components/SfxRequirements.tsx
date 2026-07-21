@@ -82,7 +82,8 @@ const DEMO_ROWS: Record<TemplateType, any[]> = {
       remarks: "配置 FMOD Multi-Sound，放入 5 个随机样本避免单调",
       video_link: "无",
       reference: "参考《塞尔达传说：荒野之息》草地脚步",
-      playback_logic: "3D 空间，设置随机音高 (Pitch) 与音量 (Volume)"
+      playback_logic: "3D 空间，设置随机音高 (Pitch) 与音量 (Volume)",
+      distance_3d: "20"
     },
     {
       index: 2,
@@ -94,7 +95,8 @@ const DEMO_ROWS: Record<TemplateType, any[]> = {
       remarks: "需要关联 RTPC 参数：法力强度（改变低频厚度与爆破感）",
       video_link: "火球技能.mp4",
       reference: "参考《魔兽世界》法术释放音效",
-      playback_logic: "3D 空间，限制最大发声数 3，最老发声覆盖"
+      playback_logic: "3D 空间，限制最大发声数 3，最老发声覆盖",
+      distance_3d: "20"
     }
   ],
   voiceover_general: [
@@ -145,8 +147,8 @@ const TEMPLATE_INFO = {
   game_sfx_middleware: {
     name: "FMOD / Wwise 引擎中间件需求表",
     desc: "适合专业音频设计师，包含事件路径、播放参数逻辑与音频参考",
-    headers: ["序号", "文件命名", "事件命名", "时长", "应用场景", "描述", "备注", "动效视频", "参考", "播放逻辑"],
-    keys: ["index", "filename", "event_name", "duration", "scene", "description", "remarks", "video_link", "reference", "playback_logic"]
+    headers: ["序号", "文件命名", "事件命名", "时长", "应用场景", "描述", "备注", "动效视频", "参考", "播放逻辑", "3D距离"],
+    keys: ["index", "filename", "event_name", "duration", "scene", "description", "remarks", "video_link", "reference", "playback_logic", "distance_3d"]
   },
   voiceover_general: {
     name: "通用角色配音表",
@@ -280,6 +282,8 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
           newRow[key] = `event:/SFX/Module/new_${newIndex}`;
         } else if (key === 'duration' || key === 'duration_logic') {
           newRow[key] = "1s";
+        } else if (key === 'distance_3d') {
+          newRow[key] = "20";
         } else {
           newRow[key] = "";
         }

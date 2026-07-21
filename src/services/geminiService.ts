@@ -362,7 +362,8 @@ export async function generateSfxRequirements(
       - remarks (备注): 声音备注或技术要点，如 "需要加入 3D 空间衰减 (Spatialization)"。
       - video_link (动效视频): 占位说明或对应动效分镜视频。
       - reference (参考): 参考音频链接或灵感来源，如 "参考《尼尔：机械纪元》闪避声效"。
-      - playback_logic (播放逻辑): 音频在引擎中的播放/触发参数逻辑，如 "2D / 1 样本 / 限制最大发声数 2"。
+      - playback_logic (播放逻辑): 音频在引擎中的播放/触发参数逻辑，如 "3D 空间，设置随机音高 (Pitch)"。
+      - distance_3d (3D距离): 3D空间最大衰减距离（如果是3D事件，必须增加一个3D距离，默认是 "20"；如果是2D事件则设置为 "-"）。
     `;
     schema = {
       type: Type.OBJECT,
@@ -372,7 +373,7 @@ export async function generateSfxRequirements(
           type: Type.ARRAY,
           items: {
             type: Type.OBJECT,
-            required: ["index", "filename", "event_name", "duration", "scene", "description", "remarks", "video_link", "reference", "playback_logic"],
+            required: ["index", "filename", "event_name", "duration", "scene", "description", "remarks", "video_link", "reference", "playback_logic", "distance_3d"],
             properties: {
               index: { type: Type.INTEGER },
               filename: { type: Type.STRING },
@@ -383,7 +384,8 @@ export async function generateSfxRequirements(
               remarks: { type: Type.STRING },
               video_link: { type: Type.STRING },
               reference: { type: Type.STRING },
-              playback_logic: { type: Type.STRING }
+              playback_logic: { type: Type.STRING },
+              distance_3d: { type: Type.STRING }
             }
           }
         }
@@ -457,22 +459,29 @@ export async function generateSfxRequirements(
 
   const prompt = `
     你是一个顶级的游戏音频总监、声音设计师和配音导演。
-    你的任务是：根据用户输入的文字描述、或上传的草稿表格/需求表截图（图片数据），进行高品质的识别、结构化重构、工程化规范命名、以及专业化的填充和扩充，最终生成一张完美格式的、可以直接用于项目开发、给外包和合作团队看的专业“音效/配音需求表”。
+    你的任务是：根据用户输入的文字描述、或上传的草稿表格/需求表截图（图片数据），进行高品质的识别、结构化重构、工程化规范命名、以及专业化的填充和优化。最终生成一张完美格式的、可以直接用于项目开发、给外包和合作团队看的专业“音效/配音需求表”。
 
     请严格遵守以下规则进行处理：
-    1. **多模态输入识别**：
-       - 如果用户提供了截图（图片文件），请深度识别并OCR提取出图片中表格的全部有效行（如：序号、名字、场景、描述、台词等内容）。不要遗漏任何一行。
-       - 如果用户只提供了简短的文字要求（例如 "帮我生成一个末日丧尸游戏的基础音效表" 或 "需要一个萌系闯关游戏的配音表"），请发挥你顶级专家的创造力，自动头脑风暴，自动为你生成 8-12 行高品质、典型的、覆盖游戏方方面面的典型需求，组成一张完整的模板表。
-       - 如果用户同时提供了图片和文字，请以图片的提取为主，并融合文字中的额外指示（如修改意见、添加特定内容等）。
+    1. **多模态输入识别与需求数量控制**：
+       - **精确识别并锁定数量**：请首先仔细识别用户输入的文字或上传的截图（图片数据）中**实际包含的、具体的音效或配音需求条目数量**。
+       - **严禁增加额外行**：在重构和优化用户已有草稿、列表或截图时，生成返回的 items 数组大小**必须与原输入条目的数量完全一致（1:1 对应），优化时不需要增加需求数量。**严禁自动填充任何无中生有的占位示例需求行。
+       - 只有当用户仅仅提供了极其空泛抽象的提示词（例如“生成一个科幻游戏的音效需求表”），而未提供任何具体列表、条目或截图时，你才应当自动头脑风暴生成 6-10 行典型的模板推荐条目。
 
-    2. **专业化设计与规范**：
+    2. **文件名命名优化与直接保留**：
+       - 如果用户输入或上传的截图/草稿表格中**本身就带有文件命名或名称**（如 \`sfx_click\`, \`bg_battle\`, \`刀剑砍击声\` 等）：
+         - 你可以根据专业的下划线英文命名规范（如：\`[sfx / bgm / vo]_[模块]_[动作/角色]_[描述]_[序号]\`）来智能优化重构这些命名；
+         - 如果用户提供的命名已经相当成熟、合理或带有特定的版本代号，你应当**直接使用和保留**给到的命名；
+         - 确保优化的命名与原始名称的意图保持强关联，不得凭空捏造全新的无关名称。
+
+    3. **专业化设计与规范**：
        - **工程化文件命名 (filename)**：禁止用中文命名文件。所有文件名必须是标准的下划线英文小写结构。
          格式：\`[sfx / bgm / vo]_[模块]_[动作/角色]_[描述]_[序号]\`。例如：\`sfx_ui_confirm_01\`、\`sfx_enemy_zombie_growl_03\`、\`vo_narrator_intro_01\`。
        - **FMOD/Wwise 事件路径命名 (event_name)**：如果是音频中间件模板，对应的事件必须有规范的虚空间路径格式，例如：\`event:/SFX/Player/jump\` 或 \`event:/VO/Hero/attack\`。
        - **时长与播放逻辑**：用声效术语编写，例如 "1s, 单次播放", "loop, 循环播放"。
+       - **3D 距离规范 (distance_3d)**：对于 FMOD/Wwise 中间件需求表，如果是 3D 事件（如备注或播放逻辑里包含 3D 空间、3D 空间定位等），必须在 \`distance_3d\` 中增加一个 3D 距离，默认值为 \`"20"\`（或根据音量、场景大小评估为 "15", "30" 等数字字符串）；如果是 2D 事件，则该字段输出为 \`"-"\`。
        - **多语种台词生成**：在多语种配音模板下，根据简中台词，翻译并创作出对应的英语台词和韩语台词。台词要带有文学色彩、符合游戏中的魔幻/科幻/写实风格，不能是粗暴的机器人机翻。
 
-    3. **输出格式**：
+    4. **输出格式**：
        - 必须输出符合以下模板要求的 JSON 数组。
        \${templateDescription}
 

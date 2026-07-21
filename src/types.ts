@@ -26,7 +26,7 @@ export interface HistoryItem {
 
 export interface TimelineClip {
   id: string;
-  trackId: 'bgm' | 'sfx' | 'dubbing';
+  trackId: string;
   name: string;
   prompt: string;
   text?: string; // For dubbing TTS
@@ -37,4 +37,5 @@ export interface TimelineClip {
   audioUrl?: string; // Generated file URL
   isGenerating?: boolean;
   error?: string;
+  speed?: number; // Playback speed (0.5 to 2.0)
 }
