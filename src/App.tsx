@@ -4,6 +4,7 @@
  */
 
 import React, { lazy, Suspense, useState, useRef, useEffect } from 'react';
+import { Menu } from 'lucide-react';
 import { analyzeAudioDesign, AudioDesignResult, regenerateLyrics, translateToEnglish } from './services/geminiService';
 import { generateSoundEffect, generateMusic, generateVoice } from './services/elevenLabsService';
 import { FileItem, HistoryItem, TabType } from './types';
@@ -37,6 +38,7 @@ function WorkspaceLoading() {
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState<TabType>('workbench');
+  const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   
   // The HTML5 client only reads service availability from the same-origin API.
   // Secret values remain on the server and are never embedded into the bundle.
@@ -563,13 +565,40 @@ export default function App() {
   };
 
   return (
-    <div id="app-root-container" className="flex h-screen w-full bg-slate-50 text-slate-800 overflow-hidden font-sans antialiased">
+    <div id="app-root-container" className="flex h-dvh min-h-0 w-full overflow-hidden bg-slate-50 font-sans text-slate-800 antialiased">
       {/* Global Sidebar Component */}
-      <Sidebar currentTab={currentTab} setCurrentTab={setCurrentTab} />
+      <Sidebar
+        currentTab={currentTab}
+        setCurrentTab={setCurrentTab}
+        isMobileOpen={isMobileNavOpen}
+        onMobileClose={() => setIsMobileNavOpen(false)}
+      />
       
-      {/* Right Side Workspace Frame */}
-      <main id="app-workspace-viewport" className="flex-1 overflow-y-auto bg-slate-50 relative custom-scrollbar">
-        <Suspense fallback={<WorkspaceLoading />}>
+      <div
+        className="flex min-w-0 flex-1 flex-col"
+        aria-hidden={isMobileNavOpen ? true : undefined}
+        inert={isMobileNavOpen ? true : undefined}
+      >
+        <header className="flex h-16 shrink-0 items-center gap-3 border-b border-slate-200 bg-white px-4 lg:hidden">
+          <button
+            type="button"
+            onClick={() => setIsMobileNavOpen(true)}
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-600 shadow-sm transition-colors hover:bg-slate-50 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+            aria-label="打开导航菜单"
+            aria-expanded={isMobileNavOpen}
+            aria-controls="sidebar-mobile"
+          >
+            <Menu className="h-5 w-5" />
+          </button>
+          <div className="min-w-0">
+            <p className="truncate text-sm font-bold tracking-tight text-slate-800">AI Audio Suite</p>
+            <p className="truncate text-[10px] font-semibold text-emerald-600">多模态音频创作中心</p>
+          </div>
+        </header>
+
+        {/* Right Side Workspace Frame */}
+        <main id="app-workspace-viewport" className="relative min-h-0 min-w-0 flex-1 overflow-auto bg-slate-50 custom-scrollbar">
+          <Suspense fallback={<WorkspaceLoading />}>
         {currentTab === 'workbench' && (
           <Workbench 
             setCurrentTab={setCurrentTab} 
@@ -696,8 +725,9 @@ export default function App() {
         {currentTab === 'video-soundtrack' && (
           <VideoSoundtrack />
         )}
-        </Suspense>
-      </main>
+          </Suspense>
+        </main>
+      </div>
     </div>
   );
 }
