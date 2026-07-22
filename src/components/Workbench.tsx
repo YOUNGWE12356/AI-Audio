@@ -12,8 +12,6 @@ import {
   Play, 
   Pause, 
   Download, 
-  CheckCircle2, 
-  AlertCircle,
   Clock,
   ArrowRight
 } from 'lucide-react';
@@ -22,13 +20,42 @@ import { HistoryItem, TabType } from '../types';
 interface WorkbenchProps {
   setCurrentTab: (tab: TabType) => void;
   historyList: HistoryItem[];
-  hasGeminiKey: boolean;
-  hasElevenLabsKey: boolean;
 }
 
-export default function Workbench({ setCurrentTab, historyList, hasGeminiKey, hasElevenLabsKey }: WorkbenchProps) {
+const historyTypeMeta: Record<HistoryItem['type'], { label: string; tab: TabType; badgeClass: string }> = {
+  music: {
+    label: '音乐',
+    tab: 'music-studio',
+    badgeClass: 'border-indigo-100 bg-indigo-50 text-indigo-700',
+  },
+  sfx: {
+    label: '音效',
+    tab: 'sfx-studio',
+    badgeClass: 'border-emerald-100 bg-emerald-50 text-emerald-700',
+  },
+  voice: {
+    label: '配音',
+    tab: 'dubbing-studio',
+    badgeClass: 'border-sky-100 bg-sky-50 text-sky-700',
+  },
+  director: {
+    label: '音频设计',
+    tab: 'audio-director',
+    badgeClass: 'border-teal-100 bg-teal-50 text-teal-700',
+  },
+  'video-soundtrack': {
+    label: '视频声音制作',
+    tab: 'video-soundtrack',
+    badgeClass: 'border-amber-100 bg-amber-50 text-amber-700',
+  },
+};
+
+export default function Workbench({ setCurrentTab, historyList }: WorkbenchProps) {
   const [playingId, setPlayingId] = useState<string | null>(null);
   const audioRefs = useRef<{ [key: string]: HTMLAudioElement | null }>({});
+  const recentHistory = [...historyList]
+    .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
+    .slice(0, 3);
 
   const handlePlayPause = (id: string, url: string) => {
     // If we're playing another audio, pause it first
@@ -86,57 +113,63 @@ export default function Workbench({ setCurrentTab, historyList, hasGeminiKey, ha
   return (
     <div id="workbench-view" className="flex-1 p-8 space-y-8 max-w-6xl mx-auto w-full">
       {/* Welcome Banner */}
-      <div id="workbench-hero" className="relative overflow-hidden rounded-3xl bg-white border border-emerald-100 p-8 md:p-10 flex flex-col md:flex-row items-center justify-between gap-6 shadow-md">
+      <div id="workbench-hero" className="relative overflow-hidden rounded-3xl bg-white border border-emerald-100 p-6 md:p-7 shadow-md">
         <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-emerald-500/5 to-teal-500/5 blur-3xl pointer-events-none" />
-        <div className="space-y-3 z-10 text-center md:text-left">
-          <div className="inline-flex items-center gap-2 px-3 py-1 bg-emerald-50 border border-emerald-100 rounded-full text-xs text-emerald-700 font-semibold">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-            AI 多模态音频创作中心 已就绪
-          </div>
-          <h2 className="text-2xl md:text-3xl font-extrabold text-slate-800 tracking-tight">
-            欢迎回来，音频制作人
-          </h2>
-          <p className="text-slate-600 text-sm max-w-lg leading-relaxed">
-            利用新一代多模态大模型与 ElevenLabs 顶尖音频合成系统，实现从视频解析、画面对齐到音效音轨、角色配音的闭环制作。
-          </p>
-        </div>
-        
-        {/* API Status Metrics */}
-        <div id="api-status-cards" className="grid grid-cols-2 gap-3 w-full md:w-auto shrink-0 z-10">
-          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col justify-between h-28 w-40 shadow-xs">
-            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Gemini API</span>
-            <div className="flex items-center gap-2 mt-2">
-              {hasGeminiKey ? (
-                <>
-                  <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-                  <span className="text-xs font-bold text-slate-800">已配置</span>
-                </>
-              ) : (
-                <>
-                  <AlertCircle className="w-5 h-5 text-amber-600" />
-                  <span className="text-xs font-bold text-slate-500">未检测到</span>
-                </>
-              )}
+        <div className="relative z-10 grid w-full grid-cols-1 gap-6 lg:grid-cols-[minmax(280px,0.85fr)_minmax(0,1.45fr)] lg:items-center">
+          <div className="space-y-3 text-center md:text-left">
+            <div className="inline-flex items-center gap-2 px-3 py-1 bg-emerald-50 border border-emerald-100 rounded-full text-xs text-emerald-700 font-semibold">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              AI 多模态音频创作中心 已就绪
             </div>
-            <span className="text-[9px] text-slate-400 truncate mt-1">负责多模态解析及排程</span>
+            <h2 className="text-2xl md:text-3xl font-extrabold text-slate-800 tracking-tight">
+              欢迎回来，音频制作人
+            </h2>
           </div>
 
-          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col justify-between h-28 w-40 shadow-xs">
-            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">ElevenLabs</span>
-            <div className="flex items-center gap-2 mt-2">
-              {hasElevenLabsKey ? (
-                <>
-                  <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-                  <span className="text-xs font-bold text-slate-800">已配置</span>
-                </>
-              ) : (
-                <>
-                  <AlertCircle className="w-5 h-5 text-amber-600" />
-                  <span className="text-xs font-bold text-slate-500">未检测到</span>
-                </>
-              )}
+          <div id="recent-work-summary" className="min-w-0">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="flex items-center gap-1.5 text-xs font-bold text-slate-700">
+                <Clock className="h-3.5 w-3.5 text-emerald-600" />
+                <span>最近工程与制作</span>
+              </h3>
+              <span className="text-[10px] font-medium text-slate-400">最近 {recentHistory.length} 条</span>
             </div>
-            <span className="text-[9px] text-slate-400 truncate mt-1">负责声音合成及渲染</span>
+
+            {recentHistory.length === 0 ? (
+              <div className="mt-2 rounded-xl border border-dashed border-slate-200 bg-white/60 px-4 py-5 text-center text-[11px] text-slate-400">
+                完成一次创作后，最近记录会显示在这里
+              </div>
+            ) : (
+              <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                {recentHistory.map((item) => {
+                  const meta = historyTypeMeta[item.type];
+                  return (
+                    <button
+                      key={item.id}
+                      id={`recent-work-${item.id}`}
+                      type="button"
+                      onClick={() => setCurrentTab(meta.tab)}
+                      className="group min-w-0 rounded-xl border border-slate-200 bg-white/85 p-2.5 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-emerald-200 hover:bg-white hover:shadow-md"
+                      aria-label={`打开${item.title}`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className={`rounded-md border px-1.5 py-0.5 text-[9px] font-bold ${meta.badgeClass}`}>
+                          {meta.label}
+                        </span>
+                        <ArrowRight className="h-3 w-3 shrink-0 text-slate-300 transition-all group-hover:translate-x-0.5 group-hover:text-emerald-600" />
+                      </div>
+                      <p className="mt-1.5 line-clamp-2 min-h-8 text-[11px] font-semibold leading-4 text-slate-700 group-hover:text-emerald-800">
+                        {item.title}
+                      </p>
+                      <div className="mt-1.5 flex items-center justify-between gap-2 text-[9px] font-medium text-slate-400">
+                        <span className="truncate">{item.details || '制作记录'}</span>
+                        <span className="shrink-0">{item.timestamp.slice(5)}</span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
       </div>

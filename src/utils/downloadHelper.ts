@@ -37,7 +37,7 @@ export async function downloadAudioHelper(
     const response = await fetch('/api/sfx/upload', {
       method: 'POST',
       headers: {
-        'x-filename': defaultFilename,
+        'x-filename': encodeURIComponent(defaultFilename),
         'Content-Type': 'audio/mpeg',
       },
       body: blob,

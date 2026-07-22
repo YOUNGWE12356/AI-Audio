@@ -547,9 +547,51 @@ export default function App() {
   };
 
   // Helper utility functions
-  const copyToClipboard = (text: string, id?: string) => {
-    navigator.clipboard.writeText(text);
-    if (id) {
+  const copyToClipboard = async (text: string, id?: string) => {
+    if (!text) return;
+
+    // Keep a synchronous fallback for embedded HTML5 browsers, where the
+    // asynchronous Clipboard API may lose its user-gesture permission.
+    const copyWithSelection = () => {
+      let copiedByEvent = false;
+      const handleCopy = (event: ClipboardEvent) => {
+        if (!event.clipboardData) return;
+        event.clipboardData.setData('text/plain', text);
+        event.preventDefault();
+        copiedByEvent = true;
+      };
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      document.addEventListener('copy', handleCopy);
+      try {
+        textarea.focus();
+        textarea.select();
+        textarea.setSelectionRange(0, textarea.value.length);
+        const commandCopied = document.execCommand('copy');
+        return commandCopied || copiedByEvent;
+      } catch {
+        return false;
+      } finally {
+        document.removeEventListener('copy', handleCopy);
+        textarea.remove();
+      }
+    };
+
+    let copied = copyWithSelection();
+    if (!copied) {
+      try {
+        await navigator.clipboard.writeText(text);
+        copied = true;
+      } catch {
+        copied = false;
+      }
+    }
+
+    if (copied && id) {
       setCopiedId(id);
       setTimeout(() => setCopiedId(null), 2000);
     }
@@ -659,8 +701,6 @@ export default function App() {
           <Workbench 
             setCurrentTab={setCurrentTab} 
             historyList={historyList} 
-            hasGeminiKey={hasGeminiKey}
-            hasElevenLabsKey={hasElevenLabsKey}
           />
         )}
 

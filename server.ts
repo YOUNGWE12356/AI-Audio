@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
+import { randomUUID } from 'node:crypto';
 import { exec, execFile } from 'child_process';
 import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
@@ -45,9 +46,15 @@ async function startServer() {
   // Directories paths
   const dataDir = path.join(process.cwd(), 'data');
   const uploadsDir = path.join(process.cwd(), 'uploads');
+  const geminiTempDir = path.join(dataDir, '.gemini-upload');
   const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
   const MAX_INLINE_MEDIA_BYTES = 24 * 1024 * 1024;
   const MAX_CHUNK_COUNT = 100;
+  const normalizeUnitVolume = (value: unknown) => (
+    typeof value === 'number' && Number.isFinite(value)
+      ? Math.min(1, Math.max(0, value))
+      : 1
+  );
   const ALLOWED_VIDEO_EXTENSIONS = new Set([
     '.mp4',
     '.m4v',
@@ -70,6 +77,63 @@ async function startServer() {
     '.mpg': 'video/mpeg',
     '.wmv': 'video/x-ms-wmv',
   };
+  const ALLOWED_UPLOAD_EXTENSIONS = new Set([
+    ...ALLOWED_VIDEO_EXTENSIONS,
+    '.wav',
+    '.mp3',
+    '.m4a',
+    '.aac',
+    '.ogg',
+    '.opus',
+    '.flac',
+    '.aif',
+    '.aiff',
+    '.png',
+    '.jpg',
+    '.jpeg',
+    '.webp',
+    '.pdf',
+  ]);
+  const UPLOAD_EXTENSION_BY_MIME: Record<string, string> = {
+    ...Object.fromEntries(
+      Object.entries(VIDEO_MIME_BY_EXTENSION).map(([extension, mimeType]) => [mimeType, extension]),
+    ),
+    'audio/wav': '.wav',
+    'audio/x-wav': '.wav',
+    'audio/mpeg': '.mp3',
+    'audio/mp4': '.m4a',
+    'audio/aac': '.aac',
+    'audio/ogg': '.ogg',
+    'audio/opus': '.opus',
+    'audio/flac': '.flac',
+    'audio/aiff': '.aiff',
+    'image/png': '.png',
+    'image/jpeg': '.jpg',
+    'image/webp': '.webp',
+    'application/pdf': '.pdf',
+  };
+
+  const getSafeUploadExtension = (
+    fileName: unknown,
+    mimeType: unknown,
+    fallback = '.bin',
+  ) => {
+    const extension = typeof fileName === 'string' ? path.extname(fileName).toLowerCase() : '';
+    if (ALLOWED_UPLOAD_EXTENSIONS.has(extension)) return extension;
+    const normalizedMimeType = String(mimeType || '').split(';', 1)[0].trim().toLowerCase();
+    return UPLOAD_EXTENSION_BY_MIME[normalizedMimeType] || fallback;
+  };
+
+  const normalizeUploadDisplayName = (value: unknown, fallback: string) => {
+    if (typeof value !== 'string') return fallback;
+    const normalized = value
+      .normalize('NFC')
+      .replace(/[\0-\x1f\x7f]/g, ' ')
+      .replace(/[\\/]/g, '_')
+      .trim()
+      .slice(0, 180);
+    return normalized || fallback;
+  };
 
   // Ensure directories exist
   if (!fs.existsSync(dataDir)) {
@@ -77,6 +141,9 @@ async function startServer() {
   }
   if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
+  }
+  if (!fs.existsSync(geminiTempDir)) {
+    fs.mkdirSync(geminiTempDir, { recursive: true });
   }
 
   const isPathInside = (root: string, candidate: string) => {
@@ -94,6 +161,33 @@ async function startServer() {
     });
   };
 
+  // Google Files API derives X-Goog-Upload-File-Name from the local path.
+  // Undici only accepts ByteString request-header values, so an existing
+  // Chinese (or otherwise non-ASCII) project filename must be uploaded through
+  // a short-lived ASCII alias. A hard link avoids copying large videos; the
+  // copy fallback keeps this portable across filesystems.
+  const createGeminiUploadAlias = async (sourcePath: string, mimeType: string) => {
+    const extension = getSafeUploadExtension(sourcePath, mimeType, '.mp4');
+    const aliasName = `gemini_video_${randomUUID()}${extension}`;
+    const aliasPath = path.resolve(geminiTempDir, aliasName);
+    if (!isPathInside(geminiTempDir, aliasPath)) {
+      throw Object.assign(new Error('无法创建安全的视频分析临时文件。'), { status: 500 });
+    }
+
+    try {
+      await fs.promises.link(sourcePath, aliasPath);
+    } catch {
+      try {
+        await fs.promises.copyFile(sourcePath, aliasPath, fs.constants.COPYFILE_EXCL);
+      } catch (copyError) {
+        await safeUnlink(aliasPath);
+        throw copyError;
+      }
+    }
+
+    return { aliasPath, aliasName };
+  };
+
   const safeRemoveDirectory = async (directoryPath?: string) => {
     if (!directoryPath || !isPathInside(uploadsDir, directoryPath)) return;
     await fs.promises.rm(directoryPath, { recursive: true, force: true }).catch((error) => {
@@ -103,6 +197,7 @@ async function startServer() {
 
   const parseSafeVideoFilename = (value: unknown) => {
     if (typeof value !== 'string' || value.length === 0 || value.length > 255) return null;
+    if (/[\\/\0-\x1f\x7f]/.test(value)) return null;
     if (path.basename(value) !== value) return null;
 
     const originalExtension = path.extname(value);
@@ -203,13 +298,8 @@ async function startServer() {
       cb(null, uploadsDir);
     },
     filename: (req, file, cb) => {
-      let originalname = file.originalname;
-      try {
-        originalname = decodeURIComponent(originalname);
-      } catch (e) {}
-      const ext = path.extname(originalname) || '.wav';
-      const base = path.basename(originalname, ext).replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_');
-      const cleanFilename = `${base}_${Date.now()}${ext}`;
+      const ext = getSafeUploadExtension(file.originalname, file.mimetype, '.wav');
+      const cleanFilename = `upload_${randomUUID()}${ext}`;
       cb(null, cleanFilename);
     }
   });
@@ -233,6 +323,68 @@ async function startServer() {
     const parsed = typeof value === 'number' ? value : Number.parseFloat(String(value));
     if (!Number.isFinite(parsed)) return fallback;
     return Math.min(max, Math.max(min, parsed));
+  };
+
+  const buildAtempoFilter = (value: unknown) => {
+    const speed = parseNumber(value, 1, 0.25, 4);
+    if (Math.abs(speed - 1) < 0.0001) return '';
+
+    const factors: number[] = [];
+    let remaining = speed;
+    while (remaining < 0.5 - 0.0001) {
+      factors.push(0.5);
+      remaining /= 0.5;
+    }
+    while (remaining > 2 + 0.0001) {
+      factors.push(2);
+      remaining /= 2;
+    }
+    if (Math.abs(remaining - 1) >= 0.0001) factors.push(remaining);
+
+    return factors
+      .map(factor => `atempo=${Number(factor.toFixed(6))}`)
+      .join(',');
+  };
+
+  const buildTimelineAudioFilter = (
+    inputIndex: number,
+    clip: any,
+    outputLabel: string,
+  ) => {
+    const isDubbingClip = clip?.trackType === 'dubbing'
+      || clip?.trackId === 'dubbing'
+      || (typeof clip?.text === 'string' && clip.text.trim().length > 0);
+    let clipStartTime = parseNumber(clip?.startTime, 0, 0, 3_600);
+    let clipDuration = parseNumber(clip?.duration, 3, 0.01, 3_600);
+    const subtitleStartTime = Number(clip?.subtitleStartTime);
+    const subtitleEndTime = Number(clip?.subtitleEndTime);
+    const hasLinkedSubtitleWindow = isDubbingClip
+      && typeof clip?.subtitleId === 'string'
+      && clip.subtitleId.trim().length > 0
+      && Number.isFinite(subtitleStartTime)
+      && Number.isFinite(subtitleEndTime)
+      && subtitleEndTime > subtitleStartTime;
+    if (hasLinkedSubtitleWindow) {
+      const minimumWindowDuration = Math.min(0.01, subtitleEndTime - subtitleStartTime);
+      clipStartTime = Math.min(
+        Math.max(subtitleStartTime, clipStartTime),
+        subtitleEndTime - minimumWindowDuration,
+      );
+      clipDuration = Math.max(
+        minimumWindowDuration,
+        Math.min(clipDuration, subtitleEndTime - clipStartTime),
+      );
+    }
+    const delayMs = Math.max(0, Math.round(clipStartTime * 1_000));
+    const atempoFilter = buildAtempoFilter(clip?.speed);
+    const speedSegment = atempoFilter ? `,${atempoFilter}` : '';
+    // Generated speech must never bleed into the following subtitle. Padding
+    // keeps a short line aligned to its full window; atrim caps long lines.
+    const dubbingWindow = isDubbingClip
+      ? `,apad,atrim=duration=${Number(clipDuration.toFixed(3))},asetpts=PTS-STARTPTS`
+      : '';
+
+    return `[${inputIndex}:a]aformat=sample_rates=44100:channel_layouts=stereo${speedSegment}${dubbingWindow},volume=${normalizeUnitVolume(clip?.volume)},adelay=${delayMs}|${delayMs}[${outputLabel}]`;
   };
 
   const resolveValidatedUploadedVideo = async (fileName: unknown) => {
@@ -405,6 +557,7 @@ async function startServer() {
 
       const uploadedPath = path.resolve(req.file.path);
       const uploadsRoot = `${path.resolve(uploadsDir)}${path.sep}`;
+      let geminiAliasPath: string | undefined;
       try {
         if (!uploadedPath.startsWith(uploadsRoot)) {
           return res.status(400).json({ error: '视频临时路径无效。' });
@@ -429,19 +582,24 @@ async function startServer() {
           return res.status(400).json({ error: '只有影视/广告或 Avatar 模式可使用专业视频分析。' });
         }
 
-        const result = await analyzeAudioDesignVideoFile(
-          uploadedPath,
-          req.file.mimetype,
+        const geminiUpload = await createGeminiUploadAlias(uploadedPath, req.file.mimetype);
+        geminiAliasPath = geminiUpload.aliasPath;
+        const originalDisplayName = normalizeUploadDisplayName(
+          req.body?.originalName,
           req.file.originalname,
+        );
+        const result = await analyzeAudioDesignVideoFile(
+          geminiUpload.aliasPath,
+          req.file.mimetype,
+          originalDisplayName,
           String(req.body?.requirements || ''),
           target,
           String(req.body?.isInstrumental) !== 'false',
         );
         return res.json(result);
       } finally {
-        if (uploadedPath.startsWith(uploadsRoot) && fs.existsSync(uploadedPath)) {
-          fs.unlinkSync(uploadedPath);
-        }
+        await safeUnlink(geminiAliasPath);
+        if (uploadedPath.startsWith(uploadsRoot)) await safeUnlink(uploadedPath);
       }
     }),
   );
@@ -580,9 +738,8 @@ async function startServer() {
             originalFilename = `upload_${Date.now()}.wav`;
           }
           
-          const ext = path.extname(originalFilename) || '.wav';
-          const base = path.basename(originalFilename, ext).replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_');
-          const cleanFilename = `${base}_${Date.now()}${ext}`;
+          const ext = getSafeUploadExtension(originalFilename, contentType, '.wav');
+          const cleanFilename = `audio_${randomUUID()}${ext}`;
           
           const filePath = path.join(uploadsDir, cleanFilename);
           
@@ -723,7 +880,7 @@ async function startServer() {
         const lockHandle = await fs.promises.open(assemblyLockPath, 'wx');
         await lockHandle.close();
 
-        const cleanFilename = `${safeName.base}_${Date.now()}_${uploadId.slice(-12)}${safeName.extension}`;
+        const cleanFilename = `video_${randomUUID()}${safeName.extension}`;
         finalFilePath = path.resolve(uploadsDir, cleanFilename);
         if (!isPathInside(uploadsDir, finalFilePath)) {
           throw new Error('合并后的视频路径无效。');
@@ -854,14 +1011,28 @@ async function startServer() {
         dubbingEnabled,
       } = req.body;
       
-      ai = getGoogleAI();
+      const aiClient = getGoogleAI();
+      ai = aiClient;
       
       const prompt = `你是一个顶级的多模态AI视频音效与配乐设计师。
 请分析提供的信息（包含视频文件或关键帧画面序列、时间点），并针对此视频生成一份极其精确的“音效、配乐和配音时间轴清单 (JSON格式)”。
 请提供以下轨道的元素（你可以根据视频画面的时间长度和事件，智能规划最合适的开始时间 startTime 和时长 duration，单位为秒）：
 ${bgmEnabled ? '1. 背景音乐轨 (bgm): 通常是一段大气合适的 background music，覆盖视频主要时间。' : ''}
 ${sfxEnabled ? '2. 音效轨 (sfx): 根据视频中的关键动势、场景变化或特效出现，生成对应的短音效。' : ''}
-${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白或人物台词的情景，生成对应的台词文本 (text)。' : ''}
+${dubbingEnabled ? '3. 配音轨 (dubbing): 逐帧识别视频中的字幕变化、说话人和嘴部活动，为每一条字幕生成一个且仅一个独立配音片段。' : ''}
+
+${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这里只规划台词与时间，不要为单个片段推荐或返回 voiceId。
+配音时间轴必须遵守以下规则：
+- 字幕文字发生变化时，上一句立即结束，下一句必须新建独立 dubbing clip；绝对不要把两条不同字幕合并成一句。
+- 同一条字幕在连续画面中保持不变时只生成一个 clip，不要因逐帧重复看到而重复创建。
+- 每条字幕使用稳定且唯一的 subtitleId，例如 "subtitle-001"、"subtitle-002"。
+- text 必须逐字对应画面中的当前字幕；speaker 表示当前说话人或画面角色，无法确定时写 "unknown"。
+- subtitleStartTime/subtitleEndTime 是该字幕实际出现和消失的时间，是绝对不可越过的硬边界。
+- lipStartTime/lipEndTime 是该字幕区间内说话人口型开始和结束活动的时间，必须限制在字幕边界内。
+- 当 lipSyncConfidence 较高且口型与字幕的交集有效时，dubbing 的 startTime=max(subtitleStartTime, lipStartTime)，结束时间=min(subtitleEndTime, lipEndTime)，duration 等于二者之差。
+- 当置信度低、没有可见人脸、属于画外音或口型交集无效时，startTime=subtitleStartTime，duration=subtitleEndTime-subtitleStartTime。
+- lipSyncConfidence 为 0 到 1；timingSource 只能说明依据，例如 "subtitle+lip"、"subtitle"、"speech+subtitle" 或 "visual-estimate"。
+- 保留视频中每一条可辨识字幕，不限制为少数重点片段。字幕持续多久，整句话后续就会按该区间统一调整语速。` : ''}
 
 返回的 JSON 必须包含一个 \`clips\` 数组，每项符合以下定义：
 {
@@ -870,9 +1041,16 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
   name: string (简短直观的中文显示名称，如 "科技感启动音效", "深邃太空背景音"),
   prompt: string (详细的英文提示词，用于 ElevenLabs 音效或音乐生成，要求是专业地道的英文描述，如 "deep cinematic low boom synth impact", "lofi chill hip hop background track"),
   text?: string (仅在 trackId 为 "dubbing" 时需要，配音台词的中文文本内容),
-  voiceId?: string (仅在 trackId 为 "dubbing" 时需要，推荐的 ElevenLabs 声音ID，Rachel女声为 "21m00Tcm4TlvDq8ikWAM", Adam男声为 "pNInz6obpg7IdgWAs6g8"),
+  subtitleId?: string (仅 dubbing，当前字幕的稳定唯一标识),
+  speaker?: string (仅 dubbing，当前说话人或角色，无法确认时为 "unknown"),
+  subtitleStartTime?: number (仅 dubbing，当前字幕出现时间，单位秒),
+  subtitleEndTime?: number (仅 dubbing，当前字幕消失或下一条字幕出现时间，单位秒),
+  lipStartTime?: number (仅 dubbing，当前字幕区间内口型开始活动时间，单位秒),
+  lipEndTime?: number (仅 dubbing，当前字幕区间内口型停止活动时间，单位秒),
+  lipSyncConfidence?: number (仅 dubbing，口型与字幕时间判断置信度，0 到 1),
+  timingSource?: string (仅 dubbing，时间依据，如 "subtitle+lip"),
   startTime: number (在时间轴上的起始时间，单位为秒，必须大于等于 0 且小于视频时长),
-  duration: number (该音频块的时长，单位秒，BGM通常在10-30s，SFX通常在2-4s，Dubbing通常在2-6s)
+  duration: number (该音频块的时长，单位秒，BGM通常在10-30s，SFX通常在2-4s；Dubbing必须位于字幕硬边界内，高可信口型时使用口型交集，否则使用整段字幕)
 }
 
 请确保 clips 数组中只包含启用的轨道类型：
@@ -881,7 +1059,7 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
 - dubbingEnabled: ${dubbingEnabled ? '开启' : '关闭'}
 
 视频总时长约为 ${parseNumber(videoDuration, 30, 1, 3_600).toFixed(1)} 秒。所有片段必须严格位于该时长内。
-为保证生成速度，请保持结果精炼：BGM 最多 1 段、SFX 最多 8 段、配音最多 3 段，只保留画面中最重要的声音节点。
+为保证生成速度，请保持非配音结果精炼：BGM 最多 1 段、SFX 最多 8 段。配音不得抽样或截断，必须覆盖所有可辨识字幕变化。
 
 请只返回符合 JSON 语法的纯数据，不要用 markdown 格式包裹，也不要带 \`\`\`json 开头。`;
 
@@ -889,7 +1067,80 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
 
       let analysisKeyframes: Array<{ timestamp: number; base64: string }> = [];
       let analysisSource: 'client-keyframes' | 'server-ffmpeg' | 'server-native-video' = 'client-keyframes';
-      if (Array.isArray(keyframes) && keyframes.length > 0) {
+      let nativeVideoFps: number | undefined;
+
+      const prepareNativeVideoAnalysis = async (fps: number, reason: string) => {
+        if (!fileName) {
+          throw Object.assign(
+            new Error('精确配音分析需要服务器上的完整视频，请等待上传完成后重试。'),
+            { status: 422 },
+          );
+        }
+
+        // Validate the local path before any third-party upload. Invalid,
+        // missing, or oversized files therefore never reach Gemini Files API.
+        const validatedVideo = await resolveValidatedUploadedVideo(fileName);
+        console.log(`${reason} Uploading ${validatedVideo.displayName} for native video analysis at ${fps} FPS.`);
+
+        const geminiUpload = await createGeminiUploadAlias(
+          validatedVideo.videoPath,
+          validatedVideo.mimeType,
+        );
+        let uploadedVideo: any;
+        try {
+          uploadedVideo = await aiClient.files.upload({
+            file: geminiUpload.aliasPath,
+            config: {
+              mimeType: validatedVideo.mimeType,
+              displayName: geminiUpload.aliasName,
+            },
+          });
+        } finally {
+          await safeUnlink(geminiUpload.aliasPath);
+        }
+        temporaryGeminiFileName = uploadedVideo.name;
+
+        const processingDeadline = Date.now() + 120_000;
+        while (uploadedVideo.state === 'PROCESSING') {
+          if (Date.now() >= processingDeadline) {
+            throw Object.assign(new Error('Gemini 视频预处理超过 2 分钟，请稍后重试。'), { status: 504 });
+          }
+          await new Promise(resolve => setTimeout(resolve, 1_500));
+          if (!uploadedVideo.name) {
+            throw new Error('Gemini 未返回视频文件标识。');
+          }
+          uploadedVideo = await aiClient.files.get({ name: uploadedVideo.name });
+          temporaryGeminiFileName = uploadedVideo.name || temporaryGeminiFileName;
+        }
+
+        if (uploadedVideo.state === 'FAILED') {
+          throw Object.assign(
+            new Error(uploadedVideo.error?.message || 'Gemini 无法处理此视频编码。'),
+            { status: 422 },
+          );
+        }
+        if (uploadedVideo.state !== 'ACTIVE' || !uploadedVideo.uri) {
+          throw Object.assign(new Error('Gemini 视频文件未进入可分析状态。'), { status: 502 });
+        }
+
+        contents.length = 0;
+        contents.push({
+          fileData: {
+            fileUri: uploadedVideo.uri,
+            mimeType: uploadedVideo.mimeType || validatedVideo.mimeType,
+          },
+          videoMetadata: { fps },
+        });
+        contents.push({ text: prompt });
+        nativeVideoFps = fps;
+        analysisSource = 'server-native-video';
+      };
+
+      if (dubbingEnabled) {
+        // Sparse keyframes cannot reveal subtitle boundaries or mouth motion.
+        // Dubbing analysis therefore always uses the complete uploaded video.
+        await prepareNativeVideoAnalysis(4, 'Dubbing is enabled;');
+      } else if (Array.isArray(keyframes) && keyframes.length > 0) {
         if (keyframes.length > 8) {
           return res.status(400).json({ error: '关键帧数量过多，请重新分析。' });
         }
@@ -919,61 +1170,15 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
         } catch (ffmpegError: any) {
           const ffmpegStatus = Number(ffmpegError?.status);
           if (![422, 503, 504].includes(ffmpegStatus)) throw ffmpegError;
-
-          // The path is validated again before any third-party upload. Invalid,
-          // missing, or oversized files therefore never reach Gemini Files API.
-          const validatedVideo = await resolveValidatedUploadedVideo(fileName);
-          console.warn(
-            `FFmpeg fallback unavailable (${ffmpegStatus}); using Gemini native video analysis for ${validatedVideo.displayName}.`,
+          await prepareNativeVideoAnalysis(
+            1,
+            `FFmpeg fallback unavailable (${ffmpegStatus});`,
           );
-
-          let uploadedVideo: any = await ai.files.upload({
-            file: validatedVideo.videoPath,
-            config: {
-              mimeType: validatedVideo.mimeType,
-              displayName: validatedVideo.displayName.slice(0, 200),
-            },
-          });
-          temporaryGeminiFileName = uploadedVideo.name;
-
-          const processingDeadline = Date.now() + 120_000;
-          while (uploadedVideo.state === 'PROCESSING') {
-            if (Date.now() >= processingDeadline) {
-              throw Object.assign(new Error('Gemini 视频预处理超过 2 分钟，请稍后重试。'), { status: 504 });
-            }
-            await new Promise(resolve => setTimeout(resolve, 1_500));
-            if (!uploadedVideo.name) {
-              throw new Error('Gemini 未返回视频文件标识。');
-            }
-            uploadedVideo = await ai.files.get({ name: uploadedVideo.name });
-            temporaryGeminiFileName = uploadedVideo.name || temporaryGeminiFileName;
-          }
-
-          if (uploadedVideo.state === 'FAILED') {
-            throw Object.assign(
-              new Error(uploadedVideo.error?.message || 'Gemini 无法处理此视频编码。'),
-              { status: 422 },
-            );
-          }
-          if (uploadedVideo.state !== 'ACTIVE' || !uploadedVideo.uri) {
-            throw Object.assign(new Error('Gemini 视频文件未进入可分析状态。'), { status: 502 });
-          }
-
-          contents.length = 0;
-          contents.push({
-            fileData: {
-              fileUri: uploadedVideo.uri,
-              mimeType: uploadedVideo.mimeType || validatedVideo.mimeType,
-            },
-            videoMetadata: { fps: 1 },
-          });
-          contents.push({ text: prompt });
-          analysisSource = 'server-native-video';
         }
       }
 
-      if (analysisSource === 'server-native-video') {
-        console.log('Analyzing complete uploaded video with native visual and audio understanding (1 FPS).');
+      if (nativeVideoFps !== undefined) {
+        console.log(`Analyzing complete uploaded video with native visual and audio understanding (${nativeVideoFps} FPS).`);
       } else {
         console.log(`Analyzing video using ${analysisKeyframes.length} compact keyframes (${analysisSource}).`);
         contents.push({ text: "\n下面是视频不同时间点的关键帧，请结合对应时间规划音轨：\n" });
@@ -994,6 +1199,7 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
         contents,
         config: {
           responseMimeType: "application/json",
+          maxOutputTokens: dubbingEnabled ? 32_768 : 8_192,
           responseSchema: {
             type: Type.OBJECT,
             required: ["clips"],
@@ -1009,7 +1215,14 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
                     name: { type: Type.STRING },
                     prompt: { type: Type.STRING },
                     text: { type: Type.STRING },
-                    voiceId: { type: Type.STRING },
+                    subtitleId: { type: Type.STRING },
+                    speaker: { type: Type.STRING },
+                    subtitleStartTime: { type: Type.NUMBER },
+                    subtitleEndTime: { type: Type.NUMBER },
+                    lipStartTime: { type: Type.NUMBER },
+                    lipEndTime: { type: Type.NUMBER },
+                    lipSyncConfidence: { type: Type.NUMBER },
+                    timingSource: { type: Type.STRING },
                     startTime: { type: Type.NUMBER },
                     duration: { type: Type.NUMBER }
                   }
@@ -1035,25 +1248,223 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
         ...(sfxEnabled ? ['sfx'] : []),
         ...(dubbingEnabled ? ['dubbing'] : []),
       ]);
-      const normalizedClips = parsed.clips
+      let normalizedClips = parsed.clips
         .filter((clip: any) => enabledTracks.has(clip?.trackId))
-        .slice(0, 12)
         .map((clip: any, index: number) => {
           const startTime = parseNumber(clip.startTime, 0, 0, Math.max(0, durationLimit - 0.1));
           const maxDuration = Math.max(0.1, durationLimit - startTime);
-          return {
+          if (clip.trackId !== 'dubbing') {
+            return {
+              ...clip,
+              id: String(clip.id || `clip-${index + 1}`),
+              startTime,
+              duration: parseNumber(clip.duration, clip.trackId === 'bgm' ? maxDuration : 3, 0.1, maxDuration),
+            };
+          }
+
+          const subtitleStartTime = parseNumber(
+            clip.subtitleStartTime ?? clip.subtitleStart,
+            startTime,
+            0,
+            Math.max(0, durationLimit - 0.1),
+          );
+          const fallbackSubtitleDuration = parseNumber(
+            clip.duration,
+            3,
+            0.1,
+            Math.max(0.1, durationLimit - subtitleStartTime),
+          );
+          const subtitleEndTime = parseNumber(
+            clip.subtitleEndTime ?? clip.subtitleEnd,
+            Math.min(durationLimit, subtitleStartTime + fallbackSubtitleDuration),
+            Math.min(durationLimit, subtitleStartTime + 0.1),
+            durationLimit,
+          );
+          const lipStartTime = parseNumber(
+            clip.lipStartTime ?? clip.lipStart,
+            subtitleStartTime,
+            subtitleStartTime,
+            subtitleEndTime,
+          );
+          const lipEndTime = parseNumber(
+            clip.lipEndTime ?? clip.lipEnd,
+            subtitleEndTime,
+            lipStartTime,
+            subtitleEndTime,
+          );
+          const lipSyncConfidence = parseNumber(clip.lipSyncConfidence, 0, 0, 1);
+          const timingSource = String(clip.timingSource || (
+            lipSyncConfidence >= 0.6 ? 'subtitle+lip' : 'subtitle'
+          )).trim().slice(0, 80);
+          const fallbackToSubtitle = lipSyncConfidence < 0.6
+            || /^(subtitle|subtitle-only|visual-estimate)$/i.test(timingSource)
+            || /voice.?over|off.?screen|no.?face/i.test(timingSource);
+          const intersectedStartTime = Math.max(subtitleStartTime, lipStartTime);
+          const intersectedEndTime = Math.min(subtitleEndTime, lipEndTime);
+          const hasUsableLipIntersection = !fallbackToSubtitle
+            && intersectedEndTime - intersectedStartTime >= 0.1;
+          const synchronizedStartTime = hasUsableLipIntersection
+            ? intersectedStartTime
+            : subtitleStartTime;
+          const synchronizedEndTime = hasUsableLipIntersection
+            ? intersectedEndTime
+            : subtitleEndTime;
+          const normalizedClip: any = {
             ...clip,
             id: String(clip.id || `clip-${index + 1}`),
-            startTime,
-            duration: parseNumber(clip.duration, clip.trackId === 'bgm' ? maxDuration : 3, 0.1, maxDuration),
+            text: String(clip.text || '').trim(),
+            speaker: String(clip.speaker || 'unknown').trim().slice(0, 80) || 'unknown',
+            subtitleStartTime,
+            subtitleEndTime,
+            lipStartTime,
+            lipEndTime,
+            lipSyncConfidence,
+            timingSource,
+            startTime: synchronizedStartTime,
+            duration: Number((synchronizedEndTime - synchronizedStartTime).toFixed(3)),
           };
-        });
-      if (normalizedClips.length === 0) {
+          // Accept short aliases from a model response, but expose one stable API shape.
+          delete normalizedClip.subtitleStart;
+          delete normalizedClip.subtitleEnd;
+          delete normalizedClip.lipStart;
+          delete normalizedClip.lipEnd;
+          return normalizedClip;
+        })
+        .filter((clip: any) => clip.trackId !== 'dubbing' || clip.text.length > 0)
+        .sort((left: any, right: any) => left.startTime - right.startTime);
+
+      // Models can repeat the same visible caption across adjacent samples.
+      // Collapse only overlapping/touching duplicates; a repeated sentence
+      // after a real time gap remains a separate subtitle cue.
+      const normalizeCueText = (value: unknown) => String(value || '')
+        .toLowerCase()
+        .replace(/[\s\u3000，。！？、…,.!?;；:："'“”‘’]/g, '');
+      const compactDubbingClips: any[] = [];
+      const candidateDubbingClips = normalizedClips
+        .filter((clip: any) => clip.trackId === 'dubbing')
+        .sort((left: any, right: any) => left.subtitleStartTime - right.subtitleStartTime);
+      for (const clip of candidateDubbingClips) {
+        const previous = compactDubbingClips[compactDubbingClips.length - 1];
+        const previousSubtitleId = String(previous?.subtitleId || '').trim();
+        const currentSubtitleId = String(clip.subtitleId || '').trim();
+        const bothHaveSubtitleIds = Boolean(previousSubtitleId && currentSubtitleId);
+        const sameOriginalSubtitleId = bothHaveSubtitleIds
+          && previousSubtitleId === currentSubtitleId;
+        const previousCueText = normalizeCueText(previous?.text);
+        const currentCueText = normalizeCueText(clip.text);
+        const sameText = Boolean(
+          previousCueText
+          && currentCueText
+          && previousCueText === currentCueText,
+        );
+        const compatibleProgressiveText = Boolean(
+          previousCueText
+          && currentCueText
+          && (
+            previousCueText.startsWith(currentCueText)
+            || currentCueText.startsWith(previousCueText)
+          ),
+        );
+        const previousSpeaker = String(previous?.speaker || 'unknown').trim().toLowerCase();
+        const currentSpeaker = String(clip.speaker || 'unknown').trim().toLowerCase();
+        const compatibleSpeaker = previousSpeaker === currentSpeaker
+          || previousSpeaker === 'unknown'
+          || currentSpeaker === 'unknown';
+        const overlapsPreviousCue = Boolean(
+          previous
+          && clip.subtitleStartTime < previous.subtitleEndTime - 0.02,
+        );
+        const sameIdTouchesPreviousCue = Boolean(
+          previous
+          && clip.subtitleStartTime <= previous.subtitleEndTime + 0.05,
+        );
+        const isDuplicateCue = sameOriginalSubtitleId
+          ? compatibleProgressiveText && sameIdTouchesPreviousCue
+          : !bothHaveSubtitleIds && sameText && overlapsPreviousCue;
+        if (previous && compatibleSpeaker && isDuplicateCue) {
+          if (String(clip.text || '').length > String(previous.text || '').length) {
+            previous.text = clip.text;
+          }
+          previous.subtitleStartTime = Math.min(previous.subtitleStartTime, clip.subtitleStartTime);
+          previous.subtitleEndTime = Math.max(previous.subtitleEndTime, clip.subtitleEndTime);
+          previous.lipStartTime = Math.min(previous.lipStartTime, clip.lipStartTime);
+          previous.lipEndTime = Math.max(previous.lipEndTime, clip.lipEndTime);
+          if (clip.lipSyncConfidence > previous.lipSyncConfidence) {
+            previous.lipSyncConfidence = clip.lipSyncConfidence;
+            previous.timingSource = clip.timingSource;
+          }
+          continue;
+        }
+        compactDubbingClips.push(clip);
+      }
+      normalizedClips = [
+        ...normalizedClips.filter((clip: any) => clip.trackId !== 'dubbing'),
+        ...compactDubbingClips,
+      ].sort((left: any, right: any) => left.startTime - right.startTime);
+
+      const usedSubtitleIds = new Set<string>();
+      const dubbingClips = normalizedClips
+        .filter((clip: any) => clip.trackId === 'dubbing')
+        .sort((left: any, right: any) => left.subtitleStartTime - right.subtitleStartTime);
+      dubbingClips.forEach((clip: any, index: number) => {
+        const requestedSubtitleId = String(clip.subtitleId || `subtitle-${String(index + 1).padStart(3, '0')}`)
+          .trim()
+          .replace(/[^a-zA-Z0-9_-]/g, '-')
+          .slice(0, 80) || `subtitle-${String(index + 1).padStart(3, '0')}`;
+        let subtitleId = requestedSubtitleId;
+        let duplicateIndex = 2;
+        while (usedSubtitleIds.has(subtitleId)) {
+          subtitleId = `${requestedSubtitleId}-${duplicateIndex}`;
+          duplicateIndex += 1;
+        }
+        usedSubtitleIds.add(subtitleId);
+        clip.subtitleId = subtitleId;
+
+        const nextSubtitleStart = dubbingClips[index + 1]?.subtitleStartTime;
+        const hardSubtitleEnd = Number.isFinite(nextSubtitleStart)
+          ? Math.min(clip.subtitleEndTime, nextSubtitleStart)
+          : clip.subtitleEndTime;
+        clip.subtitleEndTime = Math.max(clip.subtitleStartTime, hardSubtitleEnd);
+        clip.lipStartTime = Math.min(
+          clip.subtitleEndTime,
+          Math.max(clip.subtitleStartTime, clip.lipStartTime),
+        );
+        clip.lipEndTime = Math.min(
+          clip.subtitleEndTime,
+          Math.max(clip.lipStartTime, clip.lipEndTime),
+        );
+
+        const fallbackToSubtitle = clip.lipSyncConfidence < 0.6
+          || /^(subtitle|subtitle-only|visual-estimate)$/i.test(clip.timingSource)
+          || /voice.?over|off.?screen|no.?face/i.test(clip.timingSource);
+        const lipStart = Math.max(clip.subtitleStartTime, clip.lipStartTime);
+        const lipEnd = Math.min(clip.subtitleEndTime, clip.lipEndTime);
+        const useLipWindow = !fallbackToSubtitle && lipEnd - lipStart >= 0.1;
+        clip.startTime = useLipWindow ? lipStart : clip.subtitleStartTime;
+        const synchronizedEndTime = useLipWindow ? lipEnd : clip.subtitleEndTime;
+        clip.duration = Number(Math.max(0, synchronizedEndTime - clip.startTime).toFixed(3));
+      });
+
+      // Discard only genuinely invalid/fully overlapped cues; never truncate by count.
+      normalizedClips = normalizedClips
+        .filter((clip: any) => clip.trackId !== 'dubbing' || clip.duration >= 0.05)
+        .sort((left: any, right: any) => left.startTime - right.startTime);
+      const dubbingCueCount = normalizedClips.filter(
+        (clip: any) => clip.trackId === 'dubbing',
+      ).length;
+      if (normalizedClips.length === 0 && !dubbingEnabled) {
         throw new Error('AI 未生成可用的音轨片段，请调整轨道选项后重试。');
       }
 
       console.log(`Video analysis complete. Found ${normalizedClips.length} clips.`);
-      return res.json({ clips: normalizedClips, analysisSource });
+      return res.json({
+        clips: normalizedClips,
+        analysisSource,
+        dubbingCueCount,
+        dubbingStatus: dubbingEnabled
+          ? dubbingCueCount > 0 ? 'detected' : 'none-detected'
+          : 'disabled',
+      });
       
     } catch (err: any) {
       console.error('Error analyzing video:', err);
@@ -1086,7 +1497,7 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
       
       if (resolvedType === 'dubbing') {
         // Text to Speech
-        const targetVoice = voiceId || "21m00Tcm4TlvDq8ikWAM"; // Rachel fallback
+        const targetVoice = validateVoiceId(voiceId || "21m00Tcm4TlvDq8ikWAM"); // Rachel fallback
         console.log(`ElevenLabs server TTS: text="${text}" voiceId=${targetVoice}`);
         const apiResponse = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${targetVoice}`, {
           method: "POST",
@@ -1200,78 +1611,185 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
       
     } catch (err: any) {
       console.error('Error generating clip:', err);
-      return res.status(500).json({ error: err.message });
+      return res.status(Number(err?.status) || 500).json({ error: err.message });
     }
   });
 
   // 9. Mix Video with Audio Timeline Clips using FFmpeg
   app.post('/api/video/mix', (req, res) => {
     try {
-      const { videoFileName, clips } = req.body;
+      const {
+        videoFileName,
+        clips,
+        includeOriginalAudio = false,
+        originalAudioVolume = 1,
+      } = req.body;
       if (!videoFileName) {
         return res.status(400).json({ error: 'videoFileName is required' });
       }
 
-      const inputVideoPath = path.join(uploadsDir, videoFileName);
+      const safeVideoFileName = path.basename(String(videoFileName));
+      const inputVideoPath = path.join(uploadsDir, safeVideoFileName);
       if (!fs.existsSync(inputVideoPath)) {
         return res.status(404).json({ error: 'Video file not found' });
       }
 
-      const validClips = (clips || []).filter((c: any) => c.audioUrl && typeof c.audioUrl === 'string');
-      if (validClips.length === 0) {
-        // No valid audio clips, just return the video directly
-        return res.json({ videoUrl: `/uploads/${videoFileName}` });
+      const requestedClips = Array.isArray(clips) ? clips : [];
+      const validClips = requestedClips.filter((clip: any) => {
+        if (!clip.audioUrl || typeof clip.audioUrl !== 'string') return false;
+        const clipPath = path.join(uploadsDir, path.basename(clip.audioUrl));
+        return fs.existsSync(clipPath);
+      });
+      if (validClips.length !== requestedClips.length) {
+        return res.status(422).json({
+          code: 'CLIP_AUDIO_MISSING',
+          error: '部分音频片段已失效或尚未上传，请重新合成缺失片段后再导出。',
+        });
+      }
+      const requestedOriginalAudio = includeOriginalAudio === true;
+      const normalizedOriginalVolume = normalizeUnitVolume(originalAudioVolume);
+
+      // Keeping the untouched source does not require FFmpeg/FFprobe. This also
+      // lets local HTML5 previews export the original video before a media
+      // processing runtime is installed on the deployment server.
+      if (
+        validClips.length === 0
+        && requestedOriginalAudio
+        && Math.abs(normalizedOriginalVolume - 1) < 0.0001
+      ) {
+        return res.json({
+          videoUrl: `/uploads/${safeVideoFileName}`,
+          preservedSourceMedia: true,
+        });
       }
 
       // Generate a unique output file name
-      const ext = path.extname(videoFileName) || '.mp4';
-      const base = path.basename(videoFileName, ext);
-      const outputFileName = `mixed_${base}_${Date.now()}${ext}`;
+      const sourceExt = path.extname(safeVideoFileName);
+      const base = path.basename(safeVideoFileName, sourceExt);
+      const outputFileName = `mixed_${base}_${Date.now()}.mp4`;
       const outputFilePath = path.join(uploadsDir, outputFileName);
 
-      // Assemble FFmpeg command arguments
-      const inputArgs = [`-i "${inputVideoPath}"`];
-      
-      validClips.forEach((clip: any) => {
-        const clipFileName = path.basename(clip.audioUrl);
-        const clipPath = path.join(uploadsDir, clipFileName);
-        inputArgs.push(`-i "${clipPath}"`);
-      });
+      const finishWithFfmpeg = (args: string[]) => {
+        console.log('Running FFmpeg with argument count:', args.length);
+        execFile('ffmpeg', args, (err, stdout, stderr) => {
+          if (err) {
+            console.error('FFmpeg execution failed:', err, stderr);
+            const ffmpegUnavailable = /ffmpeg.*(?:not recognized|not found)|ENOENT/i.test(`${err.message}\n${stderr}`);
+            return res.status(ffmpegUnavailable ? 503 : 500).json({
+              error: ffmpegUnavailable
+                ? '当前服务器尚未安装 FFmpeg，暂时无法生成新的混音视频。'
+                : `FFmpeg mixing failed: ${err.message}.`,
+            });
+          }
+          console.log('FFmpeg mixed video successfully created:', outputFileName);
+          return res.json({ videoUrl: `/uploads/${outputFileName}` });
+        });
+      };
 
-      // Filter complex to adjust volumes and apply delays
-      const filterParts: string[] = [];
-      validClips.forEach((clip: any, idx: number) => {
-        const delayMs = Math.max(1, Math.round((clip.startTime || 0) * 1000));
-        let speedFilter = '';
-        if (clip.speed && clip.speed !== 1.0) {
-          const clampedSpeed = Math.max(0.5, Math.min(2.0, clip.speed));
-          speedFilter = `,atempo=${clampedSpeed}`;
+      const mixWithDetectedSource = (hasOriginalAudio: boolean) => {
+        const useOriginalAudio = requestedOriginalAudio && hasOriginalAudio;
+
+        if (validClips.length === 0) {
+          if (useOriginalAudio && Math.abs(normalizedOriginalVolume - 1) < 0.0001) {
+            return res.json({
+              videoUrl: `/uploads/${safeVideoFileName}`,
+              includedOriginalAudio: true,
+            });
+          }
+
+          const sourceOnlyArgs = useOriginalAudio
+            ? [
+              '-y',
+              '-i', inputVideoPath,
+              '-filter:a', `volume=${normalizedOriginalVolume},alimiter=limit=0.95,apad`,
+              '-map', '0:v:0',
+              '-map', '0:a:0',
+              '-c:v', 'libx264',
+              '-preset', 'veryfast',
+              '-crf', '18',
+              '-pix_fmt', 'yuv420p',
+              '-c:a', 'aac',
+              '-movflags', '+faststart',
+              '-shortest',
+              outputFilePath,
+            ]
+            : [
+              '-y',
+              '-i', inputVideoPath,
+              '-map', '0:v:0',
+              '-c:v', 'libx264',
+              '-preset', 'veryfast',
+              '-crf', '18',
+              '-pix_fmt', 'yuv420p',
+              '-movflags', '+faststart',
+              '-an',
+              outputFilePath,
+            ];
+          finishWithFfmpeg(sourceOnlyArgs);
+          return;
         }
-        // Force sample rate of 44100 and channel layout to stereo, then apply speed filter, volume and adelay
-        filterParts.push(`[${idx + 1}:a]aformat=sample_rates=44100:channel_layouts=stereo${speedFilter},volume=${clip.volume || 1.0},adelay=${delayMs}|${delayMs}[aud${idx}]`);
-      });
 
-      // Mix all delayed streams together
-      const mixInputs = validClips.map((_, idx) => `[aud${idx}]`).join('');
-      filterParts.push(`${mixInputs}amix=inputs=${validClips.length}:duration=longest:dropout_transition=0[aout]`);
+        const inputArgs = ['-i', inputVideoPath];
+        validClips.forEach((clip: any) => {
+          const clipPath = path.join(uploadsDir, path.basename(clip.audioUrl));
+          inputArgs.push('-i', clipPath);
+        });
 
-      const filterComplexString = filterParts.join('; ');
-
-      // Assemble FFmpeg command
-      // -c:v copy copies the video stream directly without re-encoding, extremely fast!
-      // -c:a aac encodes the mixed audio stream to AAC
-      const cmd = `ffmpeg -y ${inputArgs.join(' ')} -filter_complex "${filterComplexString}" -map 0:v -map "[aout]" -c:v copy -c:a aac -shortest "${outputFilePath}"`;
-
-      console.log('Running FFmpeg Command:', cmd);
-
-      exec(cmd, (err, stdout, stderr) => {
-        if (err) {
-          console.error('FFmpeg execution failed:', err, stderr);
-          return res.status(500).json({ error: `FFmpeg mixing failed: ${err.message}.` });
+        const filterParts: string[] = [];
+        const mixInputs: string[] = [];
+        if (useOriginalAudio) {
+          filterParts.push(`[0:a:0]aformat=sample_rates=44100:channel_layouts=stereo,volume=${normalizedOriginalVolume}[source]`);
+          mixInputs.push('[source]');
         }
-        console.log('FFmpeg mixed video successfully created:', outputFileName);
-        return res.json({ videoUrl: `/uploads/${outputFileName}` });
-      });
+        validClips.forEach((clip: any, idx: number) => {
+          filterParts.push(buildTimelineAudioFilter(idx + 1, clip, `aud${idx}`));
+          mixInputs.push(`[aud${idx}]`);
+        });
+        filterParts.push(`${mixInputs.join('')}amix=inputs=${mixInputs.length}:duration=longest:normalize=0:dropout_transition=0,alimiter=limit=0.95,apad[aout]`);
+
+        const filterComplexString = filterParts.join('; ');
+        finishWithFfmpeg([
+          '-y',
+          ...inputArgs,
+          '-filter_complex', filterComplexString,
+          '-map', '0:v:0',
+          '-map', '[aout]',
+          '-c:v', 'libx264',
+          '-preset', 'veryfast',
+          '-crf', '18',
+          '-pix_fmt', 'yuv420p',
+          '-c:a', 'aac',
+          '-movflags', '+faststart',
+          '-shortest',
+          outputFilePath,
+        ]);
+      };
+
+      if (!requestedOriginalAudio) {
+        mixWithDetectedSource(false);
+        return;
+      }
+
+      execFile(
+        'ffprobe',
+        ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=index', '-of', 'csv=p=0', inputVideoPath],
+        (probeError, stdout, stderr) => {
+          if (probeError) {
+            console.error('FFprobe failed while checking original audio:', probeError, stderr);
+            return res.status(503).json({
+              code: 'MEDIA_PROBE_FAILED',
+              error: '服务器暂时无法检测视频原声，请确认已安装 FFmpeg/FFprobe 后重试。',
+            });
+          }
+          if (stdout.trim().length === 0) {
+            return res.status(422).json({
+              code: 'ORIGINAL_AUDIO_NOT_FOUND',
+              error: '源视频没有可保留的原声音轨，请关闭视频原声后再导出。',
+            });
+          }
+          mixWithDetectedSource(true);
+        },
+      );
 
     } catch (err: any) {
       console.error('Error in video mixing:', err);
@@ -1283,53 +1801,73 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
   app.post('/api/audio/mix-tracks', (req, res) => {
     try {
       const { clips, trackId } = req.body;
-      const validClips = (clips || []).filter((c: any) => {
+      const normalizedTrackId = typeof trackId === 'string' && trackId.length > 0
+        ? trackId
+        : undefined;
+      if (normalizedTrackId && !['bgm', 'sfx', 'dubbing'].includes(normalizedTrackId)) {
+        return res.status(400).json({ error: '不支持的音轨导出类型。' });
+      }
+      const requestedClips = Array.isArray(clips) ? clips : [];
+      const targetClips = requestedClips.filter((clip: any) => (
+        !normalizedTrackId || clip.trackId === normalizedTrackId
+      ));
+      const validClips = targetClips.filter((c: any) => {
         if (!c.audioUrl || typeof c.audioUrl !== 'string') return false;
-        if (trackId && c.trackId !== trackId) return false;
-        
         const clipFileName = path.basename(c.audioUrl);
         const clipPath = path.join(uploadsDir, clipFileName);
         return fs.existsSync(clipPath);
       });
+
+      if (validClips.length !== targetClips.length) {
+        return res.status(422).json({
+          code: 'CLIP_AUDIO_MISSING',
+          error: '部分音频片段已失效或尚未上传，请重新合成缺失片段后再导出。',
+        });
+      }
       
       if (validClips.length === 0) {
         return res.status(400).json({ error: '没有已生成的、存在于服务器上的音频片段可供导出。请先合成对应的音轨。' });
       }
 
-      const outputFileName = `exported_audio_${trackId || 'mixed'}_${Date.now()}.mp3`;
+      const outputFileName = `exported_audio_${normalizedTrackId || 'mixed'}_${Date.now()}.mp3`;
       const outputFilePath = path.join(uploadsDir, outputFileName);
 
       const inputArgs: string[] = [];
       validClips.forEach((clip: any) => {
         const clipFileName = path.basename(clip.audioUrl);
         const clipPath = path.join(uploadsDir, clipFileName);
-        inputArgs.push(`-i "${clipPath}"`);
+        inputArgs.push('-i', clipPath);
       });
 
       const filterParts: string[] = [];
       validClips.forEach((clip: any, idx: number) => {
-        const delayMs = Math.max(1, Math.round((clip.startTime || 0) * 1000));
-        let speedFilter = '';
-        if (clip.speed && clip.speed !== 1.0) {
-          const clampedSpeed = Math.max(0.5, Math.min(2.0, clip.speed));
-          speedFilter = `,atempo=${clampedSpeed}`;
-        }
-        // Force sample rate of 44100 and channel layout to stereo, then apply speed filter, volume and adelay
-        filterParts.push(`[${idx}:a]aformat=sample_rates=44100:channel_layouts=stereo${speedFilter},volume=${clip.volume || 1.0},adelay=${delayMs}|${delayMs}[aud${idx}]`);
+        filterParts.push(buildTimelineAudioFilter(idx, clip, `aud${idx}`));
       });
 
       const mixInputs = validClips.map((_, idx) => `[aud${idx}]`).join('');
       filterParts.push(`${mixInputs}amix=inputs=${validClips.length}:duration=longest:dropout_transition=0[aout]`);
 
       const filterComplexString = filterParts.join('; ');
-      const cmd = `ffmpeg -y ${inputArgs.join(' ')} -filter_complex "${filterComplexString}" -map "[aout]" -c:a libmp3lame -q:a 2 "${outputFilePath}"`;
-      
-      console.log('Running Audio Mix FFmpeg Command:', cmd);
+      const ffmpegArgs = [
+        '-y',
+        ...inputArgs,
+        '-filter_complex', filterComplexString,
+        '-map', '[aout]',
+        '-c:a', 'libmp3lame',
+        '-q:a', '2',
+        outputFilePath,
+      ];
+      console.log('Running audio FFmpeg with argument count:', ffmpegArgs.length);
 
-      exec(cmd, (err, stdout, stderr) => {
+      execFile('ffmpeg', ffmpegArgs, (err, stdout, stderr) => {
         if (err) {
           console.error('Audio FFmpeg mixing failed:', err, stderr);
-          return res.status(500).json({ error: `音频合成失败: ${err.message}` });
+          const ffmpegUnavailable = /ffmpeg.*(?:not recognized|not found)|ENOENT/i.test(`${err.message}\n${stderr}`);
+          return res.status(ffmpegUnavailable ? 503 : 500).json({
+            error: ffmpegUnavailable
+              ? '当前服务器尚未安装 FFmpeg，暂时无法导出混合音频。'
+              : `音频合成失败: ${err.message}`,
+          });
         }
         console.log('FFmpeg mixed audio successfully created:', outputFileName);
         return res.json({ audioUrl: `/uploads/${outputFileName}` });

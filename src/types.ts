@@ -30,12 +30,26 @@ export interface TimelineClip {
   name: string;
   prompt: string;
   text?: string; // For dubbing TTS
-  voiceId?: string; // For dubbing voice
+  voiceId?: string; // Voice used by generated audio, or the inherited voice before generation
   startTime: number; // in seconds
   duration: number; // in seconds
-  volume: number; // 0 to 1
-  audioUrl?: string; // Generated file URL
+  volume: number; // Clip-relative volume from 0 to 1; multiplied by its track volume
+  audioUrl?: string; // Generated or uploaded file URL
+  audioSource?: 'generated' | 'uploaded';
+  origin?: 'ai' | 'manual'; // Whether the timeline item came from AI planning or a user action
   isGenerating?: boolean;
   error?: string;
-  speed?: number; // Playback speed (0.5 to 2.0)
+  speed?: number; // User-controlled fine tuning multiplier (0.5 to 2.0)
+  autoSpeed?: number; // Automatic dubbing fit multiplier derived from source/target duration
+  sourceAudioDuration?: number; // Natural duration before automatic speed fitting
+  speaker?: string; // Speaker/role detected from the source video
+  subtitleId?: string; // Stable source subtitle/caption cue identifier
+  subtitleStartTime?: number; // Source subtitle cue start time in seconds
+  subtitleEndTime?: number; // Source subtitle cue end time in seconds
+  lipStartTime?: number; // Detected visible mouth movement start in seconds
+  lipEndTime?: number; // Detected visible mouth movement end in seconds
+  lipSyncConfidence?: number; // 0 to 1 confidence for subtitle/lip timing
+  timingSource?: string; // How the timing was obtained (subtitle, speech, lip, fallback, etc.)
+  timingDirty?: boolean; // Text or timing changed after the current audio was fitted
+  voiceDirty?: boolean; // Track voice changed after this audio was generated
 }

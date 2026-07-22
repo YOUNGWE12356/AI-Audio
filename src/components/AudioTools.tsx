@@ -448,7 +448,7 @@ export default function AudioTools() {
             }`}
           >
             <RefreshCw className={`w-4 h-4 transition-colors ${activeSubTab === 'factory' ? 'text-emerald-600' : 'text-slate-400'}`} />
-            <span>音频转换</span>
+            <span>音频转换/压缩</span>
           </button>
 
           {/* Subtab Button 2: 人声分离 */}

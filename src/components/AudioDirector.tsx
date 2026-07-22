@@ -176,8 +176,8 @@ const filmDemoResult: AudioDesignResult = {
       style: "新古典奇幻史诗交响乐 (Neo-Classical Epic Fantasy Orchestral)",
       instrumentation: "独奏钢琴, 凯尔特竖琴, 史诗弦乐群, 圣洁女声合唱团, 大号与圆号群, 影视大鼓",
       sunoPrompt: {
-        chinese: "新古典史诗奇幻配乐，寂静空灵的独奏钢琴开场，中段弦乐与空灵女声吟唱渐进，随后圣洁的大合唱与圆号爆发，高潮定格，延音余韵收束",
-        english: "neo-classical cinematic epic fantasy orchestral soundtrack, starting with quiet haunting solo piano and Celtic harp, building up with soaring emotional solo soprano voice, cinematic strings crescendo, exploding into massive holy choir and French horns, leading to a sudden climax break and beautiful sustaining reverb tail, ultra high detail, 105 BPM, key of D minor",
+        chinese: "新古典史诗奇幻管弦配乐；完整连贯的歌曲；核心乐器：独奏钢琴、凯尔特竖琴、史诗弦乐、圆号、影视大鼓；105 BPM；D minor；空灵女声与圣洁合唱。",
+        english: "Neo-classical epic fantasy orchestral; cohesive full-length song; featuring solo piano, Celtic harp, cinematic strings, French horns, taiko; 105 BPM; D minor; ethereal female vocals and sacred choir.",
         bpm: "105",
         key: "D minor",
         structure: "Intro (0-5s) -> Build-up (5-12s) -> Climax Verse (12-20s) -> Reverb Outro (20-24s)",
@@ -214,8 +214,8 @@ const filmDemoResult: AudioDesignResult = {
       style: "神秘北欧民谣融合现代电子声景 (Nordic Ambient Folk & Cyber Soundscape)",
       instrumentation: "尼古赫帕琴 (Nyckelharpa), 尼泊尔竹笛, 重低音合成器 (Sub-bass), 模拟脉冲敲击, 迷幻合唱",
       sunoPrompt: {
-        chinese: "北欧极简民谣融合赛博朋克声景，空灵竹笛与拉弦琴神秘开场，中段加入合成器重低音和脉冲敲击拉开张力，后段冷酷吟唱与电子节拍高潮，定格收尾",
-        english: "Nordic minimal folk mixed with cyber soundscape, haunting ancient wood flute and Nyckelharpa solo, building with sub-bass drone and metallic analog pulses, exploding into cold vocal chanting and heavy electronic beats, sudden drop into silent echo tail, dark mystic atmospheric, 80 BPM, key of A minor",
+        chinese: "北欧极简民谣融合赛博电子声景；完整连贯的歌曲；核心乐器：尼古赫帕琴、竹笛、重低音合成器、模拟脉冲、电子鼓；80 BPM；A minor；冷峻克制的吟唱。",
+        english: "Nordic minimal folk with cyber soundscape; cohesive full-length song; featuring Nyckelharpa, bamboo flute, sub-bass synth, analog pulses, electronic drums; 80 BPM; A minor; restrained cold vocal chanting.",
         bpm: "80",
         key: "A minor",
         structure: "Intro (0-5s) -> Cyber Rise (5-12s) -> Heavy Beat (12-20s) -> Silence Tail (20-24s)",
@@ -378,7 +378,9 @@ export default function AudioDirector({
   };
 
   const handleSunoClick = (prompt: string) => {
-    copyToClipboard(prompt);
+    const englishPrompt = prompt.trim();
+    if (!englishPrompt) return;
+    copyToClipboard(englishPrompt);
     window.open('https://suno.com/create', '_blank');
   };
 
@@ -564,8 +566,8 @@ export default function AudioDirector({
                     ? `完整视频分析只能单独使用 1 个视频；当前共有 ${files.length} 份素材，其中 ${videoFileCount} 个视频。请移除其他素材后继续。`
                     : isProfessionalVideoReady
                       ? target.avatar
-                        ? '将上传完整视频，以约 2 FPS 分析画面与原音轨，生成更精细的秒级情绪和音乐时间轴。'
-                        : '将上传完整视频，以约 1 FPS 分析画面与原音轨，适合影视、广告的镜头与音乐排程。'
+                        ? '将上传完整视频，以约 2 FPS 精细分析画面与原音轨；配乐按真实转折自适应规划，通常每段约 5-8 秒。'
+                        : '将上传完整视频，以约 1 FPS 分析画面与原音轨；配乐按镜头群和情绪转折自适应排程。'
                       : usesProfessionalFallback
                         ? '未检测到视频，将根据图片、音频、PDF 或文字进行快速分析，不会分析完整视频和原音轨。若要启用专业模式，请仅上传 1 个视频。'
                         : '提取少量压缩关键帧，速度更快，适合游戏音轨和方案预览。'}
@@ -622,7 +624,7 @@ export default function AudioDirector({
               {loading ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>{analysisStage}</span>
+                  <span>分析中</span>
                 </>
               ) : (
                 <>
@@ -681,6 +683,7 @@ export default function AudioDirector({
                     type="button"
                     onClick={() => {
                       setTarget({ game: false, video: true, avatar: false, sunnyIsland: false });
+                      setIsInstrumental(false);
                       onLoadDemo(filmDemoResult);
                     }}
                     className="bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 text-xs font-bold px-4 py-2.5 rounded-xl transition-all flex items-center gap-2 shadow-sm cursor-pointer"
@@ -797,9 +800,20 @@ export default function AudioDirector({
               {/* TAB 2: BGM RECOMMENDATIONS */}
               {activeTab === 'bgm' && (
                 <div className="space-y-4">
+                  <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm space-y-1">
+                    <h5 className="text-[10px] font-bold text-slate-450 uppercase">画面整体情绪基线（两套方案共同参考）</h5>
+                    <p className="text-xs text-slate-700 leading-relaxed font-semibold">
+                      {result.musicAnalysis.emotionalCurve}
+                    </p>
+                  </div>
+
                   {/* BGM Specs Cards */}
                   {result.bgmRecommendations.map((bgm, idx) => (
-                    <div key={idx} className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
+                    <div
+                      key={idx}
+                      data-testid={`bgm-recommendation-${idx}`}
+                      className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm"
+                    >
                       {/* Section Head */}
                       <div className="px-5 py-4 bg-slate-50/50 border-b border-slate-200 flex items-center justify-between">
                         <div>
@@ -831,9 +845,9 @@ export default function AudioDirector({
 
                         {/* Music emotional curve description */}
                         <div className="space-y-1">
-                          <h5 className="text-[10px] font-bold text-slate-450 uppercase">情绪起伏曲线与剪辑点</h5>
+                          <h5 className="text-[10px] font-bold text-slate-450 uppercase">本方案动态曲线与剪辑点</h5>
                           <p className="text-slate-700 bg-slate-50 p-3.5 rounded-xl leading-relaxed border border-slate-200 font-semibold">
-                            {result.musicAnalysis.emotionalCurve}
+                            {bgm.sunoPrompt.dynamics}
                           </p>
                         </div>
 
@@ -842,7 +856,7 @@ export default function AudioDirector({
                           <div className="space-y-3 pt-2">
                             <h5 className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider flex items-center gap-1.5">
                               <Clock className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                              <span>分秒级配乐细致设计案 (Music Production Timeline)</span>
+                              <span>自适应配乐段落设计案 (Music Production Timeline)</span>
                             </h5>
                             <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4.5 space-y-4 shadow-sm">
                               <div className="relative border-l border-emerald-200 ml-3 pl-5 space-y-5">
@@ -887,19 +901,44 @@ export default function AudioDirector({
                           <div className="flex items-center justify-between">
                             <h5 className="text-[10px] font-bold text-emerald-700 uppercase tracking-widest flex items-center gap-1">
                               <Music className="w-3 h-3 text-emerald-600" />
-                              <span>Suno AI 专业生成词 (Style Prompt)</span>
+                              <span>Suno 整体音乐生成词</span>
                             </h5>
                             <button
-                              onClick={() => copyToClipboard(bgm.sunoPrompt.english, `suno-p-${idx}`)}
-                              className="text-[10px] text-slate-500 hover:text-emerald-700 flex items-center gap-1 transition-colors cursor-pointer"
+                              type="button"
+                              data-testid={`copy-suno-english-${idx}`}
+                              title="仅复制英文 Suno 生成词"
+                              disabled={!bgm.sunoPrompt.english.trim()}
+                              onClick={() => copyToClipboard(bgm.sunoPrompt.english.trim(), `suno-p-${idx}`)}
+                              className="text-[10px] text-slate-500 hover:text-emerald-700 flex items-center gap-1 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                             >
                               <Copy className="w-3 h-3" />
-                              <span>{copiedId === `suno-p-${idx}` ? '已复制' : '复制提示词'}</span>
+                              <span>{copiedId === `suno-p-${idx}` ? '已复制英文' : '复制英文生成词'}</span>
                             </button>
                           </div>
-                          <p className="font-mono text-[11px] text-slate-850 bg-white p-3 rounded-lg border border-slate-200 leading-relaxed italic select-all">
-                            {bgm.sunoPrompt.english}
+
+                          <p className="text-[10px] text-slate-400">
+                            整首音乐的简短风格概述，不含时间线；复制时仅复制英文。
                           </p>
+
+                          <div className="space-y-1.5">
+                            <p className="text-[10px] font-bold text-slate-500">中文理解版</p>
+                            <p
+                              data-testid={`suno-prompt-chinese-${idx}`}
+                              className="text-[11px] text-slate-700 bg-emerald-50/50 p-3 rounded-lg border border-emerald-100 leading-relaxed"
+                            >
+                              {bgm.sunoPrompt.chinese}
+                            </p>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <p className="text-[10px] font-bold text-slate-500">English Prompt（复制内容）</p>
+                            <p
+                              data-testid={`suno-prompt-english-${idx}`}
+                              className="font-mono text-[11px] text-slate-850 bg-white p-3 rounded-lg border border-slate-200 leading-relaxed italic select-all"
+                            >
+                              {bgm.sunoPrompt.english}
+                            </p>
+                          </div>
                           
                           {/* SfxPlayer block for direct sound scene generation */}
                           <div className="pt-2">
@@ -908,10 +947,12 @@ export default function AudioDirector({
 
                           <div className="pt-2 flex justify-end">
                             <button
+                              type="button"
+                              disabled={!bgm.sunoPrompt.english.trim()}
                               onClick={() => handleSunoClick(bgm.sunoPrompt.english)}
-                              className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-2 rounded-xl text-[10px] flex items-center gap-1.5 transition-all shadow-md shadow-emerald-600/10 cursor-pointer"
+                              className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-2 rounded-xl text-[10px] flex items-center gap-1.5 transition-all shadow-md shadow-emerald-600/10 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                             >
-                              <span>复制提示词并跳转 Suno 创作</span>
+                              <span>复制英文并跳转 Suno 创作</span>
                               <ChevronRight className="w-3 h-3" />
                             </button>
                           </div>

@@ -2,6 +2,27 @@ import { generateGeminiContent } from './geminiRetry';
 
 const isBrowser = typeof window !== 'undefined';
 
+const createAsciiVideoUploadName = (fileName: string, mimeType = '') => {
+  const allowedExtensions = new Set(['.mp4', '.m4v', '.mov', '.webm', '.mkv', '.avi', '.mpeg', '.mpg', '.wmv']);
+  const extensionMatch = fileName.toLowerCase().match(/(\.[a-z0-9]{1,10})$/);
+  const requestedExtension = extensionMatch?.[1] || '';
+  const mimeFallbacks: Record<string, string> = {
+    'video/mp4': '.mp4',
+    'video/x-m4v': '.m4v',
+    'video/quicktime': '.mov',
+    'video/webm': '.webm',
+    'video/x-matroska': '.mkv',
+    'video/x-msvideo': '.avi',
+    'video/mpeg': '.mpeg',
+    'video/x-ms-wmv': '.wmv',
+  };
+  const extension = allowedExtensions.has(requestedExtension)
+    ? requestedExtension
+    : mimeFallbacks[mimeType.toLowerCase()] || '.mp4';
+  const nonce = Math.random().toString(36).slice(2, 10);
+  return `video_${Date.now()}_${nonce}${extension}`;
+};
+
 type GeminiModule = typeof import('@google/genai');
 
 let geminiModulePromise: Promise<GeminiModule> | null = null;
@@ -120,6 +141,258 @@ export interface AudioDesignResult {
   }[];
 }
 
+interface RawAudioDesignTimelineItem {
+  timecode: string;
+  instruments: string;
+  instrumentsEnglish: string;
+  emotion: string;
+  emotionEnglish: string;
+  description: string;
+  descriptionEnglish: string;
+}
+
+interface RawAudioDesignBgmRecommendation {
+  style: string;
+  styleEnglish: string;
+  bpm: number;
+  key: string;
+  vocalDirection: string;
+  vocalDirectionEnglish: string;
+  vocalInfo?: AudioDesignResult['bgmRecommendations'][number]['vocalInfo'];
+  lyrics?: AudioDesignResult['bgmRecommendations'][number]['lyrics'];
+  timelineDesign: RawAudioDesignTimelineItem[];
+}
+
+type RawAudioDesignResult = Omit<AudioDesignResult, 'bgmRecommendations'> & {
+  bgmRecommendations: RawAudioDesignBgmRecommendation[];
+};
+
+const cleanText = (value: unknown) => typeof value === 'string' ? value.trim() : '';
+
+const cleanEnglishText = (value: unknown) => cleanText(value)
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const containsHan = (value: string) => /[\u3400-\u9fff\uf900-\ufaff]/.test(value);
+const containsNonEnglishContent = (value: string) => /[\u3400-\u9fff\uf900-\ufaff，；：。！？、]/.test(value);
+const containsVocalContentChinese = (value: string) => /(人声|女声|男声|童声|女高音|男高音|女低音|男低音|主唱|歌手|歌声|声乐|清唱|无伴奏演唱|吟唱|哼唱|合唱|呼喊|歌唱|歌词|说唱|口白|念白|旁白)/.test(value);
+const containsVocalContentEnglish = (value: string) => /\b(vocals?|voices?|choirs?|chants?|chanting|singers?|singing|humming|hums?|lyrics?|rapping|rap vocals?|countertenor|a cappella|acapella|vocalise|spoken[- ]word|narration|narrator)\b|\bsoprano\b(?!\s+sax)|\balto\b(?!\s+sax)|\btenor\b(?!\s+sax)|\bbaritone\b(?!\s+(?:sax|horn))/i.test(value);
+const isStandardMusicKey = (value: string) => /^[A-G](?:#|b)?\s+(?:major|minor)$/i.test(value);
+
+const uniqueTexts = (values: string[]) => Array.from(new Set(values.filter(Boolean)));
+
+const SUNO_CORE_INSTRUMENT_LIMIT = 5;
+const SUNO_STYLE_WORD_LIMIT = 12;
+const SUNO_VOCAL_WORD_LIMIT = 14;
+const SUNO_STYLE_CHAR_LIMIT = 32;
+const SUNO_VOCAL_CHAR_LIMIT = 32;
+
+const containsTimelineReference = (value: string) => (
+  /(?:\d{1,2}:)?\d{1,2}(?:\.\d+)?\s*(?:-|–|—|~|至|到|to)\s*(?:\d{1,2}:)?\d{1,2}(?:\.\d+)?\s*(?:s|秒|secs?|seconds?)?/i.test(value)
+  || /\b(?:timeline|timecode|at\s+\d+(?:\.\d+)?\s*(?:s|secs?|seconds?))\b|(?:时间线|时间码|第\s*[一二三四五六七八九十\d]+\s*段)/i.test(value)
+  || /\b(?:intro|verse|chorus|bridge|outro|starting\s+with|followed\s+by|ending\s+with|then|later|enters?)\b|(?:前奏|主歌|副歌|桥段|尾奏|开场|中段|后段|随后|然后|最后|结尾|收尾|进入)/i.test(value)
+  || /(?:→|->)/.test(value)
+);
+
+const limitWords = (value: string, maximum: number) => value
+  .split(/\s+/)
+  .filter(Boolean)
+  .slice(0, maximum)
+  .join(' ');
+
+const limitCharacters = (value: string, maximum: number) => Array.from(value).slice(0, maximum).join('').trim();
+
+const selectWholeTrackText = (
+  value: string,
+  fallback: string,
+  separator: RegExp,
+  limit: number,
+  limiter: (text: string, maximum: number) => string,
+) => {
+  const safeText = value
+    .split(separator)
+    .map(part => part.trim())
+    .find(part => part && !containsTimelineReference(part));
+  return limiter(safeText || fallback, limit);
+};
+
+const extractCoreInstruments = (values: string[], isEnglish: boolean) => uniqueTexts(
+  values.flatMap(value => value
+    .split(isEnglish ? /[,;|/+]/ : /[、，,；;|/+]/)
+    .map(item => item.trim())
+    .filter(item => item && !containsTimelineReference(item))
+    .map(item => isEnglish ? limitWords(item, 4) : limitCharacters(item, 12))),
+).slice(0, SUNO_CORE_INSTRUMENT_LIMIT);
+
+const normalizeBpm = (value: unknown) => {
+  const parsed = Number.parseInt(String(value), 10);
+  return String(Number.isFinite(parsed) ? Math.min(220, Math.max(40, parsed)) : 90);
+};
+
+/**
+ * 详细时间线只服务于音画分析；Suno 词由同一方案的全局风格与核心乐器汇总。
+ * 最终词必须描述一首完整音乐，不携带时间码或分段编排说明。
+ */
+const materializeAudioDesignResult = (
+  raw: RawAudioDesignResult,
+  isInstrumental: boolean,
+): AudioDesignResult => {
+  if (!Array.isArray(raw.bgmRecommendations) || raw.bgmRecommendations.length === 0) {
+    throw new Error('AI 未生成有效的配乐方案，请重试。');
+  }
+
+  const bgmRecommendations = raw.bgmRecommendations.map((plan, planIndex) => {
+    const style = cleanText(plan.style);
+    const styleEnglish = cleanEnglishText(plan.styleEnglish);
+    const key = cleanEnglishText(plan.key);
+    const bpm = normalizeBpm(plan.bpm);
+    const sourceTimeline = Array.isArray(plan.timelineDesign) ? plan.timelineDesign : [];
+
+    if (!style || !containsHan(style) || !styleEnglish || containsNonEnglishContent(styleEnglish) || sourceTimeline.length === 0) {
+      throw new Error(`AI 生成的第 ${planIndex + 1} 套配乐方案不完整，请重试。`);
+    }
+    if (!isStandardMusicKey(key)) {
+      throw new Error(`AI 生成的第 ${planIndex + 1} 套配乐调性格式有误，请重试。`);
+    }
+
+    const pairedTimeline = sourceTimeline.map((item, itemIndex) => {
+      const normalized = {
+        timecode: cleanText(item.timecode),
+        instruments: cleanText(item.instruments),
+        instrumentsEnglish: cleanEnglishText(item.instrumentsEnglish),
+        emotion: cleanText(item.emotion),
+        emotionEnglish: cleanEnglishText(item.emotionEnglish),
+        description: cleanText(item.description),
+        descriptionEnglish: cleanEnglishText(item.descriptionEnglish),
+      };
+
+      const chineseFields = [normalized.instruments, normalized.emotion, normalized.description];
+      const englishFields = [normalized.instrumentsEnglish, normalized.emotionEnglish, normalized.descriptionEnglish];
+      if (
+        !normalized.timecode
+        || containsNonEnglishContent(normalized.timecode)
+        || chineseFields.some(value => !value || !containsHan(value))
+        || englishFields.some(value => !value || containsNonEnglishContent(value))
+      ) {
+        throw new Error(`AI 生成的第 ${planIndex + 1} 套配乐在第 ${itemIndex + 1} 个时间段缺少双语信息，请重试。`);
+      }
+      return normalized;
+    });
+
+    const instrumentation = uniqueTexts(pairedTimeline.map(item => item.instruments)).join('；');
+    if (isInstrumental) {
+      const chineseBlueprint = [style, ...pairedTimeline.flatMap(item => [item.instruments, item.emotion, item.description])].join(' ');
+      const englishBlueprint = [styleEnglish, ...pairedTimeline.flatMap(item => [item.instrumentsEnglish, item.emotionEnglish, item.descriptionEnglish])].join(' ');
+      if (containsVocalContentChinese(chineseBlueprint) || containsVocalContentEnglish(englishBlueprint)) {
+        throw new Error(`AI 生成的第 ${planIndex + 1} 套纯音乐方案包含人声元素，请重试。`);
+      }
+    }
+
+    const timelineDesign = pairedTimeline.map(item => ({
+      timecode: item.timecode,
+      instruments: item.instruments,
+      emotion: item.emotion,
+      description: item.description,
+    }));
+    const vocalDirection = isInstrumental
+      ? '纯音乐，无人声、吟唱、合唱或歌词'
+      : cleanText(plan.vocalDirection);
+    const vocalDirectionEnglish = isInstrumental
+      ? 'instrumental, no vocals, chanting, choir, or lyrics'
+      : cleanEnglishText(plan.vocalDirectionEnglish);
+
+    if (
+      !vocalDirection
+      || !vocalDirectionEnglish
+      || (!isInstrumental && (!containsHan(vocalDirection) || containsNonEnglishContent(vocalDirectionEnglish)))
+    ) {
+      throw new Error(`AI 生成的第 ${planIndex + 1} 套配乐缺少人声方向，请重试。`);
+    }
+
+    const coreInstruments = extractCoreInstruments(
+      pairedTimeline.map(item => item.instruments),
+      false,
+    );
+    const coreInstrumentsEnglish = extractCoreInstruments(
+      pairedTimeline.map(item => item.instrumentsEnglish),
+      true,
+    );
+    const compactStyle = selectWholeTrackText(
+      style,
+      '现代电影感配乐',
+      /[。；;\n]+/,
+      SUNO_STYLE_CHAR_LIMIT,
+      limitCharacters,
+    );
+    const compactStyleEnglish = selectWholeTrackText(
+      styleEnglish,
+      'modern cinematic soundtrack',
+      /[.;\n]+/,
+      SUNO_STYLE_WORD_LIMIT,
+      limitWords,
+    );
+    const compactVocalDirection = isInstrumental
+      ? vocalDirection
+      : selectWholeTrackText(
+        vocalDirection,
+        '统一且自然的人声音色与演唱方式',
+        /[。；;\n]+/,
+        SUNO_VOCAL_CHAR_LIMIT,
+        limitCharacters,
+      );
+    const compactVocalDirectionEnglish = isInstrumental
+      ? vocalDirectionEnglish
+      : selectWholeTrackText(
+        vocalDirectionEnglish,
+        'consistent natural vocals and performance style',
+        /[.;\n]+/,
+        SUNO_VOCAL_WORD_LIMIT,
+        limitWords,
+      );
+    const chinesePrompt = [
+      compactStyle,
+      isInstrumental ? '完整连贯的纯音乐配乐' : '完整连贯的歌曲',
+      coreInstruments.length > 0 ? `核心乐器：${coreInstruments.join('、')}` : '',
+      `${bpm} BPM`,
+      key,
+      compactVocalDirection,
+    ].filter(Boolean).join('；') + '。';
+    const englishPrompt = [
+      compactStyleEnglish,
+      isInstrumental ? 'cohesive full-length instrumental soundtrack' : 'cohesive full-length song',
+      coreInstrumentsEnglish.length > 0 ? `featuring ${coreInstrumentsEnglish.join(', ')}` : '',
+      `${bpm} BPM`,
+      key,
+      compactVocalDirectionEnglish,
+    ].filter(Boolean).join('; ') + '.';
+
+    if (containsTimelineReference(chinesePrompt) || containsTimelineReference(englishPrompt)) {
+      throw new Error(`AI 生成的第 ${planIndex + 1} 套整体音乐提示仍包含时间线，请重试。`);
+    }
+
+    return {
+      style,
+      instrumentation,
+      vocalInfo: isInstrumental ? undefined : plan.vocalInfo,
+      lyrics: isInstrumental ? undefined : plan.lyrics,
+      timelineDesign,
+      sunoPrompt: {
+        chinese: chinesePrompt,
+        english: englishPrompt,
+        bpm,
+        key,
+        structure: pairedTimeline.map(item => `${item.timecode} ${item.emotion}`).join(' → '),
+        dynamics: pairedTimeline.map(item => `${item.timecode}：${item.emotion}；${item.description}`).join(' → '),
+      },
+    };
+  });
+
+  return {
+    ...raw,
+    bgmRecommendations,
+  };
+};
+
 export interface AudioDesignMedia {
   data?: string;
   fileUri?: string;
@@ -193,7 +466,8 @@ export async function analyzeAudioDesignVideo(
     };
 
     const formData = new FormData();
-    formData.append('video', video, video.name);
+    formData.append('originalName', video.name);
+    formData.append('video', video, createAsciiVideoUploadName(video.name, video.type));
     formData.append('requirements', requirements);
     formData.append('target', JSON.stringify(target));
     formData.append('isInstrumental', String(isInstrumental));
@@ -217,7 +491,7 @@ export async function analyzeAudioDesignVideoFile(
       file: videoPath,
       config: {
         mimeType,
-        displayName: displayName.slice(0, 200),
+        displayName: createAsciiVideoUploadName(displayName, mimeType),
       },
     });
 
@@ -282,9 +556,9 @@ export async function analyzeAudioDesign(
   if (target.avatar) {
     additionalSpecialInstructions = `
     【阿凡达 (Avatar) 风格特别设计要求（最高优先级）】：
-    1. **极度细致的时间线设计 (timelineDesign)**：你必须针对视频/关键帧中的动作进行逐秒、更细致的音效和配乐时间轴对齐，至少规划 5-6 段以上的细分时间轴块（例如 0-3s, 3-7s, 7-12s, 12-18s, 18-24s, 24-30s 等），每一段的时间精确规划到毫秒或整秒。
+    1. **高精度但符合音乐规律的时间线设计 (timelineDesign)**：逐秒观察画面动作，但配乐段落必须按真实叙事与音乐乐句自适应划分，不设固定段数。常规段落约 5-8 秒；画面与情绪持续稳定时可延长，只有明显转场、关键动作或强烈情绪拐点才提前切段，严禁连续设计大量 2-3 秒的情绪切换。
     2. **外星奇幻生态声景 (Foley)**：音效命名和设计应该充满潘多拉星球外星动植物的奇特生命律动、夜光森林荧光植物的发光嗡嗡声（ambient bioluminescent glow）、斑溪兽（Banshee）的飞掠振翅与嘶鸣、灵魂之树的空灵触碰共鸣（使用神秘高频合成器与奇异声学共鸣音效）。
-    3. **宏大管弦交响与土著部落打击乐 (BGM)**：配乐必须融合詹姆斯·霍纳 (James Horner) 风格的宏大交响乐、原野木管（原野木笛）、原始部落大鼓打击乐（wood drum, hand percussion），以及土著男女的高亢吟唱和呼喊，传递人与大自然的灵性连接，空灵、原始而极其震撼。
+    3. **宏大管弦交响与原始部落打击乐 (BGM)**：配乐应融合史诗科幻管弦、原野木管（原野木笛）和原始部落大鼓打击乐（wood drum, hand percussion），传递人与大自然的灵性连接，空灵、原始而极其震撼。${isInstrumental ? '本次为纯音乐，严禁加入可辨识的人声、吟唱、合唱、呼喊或歌词，只能用乐器音色塑造原始感。' : '本次可使用人声，但人声出现的时间、情绪和演唱方式必须写入同一份 timelineDesign。'}
     `;
   } else if (target.sunnyIsland) {
     additionalSpecialInstructions = `
@@ -292,7 +566,7 @@ export async function analyzeAudioDesign(
     1. **治治愈、田园、温暖的总体风格**：输出的所有音效设计描述（description）、背景音乐风格（style）、音效命名（name）、乐器和合成技术（logic），**都必须往治愈、舒缓、安宁、田园、温暖方向倾斜，彻底避免任何惊悚、机械或突兀的噪音**。
     2. **田园大自然日常音效 (Foley)**：音效设计应聚焦于清爽海风吹拂、海浪拍打沙滩的细软声音、微风拂过花草麦浪的沙沙沙声、自行车链条及轮轴转动的轻快咔哒声、日系风铃随风摆动的清脆铜铃音、温水煮热咖啡气泡破裂的汩汩咕嘟声、以及远方小猫撒娇的温柔细叫与草丛鸟鸣。
     3. **温暖安宁的小品式乐器配乐 (BGM)**：音乐推荐必须是极度慵懒舒缓的。推荐的主奏与辅奏乐器为：尤克里里 (ukulele)、木吉他温暖扫弦 (acoustic guitar strumming)、马林巴木琴 (marimba)、手风琴 (accordion)、轻快的手碟 (handpan) 及带大厅混响的经典立式原声钢琴 (piano)。
-    4. **Suno Prompt 必须温润治愈**：生成的英文提示词（english）必须体现温暖田园，如 "healing acoustic folk, bright cute marimba, breezy summer afternoon, warm acoustic guitar strumming, cozy seaside village, peaceful sunny island bgm, soft, emotional, beautiful, 85 BPM"。
+    4. **双语音乐蓝图必须温润治愈**：style/styleEnglish 与 timelineDesign 中每组 instruments/instrumentsEnglish 必须共同体现温暖田园；最终 Suno 词只概括整首音乐，但曲风、情绪和核心乐器必须与这套蓝图一致。
     `;
   }
 
@@ -301,16 +575,25 @@ export async function analyzeAudioDesign(
     
     分析要求：
     1. **多文件逻辑**：有联系则综合分析，无联系则以第一张/段素材为主。
-    2. **全部中文**：所有分析描述（summary, mood, rhythm 等）必须使用中文。
+    2. **双语字段边界**：除字段名带 English、标准英文调性 key、数字 bpm、时间码 timecode 及规范英文音效名 name 外，所有分析描述必须使用中文；所有 English 字段必须只写英文，不得夹杂中文。
     3. **动作级SFX**：在 "scene" 字段标明具体时间点。
     4. **双重BGM**：提供两个差异巨大的风格方案。
     5. **无语音**：音效严禁出现人声对白。
     6. **性能与精度平衡**：只保留最重要的 6-10 个音效节点；字段描述保持专业但精炼，每段不超过 100 个汉字，避免重复内容。
+    7. **单一配乐蓝图（强制）**：每个 bgmRecommendations 项是一套完全独立、闭环的方案，timelineDesign 负责分秒级音画分析。顶层 style、BPM、调性、人声方向及所有时间段必须互相一致，禁止把两套推荐交叉混用；系统会从同一方案汇总最终 Suno 整体音乐词。
+    8. **逐项双语同义（强制）**：style/styleEnglish，以及 timelineDesign 中每一组 emotion/emotionEnglish、instruments/instrumentsEnglish、description/descriptionEnglish 都必须语义等价。不得在英文项中新增中文方案没有的曲风、乐器、人声、情绪或时间节点。
+    9. **Suno 整体音乐词（强制）**：style/styleEnglish 必须用一句短语概括整首音乐的统一曲风和总体情绪，中文不超过 30 字、英文不超过 12 个单词，不得包含时间码、时间线、章节名或先后顺序。timelineDesign 的 instruments/instrumentsEnglish 只列该段使用的 1-4 个乐器或音色名称，进入时机、动态变化和剪辑配合统一写入 description/descriptionEnglish。系统将用整体曲风、最多 5 个核心乐器、BPM、调性和总体人声要求生成一条简短明确的 Suno Style Prompt，不会复制时间线文案。
+    10. **配乐段落长度与连续性（最高优先级）**：timelineDesign 是音乐段落设计，不是逐动作音效清单。必须根据视频实际时长、叙事段落、镜头群和显著情绪拐点自适应划分，不能为了增加细节而强行增加段数。常规每段约 5-8 秒；连续镜头或同一情绪可保持 8-15 秒；短于 5 秒只允许用于视频首尾余量，或真正重要的转场、关键动作与强烈情绪变化。相邻段若情绪与核心配器相近必须合并，严禁连续出现大量 2-3 秒段落。高频画面采样只用于识别动作与 SFX，不代表 BGM 要以相同颗粒度切段；微小动作、卡点和瞬时声音写入 SFX 或当前段 description，不得据此更换整段音乐情绪。时间线必须从开头到结尾连续覆盖、无空隙、无重叠。
+    11. **画面分析与方案分工**：musicAnalysis.emotionalCurve 只描述画面本身的客观情绪走势；每套音乐如何响应画面，必须分别写进该方案的 timelineDesign，不能用全局情绪曲线代替。
+    12. **调性格式（强制）**：key 必须使用标准英文“音名 + major/minor”格式，例如 "D minor"、"F# major"，不得写“小调/大调”或只写音名。
+    ${isInstrumental
+      ? '13. **纯音乐硬约束（强制）**：style 和 timelineDesign 的全部中英文字段中不得出现人声、女声、男声、童声、吟唱、合唱、呼喊、歌唱、歌词、说唱及 vocal/voice/choir/chant/singer/lyrics/rap/singing/humming 等元素；不要输出 vocalInfo 或 lyrics。'
+      : '13. **人声方案约束**：vocalDirection/vocalDirectionEnglish 只用一句短语描述整首歌曲统一的人声类型、音色与唱法，不得写时间码或进入时机；人声何时进入只写在对应 timelineDesign 时间段中，中英文必须同义。'}
 
     ${files.some(file => Boolean(file.fileUri)) ? `
     【原生视频精细分析要求】：
     1. 必须从 00:00 开始覆盖到视频结束，结合画面运动、镜头剪辑和原始音轨进行判断。
-    2. 识别每次镜头、动作、情绪和音乐能量的明显转折，并使用“MM:SS-MM:SS”标出开始与结束时间。
+    2. 识别关键镜头群、叙事阶段、情绪和音乐能量的明显转折，并使用“MM:SS-MM:SS”标出开始与结束时间；普通切镜和细小动作不应单独拆成配乐段落。
     3. timelineDesign 必须按真实视频顺序连续覆盖，不得只根据少数代表画面概括全片。
     4. 快速动作段落优先标记 Foley、撞击、转场和节奏卡点；安静段落标记氛围、留白和音乐动态。
     ` : ''}
@@ -323,14 +606,14 @@ export async function analyzeAudioDesign(
     2. **动作场景及时间码精准化 (scene)**：
        - 所有音效的出现场景和动作必须包含极度精准的时间码段（如: '00:01.5 - 00:03.2'、'0-5s' 或 '00:12 - 00:15'），并在 scene 字段中清晰阐述该时刻画面的微观动势（如：“特写镜头主角推门、门轴干涩吱呀声；0.5s时门板撞击墙壁”）。
     3. **分秒级音乐细致设计文案 (timelineDesign)**：
-       - 每个配乐推荐（bgmRecommendations）必须在 timelineDesign 字段中附带一套详尽的分秒级配乐设计案（应规划 4 段或以上不同的时间跨度），精准阐释“每个时间区段应该有什么情绪”以及“如何配合画面使用什么乐器”：
-         - "timecode": 时间段，例如 '0-5s', '5-12s', '12-20s', '20-24s' 或 '00:00-00:05', '00:05-00:12' 等。
-         - "instruments": 该时间段采用的主奏、辅奏乐器与特质音色（例如: '钢琴 + 竖琴 + 柔和弦乐环境音铺垫'）。
-         - "emotion": 该时间段在画面上烘托的情绪（例如: '营造出神圣世界初现的寂静与敬畏感'）。
-         - "description": 此时具体的配乐编排、声学变化以及配合镜头剪辑的文案（例如: '管弦乐和空灵女声渐进，配合主角开门的定格镜头达到阶段性张力'）。
+       - 每个配乐推荐（bgmRecommendations）必须在 timelineDesign 字段中附带一套按视频实际内容自适应的配乐段落设计，不设固定段数。通常每段约 5-8 秒；同一情绪可更长，只有重要转折可更短，并避免连续 2-3 秒换一次音乐情绪：
+         - "timecode": 连续时间段，例如 24 秒视频可规划为 '0-6s', '6-13s', '13-20s', '20-24s'；末段可因视频结束而短于 5 秒。实际边界必须服从视频内容，不能照抄示例。
+         - "instruments" / "instrumentsEnglish": 该时间段乐器配置的中英文同义表述。
+         - "emotion" / "emotionEnglish": 该时间段画面情绪的中英文同义表述。
+         - "description" / "descriptionEnglish": 具体编排、声学变化及剪辑配合方式的中英文同义表述；英文需简洁，且不得增添中文没有的元素。
     ` : `
     【通用场景设计要求】：
-    1. 即使不是纯影视广告，也请在 bgmRecommendations 的 timelineDesign 中提供 3-4 段故事线或时间轴段落配乐设计（如 0-10s、10-30s 等），写明各时间点的情感表达和主导乐器，让设计更立体。
+    1. 即使不是纯影视广告，也请在 bgmRecommendations 的 timelineDesign 中按素材实际叙事和情绪拐点自适应设计音乐段落，不设固定段数。常规段落约 5-8 秒，同一情绪可延长；避免连续 2-3 秒切换情绪，并写明各段的情感表达和主导乐器。
     `}
 
     ${additionalSpecialInstructions}
@@ -422,22 +705,22 @@ export async function analyzeAudioDesign(
             type: Type.ARRAY,
             items: {
               type: Type.OBJECT,
-              required: ["style", "instrumentation", "sunoPrompt", "timelineDesign"],
+              required: [
+                "style",
+                "styleEnglish",
+                "bpm",
+                "key",
+                "vocalDirection",
+                "vocalDirectionEnglish",
+                "timelineDesign"
+              ],
               properties: {
                 style: { type: Type.STRING },
-                instrumentation: { type: Type.STRING },
-                sunoPrompt: {
-                  type: Type.OBJECT,
-                  required: ["chinese", "english", "bpm", "key", "structure", "dynamics"],
-                  properties: {
-                    chinese: { type: Type.STRING },
-                    english: { type: Type.STRING },
-                    bpm: { type: Type.STRING },
-                    key: { type: Type.STRING },
-                    structure: { type: Type.STRING },
-                    dynamics: { type: Type.STRING }
-                  }
-                },
+                styleEnglish: { type: Type.STRING },
+                bpm: { type: Type.INTEGER },
+                key: { type: Type.STRING },
+                vocalDirection: { type: Type.STRING },
+                vocalDirectionEnglish: { type: Type.STRING },
                 vocalInfo: {
                   type: Type.OBJECT,
                   properties: {
@@ -468,12 +751,23 @@ export async function analyzeAudioDesign(
                   type: Type.ARRAY,
                   items: {
                     type: Type.OBJECT,
-                    required: ["timecode", "instruments", "emotion", "description"],
+                    required: [
+                      "timecode",
+                      "instruments",
+                      "instrumentsEnglish",
+                      "emotion",
+                      "emotionEnglish",
+                      "description",
+                      "descriptionEnglish"
+                    ],
                     properties: {
                       timecode: { type: Type.STRING },
                       instruments: { type: Type.STRING },
+                      instrumentsEnglish: { type: Type.STRING },
                       emotion: { type: Type.STRING },
-                      description: { type: Type.STRING }
+                      emotionEnglish: { type: Type.STRING },
+                      description: { type: Type.STRING },
+                      descriptionEnglish: { type: Type.STRING }
                     }
                   }
                 }
@@ -489,12 +783,15 @@ export async function analyzeAudioDesign(
     throw new Error("AI 未能生成有效内容");
   }
 
+  let rawResult: RawAudioDesignResult;
   try {
-    return JSON.parse(response.text);
+    rawResult = JSON.parse(response.text) as RawAudioDesignResult;
   } catch (e) {
     console.error("JSON 解析失败:", response.text);
     throw new Error("AI 返回的数据格式有误，请重试");
   }
+
+  return materializeAudioDesignResult(rawResult, isInstrumental);
 }
 
 export async function regenerateLyrics(
