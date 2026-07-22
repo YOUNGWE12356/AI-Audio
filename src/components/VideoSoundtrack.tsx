@@ -36,9 +36,7 @@ import {
   Copy,
   Clipboard,
   Square,
-  Pencil,
-  Lock,
-  ShieldCheck
+  Pencil
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { TimelineClip } from '../types';
@@ -50,12 +48,7 @@ const MAX_VIDEO_UPLOAD_BYTES = 100 * 1024 * 1024;
 const DEFAULT_DUBBING_VOICE_ID = '21m00Tcm4TlvDq8ikWAM';
 const MIN_DUBBING_AUTO_SPEED = 0.25;
 const MAX_DUBBING_AUTO_SPEED = 4;
-const ANALYSIS_UNDO_KEY_PREFIX = 'video_soundtrack_analysis_undo:';
 
-type SoundtrackProjectMode = 'preserve-original' | 'remake';
-type AnalysisScope =
-  | { kind: 'enabled-tracks' }
-  | { kind: 'track'; trackId: 'bgm' | 'sfx' | 'dubbing' };
 type ExportJobKind = 'video' | 'mixed' | 'bgm' | 'sfx' | 'dubbing';
 
 const EXPORT_JOB_KINDS: ExportJobKind[] = ['video', 'mixed', 'bgm', 'sfx', 'dubbing'];
@@ -244,26 +237,6 @@ export interface SoundtrackProject {
   exportedBgmUrl?: string | null;
   exportedSfxUrl?: string | null;
   exportedDubbingUrl?: string | null;
-  mode?: SoundtrackProjectMode;
-  sourceAudioEnabled?: boolean;
-  sourceAudioVolume?: number;
-}
-
-interface AnalysisUndoSnapshot {
-  version: 1;
-  projectId: string;
-  videoFileName: string;
-  videoDuration: number;
-  createdAt: number;
-  scopeLabel: string;
-  clips: TimelineClip[];
-  selectedClipId: string | null;
-  selectedTrackId: string | null;
-  mixedVideoUrl: string | null;
-  exportedMixedUrl: string | null;
-  exportedBgmUrl: string | null;
-  exportedSfxUrl: string | null;
-  exportedDubbingUrl: string | null;
 }
 
 export default function VideoSoundtrack() {
@@ -276,10 +249,6 @@ export default function VideoSoundtrack() {
   const [projectNameDraft, setProjectNameDraft] = useState<string>('');
   const [isRenamingProject, setIsRenamingProject] = useState<boolean>(false);
   const [savedProjectsList, setSavedProjectsList] = useState<SoundtrackProject[]>([]);
-  const [projectMode, setProjectMode] = useState<SoundtrackProjectMode>('preserve-original');
-  const [showCreateModeModal, setShowCreateModeModal] = useState<boolean>(false);
-  const [showAnalysisScopeModal, setShowAnalysisScopeModal] = useState<boolean>(false);
-  const [analysisUndoSnapshot, setAnalysisUndoSnapshot] = useState<AnalysisUndoSnapshot | null>(null);
 
   // Layout resizing and Copy/Paste states
   const [copiedClip, setCopiedClip] = useState<TimelineClip | null>(null);
@@ -326,8 +295,6 @@ export default function VideoSoundtrack() {
   const [videoDuration, setVideoDuration] = useState<number>(30); // Default placeholder duration
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
-  const [sourceAudioEnabled, setSourceAudioEnabled] = useState<boolean>(true);
-  const [sourceAudioVolume, setSourceAudioVolume] = useState<number>(1);
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [isDraggingOver, setIsDraggingOver] = useState<boolean>(false);
   const [uploadProgress, setUploadProgress] = useState<number>(0);
@@ -581,7 +548,7 @@ export default function VideoSoundtrack() {
     }
   };
 
-  const handleCreateNewProject = (mode: SoundtrackProjectMode) => {
+  const handleCreateNewProject = () => {
     cancelExportJobs();
     analysisAbortRef.current?.abort('user');
     stopVoicePreview();
@@ -590,12 +557,6 @@ export default function VideoSoundtrack() {
     setIsPlaying(false);
     setCurrentTime(0);
     // Reset workspace states to clean slate
-    setProjectMode(mode);
-    setSourceAudioEnabled(mode === 'preserve-original');
-    setSourceAudioVolume(1);
-    setShowCreateModeModal(false);
-    setShowAnalysisScopeModal(false);
-    setAnalysisUndoSnapshot(null);
     setVideoFile(null);
     setSelectedFile(null);
     setVideoDuration(30);
@@ -625,9 +586,7 @@ export default function VideoSoundtrack() {
     });
 
     setToast({
-      message: mode === 'preserve-original'
-        ? '已创建“保留原声，局部修改”工程，请导入视频开始制作。'
-        : '已创建“重新制作声音”工程，视频原声默认关闭。',
+      message: '已新建视频音频工程，请导入视频开始制作。',
       type: 'success'
     });
     setTimeout(() => setToast(null), 3000);
@@ -670,10 +629,7 @@ export default function VideoSoundtrack() {
             exportedMixedUrl,
             exportedBgmUrl,
             exportedSfxUrl,
-            exportedDubbingUrl,
-            mode: projectMode,
-            sourceAudioEnabled,
-            sourceAudioVolume
+            exportedDubbingUrl
           };
           projects[existingIdx] = updatedProject;
           localStorage.setItem('video_soundtrack_projects', JSON.stringify(projects));
@@ -718,10 +674,7 @@ export default function VideoSoundtrack() {
       exportedMixedUrl,
       exportedBgmUrl,
       exportedSfxUrl,
-      exportedDubbingUrl,
-      mode: projectMode,
-      sourceAudioEnabled,
-      sourceAudioVolume
+      exportedDubbingUrl
     };
 
     try {
@@ -759,15 +712,8 @@ export default function VideoSoundtrack() {
       setMediaTimeSafely(videoRef.current, 0);
       setIsPlaying(false);
       setCurrentTime(0);
-      const restoredMode = project.mode ?? 'preserve-original';
-      const hasExplicitSourceAudioState = project.mode !== undefined
-        && typeof project.sourceAudioEnabled === 'boolean';
-      const restoredSourceAudioEnabled = project.sourceAudioEnabled ?? (restoredMode !== 'remake');
       setVideoFile(project.videoFile);
       setVideoDuration(project.videoDuration);
-      setProjectMode(restoredMode);
-      setSourceAudioEnabled(restoredSourceAudioEnabled);
-      setSourceAudioVolume(normalizeUnitVolume(project.sourceAudioVolume, 1));
       // Clean clips of any active generating states
       const cleanedClips = (project.clips || []).map(clip => ({
         ...clip,
@@ -863,11 +809,7 @@ export default function VideoSoundtrack() {
       setBgmEnabled(project.bgmEnabled);
       setSfxEnabled(project.sfxEnabled);
       setDubbingEnabled(project.dubbingEnabled);
-      setMixedVideoUrl(
-        hasStaleDubbingAudio || !hasExplicitSourceAudioState
-          ? null
-          : project.mixedVideoUrl,
-      );
+      setMixedVideoUrl(hasStaleDubbingAudio ? null : project.mixedVideoUrl);
       setExportedMixedUrl(hasStaleDubbingAudio ? null : project.exportedMixedUrl || null);
       setExportedBgmUrl(project.exportedBgmUrl || null);
       setExportedSfxUrl(project.exportedSfxUrl || null);
@@ -875,18 +817,6 @@ export default function VideoSoundtrack() {
       
       setCurrentProjectId(project.id);
       setIsProjectActive(true); // Go to workspace
-
-      try {
-        const undoStored = localStorage.getItem(`${ANALYSIS_UNDO_KEY_PREFIX}${project.id}`);
-        const undoSnapshot = undoStored ? JSON.parse(undoStored) as AnalysisUndoSnapshot : null;
-        const isMatchingSnapshot = undoSnapshot?.version === 1
-          && undoSnapshot.projectId === project.id
-          && undoSnapshot.videoFileName === project.videoFile?.name;
-        setAnalysisUndoSnapshot(isMatchingSnapshot ? undoSnapshot : null);
-      } catch (undoError) {
-        console.warn('Failed to load AI planning undo snapshot:', undoError);
-        setAnalysisUndoSnapshot(null);
-      }
 
       // Re-initialize audio instances if any clip has audioUrl
       Object.keys(audioInstancesRef.current).forEach(clipId => {
@@ -927,11 +857,7 @@ export default function VideoSoundtrack() {
         const targetProj = projects.find(p => p.id === projectId);
         projects = projects.filter(p => p.id !== projectId);
         localStorage.setItem('video_soundtrack_projects', JSON.stringify(projects));
-        localStorage.removeItem(`${ANALYSIS_UNDO_KEY_PREFIX}${projectId}`);
         setSavedProjectsList(projects);
-        if (currentProjectId === projectId) {
-          setAnalysisUndoSnapshot(null);
-        }
         
         setToast({
           message: `已删除工程“${targetProj?.name || ''}”`,
@@ -1197,10 +1123,7 @@ export default function VideoSoundtrack() {
         exportedMixedUrl,
         exportedBgmUrl,
         exportedSfxUrl,
-        exportedDubbingUrl,
-        mode: projectMode,
-        sourceAudioEnabled,
-        sourceAudioVolume
+        exportedDubbingUrl
       };
 
       try {
@@ -1253,10 +1176,7 @@ export default function VideoSoundtrack() {
           exportedMixedUrl,
           exportedBgmUrl,
           exportedSfxUrl,
-          exportedDubbingUrl,
-          mode: projectMode,
-          sourceAudioEnabled,
-          sourceAudioVolume
+          exportedDubbingUrl
         };
 
         // Deep-comparison check to avoid redundant localStorage write and state updates
@@ -1286,10 +1206,7 @@ export default function VideoSoundtrack() {
     exportedMixedUrl,
     exportedBgmUrl,
     exportedSfxUrl,
-    exportedDubbingUrl,
-    projectMode,
-    sourceAudioEnabled,
-    sourceAudioVolume
+    exportedDubbingUrl
   ]);
 
   // 1. Auto-dismiss Sync success alert after 5 seconds
@@ -1719,8 +1636,6 @@ export default function VideoSoundtrack() {
 
   const selectedClip = clips.find(c => c.id === selectedClipId);
   const selectedTrack = tracks.find(track => track.id === selectedTrackId);
-  const hasActiveSoloTrack = tracks.some(track => track.isSoloed);
-  const effectiveSourceAudioEnabled = sourceAudioEnabled && !hasActiveSoloTrack;
   const isTrackVolumeLocked = isMixing
     || isExportingMixed
     || isExportingBgm
@@ -1781,23 +1696,6 @@ export default function VideoSoundtrack() {
 
     invalidateTrackOutputs(currentTrack.type);
   };
-
-  const updateSourceAudioEnabled = (enabled: boolean) => {
-    invalidateMixedVideo();
-    setSourceAudioEnabled(enabled);
-  };
-
-  const updateSourceAudioVolume = (value: number) => {
-    invalidateMixedVideo();
-    setSourceAudioVolume(normalizeUnitVolume(value, 1));
-  };
-
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    video.muted = !effectiveSourceAudioEnabled;
-    video.volume = normalizeUnitVolume(sourceAudioVolume, 1);
-  }, [effectiveSourceAudioEnabled, sourceAudioVolume, videoFile?.url]);
 
   const handleTrackVoiceChange = (trackId: string, voiceId: string) => {
     const track = tracks.find(item => item.id === trackId);
@@ -2061,7 +1959,6 @@ export default function VideoSoundtrack() {
     stopVoicePreview();
     analysisAbortRef.current?.abort('user');
     cancelExportJobs();
-    setShowAnalysisScopeModal(false);
     setIsProjectActive(false);
   };
 
@@ -2567,103 +2464,13 @@ export default function VideoSoundtrack() {
     }
   };
 
-  const isProtectedTimelineClip = (clip: TimelineClip) => (
-    clip.origin === 'manual'
-    || clip.audioSource === 'uploaded'
-    || clip.timingSource === 'manual'
-    || clip.timingSource === 'manual-copy'
-    || clip.id.startsWith('clip-manual-')
-    || clip.id.startsWith('clip-copied-')
-    || clip.trackId.startsWith('track-custom-')
-  );
-
-  const saveAnalysisUndoSnapshot = (scopeLabel: string) => {
-    if (!currentProjectId || !videoFile) return null;
-    const snapshot: AnalysisUndoSnapshot = {
-      version: 1,
-      projectId: currentProjectId,
-      videoFileName: videoFile.name,
-      videoDuration,
-      createdAt: Date.now(),
-      scopeLabel,
-      clips: clipsRef.current.map(clip => ({ ...clip, isGenerating: false })),
-      selectedClipId,
-      selectedTrackId,
-      mixedVideoUrl,
-      exportedMixedUrl,
-      exportedBgmUrl,
-      exportedSfxUrl,
-      exportedDubbingUrl,
-    };
-
-    try {
-      localStorage.setItem(
-        `${ANALYSIS_UNDO_KEY_PREFIX}${currentProjectId}`,
-        JSON.stringify(snapshot),
-      );
-      setAnalysisUndoSnapshot(snapshot);
-      return snapshot;
-    } catch (snapshotError) {
-      console.error('Failed to save AI planning undo snapshot:', snapshotError);
-      return null;
-    }
-  };
-
-  const handleUndoLastAnalysis = () => {
-    const snapshot = analysisUndoSnapshot;
-    if (!snapshot || !currentProjectId || !videoFile) return;
-    const isMatchingProject = snapshot.version === 1
-      && snapshot.projectId === currentProjectId
-      && snapshot.videoFileName === videoFile.name
-      && Math.abs(snapshot.videoDuration - videoDuration) < 0.5;
-    if (!isMatchingProject) {
-      setToast({ message: '恢复点与当前视频不匹配，无法撤销。', type: 'error' });
-      window.setTimeout(() => setToast(null), 3_000);
-      return;
-    }
-
-    stopPlayback(true);
-    cancelExportJobs();
-    audioInstancesRef.current = {};
-    const restoredClips = snapshot.clips.map(clip => ({ ...clip, isGenerating: false }));
-    setClips(restoredClips);
-    const restoredClipId = snapshot.selectedClipId
-      && restoredClips.some(clip => clip.id === snapshot.selectedClipId)
-      ? snapshot.selectedClipId
-      : null;
-    setSelectedClipId(restoredClipId);
-    setSelectedTrackId(restoredClipId ? null : snapshot.selectedTrackId);
-    setMixedVideoUrl(snapshot.mixedVideoUrl);
-    setExportedMixedUrl(snapshot.exportedMixedUrl);
-    setExportedBgmUrl(snapshot.exportedBgmUrl);
-    setExportedSfxUrl(snapshot.exportedSfxUrl);
-    setExportedDubbingUrl(snapshot.exportedDubbingUrl);
-    localStorage.removeItem(`${ANALYSIS_UNDO_KEY_PREFIX}${currentProjectId}`);
-    setAnalysisUndoSnapshot(null);
-    setToast({ message: `已撤销“${snapshot.scopeLabel}”，恢复修改前时间线。`, type: 'success' });
-    window.setTimeout(() => setToast(null), 3_500);
-  };
-
   // Call Gemini visual multimodal model to auto-create soundtrack timeline
-  const handleAnalyzeVideo = async (scope: AnalysisScope) => {
+  const handleAnalyzeVideo = async () => {
     if (!videoFile) return;
 
-    const scopedTrack = scope.kind === 'track'
-      ? tracksRef.current.find(track => track.id === scope.trackId)
-      : null;
-    if (scope.kind === 'track' && !scopedTrack) {
-      setError('当前音轨无法重新规划，请重新选择系统音轨。');
-      return;
-    }
-    const analysisBgmEnabled = scope.kind === 'track'
-      ? scopedTrack?.type === 'bgm'
-      : bgmEnabled;
-    const analysisSfxEnabled = scope.kind === 'track'
-      ? scopedTrack?.type === 'sfx'
-      : sfxEnabled;
-    const analysisDubbingEnabled = scope.kind === 'track'
-      ? scopedTrack?.type === 'dubbing'
-      : dubbingEnabled;
+    const analysisBgmEnabled = bgmEnabled;
+    const analysisSfxEnabled = sfxEnabled;
+    const analysisDubbingEnabled = dubbingEnabled;
     const targetTrackIds = new Set<string>([
       ...(analysisBgmEnabled ? ['bgm'] : []),
       ...(analysisSfxEnabled ? ['sfx'] : []),
@@ -2673,11 +2480,6 @@ export default function VideoSoundtrack() {
       setError('请至少启用一条需要 AI 规划的音轨。');
       return;
     }
-    const scopeLabel = scope.kind === 'track'
-      ? `${scopedTrack?.name || '当前音轨'}重新规划`
-      : '已启用音轨重新规划';
-    setShowAnalysisScopeModal(false);
-
     // React state updates are asynchronous, so use a ref as the authoritative
     // lock to prevent a rapid double click from starting duplicate AI jobs.
     if (analysisLockRef.current) {
@@ -2811,48 +2613,25 @@ export default function VideoSoundtrack() {
             timingDirty: false,
           };
         });
-        const returnedTrackIds = new Set(mappedClips.map(clip => clip.trackId));
-        const previousClips = clipsRef.current;
-
         if (mappedClips.length === 0) {
-          setToast({
-            message: `${scopeLabel}已完成，但 AI 没有找到可替换方案，原时间线已完整保留。`,
-            type: 'info',
-          });
-          window.setTimeout(() => setToast(null), 4_000);
-          return;
+          throw new Error('AI 未返回合适的时间轴配置，请重新尝试。');
         }
 
-        if (previousClips.length > 0 && !saveAnalysisUndoSnapshot(scopeLabel)) {
-          throw new Error('无法建立安全恢复点，已停止应用新的 AI 规划。请清理浏览器存储后重试。');
-        }
-
-        const preservedClips = previousClips.filter(clip => (
-          !returnedTrackIds.has(clip.trackId) || isProtectedTimelineClip(clip)
-        ));
-        const nextClips = [...preservedClips, ...mappedClips].sort((a, b) => (
+        const nextClips = [...mappedClips].sort((a, b) => (
           a.startTime - b.startTime || a.trackId.localeCompare(b.trackId)
         ));
-        const nextClipIds = new Set(nextClips.map(clip => clip.id));
-        (Object.entries(audioInstancesRef.current) as Array<[string, HTMLAudioElement]>).forEach(([clipId, audio]) => {
-          if (nextClipIds.has(clipId)) return;
+        (Object.values(audioInstancesRef.current) as HTMLAudioElement[]).forEach((audio) => {
           audio.pause();
-          delete audioInstancesRef.current[clipId];
         });
-        const affectedExportKinds = (['bgm', 'sfx', 'dubbing'] as const).filter(kind => (
-          returnedTrackIds.has(kind)
-        ));
-        cancelExportJobs(['video', 'mixed', ...affectedExportKinds]);
+        audioInstancesRef.current = {};
+        cancelExportJobs();
         setClips(nextClips);
         setMixedVideoUrl(null);
         setExportedMixedUrl(null);
-        if (returnedTrackIds.has('bgm')) setExportedBgmUrl(null);
-        if (returnedTrackIds.has('sfx')) setExportedSfxUrl(null);
-        if (returnedTrackIds.has('dubbing')) setExportedDubbingUrl(null);
-
-        if (!selectedClipId || !nextClipIds.has(selectedClipId)) {
-          handleSelectClip(mappedClips[0].id);
-        }
+        setExportedBgmUrl(null);
+        setExportedSfxUrl(null);
+        setExportedDubbingUrl(null);
+        handleSelectClip(mappedClips[0].id);
 
         const analysisSource = typeof data.analysisSource === 'string'
           ? data.analysisSource.toLowerCase()
@@ -2866,14 +2645,14 @@ export default function VideoSoundtrack() {
         const usedServerFrames = analysisSource === 'server-ffmpeg';
         setToast({
           message: usingFullVideoDubbingAnalysis && dubbingCueCount === 0
-            ? `${scopeLabel}已完成，但没有识别到可配音字幕；原配音片段及其他音轨已保留。`
+            ? 'AI 分析完成，但没有识别到可配音字幕。'
             : usingFullVideoDubbingAnalysis
-            ? `${scopeLabel}完成：已识别字幕、对白与口型，并按字幕逐句建立配音片段。`
+            ? 'AI 分析完成：已识别字幕、对白与口型，并按字幕逐句建立配音片段。'
             : usedNativeVideo
-            ? `${scopeLabel}完成：系统已自动改用完整视频与原音轨完成分析。`
+            ? 'AI 分析完成：系统已自动改用完整视频与原音轨完成分析。'
             : usedServerFrames || usingServerFallback
-              ? `${scopeLabel}完成：系统已从服务器原视频重新提取画面。`
-              : `${scopeLabel}完成：已使用本地关键帧快速编排时间轴。`,
+              ? 'AI 分析完成：系统已从服务器原视频重新提取画面。'
+              : 'AI 分析完成：已使用本地关键帧快速编排时间轴。',
           type: usingFullVideoDubbingAnalysis && dubbingCueCount === 0
             ? 'info'
             : usingFullVideoDubbingAnalysis
@@ -3252,8 +3031,6 @@ export default function VideoSoundtrack() {
         body: JSON.stringify({
           videoFileName: videoFile.name,
           clips: playableClips,
-          includeOriginalAudio: sourceAudioEnabled,
-          originalAudioVolume: sourceAudioVolume,
         })
       });
 
@@ -3611,128 +3388,6 @@ export default function VideoSoundtrack() {
   const pendingGenerationCount = clips.filter(clip => (
     (!clip.audioUrl || clip.voiceDirty || clip.timingDirty) && !clip.isGenerating
   )).length;
-  const inferredReplanTrack = tracks.find(track => (
-    track.id === (selectedTrackId || selectedClip?.trackId)
-  ));
-  const canReplanCurrentTrack = Boolean(
-    inferredReplanTrack && ['bgm', 'sfx', 'dubbing'].includes(inferredReplanTrack.id),
-  );
-
-  const handleAnalyzeButtonClick = () => {
-    if (isAnalyzing) {
-      analysisAbortRef.current?.abort('user');
-      return;
-    }
-    if (clipsRef.current.length > 0) {
-      setShowAnalysisScopeModal(true);
-      return;
-    }
-    void handleAnalyzeVideo({ kind: 'enabled-tracks' });
-  };
-
-  const renderCreateModeModal = () => showCreateModeModal ? (
-    <div className="fixed inset-0 z-[9995] flex items-center justify-center p-4">
-      <div
-        className="absolute inset-0 bg-slate-950/85 backdrop-blur-sm"
-        onClick={() => setShowCreateModeModal(false)}
-      />
-      <div className="relative z-10 max-h-[85dvh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl custom-scrollbar">
-        <div className="mb-5 flex items-start justify-between gap-4">
-          <div>
-            <h3 className="text-base font-black text-white">你想怎样处理这个视频的声音？</h3>
-            <p className="mt-1.5 text-xs leading-relaxed text-slate-400">两种方式共用同一套多轨时间线，之后仍可随时调整原声开关和需要制作的轨道。</p>
-          </div>
-          <button
-            type="button"
-            onClick={() => setShowCreateModeModal(false)}
-            className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-800 hover:text-white"
-            aria-label="关闭制作方式选择"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <button
-            type="button"
-            onClick={() => handleCreateNewProject('preserve-original')}
-            className="group relative rounded-2xl border border-emerald-500/35 bg-emerald-950/20 p-5 text-left transition-all hover:border-emerald-400 hover:bg-emerald-950/35"
-          >
-            <span className="absolute right-4 top-4 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[9px] font-bold text-emerald-300">推荐</span>
-            <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-xl border border-emerald-500/25 bg-emerald-500/10 text-emerald-400">
-              <ShieldCheck className="h-5 w-5" />
-            </div>
-            <p className="text-sm font-bold text-slate-100">保留原声，局部修改</p>
-            <p className="mt-2 text-[11px] leading-relaxed text-slate-400">锁定视频原始声音，只替换不满意的配音句子、音乐段或音效，随时可以恢复原声。</p>
-          </button>
-          <button
-            type="button"
-            onClick={() => handleCreateNewProject('remake')}
-            className="group rounded-2xl border border-indigo-500/30 bg-indigo-950/20 p-5 text-left transition-all hover:border-indigo-400 hover:bg-indigo-950/35"
-          >
-            <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-xl border border-indigo-500/25 bg-indigo-500/10 text-indigo-400">
-              <Sparkles className="h-5 w-5" />
-            </div>
-            <p className="text-sm font-bold text-slate-100">重新制作声音</p>
-            <p className="mt-2 text-[11px] leading-relaxed text-slate-400">默认关闭视频原声，再选择要重新制作的配乐、音效和配音轨道；全部勾选就是完整重制。</p>
-          </button>
-        </div>
-      </div>
-    </div>
-  ) : null;
-
-  const renderAnalysisScopeModal = () => showAnalysisScopeModal ? (
-    <div className="fixed inset-0 z-[9995] flex items-center justify-center p-4">
-      <div
-        className="absolute inset-0 bg-slate-950/85 backdrop-blur-sm"
-        onClick={() => setShowAnalysisScopeModal(false)}
-      />
-      <div className="relative z-10 w-full max-w-lg rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl">
-        <div className="mb-5 flex items-start justify-between gap-4">
-          <div>
-            <h3 className="text-base font-black text-white">选择 AI 规划范围</h3>
-            <p className="mt-1.5 text-xs leading-relaxed text-slate-400">手动创建和本地上传的片段会受到保护；应用新方案前会自动建立一层恢复点。</p>
-          </div>
-          <button
-            type="button"
-            onClick={() => setShowAnalysisScopeModal(false)}
-            className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-800 hover:text-white"
-            aria-label="关闭 AI 规划范围选择"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        <div className="space-y-3">
-          <button
-            type="button"
-            disabled={!canReplanCurrentTrack}
-            onClick={() => {
-              if (!inferredReplanTrack || !canReplanCurrentTrack) return;
-              void handleAnalyzeVideo({
-                kind: 'track',
-                trackId: inferredReplanTrack.id as 'bgm' | 'sfx' | 'dubbing',
-              });
-            }}
-            className="w-full rounded-xl border border-indigo-500/30 bg-indigo-950/20 p-4 text-left transition-colors hover:border-indigo-400 hover:bg-indigo-950/35 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <p className="text-xs font-bold text-indigo-200">当前音轨重新规划（整条）</p>
-            <p className="mt-1 text-[10px] leading-relaxed text-slate-400">
-              {canReplanCurrentTrack
-                ? `只替换“${inferredReplanTrack?.name}”中的 AI 规划片段，其他音轨保持不变。`
-                : '请先在时间线上选择配乐、音效或配音系统轨道。'}
-            </p>
-          </button>
-          <button
-            type="button"
-            onClick={() => void handleAnalyzeVideo({ kind: 'enabled-tracks' })}
-            className="w-full rounded-xl border border-emerald-500/30 bg-emerald-950/20 p-4 text-left transition-colors hover:border-emerald-400 hover:bg-emerald-950/35"
-          >
-            <p className="text-xs font-bold text-emerald-200">重新规划已启用音轨</p>
-            <p className="mt-1 text-[10px] leading-relaxed text-slate-400">按照顶栏勾选的配乐、音效和配音进行规划；未勾选及自定义轨道完整保留。</p>
-          </button>
-        </div>
-      </div>
-    </div>
-  ) : null;
 
   if (!isProjectActive) {
     return (
@@ -3746,23 +3401,23 @@ export default function VideoSoundtrack() {
             <div className="inline-flex p-3 bg-gradient-to-br from-indigo-500/20 to-purple-500/20 text-indigo-400 rounded-2xl shadow-inner border border-indigo-500/10">
               <Film className="w-10 h-10" />
             </div>
-            <h1 className="text-2xl font-black text-white tracking-tight">AI 视频声音制作</h1>
+            <h1 className="text-2xl font-black text-white tracking-tight">视频生成音频</h1>
             <p className="text-sm text-slate-400 max-w-md mx-auto leading-relaxed">
-              保留并局部修改已有声音，或重新制作视频的配乐、音效与配音。
+              导入视频，在多轨时间线上规划配乐、音效与配音。
             </p>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 pt-4">
             {/* Create New Project */}
             <button
-              onClick={() => setShowCreateModeModal(true)}
+              onClick={handleCreateNewProject}
               className="group flex flex-col items-center justify-center p-6 bg-slate-900/60 hover:bg-indigo-600/10 border border-slate-800 hover:border-indigo-500/40 rounded-xl cursor-pointer transition-all duration-300 hover:shadow-xl hover:shadow-indigo-500/5 hover:-translate-y-0.5"
             >
               <div className="p-3 bg-indigo-500/10 group-hover:bg-indigo-500/20 text-indigo-400 rounded-xl mb-4 transition-colors">
                 <Plus className="w-6 h-6" />
               </div>
               <span className="text-sm font-bold text-slate-200 group-hover:text-white">新建工程</span>
-              <span className="text-[11px] text-slate-500 mt-2 text-center leading-relaxed">下一步选择保留原声局部修改，或关闭原声重新制作。</span>
+              <span className="text-[11px] text-slate-500 mt-2 text-center leading-relaxed">创建一个空白多轨音频工程。</span>
             </button>
 
             {/* Open Existing Project */}
@@ -3873,7 +3528,6 @@ export default function VideoSoundtrack() {
             </div>
           </div>
         )}
-        {renderCreateModeModal()}
       </div>
     );
   }
@@ -3932,13 +3586,6 @@ export default function VideoSoundtrack() {
                     {currentProjectName}
                   </span>
                 )}
-                <span className={`ml-1 rounded-full border px-1.5 py-0.5 text-[9px] font-bold ${
-                  projectMode === 'preserve-original'
-                    ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-300'
-                    : 'border-indigo-500/25 bg-indigo-500/10 text-indigo-300'
-                }`}>
-                  {projectMode === 'preserve-original' ? '原声编辑' : '重新制作'}
-                </span>
               </div>
             </div>
           </div>
@@ -3946,7 +3593,7 @@ export default function VideoSoundtrack() {
           {/* 工程管理控制 */}
           <div className="flex items-center gap-2 pl-4 border-l border-slate-800">
             <button
-              onClick={() => setShowCreateModeModal(true)}
+              onClick={handleCreateNewProject}
               className="flex items-center gap-1 bg-slate-900 hover:bg-slate-800 text-slate-300 font-bold text-[11px] px-2.5 py-1.5 rounded-lg border border-slate-800 transition-all cursor-pointer"
               title="新建工程"
             >
@@ -4039,7 +3686,10 @@ export default function VideoSoundtrack() {
             <div className="flex items-center gap-2">
               <button
                 id="btn-ai-analyze"
-                onClick={handleAnalyzeButtonClick}
+                onClick={() => {
+                  if (isAnalyzing) analysisAbortRef.current?.abort('user');
+                  else void handleAnalyzeVideo();
+                }}
                 className={`flex items-center gap-1.5 text-white font-bold text-xs px-3.5 py-1.5 rounded-lg shadow-lg transition-all duration-200 cursor-pointer ${
                   isAnalyzing
                     ? 'bg-red-600 hover:bg-red-500 shadow-red-500/10'
@@ -4054,23 +3704,10 @@ export default function VideoSoundtrack() {
                 ) : (
                   <>
                     <Sparkles className="w-3.5 h-3.5" />
-                    <span>{clips.length > 0 ? 'AI 优化音轨' : 'AI 规划音轨'}</span>
+                    <span>AI 自动解析画面配乐</span>
                   </>
                 )}
               </button>
-
-              {analysisUndoSnapshot && (
-                <button
-                  type="button"
-                  onClick={handleUndoLastAnalysis}
-                  className="flex items-center gap-1 rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-1.5 text-[10px] font-bold text-amber-300 transition-colors hover:bg-amber-500/20"
-                  title={`撤销：${analysisUndoSnapshot.scopeLabel}`}
-                  aria-label="撤销上次 AI 规划"
-                >
-                  <RotateCcw className="h-3.5 w-3.5" />
-                  <span>撤销规划</span>
-                </button>
-              )}
 
               <button
                 id="btn-generate-all"
@@ -4111,7 +3748,7 @@ export default function VideoSoundtrack() {
                             <FileVideo className="w-3.5 h-3.5 text-emerald-400" />
                             <div>
                               <p className="text-[11px] font-bold text-slate-200">导出已混音视频</p>
-                              <p className="text-[9px] text-slate-500">{sourceAudioEnabled ? '保留视频原声并混入制作音轨' : '关闭视频原声，仅混入制作音轨'}</p>
+                              <p className="text-[9px] text-slate-500">将制作音轨混合到视频中</p>
                             </div>
                           </div>
                           {isMixing ? (
@@ -4424,7 +4061,6 @@ export default function VideoSoundtrack() {
                   <video
                     ref={videoRef}
                     src={videoFile.url}
-                    muted={!effectiveSourceAudioEnabled}
                     className="max-h-full max-w-full object-contain"
                     onTimeUpdate={handleTimeUpdate}
                     onLoadedMetadata={handleVideoLoaded}
@@ -5458,66 +5094,6 @@ export default function VideoSoundtrack() {
                     </div>
                   </div>
 
-                  {/* Locked source audio row: never deleted or regenerated. */}
-                  <div data-testid="source-audio-track" className="flex h-12 shrink-0 gap-0">
-                    <div className="sticky left-0 z-20 flex w-[160px] shrink-0 flex-col justify-between rounded-l-lg border-r border-amber-500/20 bg-amber-950/20 p-1.5 shadow-md">
-                      <div className="flex min-w-0 items-center gap-1.5">
-                        <Lock className="h-3 w-3 shrink-0 text-amber-400" />
-                        <span className="truncate text-[10px] font-bold text-amber-200">视频原声</span>
-                        <span className="ml-auto rounded border border-amber-500/20 px-1 text-[8px] font-bold text-amber-400">锁定</span>
-                      </div>
-                      <div className="flex items-center gap-1.5 border-t border-amber-500/10 pt-1">
-                        <button
-                          type="button"
-                          onClick={() => updateSourceAudioEnabled(!sourceAudioEnabled)}
-                          disabled={!videoFile || videoLoadFailed}
-                          className={`rounded border px-1.5 py-0.5 text-[9px] font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-                            sourceAudioEnabled
-                              ? 'border-amber-500/40 bg-amber-500/20 text-amber-300'
-                              : 'border-red-500/30 bg-red-500/15 text-red-300'
-                          }`}
-                          aria-label={sourceAudioEnabled ? '静音视频原声' : '开启视频原声'}
-                          title={sourceAudioEnabled ? '静音视频原声' : '开启视频原声'}
-                        >
-                          M
-                        </button>
-                        <Volume2 className="h-3 w-3 shrink-0 text-slate-500" />
-                        <input
-                          type="range"
-                          min="0"
-                          max="1"
-                          step="0.05"
-                          value={sourceAudioVolume}
-                          onChange={(event) => updateSourceAudioVolume(Number.parseFloat(event.target.value))}
-                          disabled={!videoFile || videoLoadFailed}
-                          className="h-1 min-w-0 flex-1 cursor-pointer accent-amber-500 disabled:cursor-not-allowed disabled:opacity-40"
-                          aria-label="视频原声音量"
-                        />
-                        <span className="w-7 text-right font-mono text-[8px] text-slate-500">{Math.round(sourceAudioVolume * 100)}%</span>
-                      </div>
-                    </div>
-                    <div className={`relative flex-1 overflow-hidden rounded-r-lg border-y border-r ${
-                      effectiveSourceAudioEnabled
-                        ? 'border-amber-500/25 bg-amber-950/15'
-                        : 'border-slate-800 bg-slate-900/40 opacity-60'
-                    }`}>
-                      <div className="absolute inset-1.5 flex items-center justify-between rounded-md border border-amber-500/15 bg-gradient-to-r from-amber-500/10 via-amber-400/5 to-amber-500/10 px-3">
-                        <span className="truncate text-[9px] font-semibold text-amber-200/80">
-                          {hasActiveSoloTrack && sourceAudioEnabled
-                            ? 'Solo 试听期间原声暂时静音'
-                            : sourceAudioEnabled
-                              ? '视频原始混合声音 · 全程保护'
-                              : '视频原声已关闭'}
-                        </span>
-                        {sourceAudioEnabled && clips.some(clip => (
-                          clip.audioUrl && tracks.find(track => track.id === clip.trackId)?.type === 'dubbing'
-                        )) && (
-                          <span className="ml-3 shrink-0 text-[8px] font-bold text-amber-400" title="原声与新配音可能同时播放">注意配音重叠</span>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                  
                   {/* Dynamic Track Rows */}
                   {(() => {
                     const hasActiveSolo = tracks.some(t => t.isSoloed);
@@ -5743,9 +5319,6 @@ export default function VideoSoundtrack() {
           </div>
         </div>
       )}
-
-      {renderCreateModeModal()}
-      {renderAnalysisScopeModal()}
 
       {/* Toast Notification Banner */}
       <AnimatePresence>
