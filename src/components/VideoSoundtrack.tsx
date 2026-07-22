@@ -41,91 +41,9 @@ import { motion, AnimatePresence } from 'motion/react';
 import { TimelineClip } from '../types';
 import { ELEVENLABS_VOICES, VoiceItem } from '../data/voices';
 import { fetchAvailableVoices } from '../services/elevenLabsService';
+import { extractVideoKeyframes } from '../utils/mediaPreparation';
 
-
-// Helper to extract keyframes from a video file in the browser using canvas
-async function extractVideoKeyframes(file: File, numFrames: number = 8): Promise<Array<{ timestamp: number; base64: string }>> {
-  return new Promise((resolve, reject) => {
-    const video = document.createElement('video');
-    video.src = URL.createObjectURL(file);
-    video.muted = true;
-    video.playsInline = true;
-    video.crossOrigin = 'anonymous';
-
-    // Set a global timeout of 15 seconds in case seeking gets stuck
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error('提取视频帧超时'));
-    }, 15000);
-
-    const cleanup = () => {
-      clearTimeout(timeout);
-      try {
-        URL.revokeObjectURL(video.src);
-      } catch (e) {}
-    };
-
-    video.onloadedmetadata = async () => {
-      try {
-        const duration = video.duration || 10;
-        const keyframes: Array<{ timestamp: number; base64: string }> = [];
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        
-        // Target width of 400px for balanced size and fast upload
-        const targetWidth = 400;
-        const aspect = video.videoWidth / video.videoHeight || 16/9;
-        canvas.width = targetWidth;
-        canvas.height = Math.round(targetWidth / aspect);
-
-        // Generate timestamps evenly distributed
-        const timestamps: number[] = [];
-        for (let i = 0; i < numFrames; i++) {
-          const t = (i + 0.5) * (duration / numFrames);
-          if (t < duration) {
-            timestamps.push(t);
-          }
-        }
-
-        for (const t of timestamps) {
-          await new Promise<void>((res) => {
-            const onSeeked = () => {
-              video.removeEventListener('seeked', onSeeked);
-              res();
-            };
-            video.addEventListener('seeked', onSeeked);
-            video.currentTime = t;
-            // Seeked fallback timeout
-            setTimeout(res, 800);
-          });
-
-          if (ctx) {
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            const dataUrl = canvas.toDataURL('image/jpeg', 0.65);
-            const base64 = dataUrl.split(',')[1];
-            if (base64) {
-              keyframes.push({
-                timestamp: parseFloat(t.toFixed(1)),
-                base64: base64
-              });
-            }
-          }
-        }
-
-        cleanup();
-        resolve(keyframes);
-      } catch (err) {
-        cleanup();
-        reject(err);
-      }
-    };
-
-    video.onerror = () => {
-      cleanup();
-      reject(new Error('无法加载视频元数据进行帧提取'));
-    };
-  });
-}
+const MAX_VIDEO_UPLOAD_BYTES = 100 * 1024 * 1024;
 
 export interface SoundtrackTrack {
   id: string;
@@ -168,17 +86,41 @@ export default function VideoSoundtrack() {
   const [timelineHeight, setTimelineHeight] = useState<number>(300);
   const [videoHeight, setVideoHeight] = useState<number>(360);
   const [propertyWidth, setPropertyWidth] = useState<number>(320);
-  const [propertyHeight, setPropertyHeight] = useState<number>(600);
+  const [propertyHeight, setPropertyHeight] = useState<number>(260);
 
   const [isResizingTimeline, setIsResizingTimeline] = useState<boolean>(false);
   const [isResizingVideo, setIsResizingVideo] = useState<boolean>(false);
-  const [isResizingPropertyWidth, setIsResizingPropertyWidth] = useState<boolean>(false);
-  const [isResizingPropertyHeight, setIsResizingPropertyHeight] = useState<boolean>(false);
+  const [propertyResizeAxis, setPropertyResizeAxis] = useState<'width' | 'height' | 'both' | null>(null);
 
-  const timelineResizeStartRef = useRef<{ clientY: number; initialHeight: number }>({ clientY: 0, initialHeight: 300 });
+  const timelineResizeStartRef = useRef<{ clientY: number; initialHeight: number; maxHeight: number }>({ clientY: 0, initialHeight: 300, maxHeight: 600 });
   const videoResizeStartRef = useRef<{ clientY: number; initialHeight: number }>({ clientY: 0, initialHeight: 360 });
-  const propertyWidthStartRef = useRef<{ clientX: number; initialWidth: number }>({ clientX: 0, initialWidth: 320 });
-  const propertyHeightStartRef = useRef<{ clientY: number; initialHeight: number }>({ clientY: 0, initialHeight: 600 });
+  const propertyResizeStartRef = useRef<{
+    active: boolean;
+    axis: 'width' | 'height' | 'both';
+    pointerId: number;
+    clientX: number;
+    clientY: number;
+    initialWidth: number;
+    initialTimelineHeight: number;
+    initialMobileHeight: number;
+    maxWidth: number;
+    maxTimelineHeight: number;
+    maxMobileHeight: number;
+    desktop: boolean;
+  }>({
+    active: false,
+    axis: 'width',
+    pointerId: -1,
+    clientX: 0,
+    clientY: 0,
+    initialWidth: 320,
+    initialTimelineHeight: 300,
+    initialMobileHeight: 260,
+    maxWidth: 600,
+    maxTimelineHeight: 600,
+    maxMobileHeight: 600
+  });
+  const propertyResizeCleanupRef = useRef<() => void>(() => undefined);
 
   // Video and file states
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -199,6 +141,9 @@ export default function VideoSoundtrack() {
   
   // AI analysis and mixing status
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
+  const [analysisStage, setAnalysisStage] = useState<string>('准备解析画面...');
+  const analysisAbortRef = useRef<AbortController | null>(null);
+  const analysisLockRef = useRef(false);
   const [isMixing, setIsMixing] = useState<boolean>(false);
   const [mixedVideoUrl, setMixedVideoUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -868,7 +813,7 @@ export default function VideoSoundtrack() {
 
     const handleMouseMove = (e: MouseEvent) => {
       const deltaY = e.clientY - timelineResizeStartRef.current.clientY;
-      const newHeight = Math.max(160, Math.min(600, timelineResizeStartRef.current.initialHeight - deltaY));
+      const newHeight = Math.max(160, Math.min(timelineResizeStartRef.current.maxHeight, timelineResizeStartRef.current.initialHeight - deltaY));
       setTimelineHeight(newHeight);
     };
 
@@ -906,57 +851,70 @@ export default function VideoSoundtrack() {
     };
   }, [isResizingVideo]);
 
-  // 4. Property width resize mouse events
+  // Property panel pointer resizing feedback and emergency cancellation.
   useEffect(() => {
-    if (!isResizingPropertyWidth) return;
+    if (!propertyResizeAxis) return;
 
-    const handleMouseMove = (e: MouseEvent) => {
-      const deltaX = e.clientX - propertyWidthStartRef.current.clientX;
-      const newWidth = Math.max(260, Math.min(600, propertyWidthStartRef.current.initialWidth - deltaX));
-      setPropertyWidth(newWidth);
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = propertyResizeAxis === 'both'
+      ? 'nesw-resize'
+      : propertyResizeAxis === 'width'
+        ? 'ew-resize'
+        : 'ns-resize';
+    document.body.style.userSelect = 'none';
+
+    const cancelResize = () => {
+      propertyResizeStartRef.current.active = false;
+      propertyResizeCleanupRef.current();
+      propertyResizeCleanupRef.current = () => undefined;
+      setPropertyResizeAxis(null);
     };
 
-    const handleMouseUp = () => {
-      setIsResizingPropertyWidth(false);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') cancelResize();
     };
 
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
+    window.addEventListener('blur', cancelResize);
+    window.addEventListener('keydown', handleKeyDown);
     return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('blur', cancelResize);
+      window.removeEventListener('keydown', handleKeyDown);
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
     };
-  }, [isResizingPropertyWidth]);
+  }, [propertyResizeAxis]);
 
-  // 5. Property height resize mouse events
-  useEffect(() => {
-    if (!isResizingPropertyHeight) return;
+  useEffect(() => () => propertyResizeCleanupRef.current(), []);
 
-    const handleMouseMove = (e: MouseEvent) => {
-      const deltaY = e.clientY - propertyHeightStartRef.current.clientY;
-      const newHeight = Math.max(300, Math.min(1000, propertyHeightStartRef.current.initialHeight + deltaY));
-      setPropertyHeight(newHeight);
+  const getPropertyResizeBounds = () => {
+    const workspace = document.getElementById('video-workspace-pane');
+    const timeline = document.getElementById('daw-timeline-section');
+    const propertyPanel = document.getElementById('properties-panel-container');
+    const currentTimelineHeight = timeline?.clientHeight ?? timelineHeight;
+    const currentWorkspaceHeight = workspace?.clientHeight ?? 180;
+    const currentPanelHeight = propertyPanel?.clientHeight ?? propertyHeight;
+    const totalResizableHeight = currentWorkspaceHeight + currentTimelineHeight;
+    const workspaceWidth = workspace?.clientWidth ?? window.innerWidth;
+
+    return {
+      currentTimelineHeight,
+      currentPanelHeight,
+      maxWidth: Math.max(280, Math.min(640, workspaceWidth - 420)),
+      maxTimelineHeight: Math.max(160, Math.min(600, totalResizableHeight - 180)),
+      maxMobileHeight: Math.max(180, Math.min(600, currentWorkspaceHeight - 60))
     };
-
-    const handleMouseUp = () => {
-      setIsResizingPropertyHeight(false);
-    };
-
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, [isResizingPropertyHeight]);
+  };
 
   // Drag start trigger functions
   const startTimelineResize = (e: React.MouseEvent) => {
     e.preventDefault();
+    const bounds = getPropertyResizeBounds();
     setIsResizingTimeline(true);
     timelineResizeStartRef.current = {
       clientY: e.clientY,
-      initialHeight: timelineHeight
+      initialHeight: bounds.currentTimelineHeight,
+      maxHeight: bounds.maxTimelineHeight
     };
   };
 
@@ -969,25 +927,113 @@ export default function VideoSoundtrack() {
     };
   };
 
-  const startPropertyWidthResize = (e: React.MouseEvent) => {
+  const startPropertyResize = (
+    e: React.PointerEvent<HTMLDivElement>,
+    axis: 'width' | 'height' | 'both'
+  ) => {
     e.preventDefault();
-    setIsResizingPropertyWidth(true);
-    propertyWidthStartRef.current = {
+    e.stopPropagation();
+    const bounds = getPropertyResizeBounds();
+    const desktop = window.matchMedia('(min-width: 768px)').matches;
+    propertyResizeCleanupRef.current();
+    propertyResizeStartRef.current = {
+      active: true,
+      axis,
+      pointerId: e.pointerId,
       clientX: e.clientX,
-      initialWidth: propertyWidth
+      clientY: e.clientY,
+      initialWidth: propertyWidth,
+      initialTimelineHeight: bounds.currentTimelineHeight,
+      initialMobileHeight: bounds.currentPanelHeight,
+      maxWidth: bounds.maxWidth,
+      maxTimelineHeight: bounds.maxTimelineHeight,
+      maxMobileHeight: bounds.maxMobileHeight,
+      desktop
     };
+    setPropertyResizeAxis(axis);
+
+    const updateSize = (clientX: number, clientY: number) => {
+      const start = propertyResizeStartRef.current;
+      if (!start.active) return;
+
+      if (start.desktop && (start.axis === 'width' || start.axis === 'both')) {
+        const deltaX = clientX - start.clientX;
+        setPropertyWidth(Math.max(280, Math.min(start.maxWidth, start.initialWidth - deltaX)));
+      }
+
+      if (start.axis === 'height' || start.axis === 'both') {
+        const deltaY = clientY - start.clientY;
+        if (start.desktop) {
+          setTimelineHeight(Math.max(160, Math.min(start.maxTimelineHeight, start.initialTimelineHeight - deltaY)));
+        } else {
+          setPropertyHeight(Math.max(180, Math.min(start.maxMobileHeight, start.initialMobileHeight + deltaY)));
+        }
+      }
+    };
+
+    const handlePointerMove = (moveEvent: PointerEvent) => updateSize(moveEvent.clientX, moveEvent.clientY);
+    const handleMouseMove = (moveEvent: MouseEvent) => updateSize(moveEvent.clientX, moveEvent.clientY);
+    const finishResize = () => {
+      propertyResizeStartRef.current.active = false;
+      propertyResizeCleanupRef.current();
+      propertyResizeCleanupRef.current = () => undefined;
+      setPropertyResizeAxis(null);
+    };
+    const removeListeners = () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('pointerup', finishResize);
+      window.removeEventListener('mouseup', finishResize);
+      window.removeEventListener('pointercancel', finishResize);
+    };
+
+    propertyResizeCleanupRef.current = removeListeners;
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('pointerup', finishResize);
+    window.addEventListener('mouseup', finishResize);
+    window.addEventListener('pointercancel', finishResize);
   };
 
-  const startPropertyHeightResize = (e: React.MouseEvent) => {
+  const handlePropertyWidthKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
     e.preventDefault();
-    setIsResizingPropertyHeight(true);
-    const currentEl = document.getElementById('properties-panel-container');
-    const currentHeight = currentEl ? currentEl.clientHeight : propertyHeight;
-    propertyHeightStartRef.current = {
-      clientY: e.clientY,
-      initialHeight: currentHeight
-    };
-    setPropertyHeight(currentHeight);
+    const step = e.shiftKey ? 40 : 16;
+    const direction = e.key === 'ArrowLeft' ? 1 : -1;
+    const { maxWidth } = getPropertyResizeBounds();
+    setPropertyWidth((current) => Math.max(280, Math.min(maxWidth, current + direction * step)));
+  };
+
+  const handlePropertyHeightKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+    e.preventDefault();
+    const step = e.shiftKey ? 40 : 16;
+    const direction = e.key === 'ArrowDown' ? 1 : -1;
+    const bounds = getPropertyResizeBounds();
+
+    if (window.matchMedia('(min-width: 768px)').matches) {
+      setTimelineHeight((current) => Math.max(160, Math.min(bounds.maxTimelineHeight, current - direction * step)));
+    } else {
+      setPropertyHeight((current) => Math.max(180, Math.min(bounds.maxMobileHeight, current + direction * step)));
+    }
+  };
+
+  const handlePropertyCornerKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      handlePropertyWidthKeyDown(e);
+    } else {
+      handlePropertyHeightKeyDown(e);
+    }
+  };
+
+  const resetPropertyPanelSize = () => {
+    const bounds = getPropertyResizeBounds();
+    setPropertyWidth(Math.max(280, Math.min(bounds.maxWidth, 320)));
+    if (window.matchMedia('(min-width: 768px)').matches) {
+      setTimelineHeight(Math.max(160, Math.min(bounds.maxTimelineHeight, 300)));
+    } else {
+      setPropertyHeight(Math.max(180, Math.min(bounds.maxMobileHeight, 260)));
+    }
   };
 
   // Copy/Paste helper actions
@@ -1393,8 +1439,31 @@ export default function VideoSoundtrack() {
     }
   };
 
+  const validateVideoFile = (file: File) => {
+    const hasVideoType = file.type.startsWith('video/');
+    const hasVideoExtension = /\.(mp4|mov|m4v|webm|avi|mkv)$/i.test(file.name);
+    let message = '';
+
+    if (!hasVideoType && !hasVideoExtension) {
+      message = '请选择有效的视频文件。';
+    } else if (file.size <= 0) {
+      message = '视频文件为空，请重新选择。';
+    } else if (file.size > MAX_VIDEO_UPLOAD_BYTES) {
+      message = '视频超过 100MB 上限，请压缩或裁剪后重新上传。';
+    }
+
+    if (!message) return true;
+
+    setError(message);
+    setToast({ message, type: 'error' });
+    window.setTimeout(() => setToast(null), 3_000);
+    return false;
+  };
+
   // Upload video via chunked uploads with a progress tracker (instant local playback, background sync with fallback to single upload)
   const uploadVideoFile = (file: File) => {
+    if (!validateVideoFile(file)) return;
+
     setVideoLoadFailed(false);
     setSelectedFile(file);
     setIsUploading(true);
@@ -1578,6 +1647,8 @@ export default function VideoSoundtrack() {
   };
 
   const relinkVideoFile = (file: File) => {
+    if (!validateVideoFile(file)) return;
+
     setVideoLoadFailed(false);
     setSelectedFile(file);
     setIsUploading(true);
@@ -1748,12 +1819,14 @@ export default function VideoSoundtrack() {
 
   const handleVideoRelink = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
     await relinkVideoFile(file);
   };
 
   const handleVideoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
     await uploadVideoFile(file);
   };
@@ -1781,31 +1854,61 @@ export default function VideoSoundtrack() {
   const handleAnalyzeVideo = async () => {
     if (!videoFile) return;
 
+    // React state updates are asynchronous, so use a ref as the authoritative
+    // lock to prevent a rapid double click from starting duplicate AI jobs.
+    if (analysisLockRef.current) {
+      analysisAbortRef.current?.abort('user');
+      return;
+    }
+
+    const controller = new AbortController();
+    analysisLockRef.current = true;
+    analysisAbortRef.current = controller;
+    const timeoutId = window.setTimeout(() => controller.abort('timeout'), 240_000);
     setIsAnalyzing(true);
+    setAnalysisStage('准备解析画面...');
     setError(null);
     try {
       let keyframes: any[] = [];
+      let usingServerFallback = false;
       if (selectedFile) {
         try {
-          console.log('Extracting video keyframes client-side...');
-          keyframes = await extractVideoKeyframes(selectedFile, 8);
-          console.log(`Successfully extracted ${keyframes.length} keyframes.`);
+          setAnalysisStage('正在提取关键帧...');
+          keyframes = await extractVideoKeyframes(selectedFile, {
+            maxFrames: 6,
+            maxDimension: 512,
+            jpegQuality: 0.68,
+            signal: controller.signal,
+            onProgress: (completed, total) => {
+              setAnalysisStage(`正在提取关键帧 ${completed}/${total}...`);
+            },
+          });
         } catch (kfErr) {
+          if (controller.signal.aborted) throw kfErr;
           console.warn('Failed to extract keyframes client-side, falling back to server video:', kfErr);
         }
       }
 
-      // Fallback check: if no keyframes could be extracted, and the video hasn't uploaded to server yet, block
-      if (keyframes.length === 0 && (isUploadingToServer || !videoFile.isUploaded)) {
-        throw new Error('由于您的视频文件尚未成功同步到服务器，且浏览器端未能成功抓取关键帧，暂无法进行 AI 自动分析。请等待同步完成，或者您可以直接在下方轨道中手动设计并添加音轨块。');
+      if (keyframes.length === 0) {
+        // The server can extract fallback frames from its uploaded copy, but it
+        // must never be asked to do so while the background upload is incomplete.
+        if (isUploadingToServer || !videoFile.isUploaded) {
+          throw new Error('浏览器未能提取关键帧，且视频仍未同步到服务器。请等待上传完成后再试，或转换为 H.264 编码的 MP4。');
+        }
+        usingServerFallback = true;
+        setAnalysisStage('本地取帧不可用，正在由服务器重新提取画面...');
+      } else {
+        setAnalysisStage('AI 正在根据关键帧编排配乐与音效...');
       }
 
       const res = await fetch('/api/video/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           fileName: videoFile.name,
           keyframes: keyframes.length > 0 ? keyframes : undefined,
+          videoDuration,
           bgmEnabled,
           sfxEnabled,
           dubbingEnabled
@@ -1819,6 +1922,7 @@ export default function VideoSoundtrack() {
 
       const data = await res.json();
       if (data.clips && Array.isArray(data.clips)) {
+        setAnalysisStage('正在整理时间轴...');
         // Map default volume values
         const mappedClips = data.clips.map((clip: any) => ({
           ...clip,
@@ -1829,13 +1933,43 @@ export default function VideoSoundtrack() {
         if (mappedClips.length > 0) {
           setSelectedClipId(mappedClips[0].id);
         }
+
+        const analysisSource = typeof data.analysisSource === 'string'
+          ? data.analysisSource.toLowerCase()
+          : '';
+        const usedNativeVideo = analysisSource === 'server-native-video';
+        const usedServerFrames = analysisSource === 'server-ffmpeg';
+        setToast({
+          message: usedNativeVideo
+            ? '快速取帧不可用，系统已自动改用完整视频与原音轨完成分析。'
+            : usedServerFrames || usingServerFallback
+              ? '浏览器取帧不可用，系统已自动从服务器原视频重新提取画面并完成分析。'
+              : '已使用本地关键帧快速完成画面分析与时间轴编排。',
+          type: usedNativeVideo || usedServerFrames || usingServerFallback ? 'info' : 'success',
+        });
+        window.setTimeout(() => setToast(null), 4_000);
       } else {
         throw new Error('AI 未返回合适的时间轴配置，请重新尝试。');
       }
     } catch (err: any) {
-      setError(err.message || '多模态智能分析出错');
+      if (controller.signal.aborted) {
+        if (controller.signal.reason === 'timeout') {
+          setError('画面解析超过 4 分钟，已自动停止。请缩短视频或稍后重试。');
+        } else {
+          // User cancellation is a neutral action, not a failed analysis.
+          setError(null);
+          setAnalysisStage('准备解析画面...');
+        }
+      } else {
+        setError(err.message || '多模态智能分析出错');
+      }
     } finally {
-      setIsAnalyzing(false);
+      window.clearTimeout(timeoutId);
+      if (analysisAbortRef.current === controller) {
+        analysisAbortRef.current = null;
+        analysisLockRef.current = false;
+        setIsAnalyzing(false);
+      }
     }
   };
 
@@ -2538,13 +2672,16 @@ export default function VideoSoundtrack() {
               <button
                 id="btn-ai-analyze"
                 onClick={handleAnalyzeVideo}
-                disabled={isAnalyzing}
-                className="flex items-center gap-1.5 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-bold text-xs px-3.5 py-1.5 rounded-lg shadow-lg shadow-indigo-500/10 disabled:opacity-50 transition-all duration-200 cursor-pointer"
+                className={`flex items-center gap-1.5 text-white font-bold text-xs px-3.5 py-1.5 rounded-lg shadow-lg transition-all duration-200 cursor-pointer ${
+                  isAnalyzing
+                    ? 'bg-red-600 hover:bg-red-500 shadow-red-500/10'
+                    : 'bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 shadow-indigo-500/10'
+                }`}
               >
                 {isAnalyzing ? (
                   <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    <span>画面解析中...</span>
+                    <X className="w-3.5 h-3.5" />
+                    <span>{analysisStage} 点击取消</span>
                   </>
                 ) : (
                   <>
@@ -2806,7 +2943,7 @@ export default function VideoSoundtrack() {
                   <p className={`text-xs font-semibold transition-colors ${isDraggingOver ? 'text-indigo-300' : 'text-slate-400 group-hover:text-slate-200'}`}>
                     {isUploading ? '正在上传您的视频并提取时长...' : isDraggingOver ? '松开鼠标立即上传视频' : '点击或拖拽视频到此处上传'}
                   </p>
-                  <p className="text-[10px] text-slate-500 mt-1">推荐 MP4 格式，建议文件小于 50MB</p>
+                  <p className="text-[10px] text-slate-500 mt-1">推荐 H.264 MP4，单个视频最大 100MB</p>
                 </div>
                 <input 
                   type="file" 
@@ -2827,7 +2964,7 @@ export default function VideoSoundtrack() {
           </div>
         ) : (
           /* DAW 剪辑视图 */
-          <div className="flex-1 flex flex-col md:flex-row overflow-hidden min-h-0">
+          <div id="video-workspace-pane" className="flex-1 flex flex-col md:flex-row overflow-hidden min-h-0">
             {/* 左侧：播放器与波形面板 */}
             <div className="flex-1 flex flex-col bg-slate-950 border-r border-slate-800 overflow-y-auto custom-scrollbar p-6">
               
@@ -2969,19 +3106,57 @@ export default function VideoSoundtrack() {
             {/* 右侧：属性调节面板 (Property Panel) */}
             <div 
               id="properties-panel-container"
-              className="bg-slate-900 border-l border-slate-800 flex flex-col overflow-y-auto custom-scrollbar shrink-0 relative"
-              style={{ width: `${propertyWidth}px`, height: `${propertyHeight}px` }}
+              className="bg-slate-900 border-l border-slate-800 flex flex-col overflow-hidden shrink-0 relative w-full h-[var(--property-panel-mobile-height)] max-h-[calc(100%-3.75rem)] md:w-[var(--property-panel-width)] md:h-full md:max-h-none"
+              style={{
+                '--property-panel-width': `${propertyWidth}px`,
+                '--property-panel-mobile-height': `${propertyHeight}px`
+              } as React.CSSProperties}
             >
-              {/* Left width resizer handle */}
+              {/* Docked panel: drag left, bottom, or the bottom-left corner. */}
               <div 
-                className="absolute top-0 bottom-0 left-0 w-1.5 cursor-ew-resize bg-transparent hover:bg-indigo-500/50 active:bg-indigo-600 transition-colors z-50"
-                onMouseDown={startPropertyWidthResize}
-              />
-              {/* Bottom height resizer handle */}
+                data-testid="property-resize-width"
+                role="separator"
+                tabIndex={0}
+                aria-label="调整属性配置面板宽度"
+                aria-orientation="vertical"
+                aria-valuemin={280}
+                aria-valuemax={640}
+                aria-valuenow={Math.round(propertyWidth)}
+                title="左右拖动调整属性面板宽度；双击恢复默认"
+                className={`absolute top-0 bottom-0 left-0 hidden md:block w-2 cursor-ew-resize touch-none transition-colors z-50 focus:outline-none focus:bg-indigo-500/40 ${propertyResizeAxis === 'width' ? 'bg-indigo-500/50' : 'bg-transparent hover:bg-indigo-500/35'}`}
+                onPointerDown={(e) => startPropertyResize(e, 'width')}
+                onKeyDown={handlePropertyWidthKeyDown}
+                onDoubleClick={resetPropertyPanelSize}
+              >
+                <span className="pointer-events-none absolute left-0.5 top-1/2 -translate-y-1/2 w-1 h-12 rounded-full bg-slate-600/60" />
+              </div>
               <div 
-                className="absolute bottom-0 left-0 right-0 h-1.5 cursor-ns-resize bg-transparent hover:bg-indigo-500/50 active:bg-indigo-600 transition-colors z-50"
-                onMouseDown={startPropertyHeightResize}
-              />
+                data-testid="property-resize-height"
+                role="separator"
+                tabIndex={0}
+                aria-label="调整属性配置面板高度"
+                aria-orientation="horizontal"
+                title="上下拖动调整属性面板高度；双击恢复默认"
+                className={`absolute bottom-0 left-0 right-0 h-2 cursor-ns-resize touch-none transition-colors z-50 focus:outline-none focus:bg-indigo-500/40 ${propertyResizeAxis === 'height' ? 'bg-indigo-500/50' : 'bg-transparent hover:bg-indigo-500/35'}`}
+                onPointerDown={(e) => startPropertyResize(e, 'height')}
+                onKeyDown={handlePropertyHeightKeyDown}
+                onDoubleClick={resetPropertyPanelSize}
+              >
+                <span className="pointer-events-none absolute left-1/2 bottom-0.5 -translate-x-1/2 w-12 h-1 rounded-full bg-slate-600/60" />
+              </div>
+              <div
+                data-testid="property-resize-corner"
+                role="button"
+                tabIndex={0}
+                aria-label="同时调整属性配置面板宽度和高度"
+                title="斜向拖动同时调整宽度和高度；双击恢复默认"
+                className={`absolute bottom-0 left-0 hidden md:flex w-5 h-5 items-end justify-start cursor-nesw-resize touch-none z-[60] rounded-tr-md transition-colors focus:outline-none focus:bg-indigo-500/60 ${propertyResizeAxis === 'both' ? 'bg-indigo-500/60' : 'bg-slate-800/80 hover:bg-indigo-500/50'}`}
+                onPointerDown={(e) => startPropertyResize(e, 'both')}
+                onKeyDown={handlePropertyCornerKeyDown}
+                onDoubleClick={resetPropertyPanelSize}
+              >
+                <span className="pointer-events-none mb-1 ml-1 block w-2 h-2 border-l border-b border-slate-400" />
+              </div>
               <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-950">
                 <div className="flex items-center gap-2 pl-2">
                   <Sliders className="w-4 h-4 text-indigo-400" />
@@ -3007,7 +3182,7 @@ export default function VideoSoundtrack() {
                 )}
               </div>
 
-              <div className="p-4 flex-1 space-y-5">
+              <div data-testid="properties-panel-scroll" className="p-4 flex-1 min-h-0 overflow-y-auto custom-scrollbar space-y-5">
                 {selectedClip ? (
                   <div className="space-y-4">
                     {/* 标题 */}
@@ -3865,10 +4040,16 @@ export default function VideoSoundtrack() {
             className="fixed bottom-6 right-6 z-[9999] flex items-center gap-3 bg-slate-900/95 backdrop-blur-md border border-slate-800 p-4 rounded-xl shadow-2xl max-w-sm"
           >
             <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
-              toast.type === 'success' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-red-500/10 text-red-400 border border-red-500/20'
+              toast.type === 'success'
+                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                : toast.type === 'info'
+                  ? 'bg-sky-500/10 text-sky-400 border border-sky-500/20'
+                  : 'bg-red-500/10 text-red-400 border border-red-500/20'
             }`}>
               {toast.type === 'success' ? (
                 <CheckCircle2 className="w-4.5 h-4.5" />
+              ) : toast.type === 'info' ? (
+                <Info className="w-4.5 h-4.5" />
               ) : (
                 <AlertCircle className="w-4.5 h-4.5" />
               )}

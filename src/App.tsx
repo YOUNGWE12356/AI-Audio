@@ -5,11 +5,18 @@
 
 import React, { lazy, Suspense, useState, useRef, useEffect } from 'react';
 import { Menu } from 'lucide-react';
-import { analyzeAudioDesign, AudioDesignResult, regenerateLyrics, translateToEnglish } from './services/geminiService';
+import {
+  analyzeAudioDesign,
+  analyzeAudioDesignVideo,
+  AudioDesignResult,
+  regenerateLyrics,
+  translateToEnglish,
+} from './services/geminiService';
 import { generateSoundEffect, generateMusic, generateVoice } from './services/elevenLabsService';
 import { FileItem, HistoryItem, TabType } from './types';
 import { ELEVENLABS_VOICES } from './data/voices';
 import { fetchPlatformHealth } from './services/platformService';
+import { prepareFilesForGemini } from './utils/mediaPreparation';
 
 // Modular Components
 import Sidebar from './components/Sidebar';
@@ -97,6 +104,7 @@ export default function App() {
   const [requirements, setRequirements] = useState('');
   const [target, setTarget] = useState({ game: true, video: false, avatar: false, sunnyIsland: false });
   const [loading, setLoading] = useState(false);
+  const [analysisStage, setAnalysisStage] = useState('正在准备素材...');
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AudioDesignResult | null>(null);
   const [activeTab, setActiveTab] = useState<'sfx' | 'bgm'>('sfx');
@@ -106,6 +114,8 @@ export default function App() {
   const [isInstrumental, setIsInstrumental] = useState(true);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const analysisAbortRef = useRef<AbortController | null>(null);
+  const analysisRunningRef = useRef(false);
 
   // Standalone SFX Generator States
   const [standalonePrompt, setStandalonePrompt] = useState('');
@@ -432,42 +442,71 @@ export default function App() {
 
   // AI Multimodal director planner handler
   const onGenerate = async () => {
+    if (analysisRunningRef.current) return;
+
     if (files.length === 0 && !requirements.trim()) {
       setError('请至少选择上传一个创意素材文件或填写补充设计需求文本');
       return;
     }
-    
-    setLoading(true);
-    setError(null);
-    setResult(null);
 
     if (!hasGeminiKey) {
-      setError('GEMINI_API_KEY 未配置，请前往设置页面或 Secrets 面板添加。');
-      setLoading(false);
+      setError('GEMINI_API_KEY 未配置，请前往设置页面添加。');
       return;
     }
 
-    try {
-      // Process files into base64 structures
-      const fileData = await Promise.all(files.map(async f => {
-        return new Promise<{ data: string; mimeType: string }>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => {
-            const resData = reader.result as string;
-            resolve({ data: resData, mimeType: f.type });
-          };
-          reader.onerror = () => reject(new Error(`创意素材导入失败: ${f.file.name}`));
-          reader.readAsDataURL(f.file);
-        });
-      }));
+    const videoFiles = files.filter(item => item.type.startsWith('video/'));
+    const wantsProfessionalVideo = Boolean(target.video || target.avatar);
+    if (wantsProfessionalVideo && videoFiles.length > 0 && (videoFiles.length !== 1 || files.length !== 1)) {
+      setError('影视/广告与 Avatar 的完整视频分析一次只能单独使用 1 个视频。请移除其他视频、图片、音频或 PDF；如需综合多份素材，请改用快速分析模式。');
+      return;
+    }
 
-      // Call Gemini multimodal analyzer service
-      const res = await analyzeAudioDesign(fileData, requirements, target, isInstrumental);
+    analysisRunningRef.current = true;
+    const controller = new AbortController();
+    analysisAbortRef.current = controller;
+    setLoading(true);
+    setAnalysisStage('正在准备素材...');
+    setError(null);
+
+    try {
+      const useProfessionalVideo = wantsProfessionalVideo && videoFiles.length === 1;
+      let res: AudioDesignResult;
+
+      if (useProfessionalVideo) {
+        setAnalysisStage(target.avatar
+          ? '正在上传视频，准备 Avatar 高精度分析...'
+          : '正在上传视频，准备影视级完整分析...');
+        res = await analyzeAudioDesignVideo(
+          videoFiles[0].file,
+          requirements,
+          target,
+          isInstrumental,
+          {
+            signal: controller.signal,
+            onProgress: setAnalysisStage,
+          },
+        );
+      } else {
+        // Fast mode reduces videos to compact keyframes and resizes images.
+        const fileData = await prepareFilesForGemini(files.map(item => item.file), {
+          signal: controller.signal,
+          onProgress: setAnalysisStage,
+        });
+        setAnalysisStage('正在上传关键帧并生成音频方案...');
+        res = await analyzeAudioDesign(
+          fileData,
+          requirements,
+          target,
+          isInstrumental,
+          { signal: controller.signal },
+        );
+      }
       
       if (!res || (!res.sfxSchemes && !res.bgmRecommendations)) {
         throw new Error('多模态解析未返回合理的音频排程推荐，请尝试修改您的输入。');
       }
       
+      setAnalysisStage('正在整理音效与配乐结果...');
       setResult(res);
 
       // Save plan result to history log
@@ -483,10 +522,27 @@ export default function App() {
       setHistoryList(prev => [newHistoryItem, ...prev]);
 
     } catch (err: any) {
-      console.error('Director generation failed:', err);
-      setError(err.message || '生成失败，请重新检查大模型状态。');
+      if (controller.signal.aborted) {
+        setAnalysisStage('已取消本次分析。');
+        setError(null);
+      } else {
+        console.error('Director generation failed:', err);
+        setError(err.message || '生成失败，请重新检查大模型状态。');
+      }
     } finally {
-      setLoading(false);
+      if (analysisAbortRef.current === controller) {
+        analysisAbortRef.current = null;
+        analysisRunningRef.current = false;
+        setLoading(false);
+      }
+    }
+  };
+
+  const cancelAnalysis = () => {
+    const controller = analysisAbortRef.current;
+    if (controller && !controller.signal.aborted) {
+      setAnalysisStage('正在取消本次分析...');
+      controller.abort('user');
     }
   };
 
@@ -617,10 +673,12 @@ export default function App() {
             target={target}
             setTarget={setTarget}
             loading={loading}
+            analysisStage={analysisStage}
             error={error}
             setError={setError}
             result={result}
             onGenerate={onGenerate}
+            onCancel={cancelAnalysis}
             copyToClipboard={copyToClipboard}
             copyTableToClipboard={copyTableToClipboard}
             downloadTableAsCSV={downloadTableAsCSV}

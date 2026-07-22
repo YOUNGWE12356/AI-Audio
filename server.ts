@@ -2,19 +2,21 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import { DEFAULT_CATEGORIES, INITIAL_SOUNDS } from './src/data/sfxData';
 import multer from 'multer';
 import {
   analyzeAudioDesign,
+  analyzeAudioDesignVideoFile,
   generateSfxRequirements,
   matchBestVoice,
   optimizeImportMetadata,
   regenerateLyrics,
   translateToEnglish,
 } from './src/services/geminiService';
+import { generateGeminiContent } from './src/services/geminiRetry';
 import {
   fetchAvailableVoices,
   generateMusic,
@@ -43,6 +45,31 @@ async function startServer() {
   // Directories paths
   const dataDir = path.join(process.cwd(), 'data');
   const uploadsDir = path.join(process.cwd(), 'uploads');
+  const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+  const MAX_INLINE_MEDIA_BYTES = 24 * 1024 * 1024;
+  const MAX_CHUNK_COUNT = 100;
+  const ALLOWED_VIDEO_EXTENSIONS = new Set([
+    '.mp4',
+    '.m4v',
+    '.mov',
+    '.webm',
+    '.mkv',
+    '.avi',
+    '.mpeg',
+    '.mpg',
+    '.wmv',
+  ]);
+  const VIDEO_MIME_BY_EXTENSION: Record<string, string> = {
+    '.mp4': 'video/mp4',
+    '.m4v': 'video/x-m4v',
+    '.mov': 'video/quicktime',
+    '.webm': 'video/webm',
+    '.mkv': 'video/x-matroska',
+    '.avi': 'video/x-msvideo',
+    '.mpeg': 'video/mpeg',
+    '.mpg': 'video/mpeg',
+    '.wmv': 'video/x-ms-wmv',
+  };
 
   // Ensure directories exist
   if (!fs.existsSync(dataDir)) {
@@ -51,6 +78,43 @@ async function startServer() {
   if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
   }
+
+  const isPathInside = (root: string, candidate: string) => {
+    const relative = path.relative(path.resolve(root), path.resolve(candidate));
+    return relative !== ''
+      && relative !== '..'
+      && !relative.startsWith(`..${path.sep}`)
+      && !path.isAbsolute(relative);
+  };
+
+  const safeUnlink = async (filePath?: string) => {
+    if (!filePath) return;
+    await fs.promises.unlink(filePath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') console.warn(`Failed to remove temporary file ${filePath}:`, error);
+    });
+  };
+
+  const safeRemoveDirectory = async (directoryPath?: string) => {
+    if (!directoryPath || !isPathInside(uploadsDir, directoryPath)) return;
+    await fs.promises.rm(directoryPath, { recursive: true, force: true }).catch((error) => {
+      console.warn(`Failed to remove temporary directory ${directoryPath}:`, error);
+    });
+  };
+
+  const parseSafeVideoFilename = (value: unknown) => {
+    if (typeof value !== 'string' || value.length === 0 || value.length > 255) return null;
+    if (path.basename(value) !== value) return null;
+
+    const originalExtension = path.extname(value);
+    const extension = originalExtension.toLowerCase();
+    if (!ALLOWED_VIDEO_EXTENSIONS.has(extension)) return null;
+
+    const base = path.basename(value, originalExtension)
+      .replace(/[^a-zA-Z0-9_\u4e00-\u9fa5-]/g, '_')
+      .slice(0, 160);
+    if (!base) return null;
+    return { base, extension };
+  };
 
   const categoriesFile = path.join(dataDir, 'categories.json');
   const soundsFile = path.join(dataDir, 'sounds.json');
@@ -152,12 +216,12 @@ async function startServer() {
 
   const upload = multer({ 
     storage,
-    limits: { fileSize: 100 * 1024 * 1024 } // 100MB
+    limits: { fileSize: MAX_UPLOAD_BYTES }
   });
 
   const aiUpload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 100 * 1024 * 1024 },
+    limits: { fileSize: MAX_UPLOAD_BYTES },
   });
 
   const sendAudioBlob = async (res: express.Response, blob: Blob) => {
@@ -169,6 +233,132 @@ async function startServer() {
     const parsed = typeof value === 'number' ? value : Number.parseFloat(String(value));
     if (!Number.isFinite(parsed)) return fallback;
     return Math.min(max, Math.max(min, parsed));
+  };
+
+  const resolveValidatedUploadedVideo = async (fileName: unknown) => {
+    const safeName = parseSafeVideoFilename(fileName);
+    if (!safeName || typeof fileName !== 'string') {
+      throw Object.assign(new Error('服务器视频文件名无效，请重新上传视频。'), { status: 400 });
+    }
+
+    const videoPath = path.resolve(uploadsDir, fileName);
+    if (!isPathInside(uploadsDir, videoPath)) {
+      throw Object.assign(new Error('服务器视频路径无效。'), { status: 400 });
+    }
+
+    let videoStat: fs.Stats;
+    try {
+      videoStat = await fs.promises.stat(videoPath);
+    } catch (error: any) {
+      if (error?.code === 'ENOENT') {
+        throw Object.assign(new Error('服务器上的视频已失效，请重新上传后再分析。'), { status: 404 });
+      }
+      throw error;
+    }
+    if (!videoStat.isFile() || videoStat.size <= 0 || videoStat.size > MAX_UPLOAD_BYTES) {
+      throw Object.assign(new Error('服务器视频无效或超过 100MB 限制。'), { status: 413 });
+    }
+
+    return {
+      videoPath,
+      displayName: fileName,
+      mimeType: VIDEO_MIME_BY_EXTENSION[safeName.extension],
+    };
+  };
+
+  const extractServerVideoKeyframes = async (
+    fileName: unknown,
+    requestedDuration: unknown,
+  ): Promise<Array<{ timestamp: number; base64: string }>> => {
+    const { videoPath } = await resolveValidatedUploadedVideo(fileName);
+
+    const duration = parseNumber(requestedDuration, 30, 1, 3_600);
+    const frameCount = 6;
+    const firstTimestamp = duration / (frameCount * 2);
+    const temporaryDirectory = await fs.promises.mkdtemp(path.join(uploadsDir, '.video-analysis-'));
+    if (!isPathInside(uploadsDir, temporaryDirectory)) {
+      await safeRemoveDirectory(temporaryDirectory);
+      throw Object.assign(new Error('无法创建安全的视频分析目录。'), { status: 500 });
+    }
+
+    try {
+      const outputPattern = path.join(temporaryDirectory, 'frame_%02d.jpg');
+      const filter = `fps=${frameCount}/${duration.toFixed(3)},scale=512:512:force_original_aspect_ratio=decrease`;
+      await new Promise<void>((resolve, reject) => {
+        execFile(
+          'ffmpeg',
+          [
+            '-hide_banner',
+            '-loglevel', 'error',
+            '-ss', firstTimestamp.toFixed(3),
+            '-i', videoPath,
+            '-an',
+            '-sn',
+            '-vf', filter,
+            '-frames:v', String(frameCount),
+            '-q:v', '6',
+            '-start_number', '0',
+            '-y',
+            outputPattern,
+          ],
+          {
+            timeout: 30_000,
+            windowsHide: true,
+            maxBuffer: 2 * 1024 * 1024,
+          },
+          (error, _stdout, stderr) => {
+            if (!error) {
+              resolve();
+              return;
+            }
+
+            const processError = error as NodeJS.ErrnoException & { killed?: boolean };
+            const status = processError.code === 'ENOENT' ? 503 : processError.killed ? 504 : 422;
+            const detail = String(stderr || '').trim().split(/\r?\n/).slice(-1)[0];
+            reject(Object.assign(new Error(
+              status === 503
+                ? '服务器尚未安装 FFmpeg，无法执行视频画面回退分析。'
+                : status === 504
+                  ? '服务器提取视频关键帧超时，请缩短视频后重试。'
+                  : `服务器无法读取此视频编码${detail ? `：${detail}` : '。'}`,
+            ), { status }));
+          },
+        );
+      });
+
+      const frameFiles = (await fs.promises.readdir(temporaryDirectory))
+        .filter(name => /^frame_\d+\.jpg$/i.test(name))
+        .sort()
+        .slice(0, frameCount);
+      if (frameFiles.length === 0) {
+        throw Object.assign(new Error('服务器未能从视频中提取画面，请转换为 H.264 MP4 后重试。'), { status: 422 });
+      }
+
+      const frames: Array<{ timestamp: number; base64: string }> = [];
+      let totalEncodedLength = 0;
+      for (let index = 0; index < frameFiles.length; index += 1) {
+        const framePath = path.resolve(temporaryDirectory, frameFiles[index]);
+        if (!isPathInside(temporaryDirectory, framePath)) continue;
+        const base64 = (await fs.promises.readFile(framePath)).toString('base64');
+        totalEncodedLength += base64.length;
+        if (base64.length > 1_500_000 || totalEncodedLength > 8_000_000) {
+          throw Object.assign(new Error('服务器提取的关键帧数据过大。'), { status: 413 });
+        }
+        frames.push({
+          timestamp: Number(Math.min(
+            Math.max(0, duration - 0.05),
+            firstTimestamp + (index * duration / frameCount),
+          ).toFixed(1)),
+          base64,
+        });
+      }
+      if (frames.length === 0) {
+        throw Object.assign(new Error('服务器未能生成有效关键帧。'), { status: 422 });
+      }
+      return frames;
+    } finally {
+      await safeRemoveDirectory(temporaryDirectory);
+    }
   };
 
   const validateVoiceId = (value: unknown) => {
@@ -185,9 +375,76 @@ async function startServer() {
     if (!Array.isArray(files)) {
       return res.status(400).json({ error: 'files must be an array' });
     }
+    if (files.length > 16) {
+      return res.status(400).json({ error: '素材切片数量过多，请减少文件后重试。' });
+    }
+    if (files.some((file: any) => file?.fileUri || typeof file?.data !== 'string')) {
+      return res.status(400).json({ error: '快速模式素材格式无效。' });
+    }
+    const decodedLength = files.reduce((total: number, file: any) => {
+      if (typeof file?.data !== 'string') return total;
+      const separatorIndex = file.data.indexOf(',');
+      const base64 = separatorIndex >= 0 ? file.data.slice(separatorIndex + 1) : file.data;
+      const paddingBytes = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
+      return total + Math.max(0, Math.floor((base64.length * 3) / 4) - paddingBytes);
+    }, 0);
+    if (decodedLength > MAX_INLINE_MEDIA_BYTES) {
+      return res.status(413).json({ error: '素材总量过大，请减少文件数量或压缩素材。' });
+    }
     const result = await analyzeAudioDesign(files, String(requirements), target, Boolean(isInstrumental));
     return res.json(result);
   }));
+
+  app.post(
+    '/api/ai/gemini/audio-design-video',
+    upload.single('video'),
+    asyncRoute(async (req, res) => {
+      if (!req.file) {
+        return res.status(400).json({ error: '请选择一个视频文件。' });
+      }
+
+      const uploadedPath = path.resolve(req.file.path);
+      const uploadsRoot = `${path.resolve(uploadsDir)}${path.sep}`;
+      try {
+        if (!uploadedPath.startsWith(uploadsRoot)) {
+          return res.status(400).json({ error: '视频临时路径无效。' });
+        }
+        if (!req.file.mimetype.startsWith('video/')) {
+          return res.status(415).json({ error: '专业模式只支持视频文件。' });
+        }
+
+        let rawTarget: any;
+        try {
+          rawTarget = JSON.parse(String(req.body?.target || '{}'));
+        } catch {
+          return res.status(400).json({ error: '视频分析模式参数无效。' });
+        }
+        const target = {
+          game: Boolean(rawTarget.game),
+          video: Boolean(rawTarget.video),
+          avatar: Boolean(rawTarget.avatar),
+          sunnyIsland: Boolean(rawTarget.sunnyIsland),
+        };
+        if (!target.video && !target.avatar) {
+          return res.status(400).json({ error: '只有影视/广告或 Avatar 模式可使用专业视频分析。' });
+        }
+
+        const result = await analyzeAudioDesignVideoFile(
+          uploadedPath,
+          req.file.mimetype,
+          req.file.originalname,
+          String(req.body?.requirements || ''),
+          target,
+          String(req.body?.isInstrumental) !== 'false',
+        );
+        return res.json(result);
+      } finally {
+        if (uploadedPath.startsWith(uploadsRoot) && fs.existsSync(uploadedPath)) {
+          fs.unlinkSync(uploadedPath);
+        }
+      }
+    }),
+  );
 
   app.post('/api/ai/gemini/regenerate-lyrics', asyncRoute(async (req, res) => {
     const { originalLyrics = '', selectedPart = '', direction = '' } = req.body || {};
@@ -300,7 +557,7 @@ async function startServer() {
       upload.single('file')(req, res, (err) => {
         if (err) {
           console.error('Multer upload error:', err);
-          return res.status(500).json({ error: err.message });
+          return next(err);
         }
         if (!req.file) {
           return res.status(400).json({ error: 'No file uploaded via multipart' });
@@ -312,7 +569,8 @@ async function startServer() {
         });
       });
     } else {
-      express.raw({ type: '*/*', limit: '100mb' })(req, res, async () => {
+      express.raw({ type: '*/*', limit: '100mb' })(req, res, async (parseError?: any) => {
+        if (parseError) return next(parseError);
         try {
           let originalFilename = req.headers['x-filename'] as string || '';
           try {
@@ -359,95 +617,170 @@ async function startServer() {
   });
 
   // 5.1. Chunked File Upload Endpoint (Bypasses proxy size limitations for large files)
-  app.post('/api/sfx/upload-chunk', (req, res) => {
-    upload.single('file')(req, res, (err) => {
+  app.post('/api/sfx/upload-chunk', (req, res, next) => {
+    upload.single('file')(req, res, async (err) => {
       if (err) {
         console.error('Multer chunk upload error:', err);
-        return res.status(500).json({ error: err.message });
+        return next(err);
       }
 
+      const incomingFilePath = req.file?.path;
+      let tempChunkDir: string | undefined;
+      let finalFilePath: string | undefined;
+      let assemblyStarted = false;
+
       try {
-        const { chunkIndex, totalChunks, fileName, uploadId } = req.body;
         if (!req.file) {
           return res.status(400).json({ error: 'No chunk file uploaded' });
         }
 
-        const index = parseInt(chunkIndex, 10);
-        const total = parseInt(totalChunks, 10);
-        
-        if (isNaN(index) || isNaN(total) || !uploadId || !fileName) {
-          if (req.file && req.file.path) {
-            try { fs.unlinkSync(req.file.path); } catch (e) {}
-          }
-          return res.status(400).json({ error: 'Missing chunk metadata' });
-        }
-
-        // Temp directory for this upload session
-        const tempChunkDir = path.join(uploadsDir, `temp_${uploadId}`);
-        if (!fs.existsSync(tempChunkDir)) {
-          fs.mkdirSync(tempChunkDir, { recursive: true });
-        }
-
-        // Move the uploaded file from multer destination to our temp chunk path
-        const chunkPath = path.join(tempChunkDir, `chunk_${index}`);
-        if (fs.existsSync(chunkPath)) {
-          try { fs.unlinkSync(chunkPath); } catch (e) {}
-        }
-        fs.renameSync(req.file.path, chunkPath);
-
-        // Check if all chunks have been uploaded
-        let allChunksUploaded = true;
-        for (let i = 0; i < total; i++) {
-          if (!fs.existsSync(path.join(tempChunkDir, `chunk_${i}`))) {
-            allChunksUploaded = false;
-            break;
-          }
-        }
-
-        if (allChunksUploaded) {
-          // Merge all chunks
-          const ext = path.extname(fileName) || '.mp4';
-          const base = path.basename(fileName, ext).replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_');
-          const cleanFilename = `${base}_${Date.now()}${ext}`;
-          const finalFilePath = path.join(uploadsDir, cleanFilename);
-
-          const writeStream = fs.createWriteStream(finalFilePath);
-          
-          for (let i = 0; i < total; i++) {
-            const chunkFilePath = path.join(tempChunkDir, `chunk_${i}`);
-            const data = fs.readFileSync(chunkFilePath);
-            writeStream.write(data);
-            // Delete temp chunk file
-            try {
-              fs.unlinkSync(chunkFilePath);
-            } catch (e) {}
-          }
-          writeStream.end();
-
-          // Remove temp directory
-          try {
-            fs.rmdirSync(tempChunkDir);
-          } catch (e) {}
-
-          console.log(`Successfully assembled chunked upload: ${cleanFilename}`);
-          return res.json({
-            url: `/uploads/${cleanFilename}`,
-            fileName: cleanFilename,
-            completed: true
+        const { chunkIndex, totalChunks, fileName, uploadId } = req.body || {};
+        const index = Number(chunkIndex);
+        const total = Number(totalChunks);
+        const safeName = parseSafeVideoFilename(fileName);
+        if (
+          typeof uploadId !== 'string'
+          || !/^[A-Za-z0-9_-]{1,80}$/.test(uploadId)
+          || !Number.isInteger(index)
+          || !Number.isInteger(total)
+          || total < 1
+          || total > MAX_CHUNK_COUNT
+          || index < 0
+          || index >= total
+          || req.file.size <= 0
+          || !safeName
+        ) {
+          await safeUnlink(incomingFilePath);
+          return res.status(400).json({
+            error: '分片参数无效；仅支持安全的视频文件名和 1-100 个分片。',
           });
         }
 
-        return res.json({
-          completed: false,
-          chunkReceived: index
-        });
-
-      } catch (err: any) {
-        console.error('Error during chunk upload:', err);
-        if (req.file && req.file.path && fs.existsSync(req.file.path)) {
-          try { fs.unlinkSync(req.file.path); } catch (e) {}
+        tempChunkDir = path.resolve(uploadsDir, `temp_${uploadId}`);
+        if (!isPathInside(uploadsDir, tempChunkDir)) {
+          await safeUnlink(incomingFilePath);
+          return res.status(400).json({ error: '分片上传路径无效。' });
         }
-        return res.status(500).json({ error: err.message });
+        await fs.promises.mkdir(tempChunkDir, { recursive: true });
+
+        const metadataPath = path.join(tempChunkDir, '.metadata.json');
+        const expectedMetadata = { fileName, total };
+        try {
+          const existingMetadata = JSON.parse(await fs.promises.readFile(metadataPath, 'utf8'));
+          if (existingMetadata.fileName !== fileName || existingMetadata.total !== total) {
+            await safeUnlink(incomingFilePath);
+            return res.status(409).json({ error: '同一上传任务的文件名或分片总数不一致。' });
+          }
+        } catch (metadataError: any) {
+          if (metadataError?.code !== 'ENOENT') throw metadataError;
+          await fs.promises.writeFile(metadataPath, JSON.stringify(expectedMetadata), { flag: 'wx' });
+        }
+
+        const assemblyLockPath = path.join(tempChunkDir, '.assembling');
+        if (fs.existsSync(assemblyLockPath)) {
+          await safeUnlink(incomingFilePath);
+          return res.status(409).json({ error: '视频分片正在合并，请勿重复提交。' });
+        }
+
+        const chunkPath = path.resolve(tempChunkDir, `chunk_${index}`);
+        if (!isPathInside(tempChunkDir, chunkPath)) {
+          await safeUnlink(incomingFilePath);
+          return res.status(400).json({ error: '分片文件路径无效。' });
+        }
+        await safeUnlink(chunkPath);
+        await fs.promises.rename(req.file.path, chunkPath);
+
+        let aggregateBytes = 0;
+        let allChunksUploaded = true;
+        for (let chunkIndexToCheck = 0; chunkIndexToCheck < total; chunkIndexToCheck += 1) {
+          const candidatePath = path.resolve(tempChunkDir, `chunk_${chunkIndexToCheck}`);
+          if (!isPathInside(tempChunkDir, candidatePath)) {
+            throw new Error('分片路径校验失败。');
+          }
+          try {
+            const chunkStat = await fs.promises.stat(candidatePath);
+            if (!chunkStat.isFile()) throw new Error('分片内容无效。');
+            aggregateBytes += chunkStat.size;
+          } catch (chunkError: any) {
+            if (chunkError?.code === 'ENOENT') {
+              allChunksUploaded = false;
+              continue;
+            }
+            throw chunkError;
+          }
+        }
+
+        if (aggregateBytes > MAX_UPLOAD_BYTES) {
+          await safeRemoveDirectory(tempChunkDir);
+          return res.status(413).json({ error: '视频分片总大小超过 100MB 限制。' });
+        }
+
+        if (!allChunksUploaded) {
+          return res.json({ completed: false, chunkReceived: index });
+        }
+
+        assemblyStarted = true;
+        const lockHandle = await fs.promises.open(assemblyLockPath, 'wx');
+        await lockHandle.close();
+
+        const cleanFilename = `${safeName.base}_${Date.now()}_${uploadId.slice(-12)}${safeName.extension}`;
+        finalFilePath = path.resolve(uploadsDir, cleanFilename);
+        if (!isPathInside(uploadsDir, finalFilePath)) {
+          throw new Error('合并后的视频路径无效。');
+        }
+
+        const outputHandle = await fs.promises.open(finalFilePath, 'wx');
+        try {
+          const copyBuffer = Buffer.allocUnsafe(1024 * 1024);
+          for (let chunkIndexToMerge = 0; chunkIndexToMerge < total; chunkIndexToMerge += 1) {
+            const chunkFilePath = path.resolve(tempChunkDir, `chunk_${chunkIndexToMerge}`);
+            const inputHandle = await fs.promises.open(chunkFilePath, 'r');
+            try {
+              while (true) {
+                const { bytesRead } = await inputHandle.read(copyBuffer, 0, copyBuffer.length, null);
+                if (bytesRead === 0) break;
+
+                let written = 0;
+                while (written < bytesRead) {
+                  const { bytesWritten } = await outputHandle.write(
+                    copyBuffer,
+                    written,
+                    bytesRead - written,
+                    null,
+                  );
+                  if (bytesWritten === 0) throw new Error('写入合并视频失败。');
+                  written += bytesWritten;
+                }
+              }
+            } finally {
+              await inputHandle.close();
+            }
+          }
+          await outputHandle.sync();
+        } finally {
+          await outputHandle.close();
+        }
+
+        const finalStat = await fs.promises.stat(finalFilePath);
+        if (!finalStat.isFile() || finalStat.size !== aggregateBytes) {
+          throw new Error('视频分片合并校验失败。');
+        }
+
+        await safeRemoveDirectory(tempChunkDir);
+        console.log(`Successfully assembled chunked upload: ${cleanFilename}`);
+        return res.json({
+          url: `/uploads/${cleanFilename}`,
+          fileName: cleanFilename,
+          completed: true,
+        });
+      } catch (uploadError: any) {
+        console.error('Error during chunk upload:', uploadError);
+        await safeUnlink(incomingFilePath);
+        await safeUnlink(finalFilePath);
+        if (assemblyStarted) await safeRemoveDirectory(tempChunkDir);
+        return res.status(uploadError?.status || 500).json({
+          error: uploadError?.message || '视频分片上传失败。',
+        });
       }
     });
   });
@@ -509,10 +842,19 @@ async function startServer() {
 
   // 7. Video AI Multi-modal Analysis
   app.post('/api/video/analyze', async (req, res) => {
+    let ai: ReturnType<typeof getGoogleAI> | undefined;
+    let temporaryGeminiFileName: string | undefined;
     try {
-      const { fileName, keyframes, bgmEnabled, sfxEnabled, dubbingEnabled } = req.body;
+      const {
+        fileName,
+        keyframes,
+        videoDuration,
+        bgmEnabled,
+        sfxEnabled,
+        dubbingEnabled,
+      } = req.body;
       
-      const ai = getGoogleAI();
+      ai = getGoogleAI();
       
       const prompt = `你是一个顶级的多模态AI视频音效与配乐设计师。
 请分析提供的信息（包含视频文件或关键帧画面序列、时间点），并针对此视频生成一份极其精确的“音效、配乐和配音时间轴清单 (JSON格式)”。
@@ -538,43 +880,116 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
 - sfxEnabled: ${sfxEnabled ? '开启' : '关闭'}
 - dubbingEnabled: ${dubbingEnabled ? '开启' : '关闭'}
 
+视频总时长约为 ${parseNumber(videoDuration, 30, 1, 3_600).toFixed(1)} 秒。所有片段必须严格位于该时长内。
+为保证生成速度，请保持结果精炼：BGM 最多 1 段、SFX 最多 8 段、配音最多 3 段，只保留画面中最重要的声音节点。
+
 请只返回符合 JSON 语法的纯数据，不要用 markdown 格式包裹，也不要带 \`\`\`json 开头。`;
 
       const contents: any[] = [prompt];
 
-      if (keyframes && Array.isArray(keyframes) && keyframes.length > 0) {
-        console.log(`Analyzing video using ${keyframes.length} keyframes sent from client.`);
-        contents.push({ text: "\n下面是该视频在不同时间点提取出的关键帧截图序列，请仔细结合画面内容及对应的时间轴位置进行配乐和音轨规划设计：\n" });
-        for (const kf of keyframes) {
-          contents.push({ text: `\n[视频时间轴位置: ${kf.timestamp} 秒]` });
-          contents.push({
-            inlineData: {
-              data: kf.base64,
-              mimeType: "image/jpeg"
-            }
+      let analysisKeyframes: Array<{ timestamp: number; base64: string }> = [];
+      let analysisSource: 'client-keyframes' | 'server-ffmpeg' | 'server-native-video' = 'client-keyframes';
+      if (Array.isArray(keyframes) && keyframes.length > 0) {
+        if (keyframes.length > 8) {
+          return res.status(400).json({ error: '关键帧数量过多，请重新分析。' });
+        }
+
+        let totalBase64Length = 0;
+        for (const frame of keyframes) {
+          if (!frame || typeof frame.base64 !== 'string' || frame.base64.length > 1_500_000) {
+            return res.status(400).json({ error: '关键帧数据无效或尺寸过大。' });
+          }
+          totalBase64Length += frame.base64.length;
+          analysisKeyframes.push({
+            timestamp: parseNumber(frame.timestamp, 0, 0, 3_600),
+            base64: frame.base64,
           });
+        }
+        if (totalBase64Length > 8_000_000) {
+          return res.status(413).json({ error: '关键帧总量过大，请降低视频分辨率后重试。' });
         }
       } else {
         if (!fileName) {
-          return res.status(400).json({ error: 'fileName or keyframes is required' });
+          return res.status(422).json({ error: '未收到视频关键帧，请重新选择视频后再分析。' });
         }
-        const filePath = path.join(uploadsDir, fileName);
-        if (!fs.existsSync(filePath)) {
-          return res.status(404).json({ error: 'Video file not found' });
-        }
-        console.log(`Analyzing video using uploaded file: ${fileName}`);
-        const videoBuffer = fs.readFileSync(filePath);
-        const base64Video = videoBuffer.toString('base64');
-        contents.push({
-          inlineData: {
-            data: base64Video,
-            mimeType: "video/mp4"
+        console.log(`Client keyframe extraction unavailable; using safe FFmpeg fallback for ${fileName}.`);
+        try {
+          analysisKeyframes = await extractServerVideoKeyframes(fileName, videoDuration);
+          analysisSource = 'server-ffmpeg';
+        } catch (ffmpegError: any) {
+          const ffmpegStatus = Number(ffmpegError?.status);
+          if (![422, 503, 504].includes(ffmpegStatus)) throw ffmpegError;
+
+          // The path is validated again before any third-party upload. Invalid,
+          // missing, or oversized files therefore never reach Gemini Files API.
+          const validatedVideo = await resolveValidatedUploadedVideo(fileName);
+          console.warn(
+            `FFmpeg fallback unavailable (${ffmpegStatus}); using Gemini native video analysis for ${validatedVideo.displayName}.`,
+          );
+
+          let uploadedVideo: any = await ai.files.upload({
+            file: validatedVideo.videoPath,
+            config: {
+              mimeType: validatedVideo.mimeType,
+              displayName: validatedVideo.displayName.slice(0, 200),
+            },
+          });
+          temporaryGeminiFileName = uploadedVideo.name;
+
+          const processingDeadline = Date.now() + 120_000;
+          while (uploadedVideo.state === 'PROCESSING') {
+            if (Date.now() >= processingDeadline) {
+              throw Object.assign(new Error('Gemini 视频预处理超过 2 分钟，请稍后重试。'), { status: 504 });
+            }
+            await new Promise(resolve => setTimeout(resolve, 1_500));
+            if (!uploadedVideo.name) {
+              throw new Error('Gemini 未返回视频文件标识。');
+            }
+            uploadedVideo = await ai.files.get({ name: uploadedVideo.name });
+            temporaryGeminiFileName = uploadedVideo.name || temporaryGeminiFileName;
           }
-        });
+
+          if (uploadedVideo.state === 'FAILED') {
+            throw Object.assign(
+              new Error(uploadedVideo.error?.message || 'Gemini 无法处理此视频编码。'),
+              { status: 422 },
+            );
+          }
+          if (uploadedVideo.state !== 'ACTIVE' || !uploadedVideo.uri) {
+            throw Object.assign(new Error('Gemini 视频文件未进入可分析状态。'), { status: 502 });
+          }
+
+          contents.length = 0;
+          contents.push({
+            fileData: {
+              fileUri: uploadedVideo.uri,
+              mimeType: uploadedVideo.mimeType || validatedVideo.mimeType,
+            },
+            videoMetadata: { fps: 1 },
+          });
+          contents.push({ text: prompt });
+          analysisSource = 'server-native-video';
+        }
+      }
+
+      if (analysisSource === 'server-native-video') {
+        console.log('Analyzing complete uploaded video with native visual and audio understanding (1 FPS).');
+      } else {
+        console.log(`Analyzing video using ${analysisKeyframes.length} compact keyframes (${analysisSource}).`);
+        contents.push({ text: "\n下面是视频不同时间点的关键帧，请结合对应时间规划音轨：\n" });
+        for (const frame of analysisKeyframes) {
+          contents.push({ text: `\n[视频时间轴位置: ${frame.timestamp} 秒]` });
+          contents.push({
+            inlineData: {
+              data: frame.base64,
+              mimeType: 'image/jpeg',
+            },
+          });
+        }
       }
 
       console.log(`Sending content generation request to Gemini (models/gemini-3.5-flash)...`);
-      const response = await ai.models.generateContent({
+      const response = await generateGeminiContent(ai, {
         model: "gemini-3.5-flash",
         contents,
         config: {
@@ -610,12 +1025,47 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
       }
       
       const parsed = JSON.parse(response.text.trim());
-      console.log(`Video analysis complete. Found ${parsed.clips?.length || 0} clips.`);
-      return res.json(parsed);
+      if (!Array.isArray(parsed.clips)) {
+        throw new Error('AI 未返回有效的时间轴片段。');
+      }
+
+      const durationLimit = parseNumber(videoDuration, 30, 1, 3_600);
+      const enabledTracks = new Set<string>([
+        ...(bgmEnabled ? ['bgm'] : []),
+        ...(sfxEnabled ? ['sfx'] : []),
+        ...(dubbingEnabled ? ['dubbing'] : []),
+      ]);
+      const normalizedClips = parsed.clips
+        .filter((clip: any) => enabledTracks.has(clip?.trackId))
+        .slice(0, 12)
+        .map((clip: any, index: number) => {
+          const startTime = parseNumber(clip.startTime, 0, 0, Math.max(0, durationLimit - 0.1));
+          const maxDuration = Math.max(0.1, durationLimit - startTime);
+          return {
+            ...clip,
+            id: String(clip.id || `clip-${index + 1}`),
+            startTime,
+            duration: parseNumber(clip.duration, clip.trackId === 'bgm' ? maxDuration : 3, 0.1, maxDuration),
+          };
+        });
+      if (normalizedClips.length === 0) {
+        throw new Error('AI 未生成可用的音轨片段，请调整轨道选项后重试。');
+      }
+
+      console.log(`Video analysis complete. Found ${normalizedClips.length} clips.`);
+      return res.json({ clips: normalizedClips, analysisSource });
       
     } catch (err: any) {
       console.error('Error analyzing video:', err);
-      return res.status(500).json({ error: err.message });
+      return res.status(err.status || 500).json({
+        error: err.message || '视频分析暂时失败，请稍后重试。',
+      });
+    } finally {
+      if (ai && temporaryGeminiFileName) {
+        await ai.files.delete({ name: temporaryGeminiFileName }).catch((deleteError) => {
+          console.warn('Failed to delete temporary Gemini video file:', deleteError);
+        });
+      }
     }
   });
 
@@ -894,8 +1344,17 @@ ${dubbingEnabled ? '3. 配音轨 (dubbing): 如果画面中有需要配音旁白
   // --- Global API Error Handler ---
   app.use('/api', (err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
     console.error('Unhandled API Error:', err);
-    res.status(err.status || 500).json({
-      error: err.message || 'Internal Server Error'
+    if (res.headersSent) return next(err);
+
+    const isPayloadTooLarge = err?.code === 'LIMIT_FILE_SIZE'
+      || err?.type === 'entity.too.large'
+      || err?.status === 413
+      || err?.statusCode === 413;
+    const status = isPayloadTooLarge ? 413 : err?.status || err?.statusCode || 500;
+    return res.status(status).json({
+      error: isPayloadTooLarge
+        ? '上传内容超过 100MB 限制。'
+        : err?.message || 'Internal Server Error'
     });
   });
 

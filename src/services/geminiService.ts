@@ -1,3 +1,5 @@
+import { generateGeminiContent } from './geminiRetry';
+
 const isBrowser = typeof window !== 'undefined';
 
 type GeminiModule = typeof import('@google/genai');
@@ -9,22 +11,47 @@ const loadGeminiModule = () => {
   return geminiModulePromise;
 };
 
-async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(path, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
+async function postJson<T>(
+  path: string,
+  body: unknown,
+  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<T> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const handleParentAbort = () => controller.abort(options.signal?.reason);
+  if (options.signal?.aborted) handleParentAbort();
+  options.signal?.addEventListener('abort', handleParentAbort, { once: true });
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, options.timeoutMs ?? 90_000);
 
-  if (!response.ok) {
-    const errorBody = await response.json().catch(() => ({}));
-    throw new Error(errorBody.error || `AI 服务请求失败 (${response.status})`);
+  try {
+    const response = await fetch(path, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({}));
+      throw new Error(errorBody.error || `AI 服务请求失败 (${response.status})`);
+    }
+
+    return response.json();
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(timedOut ? 'AI 分析超过 90 秒，请减少素材后重试。' : '已取消本次分析。');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+    options.signal?.removeEventListener('abort', handleParentAbort);
   }
-
-  return response.json();
 }
 
 const getAI = async () => {
@@ -93,11 +120,147 @@ export interface AudioDesignResult {
   }[];
 }
 
-export async function analyzeAudioDesign(
-  files: { data: string; mimeType: string }[],
+export interface AudioDesignMedia {
+  data?: string;
+  fileUri?: string;
+  mimeType: string;
+  label?: string;
+  videoMetadata?: {
+    startOffset?: string;
+    endOffset?: string;
+    fps?: number;
+  };
+}
+
+export async function analyzeAudioDesignVideo(
+  video: File,
   requirements: string,
   target: { game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean },
-  isInstrumental: boolean
+  isInstrumental: boolean,
+  options: {
+    signal?: AbortSignal;
+    onProgress?: (message: string) => void;
+  } = {},
+): Promise<AudioDesignResult> {
+  if (!isBrowser) {
+    throw new Error('该方法仅用于 HTML5 客户端上传视频。');
+  }
+
+  return new Promise<AudioDesignResult>((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(new Error('已取消本次分析。'));
+      return;
+    }
+
+    const request = new XMLHttpRequest();
+    const handleAbort = () => request.abort();
+    const cleanup = () => options.signal?.removeEventListener('abort', handleAbort);
+    options.signal?.addEventListener('abort', handleAbort, { once: true });
+
+    request.open('POST', '/api/ai/gemini/audio-design-video');
+    request.responseType = 'json';
+    request.timeout = 240_000;
+    request.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      const percent = Math.min(100, Math.round((event.loaded / event.total) * 100));
+      options.onProgress?.(`正在上传原视频 ${percent}%...`);
+    };
+    request.upload.onload = () => {
+      options.onProgress?.(target.avatar
+        ? '上传完成，Gemini 正在进行高精度逐秒分析...'
+        : '上传完成，Gemini 正在分析完整画面与声音...');
+    };
+    request.onload = () => {
+      cleanup();
+      const response = request.response || {};
+      if (request.status >= 200 && request.status < 300) {
+        resolve(response as AudioDesignResult);
+        return;
+      }
+      reject(new Error(response.error || `专业视频分析失败 (${request.status})`));
+    };
+    request.onerror = () => {
+      cleanup();
+      reject(new Error('视频上传失败，请检查网络后重试。'));
+    };
+    request.ontimeout = () => {
+      cleanup();
+      reject(new Error('专业视频分析超过 4 分钟，请缩短视频后重试。'));
+    };
+    request.onabort = () => {
+      cleanup();
+      reject(new Error('已取消本次分析。'));
+    };
+
+    const formData = new FormData();
+    formData.append('video', video, video.name);
+    formData.append('requirements', requirements);
+    formData.append('target', JSON.stringify(target));
+    formData.append('isInstrumental', String(isInstrumental));
+    request.send(formData);
+  });
+}
+
+export async function analyzeAudioDesignVideoFile(
+  videoPath: string,
+  mimeType: string,
+  displayName: string,
+  requirements: string,
+  target: { game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean },
+  isInstrumental: boolean,
+): Promise<AudioDesignResult> {
+  const { ai } = await getAI();
+  let uploadedFile: Awaited<ReturnType<typeof ai.files.upload>> | undefined;
+
+  try {
+    uploadedFile = await ai.files.upload({
+      file: videoPath,
+      config: {
+        mimeType,
+        displayName: displayName.slice(0, 200),
+      },
+    });
+
+    const deadline = Date.now() + 120_000;
+    while (uploadedFile.state === 'PROCESSING') {
+      if (Date.now() >= deadline) {
+        throw Object.assign(new Error('Gemini 视频预处理超过 2 分钟，请稍后重试。'), { status: 504 });
+      }
+      await new Promise(resolve => setTimeout(resolve, 1_500));
+      if (!uploadedFile.name) throw new Error('Gemini 未返回视频文件标识。');
+      uploadedFile = await ai.files.get({ name: uploadedFile.name });
+    }
+
+    if (uploadedFile.state === 'FAILED') {
+      throw Object.assign(new Error(uploadedFile.error?.message || 'Gemini 无法处理此视频编码。'), { status: 422 });
+    }
+    if (!uploadedFile.uri || !uploadedFile.mimeType) {
+      throw new Error('Gemini 未返回可分析的视频地址。');
+    }
+
+    return await analyzeAudioDesign([{
+      fileUri: uploadedFile.uri,
+      mimeType: uploadedFile.mimeType,
+      label: `完整视频：${displayName}`,
+      videoMetadata: {
+        fps: target.avatar ? 2 : 1,
+      },
+    }], requirements, target, isInstrumental);
+  } finally {
+    if (uploadedFile?.name) {
+      await ai.files.delete({ name: uploadedFile.name }).catch((error) => {
+        console.warn('Failed to delete temporary Gemini file:', error);
+      });
+    }
+  }
+}
+
+export async function analyzeAudioDesign(
+  files: AudioDesignMedia[],
+  requirements: string,
+  target: { game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean },
+  isInstrumental: boolean,
+  options: { signal?: AbortSignal } = {},
 ): Promise<AudioDesignResult> {
   if (isBrowser) {
     return postJson<AudioDesignResult>('/api/ai/gemini/audio-design', {
@@ -105,7 +268,7 @@ export async function analyzeAudioDesign(
       requirements,
       target,
       isInstrumental,
-    });
+    }, { signal: options.signal, timeoutMs: 90_000 });
   }
 
   let targetDesc = target.game && target.video ? "游戏CG宣传片" : target.game ? "游戏" : target.video ? "视频" : "音频设计";
@@ -142,6 +305,15 @@ export async function analyzeAudioDesign(
     3. **动作级SFX**：在 "scene" 字段标明具体时间点。
     4. **双重BGM**：提供两个差异巨大的风格方案。
     5. **无语音**：音效严禁出现人声对白。
+    6. **性能与精度平衡**：只保留最重要的 6-10 个音效节点；字段描述保持专业但精炼，每段不超过 100 个汉字，避免重复内容。
+
+    ${files.some(file => Boolean(file.fileUri)) ? `
+    【原生视频精细分析要求】：
+    1. 必须从 00:00 开始覆盖到视频结束，结合画面运动、镜头剪辑和原始音轨进行判断。
+    2. 识别每次镜头、动作、情绪和音乐能量的明显转折，并使用“MM:SS-MM:SS”标出开始与结束时间。
+    3. timelineDesign 必须按真实视频顺序连续覆盖，不得只根据少数代表画面概括全片。
+    4. 快速动作段落优先标记 Foley、撞击、转场和节奏卡点；安静段落标记氛围、留白和音乐动态。
+    ` : ''}
     
     ${target.video || target.avatar ? `
     【高精度影视级特别设计要求（最高优先级）】：
@@ -168,19 +340,35 @@ export async function analyzeAudioDesign(
     音乐类型：${isInstrumental ? "纯音乐（Instrumental）" : "带有人声的歌曲"}
   `;
 
-  const parts = [
-    { text: prompt },
-    ...files.map(f => ({
-      inlineData: {
-        data: f.data.split(',')[1] || f.data,
-        mimeType: f.mimeType
-      }
-    }))
-  ];
+  const usesNativeVideo = files.some(file => Boolean(file.fileUri));
+  const parts: any[] = usesNativeVideo ? [] : [{ text: prompt }];
+  files.forEach((file) => {
+    if (!usesNativeVideo && file.label) parts.push({ text: `\n[${file.label}]` });
+    if (file.fileUri) {
+      parts.push({
+        fileData: {
+          fileUri: file.fileUri,
+          mimeType: file.mimeType,
+        },
+        ...(file.videoMetadata ? { videoMetadata: file.videoMetadata } : {}),
+      });
+    } else if (file.data) {
+      parts.push({
+        inlineData: {
+          data: file.data.split(',')[1] || file.data,
+          mimeType: file.mimeType,
+        },
+      });
+    }
+  });
+  if (usesNativeVideo) {
+    const labels = files.map(file => file.label).filter(Boolean).join('；');
+    parts.push({ text: `${labels ? `[${labels}]\n` : ''}${prompt}` });
+  }
 
   const { ai, Type } = await getAI();
-  const response = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
+  const response = await generateGeminiContent(ai, {
+    model: "gemini-3.5-flash",
     contents: [{ parts }],
     config: {
       responseMimeType: "application/json",
@@ -337,8 +525,8 @@ export async function regenerateLyrics(
     请仅返回修改后的这一部分歌词内容，保持原有的结构标注格式。
   `;
 
-  const response = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
+  const response = await generateGeminiContent(ai, {
+    model: "gemini-3.5-flash",
     contents: [{ parts: [{ text: prompt }] }],
     config: {
       thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
@@ -554,7 +742,7 @@ export async function generateSfxRequirements(
     });
   }
 
-  const response = await ai.models.generateContent({
+  const response = await generateGeminiContent(ai, {
     model: "gemini-3.5-flash",
     contents: [{ parts }],
     config: {
@@ -657,7 +845,7 @@ export async function optimizeImportMetadata(
     请将列表中的每一项进行智能转换，并且必须保留和返回对应的 \`id\`（以便客户端能够精确匹配回对应的文件）。
   `;
 
-  const response = await ai.models.generateContent({
+  const response = await generateGeminiContent(ai, {
     model: "gemini-3.5-flash",
     contents: [{ parts: [{ text: prompt }] }],
     config: {
@@ -699,7 +887,7 @@ export async function translateToEnglish(text: string): Promise<string> {
 
 需要翻译的文本: "${text.trim()}"`;
 
-    const response = await ai.models.generateContent({
+    const response = await generateGeminiContent(ai, {
       model: "gemini-3.5-flash",
       contents: [{ parts: [{ text: prompt }] }],
       config: {
@@ -750,7 +938,7 @@ ${JSON.stringify(simplifiedVoices, null, 2)}
 
 请仅返回最匹配的那个音色的 20 位 ElevenLabs ID（例如 "pNInz6obpg7IdgWAs6g8"），不要包含任何其他字符、标点、前缀、空格或解释。如果完全无法匹配，请返回默认的推荐 ID（男声返回 "pNInz6obpg7IdgWAs6g8"，女声返回 "21m00Tcm4TlvDq8ikWAM"）。`;
 
-    const response = await ai.models.generateContent({
+    const response = await generateGeminiContent(ai, {
       model: "gemini-3.5-flash",
       contents: [{ parts: [{ text: prompt }] }],
       config: {

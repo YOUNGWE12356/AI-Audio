@@ -259,10 +259,12 @@ interface AudioDirectorProps {
   target: { game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean };
   setTarget: React.Dispatch<React.SetStateAction<{ game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean }>>;
   loading: boolean;
+  analysisStage: string;
   error: string | null;
   setError: (err: string | null) => void;
   result: AudioDesignResult | null;
   onGenerate: () => void;
+  onCancel: () => void;
   copyToClipboard: (text: string, id?: string) => void;
   copyTableToClipboard: (scheme: any, id: string) => void;
   downloadTableAsCSV: (scheme: any) => void;
@@ -290,10 +292,12 @@ export default function AudioDirector({
   target,
   setTarget,
   loading,
+  analysisStage,
   error,
   setError,
   result,
   onGenerate,
+  onCancel,
   copyToClipboard,
   copyTableToClipboard,
   downloadTableAsCSV,
@@ -313,20 +317,31 @@ export default function AudioDirector({
   onLoadDemo
 }: AudioDirectorProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const isProfessionalTarget = Boolean(target.video || target.avatar);
+  const videoFileCount = files.filter(item => item.type.startsWith('video/')).length;
+  const isProfessionalVideoReady = isProfessionalTarget && videoFileCount === 1 && files.length === 1;
+  const hasInvalidProfessionalSelection = isProfessionalTarget
+    && videoFileCount > 0
+    && (videoFileCount !== 1 || files.length !== 1);
+  const usesProfessionalFallback = isProfessionalTarget && videoFileCount === 0;
 
   const processFiles = async (selectedFiles: FileList | null) => {
     if (selectedFiles && selectedFiles.length > 0) {
-      const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
-      const oversizedFiles = Array.from(selectedFiles).filter(f => f.size > MAX_FILE_SIZE);
+      const MAX_VIDEO_SIZE = 100 * 1024 * 1024;
+      const MAX_DIRECT_SIZE = 20 * 1024 * 1024;
+      const oversizedFiles = Array.from(selectedFiles).filter((file) => (
+        file.type.startsWith('video/')
+          ? file.size > MAX_VIDEO_SIZE
+          : file.size > MAX_DIRECT_SIZE
+      ));
       
       if (oversizedFiles.length > 0) {
-        setError(`部分文件超过 100MB 限制: ${oversizedFiles.map(f => f.name).join(', ')}`);
+        setError(`文件过大：视频上限 100MB，图片、音频和 PDF 上限 20MB。请处理：${oversizedFiles.map(f => f.name).join(', ')}`);
         return;
       }
 
       setIsUploading(true);
       setError(null);
-      await new Promise(resolve => setTimeout(resolve, 800)); // Visual upload latency
 
       const newFiles = Array.from(selectedFiles).map((file: File) => ({
         file,
@@ -419,7 +434,7 @@ export default function AudioDirector({
                 <div className="flex flex-col items-center gap-2 group">
                   <Upload className="w-8 h-8 text-slate-400 group-hover:text-emerald-600 transition-colors" />
                   <p className="text-xs font-bold text-slate-700">拖拽文件到这里，或点击浏览</p>
-                  <p className="text-[10px] text-slate-400">支持 视频、音频、图片、PDF 需求文档 (最大100M)</p>
+                  <p className="text-[10px] text-slate-400">视频最大 100MB；图片、音频与 PDF 最大 20MB</p>
                 </div>
               )}
             </div>
@@ -521,6 +536,41 @@ export default function AudioDirector({
                   <span>小岛有晴天</span>
                 </button>
               </div>
+              <div className={`rounded-xl border px-3 py-2.5 text-[10px] leading-relaxed ${
+                hasInvalidProfessionalSelection
+                  ? 'border-red-200 bg-red-50 text-red-700'
+                  : isProfessionalVideoReady
+                    ? 'border-sky-200 bg-sky-50 text-sky-700'
+                    : usesProfessionalFallback
+                      ? 'border-amber-200 bg-amber-50 text-amber-700'
+                      : 'border-emerald-200 bg-emerald-50 text-emerald-700'
+              }`}>
+                <div className="flex items-center gap-1.5 font-bold">
+                  {hasInvalidProfessionalSelection || usesProfessionalFallback
+                    ? <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                    : <Clock className="h-3.5 w-3.5 shrink-0" />}
+                  <span>
+                    {hasInvalidProfessionalSelection
+                      ? '专业视频素材需要调整'
+                      : isProfessionalVideoReady
+                        ? '专业完整视频分析已就绪'
+                        : usesProfessionalFallback
+                          ? '当前将使用快速素材分析'
+                          : '快速关键帧模式'}
+                  </span>
+                </div>
+                <p className="mt-1 opacity-80">
+                  {hasInvalidProfessionalSelection
+                    ? `完整视频分析只能单独使用 1 个视频；当前共有 ${files.length} 份素材，其中 ${videoFileCount} 个视频。请移除其他素材后继续。`
+                    : isProfessionalVideoReady
+                      ? target.avatar
+                        ? '将上传完整视频，以约 2 FPS 分析画面与原音轨，生成更精细的秒级情绪和音乐时间轴。'
+                        : '将上传完整视频，以约 1 FPS 分析画面与原音轨，适合影视、广告的镜头与音乐排程。'
+                      : usesProfessionalFallback
+                        ? '未检测到视频，将根据图片、音频、PDF 或文字进行快速分析，不会分析完整视频和原音轨。若要启用专业模式，请仅上传 1 个视频。'
+                        : '提取少量压缩关键帧，速度更快，适合游戏音轨和方案预览。'}
+                </p>
+              </div>
             </div>
 
             {/* Instrumental/Vocal Toggle */}
@@ -563,46 +613,33 @@ export default function AudioDirector({
               />
             </div>
 
-            {/* Scene Shortcuts for Quick Demands */}
-            <div className="space-y-1.5">
-              <p className="text-[9px] font-bold text-slate-450 uppercase">快捷配景需求一键载入：</p>
-              <div className="flex flex-wrap gap-1.5">
-                {[
-                  '科幻星际飞船起飞与激光战争',
-                  '中世纪奇幻城堡与林间雨夜 Foley',
-                  '横版像素冒险游戏草地脚步与拾取金币',
-                  '悬疑微电影心跳声、暗色声景与脚步尾随'
-                ].map((item, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => setRequirements(item)}
-                    className="text-[9px] bg-slate-50 hover:bg-emerald-50 text-slate-600 hover:text-emerald-700 border border-slate-200 px-2.5 py-1 rounded cursor-pointer transition-all"
-                  >
-                    {item}
-                  </button>
-                ))}
-              </div>
-            </div>
-
             {/* Submit Action */}
             <button
               onClick={onGenerate}
-              disabled={loading || (files.length === 0 && !requirements.trim())}
+              disabled={loading || hasInvalidProfessionalSelection || (files.length === 0 && !requirements.trim())}
               className="w-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-bold py-3.5 rounded-xl text-xs tracking-wider uppercase transition-all shadow-md shadow-emerald-600/10 disabled:opacity-50 flex items-center justify-center gap-2 mt-2 cursor-pointer"
             >
               {loading ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>正在调用 AI 解析素材并进行规划...</span>
+                  <span>{analysisStage}</span>
                 </>
               ) : (
                 <>
                   <Sparkles className="w-4 h-4" />
-                  <span>开始生成设计方案</span>
+                  <span>{hasInvalidProfessionalSelection ? '请先调整专业视频素材' : '开始生成设计方案'}</span>
                 </>
               )}
             </button>
+            {loading && (
+              <button
+                type="button"
+                onClick={onCancel}
+                className="w-full border border-slate-200 bg-white hover:bg-red-50 hover:border-red-200 text-slate-500 hover:text-red-600 font-semibold py-2.5 rounded-xl text-xs transition-all"
+              >
+                取消本次分析
+              </button>
+            )}
           </div>
         </div>
 
@@ -623,7 +660,7 @@ export default function AudioDirector({
               <Loader2 className="w-10 h-10 text-emerald-600 animate-spin" />
               <div className="space-y-1">
                 <p className="text-sm font-bold text-slate-800">多模态大模型正在协同创作中</p>
-                <p className="text-xs text-slate-500">正在分析视频/图片画幅信息，编写 Foley 排程表，起草 Suno 音乐配曲...</p>
+                <p className="text-xs text-slate-500">{analysisStage}</p>
               </div>
             </div>
           )}
