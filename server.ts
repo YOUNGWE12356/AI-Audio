@@ -6,12 +6,14 @@ import { randomUUID } from 'node:crypto';
 import { exec, execFile } from 'child_process';
 import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
+import JSZip from 'jszip';
 import { DEFAULT_CATEGORIES, INITIAL_SOUNDS } from './src/data/sfxData';
 import multer from 'multer';
 import {
   analyzeAudioDesign,
   analyzeAudioDesignVideoFile,
   generateSfxRequirements,
+  generateLyricsFromMusicStyle,
   matchBestVoice,
   optimizeImportMetadata,
   regenerateLyrics,
@@ -161,11 +163,39 @@ async function startServer() {
     });
   };
 
+  const isRetryableFileAccessError = (error: unknown) => {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    return code === 'EPERM' || code === 'EBUSY' || code === 'EACCES';
+  };
+
+  const copyFileWithAccessRetry = async (sourcePath: string, destinationPath: string) => {
+    const delays = [0, 150, 350, 700, 1_200];
+    let lastError: unknown;
+
+    for (const delay of delays) {
+      if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+      try {
+        await fs.promises.copyFile(sourcePath, destinationPath, fs.constants.COPYFILE_EXCL);
+        return;
+      } catch (error) {
+        lastError = error;
+        await safeUnlink(destinationPath);
+        if (!isRetryableFileAccessError(error)) throw error;
+      }
+    }
+
+    throw Object.assign(
+      new Error('视频临时文件正被系统占用，请稍后重新生成。'),
+      { status: 503, cause: lastError },
+    );
+  };
+
   // Google Files API derives X-Goog-Upload-File-Name from the local path.
   // Undici only accepts ByteString request-header values, so an existing
   // Chinese (or otherwise non-ASCII) project filename must be uploaded through
-  // a short-lived ASCII alias. A hard link avoids copying large videos; the
-  // copy fallback keeps this portable across filesystems.
+  // a short-lived ASCII alias. Windows gets an independent copy because newly
+  // uploaded files can be held briefly by scanners, and a hard link retains the
+  // same underlying file lock.
   const createGeminiUploadAlias = async (sourcePath: string, mimeType: string) => {
     const extension = getSafeUploadExtension(sourcePath, mimeType, '.mp4');
     const aliasName = `gemini_video_${randomUUID()}${extension}`;
@@ -174,14 +204,13 @@ async function startServer() {
       throw Object.assign(new Error('无法创建安全的视频分析临时文件。'), { status: 500 });
     }
 
-    try {
-      await fs.promises.link(sourcePath, aliasPath);
-    } catch {
+    if (process.platform === 'win32') {
+      await copyFileWithAccessRetry(sourcePath, aliasPath);
+    } else {
       try {
-        await fs.promises.copyFile(sourcePath, aliasPath, fs.constants.COPYFILE_EXCL);
-      } catch (copyError) {
-        await safeUnlink(aliasPath);
-        throw copyError;
+        await fs.promises.link(sourcePath, aliasPath);
+      } catch {
+        await copyFileWithAccessRetry(sourcePath, aliasPath);
       }
     }
 
@@ -194,6 +223,22 @@ async function startServer() {
       console.warn(`Failed to remove temporary directory ${directoryPath}:`, error);
     });
   };
+
+  // Helper to initialize GoogleGenAI on the server
+  function getGoogleAI() {
+    const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error("GEMINI_API_KEY environment variable is not configured.");
+    }
+    return new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        }
+      }
+    });
+  }
 
   const parseSafeVideoFilename = (value: unknown) => {
     if (typeof value !== 'string' || value.length === 0 || value.length > 255) return null;
@@ -309,6 +354,40 @@ async function startServer() {
     limits: { fileSize: MAX_UPLOAD_BYTES }
   });
 
+  type AudioDesignVideoPreupload = {
+    uploadId: string;
+    fileUri: string;
+    mimeType: string;
+    displayName: string;
+    geminiFileName: string;
+    expiresAt: number;
+  };
+  const AUDIO_DESIGN_PREUPLOAD_TTL_MS = 30 * 60 * 1000;
+  const audioDesignVideoPreuploads = new Map<string, AudioDesignVideoPreupload>();
+
+  const deleteGeminiPreupload = async (entry?: AudioDesignVideoPreupload) => {
+    if (!entry?.geminiFileName) return;
+    try {
+      await getGoogleAI().files.delete({ name: entry.geminiFileName });
+    } catch (error) {
+      console.warn('Failed to delete preuploaded Gemini video:', error);
+    }
+  };
+
+  const cleanupExpiredAudioDesignPreuploads = async () => {
+    const now = Date.now();
+    const expiredEntries = [...audioDesignVideoPreuploads.values()]
+      .filter(entry => entry.expiresAt <= now);
+    for (const entry of expiredEntries) {
+      audioDesignVideoPreuploads.delete(entry.uploadId);
+      await deleteGeminiPreupload(entry);
+    }
+  };
+
+  setInterval(() => {
+    void cleanupExpiredAudioDesignPreuploads();
+  }, 5 * 60 * 1000).unref?.();
+
   const aiUpload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: MAX_UPLOAD_BYTES },
@@ -323,6 +402,83 @@ async function startServer() {
     const parsed = typeof value === 'number' ? value : Number.parseFloat(String(value));
     if (!Number.isFinite(parsed)) return fallback;
     return Math.min(max, Math.max(min, parsed));
+  };
+
+  type AudioExportFormat = 'mp3' | 'wav' | 'aac';
+
+  const normalizeAudioExportFormat = (value: unknown): AudioExportFormat => {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (normalized === 'wav' || normalized === 'aac') return normalized;
+    return 'mp3';
+  };
+
+  const normalizeSampleRate = (value: unknown) => {
+    const parsed = Number.parseInt(String(value), 10);
+    return [44100, 48000, 96000].includes(parsed) ? parsed : 48000;
+  };
+
+  const normalizeAudioBitrate = (value: unknown) => {
+    const normalized = String(value || '').trim().toLowerCase();
+    return ['128k', '192k', '256k', '320k'].includes(normalized) ? normalized : '192k';
+  };
+
+  const normalizeBitDepth = (value: unknown) => {
+    const parsed = Number.parseInt(String(value), 10);
+    return [16, 24, 32].includes(parsed) ? parsed : 24;
+  };
+
+  const getPcmCodec = (bitDepth: number) => {
+    if (bitDepth === 32) return 'pcm_s32le';
+    if (bitDepth === 24) return 'pcm_s24le';
+    return 'pcm_s16le';
+  };
+
+  const getAudioOutputArgs = (
+    format: AudioExportFormat,
+    sampleRate: number,
+    bitrate: string,
+    bitDepth = 24,
+  ) => {
+    const args = ['-ar', String(sampleRate)];
+    if (format === 'wav') {
+      return [...args, '-c:a', getPcmCodec(bitDepth)];
+    }
+    if (format === 'aac') {
+      return [...args, '-c:a', 'aac', '-b:a', bitrate];
+    }
+    return [...args, '-c:a', 'libmp3lame', '-b:a', bitrate];
+  };
+
+  const getVideoAudioOutputArgs = (
+    format: AudioExportFormat,
+    sampleRate: number,
+    bitrate: string,
+    bitDepth = 24,
+  ) => {
+    if (format === 'wav') {
+      return {
+        extension: '.mov',
+        args: ['-ar', String(sampleRate), '-c:a', getPcmCodec(bitDepth)],
+      };
+    }
+    if (format === 'mp3') {
+      return {
+        extension: '.mp4',
+        args: ['-ar', String(sampleRate), '-c:a', 'libmp3lame', '-b:a', bitrate],
+      };
+    }
+    return {
+      extension: '.mp4',
+      args: ['-ar', String(sampleRate), '-c:a', 'aac', '-b:a', bitrate],
+    };
+  };
+
+  const sanitizeExportName = (name: unknown, fallback: string) => {
+    const raw = String(name || fallback)
+      .replace(/\.[^/.]+$/, '')
+      .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_')
+      .trim();
+    return raw.length > 0 ? raw.slice(0, 80) : fallback;
   };
 
   const buildAtempoFilter = (value: unknown) => {
@@ -350,6 +506,7 @@ async function startServer() {
     inputIndex: number,
     clip: any,
     outputLabel: string,
+    sampleRate = 44100,
   ) => {
     const isDubbingClip = clip?.trackType === 'dubbing'
       || clip?.trackId === 'dubbing'
@@ -384,7 +541,7 @@ async function startServer() {
       ? `,apad,atrim=duration=${Number(clipDuration.toFixed(3))},asetpts=PTS-STARTPTS`
       : '';
 
-    return `[${inputIndex}:a]aformat=sample_rates=44100:channel_layouts=stereo${speedSegment}${dubbingWindow},volume=${normalizeUnitVolume(clip?.volume)},adelay=${delayMs}|${delayMs}[${outputLabel}]`;
+    return `[${inputIndex}:a]aformat=sample_rates=${sampleRate}:channel_layouts=stereo${speedSegment}${dubbingWindow},volume=${normalizeUnitVolume(clip?.volume)},adelay=${delayMs}|${delayMs}[${outputLabel}]`;
   };
 
   const resolveValidatedUploadedVideo = async (fileName: unknown) => {
@@ -548,6 +705,140 @@ async function startServer() {
   }));
 
   app.post(
+    '/api/ai/gemini/audio-design-video-preupload',
+    upload.single('video'),
+    asyncRoute(async (req, res) => {
+      if (!req.file) {
+        return res.status(400).json({ error: '请选择一个视频文件。' });
+      }
+
+      const uploadedPath = path.resolve(req.file.path);
+      const uploadsRoot = `${path.resolve(uploadsDir)}${path.sep}`;
+      let geminiAliasPath: string | undefined;
+      let uploadedVideo: any;
+      let cacheStored = false;
+
+      try {
+        if (!uploadedPath.startsWith(uploadsRoot)) {
+          return res.status(400).json({ error: '视频临时路径无效。' });
+        }
+        if (!req.file.mimetype.startsWith('video/')) {
+          return res.status(415).json({ error: '只支持预上传视频文件。' });
+        }
+
+        await cleanupExpiredAudioDesignPreuploads();
+
+        const geminiUpload = await createGeminiUploadAlias(uploadedPath, req.file.mimetype);
+        geminiAliasPath = geminiUpload.aliasPath;
+        const originalDisplayName = normalizeUploadDisplayName(
+          req.body?.originalName,
+          req.file.originalname,
+        );
+        const aiClient = getGoogleAI();
+        uploadedVideo = await aiClient.files.upload({
+          file: geminiUpload.aliasPath,
+          config: {
+            mimeType: req.file.mimetype,
+            displayName: geminiUpload.aliasName,
+          },
+        });
+
+        const processingDeadline = Date.now() + 120_000;
+        while (uploadedVideo.state === 'PROCESSING') {
+          if (Date.now() >= processingDeadline) {
+            throw Object.assign(new Error('Gemini 视频预处理超过 2 分钟，请稍后点击分析继续。'), { status: 504 });
+          }
+          await new Promise(resolve => setTimeout(resolve, 1_500));
+          if (!uploadedVideo.name) {
+            throw new Error('Gemini 未返回视频文件标识。');
+          }
+          uploadedVideo = await aiClient.files.get({ name: uploadedVideo.name });
+        }
+
+        if (uploadedVideo.state === 'FAILED') {
+          throw Object.assign(new Error(uploadedVideo.error?.message || 'Gemini 无法处理此视频编码。'), { status: 422 });
+        }
+        if (uploadedVideo.state !== 'ACTIVE' || !uploadedVideo.uri || !uploadedVideo.name) {
+          throw Object.assign(new Error('Gemini 视频文件未进入可分析状态。'), { status: 502 });
+        }
+
+        const uploadId = randomUUID();
+        const mimeType = uploadedVideo.mimeType || req.file.mimetype;
+        const expiresAt = Date.now() + AUDIO_DESIGN_PREUPLOAD_TTL_MS;
+        audioDesignVideoPreuploads.set(uploadId, {
+          uploadId,
+          fileUri: uploadedVideo.uri,
+          mimeType,
+          displayName: originalDisplayName,
+          geminiFileName: uploadedVideo.name,
+          expiresAt,
+        });
+        cacheStored = true;
+
+        return res.json({
+          uploadId,
+          displayName: originalDisplayName,
+          mimeType,
+          expiresAt,
+        });
+      } finally {
+        await safeUnlink(geminiAliasPath);
+        if (uploadedPath.startsWith(uploadsRoot)) await safeUnlink(uploadedPath);
+        if (uploadedVideo?.name && !cacheStored) {
+          await getGoogleAI().files.delete({ name: uploadedVideo.name }).catch((error) => {
+            console.warn('Failed to delete failed preuploaded Gemini video:', error);
+          });
+        }
+      }
+    }),
+  );
+
+  app.post('/api/ai/gemini/audio-design-video-preuploaded', asyncRoute(async (req, res) => {
+    const {
+      uploadId,
+      requirements = '',
+      target: rawTarget = {},
+      isInstrumental = true,
+      analysisMode = 'professional',
+    } = req.body || {};
+    if (typeof uploadId !== 'string' || !/^[0-9a-f-]{36}$/i.test(uploadId)) {
+      return res.status(400).json({ error: '视频预上传标识无效，请重新上传视频。' });
+    }
+
+    const cachedVideo = audioDesignVideoPreuploads.get(uploadId);
+    if (!cachedVideo) {
+      return res.status(404).json({ error: '预上传视频已失效，请重新选择视频后再分析。' });
+    }
+    if (cachedVideo.expiresAt <= Date.now()) {
+      audioDesignVideoPreuploads.delete(uploadId);
+      await deleteGeminiPreupload(cachedVideo);
+      return res.status(410).json({ error: '预上传视频已过期，请重新选择视频后再分析。' });
+    }
+
+    const target = {
+      game: Boolean(rawTarget.game),
+      video: Boolean(rawTarget.video),
+      avatar: Boolean(rawTarget.avatar),
+      sunnyIsland: Boolean(rawTarget.sunnyIsland),
+    };
+    const isFallbackAnalysis = String(analysisMode) === 'fallback';
+    const canUseNativeVideo = target.game || target.video || target.avatar || target.sunnyIsland || isFallbackAnalysis;
+    if (!canUseNativeVideo) {
+      return res.status(400).json({ error: '当前模式不支持完整视频预上传分析。' });
+    }
+
+    const result = await analyzeAudioDesign([{
+      fileUri: cachedVideo.fileUri,
+      mimeType: cachedVideo.mimeType,
+      label: `完整视频：${cachedVideo.displayName}`,
+      videoMetadata: {
+        fps: target.avatar ? 2 : 1,
+      },
+    }], String(requirements), target, Boolean(isInstrumental));
+    return res.json(result);
+  }));
+
+  app.post(
     '/api/ai/gemini/audio-design-video',
     upload.single('video'),
     asyncRoute(async (req, res) => {
@@ -578,7 +869,9 @@ async function startServer() {
           avatar: Boolean(rawTarget.avatar),
           sunnyIsland: Boolean(rawTarget.sunnyIsland),
         };
-        if (!target.video && !target.avatar) {
+        const analysisMode = String(req.body?.analysisMode || 'professional');
+        const isFallbackAnalysis = analysisMode === 'fallback';
+        if (!isFallbackAnalysis && !target.video && !target.avatar) {
           return res.status(400).json({ error: '只有影视/广告或 Avatar 模式可使用专业视频分析。' });
         }
 
@@ -607,6 +900,18 @@ async function startServer() {
   app.post('/api/ai/gemini/regenerate-lyrics', asyncRoute(async (req, res) => {
     const { originalLyrics = '', selectedPart = '', direction = '' } = req.body || {};
     const text = await regenerateLyrics(String(originalLyrics), String(selectedPart), String(direction));
+    return res.json({ text });
+  }));
+
+  app.post('/api/ai/gemini/generate-lyrics', asyncRoute(async (req, res) => {
+    const style = String(req.body?.style || '').trim();
+    if (!style) {
+      return res.status(400).json({ error: '请先输入歌曲风格描述。' });
+    }
+    if (style.length > 5000) {
+      return res.status(400).json({ error: '歌曲风格描述过长，请精简后重试。' });
+    }
+    const text = await generateLyricsFromMusicStyle(style);
     return res.json({ text });
   }));
 
@@ -980,22 +1285,6 @@ async function startServer() {
       return res.status(500).json({ error: err.message });
     }
   });
-
-  // Helper to initialize GoogleGenAI on the server
-  const getGoogleAI = () => {
-    const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error("GEMINI_API_KEY environment variable is not configured.");
-    }
-    return new GoogleGenAI({ 
-      apiKey: apiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        }
-      }
-    });
-  };
 
   // 7. Video AI Multi-modal Analysis
   app.post('/api/video/analyze', async (req, res) => {
@@ -1623,6 +1912,10 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
         clips,
         includeOriginalAudio = false,
         originalAudioVolume = 1,
+        audioFormat,
+        sampleRate,
+        bitrate,
+        bitDepth,
       } = req.body;
       if (!videoFileName) {
         return res.status(400).json({ error: 'videoFileName is required' });
@@ -1648,6 +1941,16 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       }
       const requestedOriginalAudio = includeOriginalAudio === true;
       const normalizedOriginalVolume = normalizeUnitVolume(originalAudioVolume);
+      const normalizedAudioFormat = normalizeAudioExportFormat(audioFormat);
+      const normalizedSampleRate = normalizeSampleRate(sampleRate);
+      const normalizedBitrate = normalizeAudioBitrate(bitrate);
+      const normalizedBitDepth = normalizeBitDepth(bitDepth);
+      const videoAudioOutput = getVideoAudioOutputArgs(
+        normalizedAudioFormat,
+        normalizedSampleRate,
+        normalizedBitrate,
+        normalizedBitDepth,
+      );
 
       // Keeping the untouched source does not require FFmpeg/FFprobe. This also
       // lets local HTML5 previews export the original video before a media
@@ -1666,7 +1969,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       // Generate a unique output file name
       const sourceExt = path.extname(safeVideoFileName);
       const base = path.basename(safeVideoFileName, sourceExt);
-      const outputFileName = `mixed_${base}_${Date.now()}.mp4`;
+      const outputFileName = `mixed_${base}_${Date.now()}${videoAudioOutput.extension}`;
       const outputFilePath = path.join(uploadsDir, outputFileName);
 
       const finishWithFfmpeg = (args: string[]) => {
@@ -1708,7 +2011,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
               '-preset', 'veryfast',
               '-crf', '18',
               '-pix_fmt', 'yuv420p',
-              '-c:a', 'aac',
+              ...videoAudioOutput.args,
               '-movflags', '+faststart',
               '-shortest',
               outputFilePath,
@@ -1738,11 +2041,11 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
         const filterParts: string[] = [];
         const mixInputs: string[] = [];
         if (useOriginalAudio) {
-          filterParts.push(`[0:a:0]aformat=sample_rates=44100:channel_layouts=stereo,volume=${normalizedOriginalVolume}[source]`);
+          filterParts.push(`[0:a:0]aformat=sample_rates=${normalizedSampleRate}:channel_layouts=stereo,volume=${normalizedOriginalVolume}[source]`);
           mixInputs.push('[source]');
         }
         validClips.forEach((clip: any, idx: number) => {
-          filterParts.push(buildTimelineAudioFilter(idx + 1, clip, `aud${idx}`));
+          filterParts.push(buildTimelineAudioFilter(idx + 1, clip, `aud${idx}`, normalizedSampleRate));
           mixInputs.push(`[aud${idx}]`);
         });
         filterParts.push(`${mixInputs.join('')}amix=inputs=${mixInputs.length}:duration=longest:normalize=0:dropout_transition=0,alimiter=limit=0.95,apad[aout]`);
@@ -1758,7 +2061,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
           '-preset', 'veryfast',
           '-crf', '18',
           '-pix_fmt', 'yuv420p',
-          '-c:a', 'aac',
+          ...videoAudioOutput.args,
           '-movflags', '+faststart',
           '-shortest',
           outputFilePath,
@@ -1878,6 +2181,161 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       return res.status(500).json({ error: err.message });
     }
   });
+
+  const mixClipsToAudioFileV2 = (
+    targetClips: any[],
+    outputFilePath: string,
+    options: { audioFormat: AudioExportFormat; sampleRate: number; bitrate: string; bitDepth: number },
+  ) => new Promise<void>((resolve, reject) => {
+    const inputArgs: string[] = [];
+    targetClips.forEach((clip: any) => {
+      const clipFileName = path.basename(String(clip.audioUrl || ''));
+      const clipPath = path.join(uploadsDir, clipFileName);
+      inputArgs.push('-i', clipPath);
+    });
+
+    const filterParts: string[] = [];
+    targetClips.forEach((clip: any, idx: number) => {
+      filterParts.push(buildTimelineAudioFilter(idx, clip, `aud${idx}`, options.sampleRate));
+    });
+
+    const mixInputs = targetClips.map((_, idx) => `[aud${idx}]`).join('');
+    filterParts.push(`${mixInputs}amix=inputs=${targetClips.length}:duration=longest:dropout_transition=0,alimiter=limit=0.95[aout]`);
+
+    const ffmpegArgs = [
+      '-y',
+      ...inputArgs,
+      '-filter_complex', filterParts.join('; '),
+      '-map', '[aout]',
+      ...getAudioOutputArgs(options.audioFormat, options.sampleRate, options.bitrate, options.bitDepth),
+      outputFilePath,
+    ];
+
+    execFile('ffmpeg', ffmpegArgs, (err, stdout, stderr) => {
+      if (err) {
+        console.error('Audio FFmpeg v2 mixing failed:', err, stderr);
+        reject(err);
+        return;
+      }
+      resolve();
+    });
+  });
+
+  app.post('/api/audio/mix-tracks-v2', asyncRoute(async (req, res) => {
+    const {
+      clips,
+      trackId,
+      audioFormat,
+      sampleRate,
+      bitrate,
+      bitDepth,
+    } = req.body;
+    const normalizedTrackId = typeof trackId === 'string' && trackId.length > 0
+      ? trackId
+      : undefined;
+    if (normalizedTrackId && !/^[\w-]+$/.test(normalizedTrackId)) {
+      return res.status(400).json({ error: '不支持的音轨导出类型。' });
+    }
+
+    const normalizedAudioFormat = normalizeAudioExportFormat(audioFormat);
+    const normalizedSampleRate = normalizeSampleRate(sampleRate);
+    const normalizedBitrate = normalizeAudioBitrate(bitrate);
+    const normalizedBitDepth = normalizeBitDepth(bitDepth);
+    const requestedClips = Array.isArray(clips) ? clips : [];
+    const targetClips = requestedClips.filter((clip: any) => (
+      !normalizedTrackId || clip.trackId === normalizedTrackId
+    ));
+    const validClips = targetClips.filter((clip: any) => {
+      const clipFileName = path.basename(String(clip.audioUrl || ''));
+      const clipPath = path.join(uploadsDir, clipFileName);
+      return clipFileName.length > 0 && fs.existsSync(clipPath);
+    });
+
+    if (validClips.length !== targetClips.length) {
+      return res.status(422).json({
+        code: 'CLIP_AUDIO_MISSING',
+        error: '部分音频片段已失效或尚未上传，请重新合成缺失片段后再导出。',
+      });
+    }
+    if (validClips.length === 0) {
+      return res.status(400).json({ error: '没有可导出的音频片段。' });
+    }
+
+    const outputFileName = `exported_audio_${normalizedTrackId || 'master'}_${Date.now()}.${normalizedAudioFormat}`;
+    const outputFilePath = path.join(uploadsDir, outputFileName);
+    await mixClipsToAudioFileV2(validClips, outputFilePath, {
+      audioFormat: normalizedAudioFormat,
+      sampleRate: normalizedSampleRate,
+      bitrate: normalizedBitrate,
+      bitDepth: normalizedBitDepth,
+    });
+    return res.json({ audioUrl: `/uploads/${outputFileName}` });
+  }));
+
+  app.post('/api/audio/export-stems', asyncRoute(async (req, res) => {
+    const {
+      tracks,
+      clips,
+      audioFormat,
+      sampleRate,
+      bitrate,
+      bitDepth,
+    } = req.body;
+
+    const normalizedAudioFormat = normalizeAudioExportFormat(audioFormat);
+    const normalizedSampleRate = normalizeSampleRate(sampleRate);
+    const normalizedBitrate = normalizeAudioBitrate(bitrate);
+    const normalizedBitDepth = normalizeBitDepth(bitDepth);
+    const requestedTracks = Array.isArray(tracks) ? tracks : [];
+    const requestedClips = Array.isArray(clips) ? clips : [];
+    const zip = new JSZip();
+    const tempStemPaths: string[] = [];
+    const timestamp = Date.now();
+
+    for (const track of requestedTracks) {
+      const trackId = typeof track?.id === 'string' ? track.id : '';
+      if (!/^[\w-]+$/.test(trackId) || track?.isMuted) continue;
+      const trackClips = requestedClips.filter((clip: any) => clip.trackId === trackId && clip.audioUrl);
+      if (trackClips.length === 0) continue;
+
+      const validTrackClips = trackClips.filter((clip: any) => {
+        const clipFileName = path.basename(String(clip.audioUrl || ''));
+        const clipPath = path.join(uploadsDir, clipFileName);
+        return clipFileName.length > 0 && fs.existsSync(clipPath);
+      });
+      if (validTrackClips.length !== trackClips.length) {
+        return res.status(422).json({
+          code: 'CLIP_AUDIO_MISSING',
+          error: `音轨“${track.name || trackId}”中有音频片段已失效，请重新生成后再分轨导出。`,
+        });
+      }
+
+      const safeTrackName = sanitizeExportName(track?.name, trackId);
+      const stemFileName = `${safeTrackName}_${trackId}_${timestamp}.${normalizedAudioFormat}`;
+      const stemPath = path.join(uploadsDir, stemFileName);
+      await mixClipsToAudioFileV2(validTrackClips, stemPath, {
+        audioFormat: normalizedAudioFormat,
+        sampleRate: normalizedSampleRate,
+        bitrate: normalizedBitrate,
+        bitDepth: normalizedBitDepth,
+      });
+      tempStemPaths.push(stemPath);
+      zip.file(stemFileName, fs.readFileSync(stemPath));
+    }
+
+    if (tempStemPaths.length === 0) {
+      return res.status(400).json({ error: '没有可导出的未静音单独音轨。' });
+    }
+
+    const zipFileName = `track_stems_${timestamp}.zip`;
+    const zipPath = path.join(uploadsDir, zipFileName);
+    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    fs.writeFileSync(zipPath, zipBuffer);
+    tempStemPaths.forEach((stemPath) => {
+      try { fs.unlinkSync(stemPath); } catch {}
+    });
+    return res.json({ zipUrl: `/uploads/${zipFileName}`, stemCount: tempStemPaths.length });
+  }));
 
   // --- Global API Error Handler ---
   app.use('/api', (err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {

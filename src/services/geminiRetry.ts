@@ -16,14 +16,39 @@ const wait = (delayMs: number) => new Promise<void>((resolve) => {
 });
 
 const getErrorText = (error: unknown) => {
-  if (error instanceof Error) return error.message;
-  if (typeof error === 'string') return error;
+  const parts: string[] = [];
+  const visited = new Set<unknown>();
 
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return String(error);
-  }
+  const visit = (value: unknown, depth: number) => {
+    if (value == null || depth > 4 || visited.has(value)) return;
+    if (typeof value === 'string') {
+      parts.push(value);
+      return;
+    }
+    if (typeof value !== 'object') {
+      parts.push(String(value));
+      return;
+    }
+
+    visited.add(value);
+    const candidate = value as {
+      message?: unknown;
+      code?: unknown;
+      cause?: unknown;
+      errors?: unknown;
+    };
+    if (typeof candidate.message === 'string') parts.push(candidate.message);
+    if (typeof candidate.code === 'string' || typeof candidate.code === 'number') {
+      parts.push(String(candidate.code));
+    }
+    visit(candidate.cause, depth + 1);
+    if (Array.isArray(candidate.errors)) {
+      candidate.errors.forEach(item => visit(item, depth + 1));
+    }
+  };
+
+  visit(error, 0);
+  return parts.join(' ');
 };
 
 const getErrorStatus = (error: unknown) => {
@@ -45,11 +70,23 @@ export const isRetryableGeminiError = (error: unknown) => {
     return true;
   }
 
-  return /UNAVAILABLE|RESOURCE_EXHAUSTED|DEADLINE_EXCEEDED|temporar(?:y|ily)|overload|high demand|timeout|timed out/i
+  return /UNAVAILABLE|RESOURCE_EXHAUSTED|DEADLINE_EXCEEDED|temporar(?:y|ily)|overload|high demand|timeout|timed out|fetch failed|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|EACCES|UND_ERR/i
     .test(getErrorText(error));
 };
 
+export const isGeminiNetworkError = (error: unknown) => (
+  /fetch failed|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|EACCES|UND_ERR_CONNECT_TIMEOUT/i
+    .test(getErrorText(error))
+);
+
+export const createFriendlyGeminiNetworkError = (error: unknown) => Object.assign(
+  new Error('服务器当前无法连接 Gemini，请检查服务进程的网络权限或代理设置后重试。'),
+  { status: 503, cause: error },
+);
+
 const createFriendlyGeminiError = (error: unknown) => {
+  if (isGeminiNetworkError(error)) return createFriendlyGeminiNetworkError(error);
+
   const status = getErrorStatus(error);
   const message = status === 429
     ? 'Gemini 当前请求次数较多，系统已自动重试。请稍后再次尝试。'

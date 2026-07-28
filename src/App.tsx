@@ -7,8 +7,10 @@ import React, { lazy, Suspense, useState, useRef, useEffect } from 'react';
 import { Menu } from 'lucide-react';
 import {
   analyzeAudioDesign,
+  analyzeAudioDesignPreuploadedVideo,
   analyzeAudioDesignVideo,
   AudioDesignResult,
+  preuploadAudioDesignVideo,
   regenerateLyrics,
   translateToEnglish,
 } from './services/geminiService';
@@ -116,6 +118,23 @@ export default function App() {
   const [isUploading, setIsUploading] = useState(false);
   const analysisAbortRef = useRef<AbortController | null>(null);
   const analysisRunningRef = useRef(false);
+  const filesRef = useRef<FileItem[]>([]);
+  const previousFilesRef = useRef<FileItem[]>([]);
+  const objectUrlsRef = useRef<{
+    standaloneAudioUrl: string | null;
+    standaloneMusicAudioUrl: string | null;
+    standaloneVoiceAudioUrl: string | null;
+    pendingVoiceOptionAUrl: string | null;
+    pendingVoiceOptionBUrl: string | null;
+  }>({
+    standaloneAudioUrl: null,
+    standaloneMusicAudioUrl: null,
+    standaloneVoiceAudioUrl: null,
+    pendingVoiceOptionAUrl: null,
+    pendingVoiceOptionBUrl: null,
+  });
+  const preuploadAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const preuploadPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
 
   // Standalone SFX Generator States
   const [standalonePrompt, setStandalonePrompt] = useState('');
@@ -153,17 +172,122 @@ export default function App() {
     optionB: { url: string; voiceLabel: string; emotionLabel: string; processedText: string; timestamp: string; details: string; speed: number } | null;
   }>({ optionA: null, optionB: null });
 
+  useEffect(() => {
+    const currentPreviewUrls = new Set(files.map(file => file.preview));
+    previousFilesRef.current.forEach((file) => {
+      if (!currentPreviewUrls.has(file.preview)) {
+        URL.revokeObjectURL(file.preview);
+      }
+    });
+    previousFilesRef.current = files;
+  }, [files]);
+
   // Cleanup object URLs on unmount
   useEffect(() => {
     return () => {
-      files.forEach(f => URL.revokeObjectURL(f.preview));
-      if (standaloneAudioUrl) URL.revokeObjectURL(standaloneAudioUrl);
-      if (standaloneMusicAudioUrl) URL.revokeObjectURL(standaloneMusicAudioUrl);
-      if (standaloneVoiceAudioUrl) URL.revokeObjectURL(standaloneVoiceAudioUrl);
-      if (pendingVoiceOptions.optionA) URL.revokeObjectURL(pendingVoiceOptions.optionA.url);
-      if (pendingVoiceOptions.optionB) URL.revokeObjectURL(pendingVoiceOptions.optionB.url);
+      const latestUrls = objectUrlsRef.current;
+      previousFilesRef.current.forEach(f => URL.revokeObjectURL(f.preview));
+      if (latestUrls.standaloneAudioUrl) URL.revokeObjectURL(latestUrls.standaloneAudioUrl);
+      if (latestUrls.standaloneMusicAudioUrl) URL.revokeObjectURL(latestUrls.standaloneMusicAudioUrl);
+      if (latestUrls.standaloneVoiceAudioUrl) URL.revokeObjectURL(latestUrls.standaloneVoiceAudioUrl);
+      if (latestUrls.pendingVoiceOptionAUrl) URL.revokeObjectURL(latestUrls.pendingVoiceOptionAUrl);
+      if (latestUrls.pendingVoiceOptionBUrl) URL.revokeObjectURL(latestUrls.pendingVoiceOptionBUrl);
     };
-  }, [files, standaloneAudioUrl, standaloneMusicAudioUrl, standaloneVoiceAudioUrl, pendingVoiceOptions]);
+  }, []);
+
+  useEffect(() => {
+    filesRef.current = files;
+  }, [files]);
+
+  useEffect(() => {
+    objectUrlsRef.current = {
+      standaloneAudioUrl,
+      standaloneMusicAudioUrl,
+      standaloneVoiceAudioUrl,
+      pendingVoiceOptionAUrl: pendingVoiceOptions.optionA?.url || null,
+      pendingVoiceOptionBUrl: pendingVoiceOptions.optionB?.url || null,
+    };
+  }, [standaloneAudioUrl, standaloneMusicAudioUrl, standaloneVoiceAudioUrl, pendingVoiceOptions]);
+
+  useEffect(() => {
+    const liveFileIds = new Set(files.map(item => item.id));
+    preuploadAbortControllersRef.current.forEach((controller, fileId) => {
+      if (!liveFileIds.has(fileId)) {
+        controller.abort('removed');
+        preuploadAbortControllersRef.current.delete(fileId);
+        preuploadPromisesRef.current.delete(fileId);
+      }
+    });
+
+    if (!hasGeminiKey) return;
+
+    const updatePreuploadState = (fileId: string, patch: NonNullable<FileItem['preupload']>) => {
+      setFiles(prev => prev.map(item => {
+        if (item.id !== fileId) return item;
+        return {
+          ...item,
+          preupload: {
+            ...(item.preupload || { status: 'uploading' as const, progress: 0 }),
+            ...patch,
+          },
+        };
+      }));
+    };
+
+    files.forEach((item) => {
+      if (!item.type.startsWith('video/')) return;
+      if (item.preupload || preuploadPromisesRef.current.has(item.id)) return;
+
+      const controller = new AbortController();
+      preuploadAbortControllersRef.current.set(item.id, controller);
+      updatePreuploadState(item.id, {
+        status: 'uploading',
+        progress: 0,
+        message: '正在后台预上传视频...',
+      });
+
+      const preuploadPromise = preuploadAudioDesignVideo(item.file, {
+        signal: controller.signal,
+        onProgress: (progress, message) => {
+          updatePreuploadState(item.id, {
+            status: progress >= 96 ? 'processing' : 'uploading',
+            progress,
+            message,
+          });
+        },
+      })
+        .then((upload) => {
+          updatePreuploadState(item.id, {
+            status: 'ready',
+            progress: 100,
+            uploadId: upload.uploadId,
+            message: '视频已预上传，点击分析会更快。',
+          });
+        })
+        .catch((error) => {
+          if (controller.signal.aborted) return;
+          updatePreuploadState(item.id, {
+            status: 'error',
+            progress: 0,
+            error: error instanceof Error ? error.message : '视频预上传失败。',
+            message: '预上传失败，点击分析时会尝试原流程。',
+          });
+        })
+        .finally(() => {
+          preuploadAbortControllersRef.current.delete(item.id);
+        });
+
+      preuploadPromisesRef.current.set(item.id, preuploadPromise);
+    });
+  }, [files, hasGeminiKey]);
+
+  useEffect(() => {
+    return () => {
+      preuploadAbortControllersRef.current.forEach(controller => controller.abort('unmount'));
+      preuploadAbortControllersRef.current.clear();
+      preuploadPromisesRef.current.clear();
+    };
+  }, []);
 
   // Voiceover generator handler
   const handleStandaloneVoiceGenerate = async () => {
@@ -470,36 +594,123 @@ export default function App() {
 
     try {
       const useProfessionalVideo = wantsProfessionalVideo && videoFiles.length === 1;
+      const waitForReadyPreupload = async (fileItem: FileItem) => {
+        const latestBeforeWait = filesRef.current.find(item => item.id === fileItem.id) || fileItem;
+        if (latestBeforeWait.preupload?.status === 'ready' && latestBeforeWait.preupload.uploadId) {
+          return latestBeforeWait.preupload.uploadId;
+        }
+
+        const preuploadPromise = preuploadPromisesRef.current.get(fileItem.id);
+        const canWaitForPreupload = preuploadPromise
+          && latestBeforeWait.preupload
+          && ['uploading', 'processing'].includes(latestBeforeWait.preupload.status);
+        if (!canWaitForPreupload) return null;
+
+        setAnalysisStage('视频正在后台预上传，等待完成后直接分析...');
+        await preuploadPromise;
+        if (controller.signal.aborted) {
+          throw new Error('已取消本次分析。');
+        }
+
+        const latestAfterWait = filesRef.current.find(item => item.id === fileItem.id);
+        if (latestAfterWait?.preupload?.status === 'ready' && latestAfterWait.preupload.uploadId) {
+          return latestAfterWait.preupload.uploadId;
+        }
+        return null;
+      };
+
+      const canUseSingleVideoPreupload = videoFiles.length === 1 && files.length === 1;
       let res: AudioDesignResult;
 
       if (useProfessionalVideo) {
-        setAnalysisStage(target.avatar
-          ? '正在上传视频，准备 Avatar 高精度分析...'
-          : '正在上传视频，准备影视级完整分析...');
-        res = await analyzeAudioDesignVideo(
-          videoFiles[0].file,
-          requirements,
-          target,
-          isInstrumental,
-          {
+        const preuploadId = canUseSingleVideoPreupload
+          ? await waitForReadyPreupload(videoFiles[0])
+          : null;
+        if (preuploadId) {
+          setAnalysisStage(target.avatar
+            ? '视频已预上传，正在进行 Avatar 高精度分析...'
+            : '视频已预上传，正在进行影视级完整分析...');
+          res = await analyzeAudioDesignPreuploadedVideo(
+            preuploadId,
+            requirements,
+            target,
+            isInstrumental,
+            {
+              signal: controller.signal,
+              analysisMode: 'professional',
+            },
+          );
+        } else {
+          setAnalysisStage(target.avatar
+            ? '正在上传视频，准备 Avatar 高精度分析...'
+            : '正在上传视频，准备影视级完整分析...');
+          res = await analyzeAudioDesignVideo(
+            videoFiles[0].file,
+            requirements,
+            target,
+            isInstrumental,
+            {
+              signal: controller.signal,
+              onProgress: setAnalysisStage,
+            },
+          );
+        }
+      } else {
+        const preuploadId = canUseSingleVideoPreupload
+          ? await waitForReadyPreupload(videoFiles[0])
+          : null;
+        if (preuploadId) {
+          setAnalysisStage('视频已预上传，正在直接分析完整画面并生成音频方案...');
+          res = await analyzeAudioDesignPreuploadedVideo(
+            preuploadId,
+            requirements,
+            target,
+            isInstrumental,
+            {
+              signal: controller.signal,
+              analysisMode: 'fallback',
+            },
+          );
+        } else {
+        // Fast mode reduces videos to compact keyframes and resizes images.
+        let fileData: Awaited<ReturnType<typeof prepareFilesForGemini>> | null = null;
+        try {
+          fileData = await prepareFilesForGemini(files.map(item => item.file), {
             signal: controller.signal,
             onProgress: setAnalysisStage,
-          },
-        );
-      } else {
-        // Fast mode reduces videos to compact keyframes and resizes images.
-        const fileData = await prepareFilesForGemini(files.map(item => item.file), {
-          signal: controller.signal,
-          onProgress: setAnalysisStage,
-        });
-        setAnalysisStage('正在上传关键帧并生成音频方案...');
-        res = await analyzeAudioDesign(
-          fileData,
-          requirements,
-          target,
-          isInstrumental,
-          { signal: controller.signal },
-        );
+          });
+        } catch (prepareError) {
+          const canUseServerVideoFallback = videoFiles.length === 1 && files.length === 1;
+          if (!canUseServerVideoFallback || controller.signal.aborted) {
+            throw prepareError;
+          }
+
+          console.warn('Local video keyframe extraction failed; falling back to server video analysis:', prepareError);
+          setAnalysisStage('浏览器抽帧失败，正在上传完整视频交由服务器分析...');
+          res = await analyzeAudioDesignVideo(
+            videoFiles[0].file,
+            requirements,
+            target,
+            isInstrumental,
+            {
+              signal: controller.signal,
+              onProgress: setAnalysisStage,
+              analysisMode: 'fallback',
+            },
+          );
+        }
+
+        if (fileData) {
+          setAnalysisStage('正在上传关键帧并生成音频方案...');
+          res = await analyzeAudioDesign(
+            fileData,
+            requirements,
+            target,
+            isInstrumental,
+            { signal: controller.signal },
+          );
+        }
+        }
       }
       
       if (!res || (!res.sfxSchemes && !res.bgmRecommendations)) {
@@ -544,6 +755,14 @@ export default function App() {
       setAnalysisStage('正在取消本次分析...');
       controller.abort('user');
     }
+  };
+
+  const sendDirectorPromptToMusicStudio = (prompt: string) => {
+    const normalizedPrompt = prompt.trim();
+    if (!normalizedPrompt) return;
+    setStandaloneMusicPrompt(normalizedPrompt);
+    setStandaloneMusicType(isInstrumental ? 'instrumental' : 'vocal');
+    setCurrentTab('music-studio');
   };
 
   // Helper utility functions
@@ -736,6 +955,7 @@ export default function App() {
             editingLyrics={editingLyrics}
             handleRegenerateLyrics={handleRegenerateLyrics}
             onLoadDemo={setResult}
+            onSendMusicPrompt={sendDirectorPromptToMusicStudio}
           />
         )}
 

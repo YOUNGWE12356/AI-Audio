@@ -97,7 +97,8 @@ export async function generateMusic(text: string, duration?: number, isInstrumen
     throw new Error("ElevenLabs API Key is not configured. Please add it in the Secrets panel.");
   }
 
-  // Clean all Chinese and non-English characters from music prompt to ensure high quality track generation
+  // Clean all Chinese and non-English characters from the style prompt to keep the music model prompt focused.
+  // Lyrics are preserved below because vocal tracks may intentionally use Chinese lyrics.
   let cleanText = text;
   if (/[\u4e00-\u9fa5]/.test(text)) {
     cleanText = text.replace(/[\u4e00-\u9fa5]/g, '').trim();
@@ -111,30 +112,38 @@ export async function generateMusic(text: string, duration?: number, isInstrumen
   // Limit words
   cleanText = cleanText.split(/\s+/).slice(0, 45).join(" ");
 
+  const normalizedDurationSeconds = Math.min(600, Math.max(3, duration || 30));
+  const musicLengthMs = Math.round(normalizedDurationSeconds * 1000);
+  const normalizedLyrics = lyrics?.trim();
   const musicPrompt = isInstrumental
-    ? `AI Music, full background instrumental track, no vocals, no speech: ${cleanText}`
-    : (lyrics 
-        ? `AI Music, complete song with expressive vocals and lyrics, vocal track, full mix. Lyrics: "${lyrics}". Style: ${cleanText}`
+    ? `Full-length background instrumental music, no vocals, no speech, no lyrics. Style: ${cleanText}`
+    : (normalizedLyrics
+        ? `Complete vocal song with expressive vocals and a full music mix. Style: ${cleanText}. Lyrics:\n${normalizedLyrics}`
         : `AI Music, complete song with expressive vocals and lyrics, vocal track, full mix: ${cleanText}`);
+  const limitedMusicPrompt = musicPrompt.slice(0, 4100);
 
-  console.log(`Generating music (instrumental=${isInstrumental}) with English prompt:`, musicPrompt);
+  console.log(`Generating music (instrumental=${isInstrumental}, duration=${normalizedDurationSeconds}s) with ElevenLabs Music API prompt:`, limitedMusicPrompt);
 
-  const response = await fetch("https://api.elevenlabs.io/v1/sound-generation", {
+  const response = await fetch("https://api.elevenlabs.io/v1/music", {
     method: "POST",
     headers: {
       "xi-api-key": apiKey,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      text: musicPrompt,
-      duration_seconds: duration || 30, // Default to 30 seconds for music
-      prompt_influence: 0.5,
+      prompt: limitedMusicPrompt,
+      music_length_ms: musicLengthMs,
+      force_instrumental: isInstrumental,
     }),
   });
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({ detail: { message: "Unknown error" } }));
-    throw new Error(`ElevenLabs API error: ${errorData.detail?.message || response.statusText}`);
+    const detail = errorData.detail;
+    const message = typeof detail === 'string'
+      ? detail
+      : detail?.message || errorData.message || response.statusText;
+    throw new Error(`ElevenLabs Music API error: ${message}`);
   }
 
   return await response.blob();

@@ -773,7 +773,7 @@ export default function AudioWorkstation() {
   return (
     <div id="audio-workstation" className="space-y-6">
       {/* DAW Header Info bar */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white border border-slate-200 rounded-2xl p-5 shadow-sm">
+      <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm">
         <div className="space-y-1">
           <div className="flex items-center gap-2">
             <span className="p-1.5 bg-emerald-50 text-emerald-700 rounded-lg">
@@ -791,61 +791,6 @@ export default function AudioWorkstation() {
           </div>
         </div>
 
-        {/* Action button bar */}
-        <div className="flex flex-wrap items-center gap-2">
-          {/* File Input */}
-          <input 
-            type="file" 
-            ref={fileInputRef}
-            onChange={handleFileUpload}
-            multiple
-            accept="audio/*"
-            className="hidden" 
-          />
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={isDecoding}
-            className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-bold text-xs px-4 py-2.5 rounded-xl cursor-pointer shadow-sm hover:shadow transition-all"
-          >
-            {isDecoding ? (
-              <span className="flex items-center gap-1.5">
-                <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                <span>载入并解码中...</span>
-              </span>
-            ) : (
-              <>
-                <Upload className="w-4 h-4" />
-                <span>导入音频轨文件</span>
-              </>
-            )}
-          </button>
-
-          <button
-            onClick={handleAddTrack}
-            className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs px-3.5 py-2.5 rounded-xl border border-slate-200 transition-all cursor-pointer"
-          >
-            <Plus className="w-4 h-4 text-slate-600" />
-            <span>添加空白音轨</span>
-          </button>
-
-          <button
-            onClick={handleExportMix}
-            disabled={totalClipsCount === 0 || isExporting}
-            className="flex items-center gap-2 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-100 disabled:text-slate-400 disabled:border-slate-100 text-white font-bold text-xs px-4 py-2.5 rounded-xl cursor-pointer shadow-sm transition-all border border-slate-900"
-          >
-            {isExporting ? (
-              <span className="flex items-center gap-2">
-                <span className="w-3.5 h-3.5 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
-                <span>混音输出 {exportProgress}%</span>
-              </span>
-            ) : (
-              <>
-                <Download className="w-4 h-4" />
-                <span>导出并保存混音 (WAV)</span>
-              </>
-            )}
-          </button>
-        </div>
       </div>
 
       {/* Main Grid Viewport */}
@@ -853,6 +798,14 @@ export default function AudioWorkstation() {
         
         {/* Top Control Panel Toolbar */}
         <div className="bg-slate-950 px-5 py-3 border-b border-slate-800 flex flex-wrap items-center justify-between gap-4">
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileUpload}
+            multiple
+            accept="audio/*"
+            className="hidden"
+          />
           
           {/* Playback Controls */}
           <div className="flex items-center gap-1.5">
@@ -883,7 +836,7 @@ export default function AudioWorkstation() {
           </div>
 
           {/* Context Tools (Scissors / Split & Delete Clip) */}
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             {selectedClip ? (
               <>
                 <div className="text-xs text-slate-400 mr-2 max-w-44 truncate">
@@ -920,6 +873,52 @@ export default function AudioWorkstation() {
                 <span>提示: 点击轨道上的彩色音频块可激活剪切、删除或进行左右拖移。</span>
               </div>
             )}
+
+            <div className="mx-1 hidden h-6 w-px bg-slate-800 sm:block" />
+
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isDecoding}
+              className="flex items-center gap-2 rounded-xl bg-emerald-500 px-3.5 py-2 text-xs font-bold text-slate-950 shadow-sm transition-all hover:bg-emerald-400 disabled:bg-slate-800 disabled:text-slate-500 cursor-pointer"
+            >
+              {isDecoding ? (
+                <span className="flex items-center gap-1.5">
+                  <span className="w-3 h-3 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
+                  <span>解码中...</span>
+                </span>
+              ) : (
+                <>
+                  <Upload className="w-4 h-4" />
+                  <span>导入音频</span>
+                </>
+              )}
+            </button>
+
+            <button
+              onClick={handleAddTrack}
+              className="flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-bold text-slate-200 transition-all hover:bg-slate-700 cursor-pointer"
+            >
+              <Plus className="w-4 h-4 text-emerald-400" />
+              <span>添加音轨</span>
+            </button>
+
+            <button
+              onClick={handleExportMix}
+              disabled={totalClipsCount === 0 || isExporting}
+              className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-3.5 py-2 text-xs font-bold text-slate-200 shadow-sm transition-all hover:border-emerald-500 hover:text-emerald-300 disabled:bg-slate-900 disabled:text-slate-600 disabled:border-slate-800 disabled:cursor-not-allowed cursor-pointer"
+            >
+              {isExporting ? (
+                <span className="flex items-center gap-2">
+                  <span className="w-3.5 h-3.5 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+                  <span>混音 {exportProgress}%</span>
+                </span>
+              ) : (
+                <>
+                  <Download className="w-4 h-4" />
+                  <span>导出 WAV</span>
+                </>
+              )}
+            </button>
           </div>
         </div>
 
@@ -1099,7 +1098,7 @@ export default function AudioWorkstation() {
           {tracks.length === 0 ? (
             <div className="flex-1 flex flex-col items-center justify-center p-12 text-slate-500 bg-slate-900/40">
               <Radio className="w-8 h-8 text-slate-600 mb-2 animate-pulse" />
-              <p className="text-xs">无可用音频轨道，请点击“添加空白音轨”或直接导入音频文件。</p>
+              <p className="text-xs">无可用音频轨道，请点击“添加音轨”或直接导入音频文件。</p>
             </div>
           ) : (
             <div className="flex flex-col flex-1 divide-y divide-slate-850 bg-slate-900">
@@ -1297,7 +1296,7 @@ export default function AudioWorkstation() {
         <div className="space-y-1">
           <h4 className="text-xs font-bold text-emerald-800">智能音频工作室剪裁拼接指南：</h4>
           <ul className="text-[11px] text-emerald-700/90 list-disc list-inside space-y-1 leading-relaxed">
-            <li><strong>导入音频</strong>: 点击“导入音频轨文件”选择一个或多个 MP3/WAV，文件会被加载并解码成真正的波形。</li>
+            <li><strong>导入音频</strong>: 点击 DAW 顶部工具栏里的“导入音频”选择一个或多个 MP3/WAV，文件会被加载并解码成真正的波形。</li>
             <li><strong>移动位置</strong>: 鼠标按住彩色音频片段块，即可<strong>任意左右拖动</strong>到指定的时间。</li>
             <li><strong>移动轨道</strong>: 将彩色片段<strong>上下拖动</strong>即可直接跨轨道重组混流。</li>
             <li><strong>精准切分(剪切)</strong>: 拖拽或在时间轴点一下红线播放头，点击已选片段，然后点击上方“剪切拆分”，可实现完美物理剪断！</li>

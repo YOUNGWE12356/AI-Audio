@@ -1,4 +1,8 @@
-import { generateGeminiContent } from './geminiRetry';
+import {
+  createFriendlyGeminiNetworkError,
+  generateGeminiContent,
+  isGeminiNetworkError,
+} from './geminiRetry';
 
 const isBrowser = typeof window !== 'undefined';
 
@@ -113,6 +117,7 @@ export interface AudioDesignResult {
   bgmRecommendations: {
     style: string;
     instrumentation: string;
+    visualRationale?: string;
     sunoPrompt: {
       chinese: string;
       english: string;
@@ -154,13 +159,16 @@ interface RawAudioDesignTimelineItem {
 interface RawAudioDesignBgmRecommendation {
   style: string;
   styleEnglish: string;
+  instrumentation?: string;
+  instrumentationEnglish?: string;
+  visualRationale?: string;
   bpm: number;
   key: string;
   vocalDirection: string;
   vocalDirectionEnglish: string;
   vocalInfo?: AudioDesignResult['bgmRecommendations'][number]['vocalInfo'];
   lyrics?: AudioDesignResult['bgmRecommendations'][number]['lyrics'];
-  timelineDesign: RawAudioDesignTimelineItem[];
+  timelineDesign?: RawAudioDesignTimelineItem[];
 }
 
 type RawAudioDesignResult = Omit<AudioDesignResult, 'bgmRecommendations'> & {
@@ -236,6 +244,7 @@ const normalizeBpm = (value: unknown) => {
 const materializeAudioDesignResult = (
   raw: RawAudioDesignResult,
   isInstrumental: boolean,
+  includeTimeline: boolean,
 ): AudioDesignResult => {
   if (!Array.isArray(raw.bgmRecommendations) || raw.bgmRecommendations.length === 0) {
     throw new Error('AI 未生成有效的配乐方案，请重试。');
@@ -247,8 +256,25 @@ const materializeAudioDesignResult = (
     const key = cleanEnglishText(plan.key);
     const bpm = normalizeBpm(plan.bpm);
     const sourceTimeline = Array.isArray(plan.timelineDesign) ? plan.timelineDesign : [];
+    const overallInstrumentation = cleanText(plan.instrumentation);
+    const overallInstrumentationEnglish = cleanEnglishText(plan.instrumentationEnglish);
+    const visualRationale = cleanText(plan.visualRationale);
 
-    if (!style || !containsHan(style) || !styleEnglish || containsNonEnglishContent(styleEnglish) || sourceTimeline.length === 0) {
+    if (
+      !style
+      || !containsHan(style)
+      || !styleEnglish
+      || containsNonEnglishContent(styleEnglish)
+      || (includeTimeline && sourceTimeline.length === 0)
+      || (!includeTimeline && (
+        !overallInstrumentation
+        || !containsHan(overallInstrumentation)
+        || !overallInstrumentationEnglish
+        || containsNonEnglishContent(overallInstrumentationEnglish)
+        || !visualRationale
+        || !containsHan(visualRationale)
+      ))
+    ) {
       throw new Error(`AI 生成的第 ${planIndex + 1} 套配乐方案不完整，请重试。`);
     }
     if (!isStandardMusicKey(key)) {
@@ -279,21 +305,28 @@ const materializeAudioDesignResult = (
       return normalized;
     });
 
-    const instrumentation = uniqueTexts(pairedTimeline.map(item => item.instruments)).join('；');
+    const instrumentation = includeTimeline
+      ? uniqueTexts(pairedTimeline.map(item => item.instruments)).join('；')
+      : overallInstrumentation;
     if (isInstrumental) {
-      const chineseBlueprint = [style, ...pairedTimeline.flatMap(item => [item.instruments, item.emotion, item.description])].join(' ');
-      const englishBlueprint = [styleEnglish, ...pairedTimeline.flatMap(item => [item.instrumentsEnglish, item.emotionEnglish, item.descriptionEnglish])].join(' ');
+      const chineseBlueprint = [style, instrumentation, ...pairedTimeline.flatMap(item => [item.emotion, item.description])].join(' ');
+      const englishBlueprint = [
+        styleEnglish,
+        ...(includeTimeline
+          ? pairedTimeline.flatMap(item => [item.instrumentsEnglish, item.emotionEnglish, item.descriptionEnglish])
+          : [overallInstrumentationEnglish]),
+      ].join(' ');
       if (containsVocalContentChinese(chineseBlueprint) || containsVocalContentEnglish(englishBlueprint)) {
         throw new Error(`AI 生成的第 ${planIndex + 1} 套纯音乐方案包含人声元素，请重试。`);
       }
     }
 
-    const timelineDesign = pairedTimeline.map(item => ({
+    const timelineDesign = includeTimeline ? pairedTimeline.map(item => ({
       timecode: item.timecode,
       instruments: item.instruments,
       emotion: item.emotion,
       description: item.description,
-    }));
+    })) : undefined;
     const vocalDirection = isInstrumental
       ? '纯音乐，无人声、吟唱、合唱或歌词'
       : cleanText(plan.vocalDirection);
@@ -310,11 +343,11 @@ const materializeAudioDesignResult = (
     }
 
     const coreInstruments = extractCoreInstruments(
-      pairedTimeline.map(item => item.instruments),
+      includeTimeline ? pairedTimeline.map(item => item.instruments) : [overallInstrumentation],
       false,
     );
     const coreInstrumentsEnglish = extractCoreInstruments(
-      pairedTimeline.map(item => item.instrumentsEnglish),
+      includeTimeline ? pairedTimeline.map(item => item.instrumentsEnglish) : [overallInstrumentationEnglish],
       true,
     );
     const compactStyle = selectWholeTrackText(
@@ -373,6 +406,7 @@ const materializeAudioDesignResult = (
     return {
       style,
       instrumentation,
+      visualRationale: includeTimeline ? undefined : visualRationale,
       vocalInfo: isInstrumental ? undefined : plan.vocalInfo,
       lyrics: isInstrumental ? undefined : plan.lyrics,
       timelineDesign,
@@ -381,8 +415,8 @@ const materializeAudioDesignResult = (
         english: englishPrompt,
         bpm,
         key,
-        structure: pairedTimeline.map(item => `${item.timecode} ${item.emotion}`).join(' → '),
-        dynamics: pairedTimeline.map(item => `${item.timecode}：${item.emotion}；${item.description}`).join(' → '),
+        structure: includeTimeline ? pairedTimeline.map(item => `${item.timecode} ${item.emotion}`).join(' → ') : '',
+        dynamics: includeTimeline ? pairedTimeline.map(item => `${item.timecode}：${item.emotion}；${item.description}`).join(' → ') : '',
       },
     };
   });
@@ -405,6 +439,76 @@ export interface AudioDesignMedia {
   };
 }
 
+export interface AudioDesignVideoPreuploadResult {
+  uploadId: string;
+  displayName: string;
+  mimeType: string;
+  expiresAt: number;
+}
+
+export async function preuploadAudioDesignVideo(
+  video: File,
+  options: {
+    signal?: AbortSignal;
+    onProgress?: (progress: number, message: string) => void;
+  } = {},
+): Promise<AudioDesignVideoPreuploadResult> {
+  if (!isBrowser) {
+    throw new Error('该方法仅用于 HTML5 客户端预上传视频。');
+  }
+
+  return new Promise<AudioDesignVideoPreuploadResult>((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(new Error('已取消视频预上传。'));
+      return;
+    }
+
+    const request = new XMLHttpRequest();
+    const handleAbort = () => request.abort();
+    const cleanup = () => options.signal?.removeEventListener('abort', handleAbort);
+    options.signal?.addEventListener('abort', handleAbort, { once: true });
+
+    request.open('POST', '/api/ai/gemini/audio-design-video-preupload');
+    request.responseType = 'json';
+    request.timeout = 180_000;
+    request.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      const percent = Math.min(95, Math.round((event.loaded / event.total) * 95));
+      options.onProgress?.(percent, `正在后台上传视频 ${percent}%...`);
+    };
+    request.upload.onload = () => {
+      options.onProgress?.(96, '视频已传到服务器，Gemini 正在预处理...');
+    };
+    request.onload = () => {
+      cleanup();
+      const response = request.response || {};
+      if (request.status >= 200 && request.status < 300) {
+        options.onProgress?.(100, '视频预上传已就绪，点击分析会更快。');
+        resolve(response as AudioDesignVideoPreuploadResult);
+        return;
+      }
+      reject(new Error(response.error || `视频预上传失败 (${request.status})`));
+    };
+    request.onerror = () => {
+      cleanup();
+      reject(new Error('视频预上传失败，请检查网络后重试。'));
+    };
+    request.ontimeout = () => {
+      cleanup();
+      reject(new Error('视频预上传超过 3 分钟，请稍后点击分析继续。'));
+    };
+    request.onabort = () => {
+      cleanup();
+      reject(new Error('已取消视频预上传。'));
+    };
+
+    const formData = new FormData();
+    formData.append('originalName', video.name);
+    formData.append('video', video, createAsciiVideoUploadName(video.name, video.type));
+    request.send(formData);
+  });
+}
+
 export async function analyzeAudioDesignVideo(
   video: File,
   requirements: string,
@@ -413,6 +517,7 @@ export async function analyzeAudioDesignVideo(
   options: {
     signal?: AbortSignal;
     onProgress?: (message: string) => void;
+    analysisMode?: 'professional' | 'fallback';
   } = {},
 ): Promise<AudioDesignResult> {
   if (!isBrowser) {
@@ -439,6 +544,11 @@ export async function analyzeAudioDesignVideo(
       options.onProgress?.(`正在上传原视频 ${percent}%...`);
     };
     request.upload.onload = () => {
+      if (options.analysisMode === 'fallback') {
+        options.onProgress?.('上传完成，服务器正在分析完整视频...');
+        return;
+      }
+
       options.onProgress?.(target.avatar
         ? '上传完成，Gemini 正在进行高精度逐秒分析...'
         : '上传完成，Gemini 正在分析完整画面与声音...');
@@ -471,8 +581,32 @@ export async function analyzeAudioDesignVideo(
     formData.append('requirements', requirements);
     formData.append('target', JSON.stringify(target));
     formData.append('isInstrumental', String(isInstrumental));
+    formData.append('analysisMode', options.analysisMode || 'professional');
     request.send(formData);
   });
+}
+
+export async function analyzeAudioDesignPreuploadedVideo(
+  uploadId: string,
+  requirements: string,
+  target: { game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean },
+  isInstrumental: boolean,
+  options: {
+    signal?: AbortSignal;
+    analysisMode?: 'professional' | 'fallback';
+  } = {},
+): Promise<AudioDesignResult> {
+  if (!isBrowser) {
+    throw new Error('该方法仅用于 HTML5 客户端分析预上传视频。');
+  }
+
+  return postJson<AudioDesignResult>('/api/ai/gemini/audio-design-video-preuploaded', {
+    uploadId,
+    requirements,
+    target,
+    isInstrumental,
+    analysisMode: options.analysisMode || 'professional',
+  }, { signal: options.signal, timeoutMs: 180_000 });
 }
 
 export async function analyzeAudioDesignVideoFile(
@@ -520,6 +654,11 @@ export async function analyzeAudioDesignVideoFile(
         fps: target.avatar ? 2 : 1,
       },
     }], requirements, target, isInstrumental);
+  } catch (error) {
+    if (isGeminiNetworkError(error)) {
+      throw createFriendlyGeminiNetworkError(error);
+    }
+    throw error;
   } finally {
     if (uploadedFile?.name) {
       await ai.files.delete({ name: uploadedFile.name }).catch((error) => {
@@ -546,6 +685,8 @@ export async function analyzeAudioDesign(
   }
 
   let targetDesc = target.game && target.video ? "游戏CG宣传片" : target.game ? "游戏" : target.video ? "视频" : "音频设计";
+  const isGameTrack = target.game && !target.video && !target.avatar && !target.sunnyIsland;
+  const includeMusicTimeline = !isGameTrack;
   if (target.avatar) {
     targetDesc = "科幻巨制《阿凡达》(Avatar) 风格奇幻自然场景";
   } else if (target.sunnyIsland) {
@@ -577,20 +718,32 @@ export async function analyzeAudioDesign(
     1. **多文件逻辑**：有联系则综合分析，无联系则以第一张/段素材为主。
     2. **双语字段边界**：除字段名带 English、标准英文调性 key、数字 bpm、时间码 timecode 及规范英文音效名 name 外，所有分析描述必须使用中文；所有 English 字段必须只写英文，不得夹杂中文。
     3. **动作级SFX**：在 "scene" 字段标明具体时间点。
-    4. **双重BGM**：提供两个差异巨大的风格方案。
+    ${isGameTrack
+      ? '4. **双重BGM**：提供两个制作方向不同的整体风格方案，但两套都必须严格符合素材与补充需求的题材、情绪和玩法；差异只能来自曲风融合、核心配器或节奏处理，禁止为了制造差异而输出相反情绪。'
+      : '4. **双重BGM**：提供两个差异巨大的风格方案。'}
     5. **无语音**：音效严禁出现人声对白。
     6. **性能与精度平衡**：只保留最重要的 6-10 个音效节点；字段描述保持专业但精炼，每段不超过 100 个汉字，避免重复内容。
+    ${isGameTrack ? `
+    7. **游戏配乐只做整体方案（最高优先级）**：游戏音轨不按视频时间、镜头或动作切分音乐。每个 bgmRecommendations 项只提供一套统一的整曲风格，不得输出 timelineDesign，不得在任何音乐字段中写时间码、段落时长、进入时机、剪辑点或先后顺序。
+    8. **整体配器双语同义（强制）**：instrumentation/instrumentationEnglish 用一句短语列出整首音乐最重要的 3-5 个核心乐器或音色，中英文必须语义等价。
+    9. **画面推荐依据（强制）**：visualRationale 用中文说明画面题材、色彩/空间、动作节奏、玩法氛围或用户补充需求如何共同指向该音乐风格；必须解释“为什么推荐这种音乐”，但不得写时间码、段落时长或先后顺序，长度 60-120 字。
+    10. **Suno 整体音乐词（强制）**：style/styleEnglish 用一句短语概括整首音乐的统一曲风与情绪；结合整体配器、BPM、调性和统一人声方向生成简短明确的 Suno Style Prompt。不要生成曲式结构、动态时间线或剪辑说明。
+    11. **游戏适配原则**：音乐应适合长时间播放和自然循环，保持统一氛围与稳定能量，避免依赖固定画面时长或一次性剧情转折。素材内容与“补充需求”是判断整体风格的最高依据；没有素材时完全以补充需求为准，不得输出与其题材或情绪相冲突的音乐。
+    ` : `
     7. **单一配乐蓝图（强制）**：每个 bgmRecommendations 项是一套完全独立、闭环的方案，timelineDesign 负责分秒级音画分析。顶层 style、BPM、调性、人声方向及所有时间段必须互相一致，禁止把两套推荐交叉混用；系统会从同一方案汇总最终 Suno 整体音乐词。
     8. **逐项双语同义（强制）**：style/styleEnglish，以及 timelineDesign 中每一组 emotion/emotionEnglish、instruments/instrumentsEnglish、description/descriptionEnglish 都必须语义等价。不得在英文项中新增中文方案没有的曲风、乐器、人声、情绪或时间节点。
     9. **Suno 整体音乐词（强制）**：style/styleEnglish 必须用一句短语概括整首音乐的统一曲风和总体情绪，中文不超过 30 字、英文不超过 12 个单词，不得包含时间码、时间线、章节名或先后顺序。timelineDesign 的 instruments/instrumentsEnglish 只列该段使用的 1-4 个乐器或音色名称，进入时机、动态变化和剪辑配合统一写入 description/descriptionEnglish。系统将用整体曲风、最多 5 个核心乐器、BPM、调性和总体人声要求生成一条简短明确的 Suno Style Prompt，不会复制时间线文案。
     10. **配乐段落长度与连续性（最高优先级）**：timelineDesign 是音乐段落设计，不是逐动作音效清单。必须根据视频实际时长、叙事段落、镜头群和显著情绪拐点自适应划分，不能为了增加细节而强行增加段数。常规每段约 5-8 秒；连续镜头或同一情绪可保持 8-15 秒；短于 5 秒只允许用于视频首尾余量，或真正重要的转场、关键动作与强烈情绪变化。相邻段若情绪与核心配器相近必须合并，严禁连续出现大量 2-3 秒段落。高频画面采样只用于识别动作与 SFX，不代表 BGM 要以相同颗粒度切段；微小动作、卡点和瞬时声音写入 SFX 或当前段 description，不得据此更换整段音乐情绪。时间线必须从开头到结尾连续覆盖、无空隙、无重叠。
     11. **画面分析与方案分工**：musicAnalysis.emotionalCurve 只描述画面本身的客观情绪走势；每套音乐如何响应画面，必须分别写进该方案的 timelineDesign，不能用全局情绪曲线代替。
+    `}
     12. **调性格式（强制）**：key 必须使用标准英文“音名 + major/minor”格式，例如 "D minor"、"F# major"，不得写“小调/大调”或只写音名。
     ${isInstrumental
-      ? '13. **纯音乐硬约束（强制）**：style 和 timelineDesign 的全部中英文字段中不得出现人声、女声、男声、童声、吟唱、合唱、呼喊、歌唱、歌词、说唱及 vocal/voice/choir/chant/singer/lyrics/rap/singing/humming 等元素；不要输出 vocalInfo 或 lyrics。'
-      : '13. **人声方案约束**：vocalDirection/vocalDirectionEnglish 只用一句短语描述整首歌曲统一的人声类型、音色与唱法，不得写时间码或进入时机；人声何时进入只写在对应 timelineDesign 时间段中，中英文必须同义。'}
+      ? `13. **纯音乐硬约束（强制）**：style、instrumentation${includeMusicTimeline ? ' 和 timelineDesign' : ''} 的全部中英文字段中不得出现人声、女声、男声、童声、吟唱、合唱、呼喊、歌唱、歌词、说唱及 vocal/voice/choir/chant/singer/lyrics/rap/singing/humming 等元素；不要输出 vocalInfo 或 lyrics。`
+      : isGameTrack
+        ? '13. **人声方案约束**：vocalDirection/vocalDirectionEnglish 只用一句短语描述整首歌曲统一的人声类型、音色与唱法，不得写时间码、进入时机或分段安排；不要输出 vocalInfo 或 lyrics。'
+        : '13. **人声方案约束**：vocalDirection/vocalDirectionEnglish 只用一句短语描述整首歌曲统一的人声类型、音色与唱法，不得写时间码或进入时机；人声何时进入只写在对应 timelineDesign 时间段中，中英文必须同义。'}
 
-    ${files.some(file => Boolean(file.fileUri)) ? `
+    ${files.some(file => Boolean(file.fileUri)) && includeMusicTimeline ? `
     【原生视频精细分析要求】：
     1. 必须从 00:00 开始覆盖到视频结束，结合画面运动、镜头剪辑和原始音轨进行判断。
     2. 识别关键镜头群、叙事阶段、情绪和音乐能量的明显转折，并使用“MM:SS-MM:SS”标出开始与结束时间；普通切镜和细小动作不应单独拆成配乐段落。
@@ -611,6 +764,11 @@ export async function analyzeAudioDesign(
          - "instruments" / "instrumentsEnglish": 该时间段乐器配置的中英文同义表述。
          - "emotion" / "emotionEnglish": 该时间段画面情绪的中英文同义表述。
          - "description" / "descriptionEnglish": 具体编排、声学变化及剪辑配合方式的中英文同义表述；英文需简洁，且不得增添中文没有的元素。
+    ` : isGameTrack ? `
+    【游戏音轨整体音乐要求】：
+    1. 音效节点仍可根据素材动作标记具体触发时机，但背景音乐只做整局统一风格，不得按素材时间拆分。
+    2. bgmRecommendations 不输出 timelineDesign；只输出 style/styleEnglish、instrumentation/instrumentationEnglish、visualRationale、bpm、key 与统一人声方向。
+    3. visualRationale 必须针对上传画面或补充需求解释推荐逻辑，说明这种音乐如何匹配画面气质、玩法情绪和长时间循环体验。
     ` : `
     【通用场景设计要求】：
     1. 即使不是纯影视广告，也请在 bgmRecommendations 的 timelineDesign 中按素材实际叙事和情绪拐点自适应设计音乐段落，不设固定段数。常规段落约 5-8 秒，同一情绪可延长；避免连续 2-3 秒切换情绪，并写明各段的情感表达和主导乐器。
@@ -708,15 +866,19 @@ export async function analyzeAudioDesign(
               required: [
                 "style",
                 "styleEnglish",
+                ...(isGameTrack ? ["instrumentation", "instrumentationEnglish", "visualRationale"] : []),
                 "bpm",
                 "key",
                 "vocalDirection",
                 "vocalDirectionEnglish",
-                "timelineDesign"
+                ...(!isGameTrack ? ["timelineDesign"] : [])
               ],
               properties: {
                 style: { type: Type.STRING },
                 styleEnglish: { type: Type.STRING },
+                instrumentation: { type: Type.STRING },
+                instrumentationEnglish: { type: Type.STRING },
+                visualRationale: { type: Type.STRING },
                 bpm: { type: Type.INTEGER },
                 key: { type: Type.STRING },
                 vocalDirection: { type: Type.STRING },
@@ -791,7 +953,7 @@ export async function analyzeAudioDesign(
     throw new Error("AI 返回的数据格式有误，请重试");
   }
 
-  return materializeAudioDesignResult(rawResult, isInstrumental);
+  return materializeAudioDesignResult(rawResult, isInstrumental, includeMusicTimeline);
 }
 
 export async function regenerateLyrics(
@@ -831,6 +993,54 @@ export async function regenerateLyrics(
   });
 
   return response.text || "";
+}
+
+export async function generateLyricsFromMusicStyle(
+  stylePrompt: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<string> {
+  const normalizedStyle = stylePrompt.trim();
+  if (!normalizedStyle) {
+    throw new Error("请先输入歌曲风格描述。");
+  }
+
+  if (isBrowser) {
+    const result = await postJson<{ text: string }>('/api/ai/gemini/generate-lyrics', {
+      style: normalizedStyle,
+    }, {
+      signal: options.signal,
+    });
+    return result.text;
+  }
+
+  const { ai, ThinkingLevel } = await getAI();
+  const prompt = `
+    请根据下面的歌曲风格与情绪描述，创作一版适合 Suno / AI 音乐生成使用的中文背景歌词。
+
+    歌曲风格描述：
+    ${normalizedStyle}
+
+    要求：
+    1. 歌词需要贴合风格描述中的情绪、题材、速度、配器、画面感或应用场景。
+    2. 使用 [Verse]、[Pre-Chorus]、[Chorus]、[Bridge] 等结构标签。
+    3. 歌词要适合作为背景音乐/游戏/视频配乐使用，避免过度抢戏。
+    4. 保持画面感、节奏感和可唱性，副歌可以更有记忆点。
+    5. 只返回歌词正文，不要解释，不要 Markdown 代码块。
+  `;
+
+  const response = await generateGeminiContent(ai, {
+    model: "gemini-3.5-flash",
+    contents: [{ parts: [{ text: prompt }] }],
+    config: {
+      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
+    }
+  });
+
+  const text = response.text?.trim() || "";
+  if (!text) {
+    throw new Error("AI 未能生成有效歌词，请稍后重试。");
+  }
+  return text;
 }
 
 export interface SfxRequirementRow {

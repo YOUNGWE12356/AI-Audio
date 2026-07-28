@@ -20,7 +20,7 @@ import {
   Languages
 } from 'lucide-react';
 import { HistoryItem } from '../types';
-import { translateToEnglish } from '../services/geminiService';
+import { generateLyricsFromMusicStyle, translateToEnglish } from '../services/geminiService';
 
 interface MusicStudioProps {
   standaloneMusicPrompt: string;
@@ -60,6 +60,8 @@ export default function MusicStudio({
   const [isPlaying, setIsPlaying] = useState(false);
   const [playingHistoryId, setPlayingHistoryId] = useState<string | null>(null);
   const [isTranslating, setIsTranslating] = useState(false);
+  const [isGeneratingLyrics, setIsGeneratingLyrics] = useState(false);
+  const [lyricsGenerationError, setLyricsGenerationError] = useState<string | null>(null);
 
   const handleTranslate = async () => {
     if (!standaloneMusicPrompt.trim()) return;
@@ -73,6 +75,23 @@ export default function MusicStudio({
       console.error("Translation error:", err);
     } finally {
       setIsTranslating(false);
+    }
+  };
+
+  const handleGenerateLyrics = async () => {
+    if (!standaloneMusicPrompt.trim()) return;
+    setIsGeneratingLyrics(true);
+    setLyricsGenerationError(null);
+    try {
+      const generatedLyrics = await generateLyricsFromMusicStyle(standaloneMusicPrompt);
+      if (generatedLyrics.trim()) {
+        setStandaloneMusicLyrics(generatedLyrics.trim());
+      }
+    } catch (err) {
+      console.error("Lyrics generation error:", err);
+      setLyricsGenerationError(err instanceof Error ? err.message : '歌词生成失败，请稍后重试。');
+    } finally {
+      setIsGeneratingLyrics(false);
     }
   };
   
@@ -248,9 +267,30 @@ export default function MusicStudio({
             {/* Lyrics Input Box - Shows when "vocal" is selected */}
             {standaloneMusicType === 'vocal' && (
               <div className="space-y-2 border-t border-slate-100 pt-3">
-                <label className="text-xs font-bold text-slate-700 block uppercase tracking-wider">
-                  输入背景歌词
-                </label>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-xs font-bold text-slate-700 block uppercase tracking-wider">
+                    输入背景歌词
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleGenerateLyrics}
+                    disabled={isGeneratingLyrics || !standaloneMusicPrompt.trim()}
+                    className="text-[10px] text-emerald-600 hover:text-emerald-700 disabled:text-slate-400 font-bold flex items-center gap-1.5 transition-all bg-emerald-50 hover:bg-emerald-100 disabled:bg-slate-50 px-2.5 py-1 rounded-lg border border-emerald-200/50 disabled:border-slate-200 cursor-pointer"
+                    title={!standaloneMusicPrompt.trim() ? '请先输入配乐风格与情感描述' : '根据当前风格描述生成歌词'}
+                  >
+                    {isGeneratingLyrics ? (
+                      <>
+                        <Loader2 className="w-3 h-3 animate-spin text-emerald-600" />
+                        <span>生成中...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-3 h-3 text-emerald-600" />
+                        <span>根据风格生成歌词</span>
+                      </>
+                    )}
+                  </button>
+                </div>
                 <textarea
                   value={standaloneMusicLyrics}
                   onChange={(e) => setStandaloneMusicLyrics(e.target.value)}
@@ -260,6 +300,12 @@ export default function MusicStudio({
                 <p className="text-[10px] text-slate-400 italic">
                   支持使用 [Verse] 或 [Chorus] 等标签来标注结构，生成效果更佳。
                 </p>
+                {lyricsGenerationError && (
+                  <p className="text-[10px] text-red-500 flex items-center gap-1.5">
+                    <AlertCircle className="w-3 h-3 shrink-0" />
+                    <span>{lyricsGenerationError}</span>
+                  </p>
+                )}
               </div>
             )}
 

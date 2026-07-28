@@ -31,7 +31,17 @@ import { AudioDesignResult } from '../services/geminiService';
 import { generateSoundEffect, generateMusic } from '../services/elevenLabsService';
 
 // Self-contained ElevenLabs Player for Demo Sound Effects inside table
-const ElevenLabsPlayer = ({ text, id, type = 'sfx' }: { text: string; id: string; type?: 'sfx' | 'music' }) => {
+const ElevenLabsPlayer = ({
+  text,
+  id,
+  type = 'sfx',
+  onSendToMusicStudio,
+}: {
+  text: string;
+  id: string;
+  type?: 'sfx' | 'music';
+  onSendToMusicStudio?: (prompt: string) => void;
+}) => {
   const [loading, setLoading] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -43,6 +53,11 @@ const ElevenLabsPlayer = ({ text, id, type = 'sfx' }: { text: string; id: string
   };
 
   const handleGenerate = async () => {
+    if (type === 'music' && onSendToMusicStudio) {
+      onSendToMusicStudio(text.trim());
+      return;
+    }
+
     setLoading(true);
     setError(null);
     try {
@@ -67,6 +82,21 @@ const ElevenLabsPlayer = ({ text, id, type = 'sfx' }: { text: string; id: string
     }
   };
 
+  if (type === 'music' && onSendToMusicStudio) {
+    return (
+      <button
+        type="button"
+        disabled={!text.trim()}
+        onClick={() => onSendToMusicStudio(text.trim())}
+        className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-2 rounded-xl text-[10px] flex items-center gap-1.5 transition-all shadow-md shadow-emerald-600/10 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        <Music className="w-3 h-3" />
+        <span>生成音乐</span>
+        <ChevronRight className="w-3 h-3" />
+      </button>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-1 mt-1">
       <div className="flex items-center gap-2">
@@ -85,7 +115,7 @@ const ElevenLabsPlayer = ({ text, id, type = 'sfx' }: { text: string; id: string
             ) : (
               <Volume2 className="w-2.5 h-2.5" />
             )}
-            {loading ? '生成中...' : (type === 'music' ? '声景生成' : '声效试听')}
+            {loading ? '生成中...' : (type === 'music' ? '生成音乐' : '声效试听')}
           </button>
         ) : (
           <div className="flex items-center gap-2 bg-[#12141D] border border-gray-800 px-2 py-0.5 rounded-lg">
@@ -282,6 +312,7 @@ interface AudioDirectorProps {
   editingLyrics: boolean;
   handleRegenerateLyrics: () => void;
   onLoadDemo?: (demo: AudioDesignResult) => void;
+  onSendMusicPrompt?: (prompt: string) => void;
 }
 
 export default function AudioDirector({
@@ -314,10 +345,12 @@ export default function AudioDirector({
   setLyricEditDirection,
   editingLyrics,
   handleRegenerateLyrics,
-  onLoadDemo
+  onLoadDemo,
+  onSendMusicPrompt,
 }: AudioDirectorProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isProfessionalTarget = Boolean(target.video || target.avatar);
+  const isGameTrack = target.game && !target.video && !target.avatar && !target.sunnyIsland;
   const videoFileCount = files.filter(item => item.type.startsWith('video/')).length;
   const isProfessionalVideoReady = isProfessionalTarget && videoFileCount === 1 && files.length === 1;
   const hasInvalidProfessionalSelection = isProfessionalTarget
@@ -344,6 +377,9 @@ export default function AudioDirector({
       setError(null);
 
       const newFiles = Array.from(selectedFiles).map((file: File) => ({
+        id: typeof crypto !== 'undefined' && 'randomUUID' in crypto
+          ? crypto.randomUUID()
+          : `file-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
         file,
         preview: URL.createObjectURL(file),
         type: file.type
@@ -450,9 +486,21 @@ export default function AudioDirector({
                     const isVideo = item.type.startsWith('video/');
                     const isImage = item.type.startsWith('image/');
                     const isAudio = item.type.startsWith('audio/');
+                    const preuploadTone = item.preupload?.status === 'ready'
+                      ? 'text-emerald-600'
+                      : item.preupload?.status === 'error'
+                        ? 'text-amber-600'
+                        : 'text-sky-600';
+                    const preuploadLabel = item.preupload
+                      ? item.preupload.status === 'ready'
+                        ? '预上传已就绪'
+                        : item.preupload.status === 'error'
+                          ? item.preupload.message || '预上传失败，将走原流程'
+                          : item.preupload.message || '正在后台预上传'
+                      : null;
                     
                     return (
-                      <div key={index} className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs">
+                      <div key={item.id} className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs">
                         <div className="flex items-center gap-2 min-w-0">
                           {isImage && <img src={item.preview} className="w-8 h-8 rounded-lg object-cover shrink-0" />}
                           {isVideo && <Clapperboard className="w-5 h-5 text-emerald-600 shrink-0" />}
@@ -462,6 +510,14 @@ export default function AudioDirector({
                           <div className="min-w-0">
                             <p className="text-[11px] font-bold text-slate-700 truncate">{item.file.name}</p>
                             <p className="text-[9px] text-slate-400">{(item.file.size / (1024 * 1024)).toFixed(1)} MB</p>
+                            {isVideo && preuploadLabel && (
+                              <p className={`text-[9px] font-bold truncate ${preuploadTone}`}>
+                                {preuploadLabel}
+                                {item.preupload?.status !== 'ready' && item.preupload?.status !== 'error'
+                                  ? ` ${item.preupload?.progress || 0}%`
+                                  : ''}
+                              </p>
+                            )}
                           </div>
                         </div>
                         <button
@@ -800,12 +856,12 @@ export default function AudioDirector({
               {/* TAB 2: BGM RECOMMENDATIONS */}
               {activeTab === 'bgm' && (
                 <div className="space-y-4">
-                  <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm space-y-1">
+                  {!isGameTrack && <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm space-y-1">
                     <h5 className="text-[10px] font-bold text-slate-450 uppercase">画面整体情绪基线（两套方案共同参考）</h5>
                     <p className="text-xs text-slate-700 leading-relaxed font-semibold">
                       {result.musicAnalysis.emotionalCurve}
                     </p>
-                  </div>
+                  </div>}
 
                   {/* BGM Specs Cards */}
                   {result.bgmRecommendations.map((bgm, idx) => (
@@ -824,7 +880,7 @@ export default function AudioDirector({
 
                       {/* Music parameters */}
                       <div className="p-5 space-y-4 text-xs">
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 bg-slate-50 p-4 rounded-xl border border-slate-200">
+                        {!isGameTrack && <div className="grid grid-cols-2 md:grid-cols-4 gap-3 bg-slate-50 p-4 rounded-xl border border-slate-200">
                           <div>
                             <p className="text-[10px] text-slate-450 uppercase font-bold">配乐乐器</p>
                             <p className="text-slate-700 font-semibold mt-0.5 truncate">{bgm.instrumentation}</p>
@@ -841,18 +897,45 @@ export default function AudioDirector({
                             <p className="text-[10px] text-slate-450 uppercase font-bold">曲式结构</p>
                             <p className="text-slate-700 font-semibold mt-0.5 truncate">{bgm.sunoPrompt.structure}</p>
                           </div>
-                        </div>
+                        </div>}
+
+                        {isGameTrack && <div className="space-y-3">
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 bg-slate-50 p-4 rounded-xl border border-slate-200">
+                            <div>
+                              <p className="text-[10px] text-slate-450 uppercase font-bold">核心配器</p>
+                              <p className="text-slate-700 font-semibold mt-0.5 leading-relaxed">{bgm.instrumentation}</p>
+                            </div>
+                            <div>
+                              <p className="text-[10px] text-slate-450 uppercase font-bold">建议速度</p>
+                              <p className="text-slate-700 font-semibold mt-0.5">{bgm.sunoPrompt.bpm} BPM</p>
+                            </div>
+                            <div>
+                              <p className="text-[10px] text-slate-450 uppercase font-bold">建议调性</p>
+                              <p className="text-slate-700 font-semibold mt-0.5">{bgm.sunoPrompt.key}</p>
+                            </div>
+                          </div>
+
+                          {bgm.visualRationale && <div className="space-y-1">
+                            <h5 className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider flex items-center gap-1.5">
+                              <Sparkles className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                              <span>画面适配说明</span>
+                            </h5>
+                            <p className="text-slate-700 bg-emerald-50/50 p-3.5 rounded-xl leading-relaxed border border-emerald-100 font-semibold">
+                              {bgm.visualRationale}
+                            </p>
+                          </div>}
+                        </div>}
 
                         {/* Music emotional curve description */}
-                        <div className="space-y-1">
+                        {!isGameTrack && <div className="space-y-1">
                           <h5 className="text-[10px] font-bold text-slate-450 uppercase">本方案动态曲线与剪辑点</h5>
                           <p className="text-slate-700 bg-slate-50 p-3.5 rounded-xl leading-relaxed border border-slate-200 font-semibold">
                             {bgm.sunoPrompt.dynamics}
                           </p>
-                        </div>
+                        </div>}
 
                         {/* Timeline Music Design copy */}
-                        {bgm.timelineDesign && bgm.timelineDesign.length > 0 && (
+                        {!isGameTrack && bgm.timelineDesign && bgm.timelineDesign.length > 0 && (
                           <div className="space-y-3 pt-2">
                             <h5 className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider flex items-center gap-1.5">
                               <Clock className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
@@ -940,12 +1023,14 @@ export default function AudioDirector({
                             </p>
                           </div>
                           
-                          {/* SfxPlayer block for direct sound scene generation */}
-                          <div className="pt-2">
-                            <ElevenLabsPlayer text={bgm.sunoPrompt.english} id={`dir-bgm-${idx}`} type="music" />
-                          </div>
+                          <div className="pt-2 flex flex-wrap justify-end gap-2">
+                            <ElevenLabsPlayer
+                              text={bgm.sunoPrompt.english}
+                              id={`dir-bgm-${idx}`}
+                              type="music"
+                              onSendToMusicStudio={onSendMusicPrompt}
+                            />
 
-                          <div className="pt-2 flex justify-end">
                             <button
                               type="button"
                               disabled={!bgm.sunoPrompt.english.trim()}
@@ -959,7 +1044,7 @@ export default function AudioDirector({
                         </div>
 
                         {/* Lyrics editing block (if Vocal is enabled) */}
-                        {bgm.lyrics && !isInstrumental && (
+                        {!isGameTrack && bgm.lyrics && !isInstrumental && (
                           <div className="space-y-3 pt-2">
                             <h5 className="text-[10px] font-bold text-slate-700 uppercase tracking-wider">配曲歌词智能设计 (Lyrical Architecture)</h5>
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
