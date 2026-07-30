@@ -16,6 +16,23 @@ function floatTo16BitPCM(input: Float32Array): Int16Array {
   return output;
 }
 
+function writePcmSample(view: DataView, offset: number, sample: number, bitDepth: 16 | 24 | 32) {
+  const s = Math.max(-1, Math.min(1, sample));
+  if (bitDepth === 16) {
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    return 2;
+  }
+  if (bitDepth === 24) {
+    const value = Math.round(s < 0 ? s * 0x800000 : s * 0x7FFFFF);
+    view.setUint8(offset, value & 0xFF);
+    view.setUint8(offset + 1, (value >> 8) & 0xFF);
+    view.setUint8(offset + 2, (value >> 16) & 0xFF);
+    return 3;
+  }
+  view.setInt32(offset, s < 0 ? s * 0x80000000 : s * 0x7FFFFFFF, true);
+  return 4;
+}
+
 function interleave(inputL: Float32Array, inputR: Float32Array): Int16Array {
   const length = inputL.length + inputR.length;
   const result = new Int16Array(length);
@@ -57,20 +74,14 @@ export async function resampleAudioBuffer(
   return await offlineCtx.startRendering();
 }
 
-export function encodeWav(audioBuffer: AudioBuffer): Blob {
+export function encodeWav(audioBuffer: AudioBuffer, bitDepth: 16 | 24 | 32 = 16): Blob {
   const numOfChan = Math.min(2, audioBuffer.numberOfChannels);
   const sampleRate = audioBuffer.sampleRate;
   const format = 1; // 1 = Raw PCM
-  const bitDepth = 16;
-  
-  let result: Int16Array;
-  if (numOfChan === 2) {
-    result = interleave(audioBuffer.getChannelData(0), audioBuffer.getChannelData(1));
-  } else {
-    result = floatTo16BitPCM(audioBuffer.getChannelData(0));
-  }
-  
-  const buffer = new ArrayBuffer(44 + result.length * 2);
+  const bytesPerSample = bitDepth / 8;
+  const frameCount = audioBuffer.length;
+  const dataByteLength = frameCount * numOfChan * bytesPerSample;
+  const buffer = new ArrayBuffer(44 + dataByteLength);
   const view = new DataView(buffer);
   
   const writeString = (v: DataView, offset: number, str: string) => {
@@ -80,21 +91,27 @@ export function encodeWav(audioBuffer: AudioBuffer): Blob {
   };
   
   writeString(view, 0, 'RIFF');
-  view.setUint32(4, 36 + result.length * 2, true);
+  view.setUint32(4, 36 + dataByteLength, true);
   writeString(view, 8, 'WAVE');
   writeString(view, 12, 'fmt ');
   view.setUint32(16, 16, true);
   view.setUint16(20, format, true);
   view.setUint16(22, numOfChan, true);
   view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * numOfChan * (bitDepth / 8), true);
-  view.setUint16(32, numOfChan * (bitDepth / 8), true);
+  view.setUint32(28, sampleRate * numOfChan * bytesPerSample, true);
+  view.setUint16(32, numOfChan * bytesPerSample, true);
   view.setUint16(34, bitDepth, true);
   writeString(view, 36, 'data');
-  view.setUint32(40, result.length * 2, true);
-  
-  for (let i = 0; i < result.length; i++) {
-    view.setInt16(44 + i * 2, result[i], true);
+  view.setUint32(40, dataByteLength, true);
+
+  const left = audioBuffer.getChannelData(0);
+  const right = numOfChan > 1 ? audioBuffer.getChannelData(1) : left;
+  let offset = 44;
+  for (let i = 0; i < frameCount; i++) {
+    offset += writePcmSample(view, offset, left[i], bitDepth);
+    if (numOfChan > 1) {
+      offset += writePcmSample(view, offset, right[i], bitDepth);
+    }
   }
   
   return new Blob([view], { type: 'audio/wav' });

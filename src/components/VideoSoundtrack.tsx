@@ -66,6 +66,25 @@ const EXPORT_JOB_KINDS: ExportJobKind[] = ['video', 'mixed', 'stems', 'bgm', 'sf
 type ExportAudioFormat = 'mp3' | 'wav' | 'aac';
 type ExportBitDepth = 16 | 24 | 32;
 type OriginalAudioSplitStatus = 'idle' | 'running' | 'completed' | 'error';
+type OriginalAudioSplitSegmentRequest = {
+  id: string;
+  startTime: number;
+  duration: number;
+};
+type OriginalAudioSeparationResult = {
+  engine?: string;
+  stems?: {
+    vocalUrl?: string;
+    musicUrl?: string;
+    ambienceUrl?: string;
+    originalUrl?: string;
+  };
+  vocalSegments?: Array<{
+    id: string;
+    audioUrl: string;
+    sourceAudioDuration?: number;
+  }>;
+};
 
 export interface SoundtrackTrack {
   id: string;
@@ -1788,7 +1807,57 @@ export default function VideoSoundtrack() {
     )));
   };
 
-  const upsertSplitResultTracksAndClips = (sourceClip: TimelineClip) => {
+  const getSplitSourceDubbingCues = (
+    sourceClip: TimelineClip,
+    existingTracks = tracksRef.current,
+  ) => {
+    const sourceStart = normalizeOptionalTime(sourceClip.startTime) ?? 0;
+    const sourceDuration = normalizePositiveNumber(sourceClip.duration, safeDuration);
+    const sourceEnd = sourceStart + sourceDuration;
+    return clipsRef.current
+      .filter(clip => {
+        const track = existingTracks.find(item => item.id === clip.trackId);
+        const clipStart = normalizeOptionalTime(clip.startTime) ?? 0;
+        const clipDuration = normalizePositiveNumber(clip.duration, 0);
+        const clipEnd = clipStart + clipDuration;
+        return track?.type === 'dubbing'
+          && clip.trackId !== SPLIT_VOCAL_TRACK_ID
+          && typeof clip.text === 'string'
+          && clip.text.trim().length > 0
+          && clipEnd > sourceStart
+          && clipStart < sourceEnd;
+      })
+      .sort((a, b) => a.startTime - b.startTime);
+  };
+
+  const buildOriginalAudioSplitSegments = (sourceClip: TimelineClip): OriginalAudioSplitSegmentRequest[] => {
+    const sourceStart = normalizeOptionalTime(sourceClip.startTime) ?? 0;
+    const sourceDuration = normalizePositiveNumber(sourceClip.duration, safeDuration);
+    const sourceEnd = sourceStart + sourceDuration;
+    const sourceDubbingCues = getSplitSourceDubbingCues(sourceClip);
+    if (sourceDubbingCues.length === 0) {
+      return [{
+        id: SPLIT_VOCAL_CLIP_ID,
+        startTime: sourceStart,
+        duration: sourceDuration,
+      }];
+    }
+    return sourceDubbingCues.map((cue, index) => {
+      const cueStart = Math.max(sourceStart, normalizeOptionalTime(cue.startTime) ?? sourceStart);
+      const cueDuration = normalizePositiveNumber(cue.duration, 1);
+      const cueEnd = Math.min(sourceEnd, cueStart + cueDuration);
+      return {
+        id: `clip-split-vocal-${index + 1}`,
+        startTime: cueStart,
+        duration: Math.max(0.05, cueEnd - cueStart),
+      };
+    });
+  };
+
+  const upsertSplitResultTracksAndClips = (
+    sourceClip: TimelineClip,
+    separationResult?: OriginalAudioSeparationResult,
+  ) => {
     const splitTrackDefinitions: SoundtrackTrack[] = [
       {
         id: SPLIT_VOCAL_TRACK_ID,
@@ -1838,20 +1907,12 @@ export default function VideoSoundtrack() {
     const sourceStart = normalizeOptionalTime(sourceClip.startTime) ?? 0;
     const sourceDuration = normalizePositiveNumber(sourceClip.duration, safeDuration);
     const sourceEnd = sourceStart + sourceDuration;
-    const sourceDubbingCues = clipsRef.current
-      .filter(clip => {
-        const track = existingTracks.find(item => item.id === clip.trackId);
-        const clipStart = normalizeOptionalTime(clip.startTime) ?? 0;
-        const clipDuration = normalizePositiveNumber(clip.duration, 0);
-        const clipEnd = clipStart + clipDuration;
-        return track?.type === 'dubbing'
-          && clip.trackId !== SPLIT_VOCAL_TRACK_ID
-          && typeof clip.text === 'string'
-          && clip.text.trim().length > 0
-          && clipEnd > sourceStart
-          && clipStart < sourceEnd;
-      })
-      .sort((a, b) => a.startTime - b.startTime);
+    const sourceDubbingCues = getSplitSourceDubbingCues(sourceClip, existingTracks);
+    const vocalSegmentAudioById = new Map(
+      (separationResult?.vocalSegments || [])
+        .filter(segment => segment?.id && segment.audioUrl)
+        .map(segment => [segment.id, segment]),
+    );
     const splitVocalClips: TimelineClip[] = sourceDubbingCues.length > 0
       ? sourceDubbingCues.map((cue, index) => {
         const cueStart = Math.max(sourceStart, normalizeOptionalTime(cue.startTime) ?? sourceStart);
@@ -1860,8 +1921,10 @@ export default function VideoSoundtrack() {
         const safeCueDuration = Math.max(0.05, cueEnd - cueStart);
         const subtitleStartTime = normalizeOptionalTime(cue.subtitleStartTime) ?? cueStart;
         const subtitleEndTime = normalizeOptionalTime(cue.subtitleEndTime) ?? cueStart + safeCueDuration;
+        const segmentId = `clip-split-vocal-${index + 1}`;
+        const segmentAudio = vocalSegmentAudioById.get(segmentId);
         return {
-          id: `clip-split-vocal-${index + 1}`,
+          id: segmentId,
           trackId: SPLIT_VOCAL_TRACK_ID,
           origin: 'manual',
           name: `拆分台词 ${index + 1}`,
@@ -1871,8 +1934,11 @@ export default function VideoSoundtrack() {
           startTime: cueStart,
           duration: safeCueDuration,
           volume: 1,
+          audioUrl: segmentAudio?.audioUrl,
+          audioSource: segmentAudio?.audioUrl ? 'uploaded' : undefined,
           speed: 1,
           autoSpeed: 1,
+          sourceAudioDuration: segmentAudio?.sourceAudioDuration ?? safeCueDuration,
           subtitleId: cue.subtitleId || `split-subtitle-${index + 1}`,
           subtitleStartTime,
           subtitleEndTime,
@@ -1895,8 +1961,11 @@ export default function VideoSoundtrack() {
           startTime: sourceStart,
           duration: sourceDuration,
           volume: 1,
+          audioUrl: vocalSegmentAudioById.get(SPLIT_VOCAL_CLIP_ID)?.audioUrl,
+          audioSource: vocalSegmentAudioById.get(SPLIT_VOCAL_CLIP_ID)?.audioUrl ? 'uploaded' : undefined,
           speed: 1,
           autoSpeed: 1,
+          sourceAudioDuration: vocalSegmentAudioById.get(SPLIT_VOCAL_CLIP_ID)?.sourceAudioDuration ?? sourceDuration,
           subtitleStartTime: sourceStart,
           subtitleEndTime: sourceEnd,
           lipStartTime: sourceStart,
@@ -1918,8 +1987,11 @@ export default function VideoSoundtrack() {
         startTime: sourceStart,
         duration: sourceDuration,
         volume: 0.75,
+        audioUrl: separationResult?.stems?.musicUrl,
+        audioSource: separationResult?.stems?.musicUrl ? 'uploaded' : undefined,
         speed: 1,
         autoSpeed: 1,
+        sourceAudioDuration: sourceDuration,
         voiceDirty: false,
         timingDirty: false,
       },
@@ -1932,8 +2004,11 @@ export default function VideoSoundtrack() {
         startTime: sourceStart,
         duration: sourceDuration,
         volume: 0.85,
+        audioUrl: separationResult?.stems?.ambienceUrl,
+        audioSource: separationResult?.stems?.ambienceUrl ? 'uploaded' : undefined,
         speed: 1,
         autoSpeed: 1,
+        sourceAudioDuration: sourceDuration,
         voiceDirty: false,
         timingDirty: false,
       },
@@ -1951,6 +2026,22 @@ export default function VideoSoundtrack() {
         a.startTime - b.startTime || a.trackId.localeCompare(b.trackId)
       ));
     });
+    splitClipDefinitions.forEach(clip => {
+      if (clip.audioUrl) {
+        replaceCachedClipAudio(
+          clip.id,
+          clip.audioUrl,
+          clip.volume,
+          getEffectiveClipSpeed(clip),
+          clip.trackId,
+        );
+      }
+    });
+    const firstVocalClip = splitVocalClips[0];
+    if (firstVocalClip) {
+      setSelectedTrackId(SPLIT_VOCAL_TRACK_ID);
+      setSelectedClipId(firstVocalClip.id);
+    }
     invalidateTrackOutputs('dubbing');
     invalidateTrackOutputs('bgm');
     invalidateTrackOutputs('sfx');
@@ -2952,6 +3043,18 @@ export default function VideoSoundtrack() {
           };
         });
         if (mappedClips.length === 0) {
+          const dubbingStatus = typeof data.dubbingStatus === 'string'
+            ? data.dubbingStatus
+            : '';
+          if (usingFullVideoDubbingAnalysis && targetTrackIds.size === 1) {
+            const message = dubbingStatus === 'unavailable'
+              ? '完整视频字幕/口型分析暂时不可用，没有生成配音片段。你可以稍后重试，或先开启音乐/音效轨生成基础设计。'
+              : 'AI分析完成，但没有识别到可拆成配音片段的台词/字幕。原视频轨已保留，可以换一个有清晰人声或字幕的视频再试。';
+            setAnalysisStage(message);
+            setToast({ message, type: 'info' });
+            window.setTimeout(() => setToast(null), 4_000);
+            return;
+          }
           throw new Error('AI 未返回合适的时间轴配置，请重新尝试。');
         }
 
@@ -2984,6 +3087,9 @@ export default function VideoSoundtrack() {
           : mappedClips.filter((clip: TimelineClip) => (
             tracks.find(track => track.id === clip.trackId)?.type === 'dubbing'
           )).length;
+        const dubbingStatus = typeof data.dubbingStatus === 'string'
+          ? data.dubbingStatus
+          : '';
         const usedNativeVideo = analysisSource === 'server-native-video';
         const usedServerFrames = analysisSource === 'server-ffmpeg';
         setToast({
@@ -3346,29 +3452,49 @@ export default function VideoSoundtrack() {
     setOriginalAudioSplitStage('准备读取视频原声音频...');
     setError(null);
 
-    const wait = (ms: number) => new Promise(resolve => window.setTimeout(resolve, ms));
-    const steps = [
-      { progress: 22, stage: '提取并校验原始音频轨...' },
-      { progress: 40, stage: '准备分离人声、音乐与环境音效...' },
-      { progress: 58, stage: '准备 ASR 台词识别与静音停顿检测...' },
-      { progress: 74, stage: '准备画面口型窗口分析...' },
-      { progress: 88, stage: '准备生成可编辑配音短句片段...' },
-    ];
+    try {
+      const vocalSegments = buildOriginalAudioSplitSegments(sourceClip);
+      setOriginalAudioSplitProgress(18);
+      setOriginalAudioSplitStage('正在准备台词片段与源视频音频范围...');
 
-    for (const step of steps) {
-      await wait(450);
+      const sourceStartTime = normalizeOptionalTime(sourceClip.startTime) ?? 0;
+      const sourceDuration = normalizePositiveNumber(sourceClip.duration, safeDuration);
+      setOriginalAudioSplitProgress(38);
+      setOriginalAudioSplitStage('正在服务器提取原声并分离人声、音乐、环境/音效...');
+
+      const response = await fetch('/api/video/separate-original-audio', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          videoFileName: videoFile.name,
+          sourceStartTime,
+          sourceDuration,
+          vocalSegments,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || '视频原声音频拆分失败，请稍后重试。');
+      }
       if (originalAudioSplitRunRef.current !== runId) return;
-      setOriginalAudioSplitProgress(step.progress);
-      setOriginalAudioSplitStage(step.stage);
-    }
 
-    await wait(450);
-    if (originalAudioSplitRunRef.current !== runId) return;
-    setOriginalAudioSplitProgress(100);
-    upsertSplitResultTracksAndClips(sourceClip);
-    setOriginalAudioSplitStatus('completed');
-    setOriginalAudioSplitStage('已在多轨区生成拆分结果轨道；真实音频分离文件待后端服务接入后自动关联。');
-    showAudioRepairWorkflowToast('已生成拆分人声、拆分音乐、拆分环境/音效轨道；真实分离音频待后端接入后自动填充。');
+      setOriginalAudioSplitProgress(88);
+      setOriginalAudioSplitStage('正在把拆分音频写入多轨并保留台词/口型属性...');
+      upsertSplitResultTracksAndClips(sourceClip, data as OriginalAudioSeparationResult);
+
+      setOriginalAudioSplitProgress(100);
+      setOriginalAudioSplitStatus('completed');
+      setOriginalAudioSplitStage('已生成可播放的人声、音乐、环境/音效拆分音频，并已写入多轨。');
+      showAudioRepairWorkflowToast(
+        `已完成原声拆分：人声短句、音乐、环境/音效都已绑定音频。${data.engine ? ` 引擎：${data.engine}` : ''}`,
+      );
+    } catch (err: any) {
+      if (originalAudioSplitRunRef.current !== runId) return;
+      setOriginalAudioSplitStatus('error');
+      setOriginalAudioSplitProgress(0);
+      setOriginalAudioSplitStage(err?.message || '视频原声音频拆分失败，请稍后重试。');
+      setError(err?.message || '视频原声音频拆分失败，请稍后重试。');
+    }
   };
 
   const handleMusicReplacementWorkflow = () => {

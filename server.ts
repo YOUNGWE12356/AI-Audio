@@ -7,6 +7,7 @@ import { exec, execFile } from 'child_process';
 import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import JSZip from 'jszip';
+import ffmpegStatic from 'ffmpeg-static';
 import { DEFAULT_CATEGORIES, INITIAL_SOUNDS } from './src/data/sfxData';
 import multer from 'multer';
 import {
@@ -33,6 +34,7 @@ import {
 async function startServer() {
   const app = express();
   const PORT = Number.parseInt(process.env.PORT || '3000', 10);
+  const FFMPEG_BINARY = process.env.FFMPEG_PATH || ffmpegStatic || 'ffmpeg';
 
   app.disable('x-powered-by');
 
@@ -274,10 +276,26 @@ async function startServer() {
       services: {
         gemini: Boolean(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY),
         elevenLabs: Boolean(process.env.ELEVENLABS_API_KEY || process.env.VITE_ELEVENLABS_API_KEY),
+        ffmpeg: Boolean(FFMPEG_BINARY),
+        demucsConfigured: Boolean(process.env.DEMUCS_COMMAND || process.env.DEMUCS_PYTHON),
       },
       timestamp: new Date().toISOString(),
     });
   });
+
+  app.get('/api/video/separation-engines', asyncRoute(async (_req, res) => {
+    const demucs = await probeDemucsAvailability();
+    return res.json({
+      preferred: demucs.available ? 'demucs-local' : 'ffmpeg-filter-fallback',
+      demucs,
+      fallback: {
+        engine: 'ffmpeg-filter-fallback',
+        available: true,
+        ffmpegBinary: FFMPEG_BINARY,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  }));
 
   // 1. Get Categories
   app.get('/api/sfx/categories', (req, res) => {
@@ -473,6 +491,284 @@ async function startServer() {
     };
   };
 
+  const runFfmpegFile = (
+    args: string[],
+    timeout = 180_000,
+  ) => new Promise<void>((resolve, reject) => {
+    execFile(
+      FFMPEG_BINARY,
+      args,
+      {
+        timeout,
+        windowsHide: true,
+        maxBuffer: 8 * 1024 * 1024,
+      },
+      (error, _stdout, stderr) => {
+        if (!error) {
+          resolve();
+          return;
+        }
+        const ffmpegUnavailable = /ffmpeg.*(?:not recognized|not found)|ENOENT/i.test(`${error.message}\n${stderr}`);
+        reject(Object.assign(
+          new Error(ffmpegUnavailable
+            ? '本机未安装或无法访问 FFmpeg，无法拆分视频原声音频。'
+            : `FFmpeg 音频拆分失败：${String(stderr || error.message).trim().split(/\r?\n/).slice(-1)[0] || error.message}`),
+          { status: ffmpegUnavailable ? 503 : 422, cause: error },
+        ));
+      },
+    );
+  });
+
+  const runExternalFile = (
+    binary: string,
+    args: string[],
+    timeout = 180_000,
+    label = 'External audio process',
+  ) => new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    execFile(
+      binary,
+      args,
+      {
+        timeout,
+        windowsHide: true,
+        maxBuffer: 16 * 1024 * 1024,
+      },
+      (error, stdout, stderr) => {
+        if (!error) {
+          resolve({ stdout: String(stdout || ''), stderr: String(stderr || '') });
+          return;
+        }
+        reject(Object.assign(
+          new Error(`${label} failed: ${String(stderr || error.message).trim().split(/\r?\n/).slice(-1)[0] || error.message}`),
+          { cause: error },
+        ));
+      },
+    );
+  });
+
+  const splitCommandLine = (commandLine: string) => {
+    const parts: string[] = [];
+    commandLine.replace(/"([^"]+)"|'([^']+)'|(\S+)/g, (_match, doubleQuoted, singleQuoted, bare) => {
+      parts.push(doubleQuoted || singleQuoted || bare);
+      return '';
+    });
+    return parts;
+  };
+
+  const getDemucsCommandCandidates = () => {
+    const candidates: Array<{ label: string; binary: string; argsPrefix: string[] }> = [];
+    const addPythonCandidate = (label: string, pythonPath?: string) => {
+      const binary = String(pythonPath || '').trim();
+      if (binary) candidates.push({ label, binary, argsPrefix: ['-m', 'demucs'] });
+    };
+
+    const demucsCommand = String(process.env.DEMUCS_COMMAND || '').trim();
+    if (demucsCommand) {
+      const [binary, ...argsPrefix] = splitCommandLine(demucsCommand);
+      if (binary) candidates.push({ label: 'demucs-command', binary, argsPrefix });
+    }
+
+    addPythonCandidate('demucs-python-env', process.env.DEMUCS_PYTHON);
+
+    const workspaceDemucsPython = process.platform === 'win32'
+      ? path.join(process.cwd(), 'tools', 'demucs', '.venv', 'Scripts', 'python.exe')
+      : path.join(process.cwd(), 'tools', 'demucs', '.venv', 'bin', 'python');
+    if (fs.existsSync(workspaceDemucsPython)) {
+      addPythonCandidate('workspace-demucs-python', workspaceDemucsPython);
+    }
+
+    candidates.push({ label: 'demucs-path', binary: 'demucs', argsPrefix: [] });
+
+    if (process.platform === 'win32') {
+      candidates.push({ label: 'py-3.11-demucs', binary: 'py', argsPrefix: ['-3.11', '-m', 'demucs'] });
+      candidates.push({ label: 'py-demucs', binary: 'py', argsPrefix: ['-m', 'demucs'] });
+    } else {
+      candidates.push({ label: 'python3-demucs', binary: 'python3', argsPrefix: ['-m', 'demucs'] });
+      candidates.push({ label: 'python-demucs', binary: 'python', argsPrefix: ['-m', 'demucs'] });
+    }
+
+    return candidates;
+  };
+
+  async function probeDemucsAvailability() {
+    const candidates = getDemucsCommandCandidates();
+    const errors: string[] = [];
+
+    for (const candidate of candidates) {
+      try {
+        await runExternalFile(
+          candidate.binary,
+          [...candidate.argsPrefix, '--help'],
+          15_000,
+          candidate.label,
+        );
+        return {
+          available: true,
+          engine: 'demucs-local',
+          candidate: candidate.label,
+          command: [candidate.binary, ...candidate.argsPrefix].join(' '),
+          model: process.env.DEMUCS_MODEL || 'htdemucs',
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        errors.push(`${candidate.label}: ${message}`);
+      }
+    }
+
+    return {
+      available: false,
+      engine: 'ffmpeg-filter-fallback',
+      candidate: null,
+      command: null,
+      model: process.env.DEMUCS_MODEL || 'htdemucs',
+      errors: errors.slice(-5),
+    };
+  }
+
+  const findDemucsStemFiles = async (directoryPath: string) => {
+    const stems: Record<string, string> = {};
+    const wanted = new Set(['vocals.wav', 'no_vocals.wav', 'drums.wav', 'bass.wav', 'other.wav', 'guitar.wav', 'piano.wav']);
+    const walk = async (currentPath: string, depth = 0): Promise<void> => {
+      if (depth > 6) return;
+      const entries = await fs.promises.readdir(currentPath, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        const entryPath = path.join(currentPath, entry.name);
+        if (entry.isDirectory()) {
+          await walk(entryPath, depth + 1);
+          continue;
+        }
+        const lowerName = entry.name.toLowerCase();
+        if (wanted.has(lowerName) && !stems[lowerName]) {
+          stems[lowerName] = entryPath;
+        }
+      }
+    };
+    await walk(directoryPath);
+    return stems;
+  };
+
+  const normalizeWavStem = async (inputPath: string, outputPath: string) => {
+    await runFfmpegFile([
+      '-y',
+      '-hide_banner',
+      '-loglevel', 'error',
+      '-i', inputPath,
+      '-ac', '2',
+      '-ar', '48000',
+      '-c:a', 'pcm_s16le',
+      outputPath,
+    ]);
+  };
+
+  const mixWavStems = async (inputPaths: string[], outputPath: string) => {
+    const uniqueInputs = Array.from(new Set(inputPaths.filter(Boolean)));
+    if (uniqueInputs.length === 0) {
+      throw new Error('Demucs did not produce enough accompaniment stems.');
+    }
+    if (uniqueInputs.length === 1) {
+      await normalizeWavStem(uniqueInputs[0], outputPath);
+      return;
+    }
+    const inputArgs = uniqueInputs.flatMap(inputPath => ['-i', inputPath]);
+    await runFfmpegFile([
+      '-y',
+      '-hide_banner',
+      '-loglevel', 'error',
+      ...inputArgs,
+      '-filter_complex',
+      `amix=inputs=${uniqueInputs.length}:duration=longest:dropout_transition=0,volume=0.95,aformat=sample_rates=48000:channel_layouts=stereo`,
+      '-c:a', 'pcm_s16le',
+      outputPath,
+    ]);
+  };
+
+  const tryRunDemucsSeparation = async (
+    originalAudioPath: string,
+    baseName: string,
+    outputs: {
+      vocalPath: string;
+      musicPath: string;
+      ambiencePath: string;
+    },
+  ) => {
+    const candidates = getDemucsCommandCandidates();
+    const demucsOutputRoot = path.resolve(uploadsDir, `${baseName}_demucs`);
+    if (!isPathInside(uploadsDir, demucsOutputRoot)) {
+      throw Object.assign(new Error('Unable to create a safe Demucs working directory.'), { status: 500 });
+    }
+
+    const errors: string[] = [];
+    for (const candidate of candidates) {
+      await safeRemoveDirectory(demucsOutputRoot);
+      await fs.promises.mkdir(demucsOutputRoot, { recursive: true });
+
+      try {
+        await runExternalFile(
+          candidate.binary,
+          [
+            ...candidate.argsPrefix,
+            '-n', process.env.DEMUCS_MODEL || 'htdemucs',
+            '--out', demucsOutputRoot,
+            originalAudioPath,
+          ],
+          parseNumber(process.env.DEMUCS_TIMEOUT_MS, 20 * 60_000, 60_000, 120 * 60_000),
+          candidate.label,
+        );
+
+        const stems = await findDemucsStemFiles(demucsOutputRoot);
+        const vocalsPath = stems['vocals.wav'];
+        const noVocalsPath = stems['no_vocals.wav'];
+        const accompanimentPaths = noVocalsPath
+          ? [noVocalsPath]
+          : [
+            stems['drums.wav'],
+            stems['bass.wav'],
+            stems['other.wav'],
+            stems['guitar.wav'],
+            stems['piano.wav'],
+          ].filter((stemPath): stemPath is string => Boolean(stemPath));
+        const ambiencePath = stems['other.wav'] || stems['guitar.wav'] || noVocalsPath;
+
+        if (!vocalsPath || accompanimentPaths.length === 0) {
+          throw new Error('Demucs finished but did not produce the expected vocal/accompaniment stems.');
+        }
+
+        await normalizeWavStem(vocalsPath, outputs.vocalPath);
+        await mixWavStems(accompanimentPaths, outputs.musicPath);
+        if (ambiencePath) {
+          await normalizeWavStem(ambiencePath, outputs.ambiencePath);
+        } else {
+          await runFfmpegFile([
+            '-y',
+            '-hide_banner',
+            '-loglevel', 'error',
+            '-i', originalAudioPath,
+            '-af', 'highpass=f=2600,afftdn=nf=-20,volume=0.55,aformat=sample_rates=48000:channel_layouts=stereo',
+            '-c:a', 'pcm_s16le',
+            outputs.ambiencePath,
+          ]);
+        }
+
+        await safeRemoveDirectory(demucsOutputRoot);
+        return {
+          ok: true as const,
+          engine: 'demucs-local' as const,
+          candidate: candidate.label,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        errors.push(`${candidate.label}: ${message}`);
+        console.warn(`Demucs separation candidate failed (${candidate.label}); trying fallback:`, error);
+      }
+    }
+
+    await safeRemoveDirectory(demucsOutputRoot);
+    return {
+      ok: false as const,
+      errors,
+    };
+  };
+
   const sanitizeExportName = (name: unknown, fallback: string) => {
     const raw = String(name || fallback)
       .replace(/\.[^/.]+$/, '')
@@ -595,7 +891,7 @@ async function startServer() {
       const filter = `fps=${frameCount}/${duration.toFixed(3)},scale=512:512:force_original_aspect_ratio=decrease`;
       await new Promise<void>((resolve, reject) => {
         execFile(
-          'ffmpeg',
+          FFMPEG_BINARY,
           [
             '-hide_banner',
             '-loglevel', 'error',
@@ -1357,6 +1653,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       let analysisKeyframes: Array<{ timestamp: number; base64: string }> = [];
       let analysisSource: 'client-keyframes' | 'server-ffmpeg' | 'server-native-video' = 'client-keyframes';
       let nativeVideoFps: number | undefined;
+      let dubbingAnalysisUnavailable = false;
 
       const prepareNativeVideoAnalysis = async (fps: number, reason: string) => {
         if (!fileName) {
@@ -1428,7 +1725,17 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       if (dubbingEnabled) {
         // Sparse keyframes cannot reveal subtitle boundaries or mouth motion.
         // Dubbing analysis therefore always uses the complete uploaded video.
-        await prepareNativeVideoAnalysis(4, 'Dubbing is enabled;');
+        try {
+          await prepareNativeVideoAnalysis(4, 'Dubbing is enabled;');
+        } catch (nativeVideoError) {
+          if (!bgmEnabled && !sfxEnabled) {
+            throw nativeVideoError;
+          }
+          dubbingAnalysisUnavailable = true;
+          console.warn('Native dubbing analysis failed; falling back to keyframe-only BGM/SFX analysis:', nativeVideoError);
+          analysisKeyframes = await extractServerVideoKeyframes(fileName, videoDuration);
+          analysisSource = 'server-ffmpeg';
+        }
       } else if (Array.isArray(keyframes) && keyframes.length > 0) {
         if (keyframes.length > 8) {
           return res.status(400).json({ error: '关键帧数量过多，请重新分析。' });
@@ -1751,7 +2058,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
         analysisSource,
         dubbingCueCount,
         dubbingStatus: dubbingEnabled
-          ? dubbingCueCount > 0 ? 'detected' : 'none-detected'
+          ? dubbingAnalysisUnavailable ? 'unavailable' : dubbingCueCount > 0 ? 'detected' : 'none-detected'
           : 'disabled',
       });
       
@@ -1846,11 +2153,10 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
           const tempPath = path.join(uploadsDir, tempFileName);
           fs.writeFileSync(tempPath, buffer);
           
-          const loopCmd = `ffmpeg -y -stream_loop -1 -i "${tempPath}" -t ${duration} "${filePath}"`;
-          console.log(`Looping BGM to ${duration}s using command: ${loopCmd}`);
+          console.log(`Looping BGM to ${duration}s using bundled FFmpeg.`);
           
           await new Promise<void>((resolve) => {
-            exec(loopCmd, (err, stdout, stderr) => {
+            execFile(FFMPEG_BINARY, ['-y', '-stream_loop', '-1', '-i', tempPath, '-t', String(duration), filePath], (err, stdout, stderr) => {
               // Delete temp file
               try { fs.unlinkSync(tempPath); } catch (e) {}
               if (err) {
@@ -1903,6 +2209,197 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       return res.status(Number(err?.status) || 500).json({ error: err.message });
     }
   });
+
+  app.post('/api/video/separate-original-audio', asyncRoute(async (req, res) => {
+    const {
+      videoFileName,
+      sourceStartTime,
+      sourceDuration,
+      vocalSegments,
+    } = req.body || {};
+
+    const safeName = parseSafeVideoFilename(videoFileName);
+    if (!safeName) {
+      return res.status(400).json({ error: '视频文件名无效，请重新上传视频后再拆分。' });
+    }
+
+    const { videoPath } = await resolveValidatedUploadedVideo(videoFileName);
+    const startTime = parseNumber(sourceStartTime, 0, 0, 3_600);
+    const duration = parseNumber(sourceDuration, 30, 0.05, 3_600);
+    const endTime = startTime + duration;
+    const timestamp = Date.now();
+    const token = randomUUID().slice(0, 8);
+    const baseName = `${safeName.base}_split_${timestamp}_${token}`;
+    const createdFiles: string[] = [];
+    const makeOutput = (suffix: string) => {
+      const fileName = `${baseName}_${suffix}.wav`;
+      const filePath = path.join(uploadsDir, fileName);
+      createdFiles.push(filePath);
+      return { fileName, filePath, audioUrl: `/uploads/${fileName}` };
+    };
+
+    const original = makeOutput('original');
+    const vocal = makeOutput('vocal');
+    const music = makeOutput('music');
+    const ambience = makeOutput('ambience_sfx');
+    let separationEngine: 'demucs-local' | 'elevenlabs-audio-isolation' | 'ffmpeg-filter-fallback' = 'ffmpeg-filter-fallback';
+
+    try {
+      await runFfmpegFile([
+        '-y',
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-ss', startTime.toFixed(3),
+        '-t', duration.toFixed(3),
+        '-i', videoPath,
+        '-vn',
+        '-sn',
+        '-map', '0:a:0',
+        '-ac', '2',
+        '-ar', '48000',
+        '-c:a', 'pcm_s16le',
+        original.filePath,
+      ]);
+
+      const demucsResult = await tryRunDemucsSeparation(original.filePath, baseName, {
+        vocalPath: vocal.filePath,
+        musicPath: music.filePath,
+        ambiencePath: ambience.filePath,
+      });
+
+      if (demucsResult.ok) {
+        separationEngine = 'demucs-local';
+      } else {
+        if (demucsResult.errors.length > 0) {
+          console.warn('Demucs is unavailable or failed; falling back to cloud/filter separation:', demucsResult.errors.slice(-3));
+        }
+
+        const hasElevenLabsKey = Boolean(process.env.ELEVENLABS_API_KEY || process.env.VITE_ELEVENLABS_API_KEY);
+        if (hasElevenLabsKey) {
+          let isolatedTempPath = '';
+          try {
+            const isolatedBlob = await isolateAudio(new Blob([fs.readFileSync(original.filePath)], { type: 'audio/wav' }));
+            const isolatedExt = getSafeUploadExtension('isolated_audio', isolatedBlob.type, '.mp3');
+            isolatedTempPath = path.join(uploadsDir, `${baseName}_isolated_raw${isolatedExt}`);
+            await fs.promises.writeFile(isolatedTempPath, Buffer.from(await isolatedBlob.arrayBuffer()));
+            await runFfmpegFile([
+              '-y',
+              '-hide_banner',
+              '-loglevel', 'error',
+              '-i', isolatedTempPath,
+              '-ac', '2',
+              '-ar', '48000',
+              '-c:a', 'pcm_s16le',
+              vocal.filePath,
+            ]);
+            separationEngine = 'elevenlabs-audio-isolation';
+          } catch (isolationError) {
+            console.warn('ElevenLabs audio isolation failed; falling back to FFmpeg vocal proxy:', isolationError);
+            await runFfmpegFile([
+              '-y',
+              '-hide_banner',
+              '-loglevel', 'error',
+              '-i', original.filePath,
+              '-af', 'highpass=f=120,lowpass=f=7800,afftdn=nf=-25,volume=1.15,aformat=sample_rates=48000:channel_layouts=stereo',
+              '-c:a', 'pcm_s16le',
+              vocal.filePath,
+            ]);
+          } finally {
+            await safeUnlink(isolatedTempPath);
+          }
+        } else {
+          await runFfmpegFile([
+            '-y',
+            '-hide_banner',
+            '-loglevel', 'error',
+            '-i', original.filePath,
+            '-af', 'highpass=f=120,lowpass=f=7800,afftdn=nf=-25,volume=1.15,aformat=sample_rates=48000:channel_layouts=stereo',
+            '-c:a', 'pcm_s16le',
+            vocal.filePath,
+          ]);
+        }
+
+        await runFfmpegFile([
+          '-y',
+          '-hide_banner',
+          '-loglevel', 'error',
+          '-i', original.filePath,
+          '-af', 'highpass=f=45,lowpass=f=14000,volume=0.75,aformat=sample_rates=48000:channel_layouts=stereo',
+          '-c:a', 'pcm_s16le',
+          music.filePath,
+        ]);
+
+        await runFfmpegFile([
+          '-y',
+          '-hide_banner',
+          '-loglevel', 'error',
+          '-i', original.filePath,
+          '-af', 'highpass=f=2600,afftdn=nf=-20,volume=0.55,aformat=sample_rates=48000:channel_layouts=stereo',
+          '-c:a', 'pcm_s16le',
+          ambience.filePath,
+        ]);
+      }
+
+      const requestedSegments = Array.isArray(vocalSegments) ? vocalSegments.slice(0, 200) : [];
+      const normalizedSegments = requestedSegments.length > 0
+        ? requestedSegments.map((segment: any, index: number) => {
+          const absoluteStart = parseNumber(segment?.startTime, startTime, startTime, endTime);
+          const maximumDuration = Math.max(0.05, endTime - absoluteStart);
+          return {
+            id: typeof segment?.id === 'string' && /^[\w-]+$/.test(segment.id)
+              ? segment.id
+              : `clip-split-vocal-${index + 1}`,
+            offset: Math.max(0, absoluteStart - startTime),
+            duration: parseNumber(segment?.duration, Math.min(3, maximumDuration), 0.05, maximumDuration),
+          };
+        })
+        : [{ id: 'clip-split-vocal-1', offset: 0, duration }];
+
+      const segmentResults = [];
+      for (let index = 0; index < normalizedSegments.length; index += 1) {
+        const segment = normalizedSegments[index];
+        const segmentOutput = makeOutput(`vocal_segment_${String(index + 1).padStart(3, '0')}`);
+        await runFfmpegFile([
+          '-y',
+          '-hide_banner',
+          '-loglevel', 'error',
+          '-ss', segment.offset.toFixed(3),
+          '-t', segment.duration.toFixed(3),
+          '-i', vocal.filePath,
+          '-ac', '2',
+          '-ar', '48000',
+          '-c:a', 'pcm_s16le',
+          segmentOutput.filePath,
+        ]);
+        segmentResults.push({
+          id: segment.id,
+          audioUrl: segmentOutput.audioUrl,
+          sourceAudioDuration: Number(segment.duration.toFixed(3)),
+        });
+      }
+
+      return res.json({
+        engine: separationEngine,
+        sampleRate: 48000,
+        bitDepth: 16,
+        source: {
+          startTime,
+          duration,
+          audioUrl: original.audioUrl,
+        },
+        stems: {
+          vocalUrl: vocal.audioUrl,
+          musicUrl: music.audioUrl,
+          ambienceUrl: ambience.audioUrl,
+          originalUrl: original.audioUrl,
+        },
+        vocalSegments: segmentResults,
+      });
+    } catch (error) {
+      await Promise.all(createdFiles.map(filePath => safeUnlink(filePath)));
+      throw error;
+    }
+  }));
 
   // 9. Mix Video with Audio Timeline Clips using FFmpeg
   app.post('/api/video/mix', (req, res) => {
@@ -1974,7 +2471,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
 
       const finishWithFfmpeg = (args: string[]) => {
         console.log('Running FFmpeg with argument count:', args.length);
-        execFile('ffmpeg', args, (err, stdout, stderr) => {
+        execFile(FFMPEG_BINARY, args, (err, stdout, stderr) => {
           if (err) {
             console.error('FFmpeg execution failed:', err, stderr);
             const ffmpegUnavailable = /ffmpeg.*(?:not recognized|not found)|ENOENT/i.test(`${err.message}\n${stderr}`);
@@ -2162,7 +2659,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       ];
       console.log('Running audio FFmpeg with argument count:', ffmpegArgs.length);
 
-      execFile('ffmpeg', ffmpegArgs, (err, stdout, stderr) => {
+      execFile(FFMPEG_BINARY, ffmpegArgs, (err, stdout, stderr) => {
         if (err) {
           console.error('Audio FFmpeg mixing failed:', err, stderr);
           const ffmpegUnavailable = /ffmpeg.*(?:not recognized|not found)|ENOENT/i.test(`${err.message}\n${stderr}`);
@@ -2211,7 +2708,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       outputFilePath,
     ];
 
-    execFile('ffmpeg', ffmpegArgs, (err, stdout, stderr) => {
+    execFile(FFMPEG_BINARY, ffmpegArgs, (err, stdout, stderr) => {
       if (err) {
         console.error('Audio FFmpeg v2 mixing failed:', err, stderr);
         reject(err);
