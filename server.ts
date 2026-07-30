@@ -688,7 +688,6 @@ async function startServer() {
     outputs: {
       vocalPath: string;
       musicPath: string;
-      ambiencePath: string;
     },
   ) => {
     const candidates = getDemucsCommandCandidates();
@@ -727,27 +726,12 @@ async function startServer() {
             stems['guitar.wav'],
             stems['piano.wav'],
           ].filter((stemPath): stemPath is string => Boolean(stemPath));
-        const ambiencePath = stems['other.wav'] || stems['guitar.wav'] || noVocalsPath;
-
         if (!vocalsPath || accompanimentPaths.length === 0) {
           throw new Error('Demucs finished but did not produce the expected vocal/accompaniment stems.');
         }
 
         await normalizeWavStem(vocalsPath, outputs.vocalPath);
         await mixWavStems(accompanimentPaths, outputs.musicPath);
-        if (ambiencePath) {
-          await normalizeWavStem(ambiencePath, outputs.ambiencePath);
-        } else {
-          await runFfmpegFile([
-            '-y',
-            '-hide_banner',
-            '-loglevel', 'error',
-            '-i', originalAudioPath,
-            '-af', 'highpass=f=2600,afftdn=nf=-20,volume=0.55,aformat=sample_rates=48000:channel_layouts=stereo',
-            '-c:a', 'pcm_s16le',
-            outputs.ambiencePath,
-          ]);
-        }
 
         await safeRemoveDirectory(demucsOutputRoot);
         return {
@@ -972,6 +956,91 @@ async function startServer() {
       throw Object.assign(new Error('Invalid voiceId'), { status: 400 });
     }
     return voiceId;
+  };
+
+  const resolveUploadedAudioUrlPath = (value: unknown) => {
+    const audioUrl = String(value || '').trim();
+    if (!audioUrl.startsWith('/uploads/')) {
+      throw Object.assign(new Error('请选择拆分出来的人声音频片段后再匹配相似声音。'), { status: 400 });
+    }
+
+    const fileName = path.basename(audioUrl.split(/[?#]/)[0]);
+    if (!fileName || fileName !== audioUrl.split(/[?#]/)[0].replace(/^\/uploads\//, '')) {
+      throw Object.assign(new Error('音频片段路径无效，无法匹配声音。'), { status: 400 });
+    }
+
+    const extension = path.extname(fileName).toLowerCase();
+    if (!['.wav', '.mp3', '.m4a', '.aac', '.ogg', '.webm'].includes(extension)) {
+      throw Object.assign(new Error('仅支持使用音频片段匹配相似声音。'), { status: 415 });
+    }
+
+    const filePath = path.resolve(uploadsDir, fileName);
+    if (!isPathInside(uploadsDir, filePath) || !fs.existsSync(filePath)) {
+      throw Object.assign(new Error('找不到拆分出来的人声音频文件，请重新拆分后再试。'), { status: 404 });
+    }
+
+    const stat = fs.statSync(filePath);
+    if (stat.size <= 0) {
+      throw Object.assign(new Error('人声音频片段为空，无法匹配声音。'), { status: 422 });
+    }
+    if (stat.size > 12 * 1024 * 1024) {
+      throw Object.assign(new Error('人声音频片段过大，请选择更短、更清晰的一句台词来匹配。'), { status: 413 });
+    }
+
+    const mimeType = extension === '.mp3'
+      ? 'audio/mpeg'
+      : extension === '.m4a'
+        ? 'audio/mp4'
+        : extension === '.aac'
+          ? 'audio/aac'
+          : extension === '.ogg'
+            ? 'audio/ogg'
+            : extension === '.webm'
+              ? 'audio/webm'
+              : 'audio/wav';
+
+    return { filePath, mimeType };
+  };
+
+  const normalizeVoiceForMatching = (voice: any) => {
+    const id = String(voice?.id || voice?.voice_id || '').trim();
+    if (!/^[a-zA-Z0-9_-]{10,64}$/.test(id)) return null;
+    const labels = voice?.labels && typeof voice.labels === 'object' ? voice.labels : {};
+    const tags = Array.isArray(voice?.tags) ? voice.tags : Object.values(labels).filter(Boolean);
+    return {
+      id,
+      name: String(voice?.name || voice?.englishName || id).slice(0, 120),
+      englishName: String(voice?.englishName || voice?.name || id).slice(0, 120),
+      gender: voice?.gender === 'male' ? 'male' : voice?.gender === 'female' ? 'female' : String(labels.gender || ''),
+      category: String(voice?.category || voice?.category_name || '').slice(0, 80),
+      description: String(voice?.description || labels.description || '').slice(0, 300),
+      tags: tags.map((tag: any) => String(tag).slice(0, 60)).filter(Boolean).slice(0, 12),
+    };
+  };
+
+  const localVoiceMatchFallback = (voices: any[], preferredGender?: string) => {
+    const gender = preferredGender === 'male' || preferredGender === 'female' ? preferredGender : '';
+    return voices
+      .map((voice, index) => {
+        const voiceText = [
+          voice.name,
+          voice.englishName,
+          voice.category,
+          voice.description,
+          ...(voice.tags || []),
+        ].join(' ').toLowerCase();
+        let score = 68 - index;
+        if (gender && String(voice.gender).toLowerCase().includes(gender)) score += 16;
+        if (/natural|真实|自然|conversation|口语|dialogue|对话/i.test(voiceText)) score += 8;
+        if (/young|adult|middle|warm|calm|serious|energetic|温暖|沉稳|活泼|叙事/i.test(voiceText)) score += 4;
+        return {
+          voiceId: voice.id,
+          score: Math.max(45, Math.min(92, score)),
+          reason: '基于声音库标签与可用元数据的近似推荐。',
+        };
+      })
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 6);
   };
 
   // --- Server-side AI gateway for the HTML5 client ---
@@ -1242,6 +1311,118 @@ async function startServer() {
     }
     const voiceId = await matchBestVoice(String(description), gender, voices);
     return res.json({ voiceId });
+  }));
+
+  app.post('/api/video/match-similar-voices', asyncRoute(async (req, res) => {
+    const { audioUrl, voices } = req.body || {};
+    if (!Array.isArray(voices) || voices.length === 0) {
+      return res.status(400).json({ error: '声音库为空，请先刷新 ElevenLabs 声音库。' });
+    }
+
+    const normalizedVoices = voices
+      .map(normalizeVoiceForMatching)
+      .filter((voice): voice is NonNullable<ReturnType<typeof normalizeVoiceForMatching>> => Boolean(voice))
+      .slice(0, 120);
+    if (normalizedVoices.length === 0) {
+      return res.status(400).json({ error: '没有可用于匹配的 ElevenLabs 声音。' });
+    }
+
+    const { filePath, mimeType } = resolveUploadedAudioUrlPath(audioUrl);
+    const audioBase64 = await fs.promises.readFile(filePath, { encoding: 'base64' });
+    const ai = getGoogleAI();
+    const prompt = `
+你是专业配音导演。请先聆听用户提供的人声音频，判断它的性别倾向、年龄感、音色、能量、语速、情绪、口音/语言特征和适合的配音用途。
+然后在给定 ElevenLabs 声音库中选择最相似、最适合替代该人声的 3-6 个声音。
+
+重要约束：
+- 只从候选声音库中选择，不要编造 voiceId。
+- 如果音频中有人声不清晰，也要基于可听到的部分给出保守推荐。
+- score 为 0-100，表示相似程度和可替代程度。
+- reason 用中文，简短说明为什么推荐。
+
+候选声音库 JSON：
+${JSON.stringify(normalizedVoices)}
+
+请只返回 JSON：
+{
+  "sourceDescription": "中文描述",
+  "gender": "male" | "female" | "unknown",
+  "recommendations": [
+    { "voiceId": "候选声音ID", "score": 88, "reason": "中文原因" }
+  ]
+}`;
+
+    try {
+      const response = await generateGeminiContent(ai, {
+        model: 'gemini-3.5-flash',
+        contents: [{
+          parts: [
+            { inlineData: { data: audioBase64, mimeType } },
+            { text: prompt },
+          ],
+        }],
+        config: {
+          responseMimeType: 'application/json',
+          maxOutputTokens: 4096,
+          responseSchema: {
+            type: Type.OBJECT,
+            required: ['sourceDescription', 'gender', 'recommendations'],
+            properties: {
+              sourceDescription: { type: Type.STRING },
+              gender: { type: Type.STRING },
+              recommendations: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  required: ['voiceId', 'score', 'reason'],
+                  properties: {
+                    voiceId: { type: Type.STRING },
+                    score: { type: Type.NUMBER },
+                    reason: { type: Type.STRING },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      const parsed = JSON.parse(String(response.text || '{}'));
+      const validVoiceIds = new Set(normalizedVoices.map(voice => voice.id));
+      const seenVoiceIds = new Set<string>();
+      let recommendations = Array.isArray(parsed.recommendations)
+        ? parsed.recommendations
+          .map((item: any) => ({
+            voiceId: String(item?.voiceId || '').trim(),
+            score: parseNumber(item?.score, 70, 0, 100),
+            reason: String(item?.reason || '音色、语气和用途接近。').slice(0, 160),
+          }))
+          .filter((item: any) => {
+            if (!validVoiceIds.has(item.voiceId) || seenVoiceIds.has(item.voiceId)) return false;
+            seenVoiceIds.add(item.voiceId);
+            return true;
+          })
+          .sort((left: any, right: any) => right.score - left.score)
+          .slice(0, 6)
+        : [];
+
+      if (recommendations.length === 0) {
+        recommendations = localVoiceMatchFallback(normalizedVoices, parsed.gender);
+      }
+
+      return res.json({
+        sourceDescription: String(parsed.sourceDescription || '已根据拆分人声音频提取音色特征。').slice(0, 300),
+        gender: parsed.gender === 'male' || parsed.gender === 'female' ? parsed.gender : 'unknown',
+        recommendations,
+      });
+    } catch (error) {
+      console.warn('Gemini similar voice matching failed; using local metadata fallback:', error);
+      return res.json({
+        sourceDescription: 'AI听辨暂时不可用，已根据声音库标签给出保守推荐。',
+        gender: 'unknown',
+        recommendations: localVoiceMatchFallback(normalizedVoices),
+      });
+    }
   }));
 
   app.post('/api/ai/elevenlabs/sound-effect', asyncRoute(async (req, res) => {
@@ -1613,6 +1794,8 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
 - 每条字幕使用稳定且唯一的 subtitleId，例如 "subtitle-001"、"subtitle-002"。
 - text 必须逐字对应画面中的当前字幕；speaker 表示当前说话人或画面角色，无法确定时写 "unknown"。
 - subtitleStartTime/subtitleEndTime 是该字幕实际出现和消失的时间，是绝对不可越过的硬边界。
+- 配音片段必须严格按画面字幕块切分：屏幕字幕文字一旦变化，上一句立即结束并新建下一句；同一句字幕只要画面文字未变化，就保持为一个片段。
+- startTime 必须等于 subtitleStartTime，duration 必须等于 subtitleEndTime - subtitleStartTime；口型时间只作为 lipStartTime/lipEndTime 元数据，不得用来缩短配音片段。
 - lipStartTime/lipEndTime 是该字幕区间内说话人口型开始和结束活动的时间，必须限制在字幕边界内。
 - 当 lipSyncConfidence 较高且口型与字幕的交集有效时，dubbing 的 startTime=max(subtitleStartTime, lipStartTime)，结束时间=min(subtitleEndTime, lipEndTime)，duration 等于二者之差。
 - 当置信度低、没有可见人脸、属于画外音或口型交集无效时，startTime=subtitleStartTime，duration=subtitleEndTime-subtitleStartTime。
@@ -1892,19 +2075,11 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
           const timingSource = String(clip.timingSource || (
             lipSyncConfidence >= 0.6 ? 'subtitle+lip' : 'subtitle'
           )).trim().slice(0, 80);
-          const fallbackToSubtitle = lipSyncConfidence < 0.6
-            || /^(subtitle|subtitle-only|visual-estimate)$/i.test(timingSource)
-            || /voice.?over|off.?screen|no.?face/i.test(timingSource);
-          const intersectedStartTime = Math.max(subtitleStartTime, lipStartTime);
-          const intersectedEndTime = Math.min(subtitleEndTime, lipEndTime);
-          const hasUsableLipIntersection = !fallbackToSubtitle
-            && intersectedEndTime - intersectedStartTime >= 0.1;
-          const synchronizedStartTime = hasUsableLipIntersection
-            ? intersectedStartTime
-            : subtitleStartTime;
-          const synchronizedEndTime = hasUsableLipIntersection
-            ? intersectedEndTime
-            : subtitleEndTime;
+          // Dubbing clip timing must follow the visible subtitle block. Lip
+          // timing remains metadata for risk hints, but it must not shorten the
+          // editable sentence or the later split vocal segment.
+          const synchronizedStartTime = subtitleStartTime;
+          const synchronizedEndTime = subtitleEndTime;
           const normalizedClip: any = {
             ...clip,
             id: String(clip.id || `clip-${index + 1}`),
@@ -1953,14 +2128,6 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
           && currentCueText
           && previousCueText === currentCueText,
         );
-        const compatibleProgressiveText = Boolean(
-          previousCueText
-          && currentCueText
-          && (
-            previousCueText.startsWith(currentCueText)
-            || currentCueText.startsWith(previousCueText)
-          ),
-        );
         const previousSpeaker = String(previous?.speaker || 'unknown').trim().toLowerCase();
         const currentSpeaker = String(clip.speaker || 'unknown').trim().toLowerCase();
         const compatibleSpeaker = previousSpeaker === currentSpeaker
@@ -1975,7 +2142,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
           && clip.subtitleStartTime <= previous.subtitleEndTime + 0.05,
         );
         const isDuplicateCue = sameOriginalSubtitleId
-          ? compatibleProgressiveText && sameIdTouchesPreviousCue
+          ? sameText && sameIdTouchesPreviousCue
           : !bothHaveSubtitleIds && sameText && overlapsPreviousCue;
         if (previous && compatibleSpeaker && isDuplicateCue) {
           if (String(clip.text || '').length > String(previous.text || '').length) {
@@ -2030,15 +2197,8 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
           Math.max(clip.lipStartTime, clip.lipEndTime),
         );
 
-        const fallbackToSubtitle = clip.lipSyncConfidence < 0.6
-          || /^(subtitle|subtitle-only|visual-estimate)$/i.test(clip.timingSource)
-          || /voice.?over|off.?screen|no.?face/i.test(clip.timingSource);
-        const lipStart = Math.max(clip.subtitleStartTime, clip.lipStartTime);
-        const lipEnd = Math.min(clip.subtitleEndTime, clip.lipEndTime);
-        const useLipWindow = !fallbackToSubtitle && lipEnd - lipStart >= 0.1;
-        clip.startTime = useLipWindow ? lipStart : clip.subtitleStartTime;
-        const synchronizedEndTime = useLipWindow ? lipEnd : clip.subtitleEndTime;
-        clip.duration = Number(Math.max(0, synchronizedEndTime - clip.startTime).toFixed(3));
+        clip.startTime = clip.subtitleStartTime;
+        clip.duration = Number(Math.max(0, clip.subtitleEndTime - clip.subtitleStartTime).toFixed(3));
       });
 
       // Discard only genuinely invalid/fully overlapped cues; never truncate by count.
@@ -2241,7 +2401,6 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
     const original = makeOutput('original');
     const vocal = makeOutput('vocal');
     const music = makeOutput('music');
-    const ambience = makeOutput('ambience_sfx');
     let separationEngine: 'demucs-local' | 'elevenlabs-audio-isolation' | 'ffmpeg-filter-fallback' = 'ffmpeg-filter-fallback';
 
     try {
@@ -2264,7 +2423,6 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       const demucsResult = await tryRunDemucsSeparation(original.filePath, baseName, {
         vocalPath: vocal.filePath,
         musicPath: music.filePath,
-        ambiencePath: ambience.filePath,
       });
 
       if (demucsResult.ok) {
@@ -2329,15 +2487,6 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
           music.filePath,
         ]);
 
-        await runFfmpegFile([
-          '-y',
-          '-hide_banner',
-          '-loglevel', 'error',
-          '-i', original.filePath,
-          '-af', 'highpass=f=2600,afftdn=nf=-20,volume=0.55,aformat=sample_rates=48000:channel_layouts=stereo',
-          '-c:a', 'pcm_s16le',
-          ambience.filePath,
-        ]);
       }
 
       const requestedSegments = Array.isArray(vocalSegments) ? vocalSegments.slice(0, 200) : [];
@@ -2390,7 +2539,6 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
         stems: {
           vocalUrl: vocal.audioUrl,
           musicUrl: music.audioUrl,
-          ambienceUrl: ambience.audioUrl,
           originalUrl: original.audioUrl,
         },
         vocalSegments: segmentResults,

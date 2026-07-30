@@ -53,9 +53,9 @@ const ORIGINAL_AUDIO_CLIP_ID = 'clip-original-audio';
 const SPLIT_VOCAL_TRACK_ID = 'split-vocal-track';
 const SPLIT_MUSIC_TRACK_ID = 'split-music-track';
 const SPLIT_AMBIENCE_TRACK_ID = 'split-ambience-track';
+const SPLIT_DUBBING_EDIT_TRACK_ID = 'split-dubbing-edit-track';
 const SPLIT_VOCAL_CLIP_ID = 'clip-split-vocal';
 const SPLIT_MUSIC_CLIP_ID = 'clip-split-music';
-const SPLIT_AMBIENCE_CLIP_ID = 'clip-split-ambience';
 
 type SoundtrackTrackType = 'bgm' | 'sfx' | 'dubbing' | 'original';
 
@@ -76,7 +76,6 @@ type OriginalAudioSeparationResult = {
   stems?: {
     vocalUrl?: string;
     musicUrl?: string;
-    ambienceUrl?: string;
     originalUrl?: string;
   };
   vocalSegments?: Array<{
@@ -84,6 +83,11 @@ type OriginalAudioSeparationResult = {
     audioUrl: string;
     sourceAudioDuration?: number;
   }>;
+};
+type SimilarVoiceRecommendation = {
+  voiceId: string;
+  score: number;
+  reason: string;
 };
 
 export interface SoundtrackTrack {
@@ -391,6 +395,11 @@ export default function VideoSoundtrack() {
   const [originalAudioSplitProgress, setOriginalAudioSplitProgress] = useState<number>(0);
   const [originalAudioSplitStage, setOriginalAudioSplitStage] = useState<string>('等待开始');
   const originalAudioSplitRunRef = useRef(0);
+  const [subtitleSegmentStatus, setSubtitleSegmentStatus] = useState<OriginalAudioSplitStatus>('idle');
+  const [subtitleSegmentProgress, setSubtitleSegmentProgress] = useState<number>(0);
+  const [subtitleSegmentStage, setSubtitleSegmentStage] = useState<string>('等待识别字幕');
+  const [subtitleSegmentCount, setSubtitleSegmentCount] = useState<number>(0);
+  const subtitleSegmentRunRef = useRef(0);
 
   // Audio export and tracks stem states
   const [isExportingMixed, setIsExportingMixed] = useState<boolean>(false);
@@ -479,6 +488,9 @@ export default function VideoSoundtrack() {
   const [voiceSearchQuery, setVoiceSearchQuery] = useState<string>('');
   const [voiceGenderFilter, setVoiceGenderFilter] = useState<'all' | 'male' | 'female'>('all');
   const [voiceActiveCategory, setVoiceActiveCategory] = useState<string>('全部');
+  const [isMatchingSimilarVoices, setIsMatchingSimilarVoices] = useState<boolean>(false);
+  const [similarVoiceRecommendations, setSimilarVoiceRecommendations] = useState<SimilarVoiceRecommendation[]>([]);
+  const [similarVoiceSourceDescription, setSimilarVoiceSourceDescription] = useState<string>('');
   const [playingVoiceId, setPlayingVoiceId] = useState<string | null>(null);
 
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -865,7 +877,7 @@ export default function VideoSoundtrack() {
           timingDirty: Boolean(clip.timingDirty),
         };
         const linkedSubtitleWindow = getLinkedSubtitleWindow(normalizedClip);
-        if (linkedSubtitleWindow) {
+        if (linkedSubtitleWindow && !normalizedClip.timingDirty) {
           const subtitleDuration = linkedSubtitleWindow.end - linkedSubtitleWindow.start;
           const boundedDuration = Math.min(normalizedClip.duration, subtitleDuration);
           const boundedStartTime = Math.min(
@@ -1670,22 +1682,6 @@ export default function VideoSoundtrack() {
           newDuration = parseFloat(newDuration.toFixed(2));
         }
 
-        const linkedSubtitleWindow = getLinkedSubtitleWindow(clip);
-        if (linkedSubtitleWindow) {
-          const subtitleDuration = linkedSubtitleWindow.end - linkedSubtitleWindow.start;
-          const minimumDuration = Math.min(0.5, subtitleDuration);
-          newDuration = Math.min(
-            subtitleDuration,
-            Math.max(minimumDuration, newDuration),
-          );
-          newStartTime = Math.min(
-            Math.max(linkedSubtitleWindow.start, newStartTime),
-            linkedSubtitleWindow.end - newDuration,
-          );
-          newStartTime = Number(newStartTime.toFixed(3));
-          newDuration = Number(newDuration.toFixed(3));
-        }
-
         const isDubbingClip = tracksRef.current.find(
           track => track.id === clip.trackId,
         )?.type === 'dubbing';
@@ -1843,9 +1839,14 @@ export default function VideoSoundtrack() {
       }];
     }
     return sourceDubbingCues.map((cue, index) => {
-      const cueStart = Math.max(sourceStart, normalizeOptionalTime(cue.startTime) ?? sourceStart);
-      const cueDuration = normalizePositiveNumber(cue.duration, 1);
-      const cueEnd = Math.min(sourceEnd, cueStart + cueDuration);
+      const cueStart = Math.max(
+        sourceStart,
+        normalizeOptionalTime(cue.subtitleStartTime) ?? normalizeOptionalTime(cue.startTime) ?? sourceStart,
+      );
+      const cueEnd = Math.min(
+        sourceEnd,
+        normalizeOptionalTime(cue.subtitleEndTime) ?? cueStart + normalizePositiveNumber(cue.duration, 1),
+      );
       return {
         id: `clip-split-vocal-${index + 1}`,
         startTime: cueStart,
@@ -1876,14 +1877,6 @@ export default function VideoSoundtrack() {
         isMuted: false,
         isSoloed: false,
       },
-      {
-        id: SPLIT_AMBIENCE_TRACK_ID,
-        name: '拆分环境 / 音效',
-        type: 'sfx',
-        volume: 0.85,
-        isMuted: false,
-        isSoloed: false,
-      },
     ];
 
     const existingTracks = tracksRef.current;
@@ -1901,8 +1894,9 @@ export default function VideoSoundtrack() {
         nextTracks.push(splitTrack);
       }
     }
-    tracksRef.current = nextTracks;
-    setTracks(nextTracks);
+    const cleanedNextTracks = nextTracks.filter(track => track.id !== SPLIT_AMBIENCE_TRACK_ID);
+    tracksRef.current = cleanedNextTracks;
+    setTracks(cleanedNextTracks);
 
     const sourceStart = normalizeOptionalTime(sourceClip.startTime) ?? 0;
     const sourceDuration = normalizePositiveNumber(sourceClip.duration, safeDuration);
@@ -1915,9 +1909,14 @@ export default function VideoSoundtrack() {
     );
     const splitVocalClips: TimelineClip[] = sourceDubbingCues.length > 0
       ? sourceDubbingCues.map((cue, index) => {
-        const cueStart = Math.max(sourceStart, normalizeOptionalTime(cue.startTime) ?? sourceStart);
-        const cueDuration = normalizePositiveNumber(cue.duration, 1);
-        const cueEnd = Math.min(sourceEnd, cueStart + cueDuration);
+        const cueStart = Math.max(
+          sourceStart,
+          normalizeOptionalTime(cue.subtitleStartTime) ?? normalizeOptionalTime(cue.startTime) ?? sourceStart,
+        );
+        const cueEnd = Math.min(
+          sourceEnd,
+          normalizeOptionalTime(cue.subtitleEndTime) ?? cueStart + normalizePositiveNumber(cue.duration, 1),
+        );
         const safeCueDuration = Math.max(0.05, cueEnd - cueStart);
         const subtitleStartTime = normalizeOptionalTime(cue.subtitleStartTime) ?? cueStart;
         const subtitleEndTime = normalizeOptionalTime(cue.subtitleEndTime) ?? cueStart + safeCueDuration;
@@ -1995,23 +1994,6 @@ export default function VideoSoundtrack() {
         voiceDirty: false,
         timingDirty: false,
       },
-      {
-        id: SPLIT_AMBIENCE_CLIP_ID,
-        trackId: SPLIT_AMBIENCE_TRACK_ID,
-        origin: 'manual',
-        name: '拆分环境 / 音效（待生成）',
-        prompt: 'Separated ambience and sound effects stem from source video audio',
-        startTime: sourceStart,
-        duration: sourceDuration,
-        volume: 0.85,
-        audioUrl: separationResult?.stems?.ambienceUrl,
-        audioSource: separationResult?.stems?.ambienceUrl ? 'uploaded' : undefined,
-        speed: 1,
-        autoSpeed: 1,
-        sourceAudioDuration: sourceDuration,
-        voiceDirty: false,
-        timingDirty: false,
-      },
     ];
 
     const splitClipIds = new Set(splitClipDefinitions.map(clip => clip.id));
@@ -2044,7 +2026,13 @@ export default function VideoSoundtrack() {
     }
     invalidateTrackOutputs('dubbing');
     invalidateTrackOutputs('bgm');
-    invalidateTrackOutputs('sfx');
+    Object.keys(audioInstancesRef.current).forEach(clipId => {
+      const cachedClip = clipsRef.current.find(clip => clip.id === clipId);
+      if (cachedClip?.trackId === SPLIT_AMBIENCE_TRACK_ID) {
+        audioInstancesRef.current[clipId].pause();
+        delete audioInstancesRef.current[clipId];
+      }
+    });
   };
 
   const selectedClip = clips.find(c => c.id === selectedClipId);
@@ -2067,7 +2055,11 @@ export default function VideoSoundtrack() {
   const selectedTrackVoice = selectedTrackVoiceId
     ? displayVoices.find(voice => voice.id === selectedTrackVoiceId)
     : undefined;
+  const similarVoiceRecommendationById = new Map<string, SimilarVoiceRecommendation>(
+    similarVoiceRecommendations.map(recommendation => [recommendation.voiceId, recommendation]),
+  );
   const filteredVoiceOptions = displayVoices.filter(voice => {
+    if (similarVoiceRecommendations.length > 0 && !similarVoiceRecommendationById.has(voice.id)) return false;
     if (voiceActiveCategory !== '全部' && voice.category !== voiceActiveCategory) return false;
     if (voiceGenderFilter !== 'all' && voice.gender !== voiceGenderFilter) return false;
     const query = voiceSearchQuery.trim().toLowerCase();
@@ -2077,16 +2069,49 @@ export default function VideoSoundtrack() {
       || voice.category.toLowerCase().includes(query)
       || voice.description.toLowerCase().includes(query)
       || voice.tags.some(tag => tag.toLowerCase().includes(query));
+  }).sort((left, right) => {
+    if (similarVoiceRecommendations.length === 0) return 0;
+    return (similarVoiceRecommendationById.get(right.id)?.score || 0)
+      - (similarVoiceRecommendationById.get(left.id)?.score || 0);
   });
+
+  const getOrCreateSplitDubbingEditTrack = () => {
+    const existingTrack = tracksRef.current.find(track => track.id === SPLIT_DUBBING_EDIT_TRACK_ID);
+    if (existingTrack) return existingTrack;
+
+    const baseDubbingTrack = tracksRef.current.find(track => track.id === 'dubbing')
+      || tracksRef.current.find(track => (
+        track.type === 'dubbing'
+        && track.id !== SPLIT_VOCAL_TRACK_ID
+        && track.id !== SPLIT_DUBBING_EDIT_TRACK_ID
+      ));
+    const nextTrack: SoundtrackTrack = {
+      id: SPLIT_DUBBING_EDIT_TRACK_ID,
+      name: '可编辑配音片段',
+      type: 'dubbing',
+      volume: 1,
+      isMuted: false,
+      isSoloed: false,
+      defaultVoiceId: baseDubbingTrack?.defaultVoiceId || DEFAULT_DUBBING_VOICE_ID,
+    };
+    const nextTracks = [...tracksRef.current, nextTrack];
+    tracksRef.current = nextTracks;
+    setTracks(nextTracks);
+    return nextTrack;
+  };
 
   const handleSelectTrack = (trackId: string) => {
     stopVoicePreview();
+    setSimilarVoiceRecommendations([]);
+    setSimilarVoiceSourceDescription('');
     setSelectedTrackId(trackId);
     setSelectedClipId(null);
   };
 
   const handleSelectClip = (clipId: string) => {
     stopVoicePreview();
+    setSimilarVoiceRecommendations([]);
+    setSimilarVoiceSourceDescription('');
     setSelectedClipId(clipId);
     setSelectedTrackId(null);
   };
@@ -3004,12 +3029,16 @@ export default function VideoSoundtrack() {
           const subtitleEndTime = normalizeOptionalTime(
             clip.subtitleEndTime ?? clip.subtitleEnd,
           ) ?? subtitleStartTime + clipDuration;
+          const timelineStartTime = isDubbingClip ? subtitleStartTime : clipStartTime;
+          const timelineDuration = isDubbingClip
+            ? Math.max(0.05, subtitleEndTime - subtitleStartTime)
+            : clipDuration;
           return {
             ...clip,
             id: `clip-ai-${clip.trackId}-${analysisRunId}-${clipIndex}`,
             origin: 'ai' as const,
-            startTime: clipStartTime,
-            duration: clipDuration,
+            startTime: timelineStartTime,
+            duration: timelineDuration,
             voiceId: isDubbingClip
               ? clipTrack.defaultVoiceId || DEFAULT_DUBBING_VOICE_ID
               : clip.voiceId,
@@ -3138,6 +3167,53 @@ export default function VideoSoundtrack() {
   const handleGenerateAudioClip = async (clipId: string) => {
     const clip = clipsRef.current.find(c => c.id === clipId);
     if (!clip) return;
+    if (clip.trackId === SPLIT_VOCAL_TRACK_ID) {
+      const targetTrack = getOrCreateSplitDubbingEditTrack();
+      const editableClipId = `clip-editable-from-${clip.id}`;
+      const existingEditableClip = clipsRef.current.find(item => item.id === editableClipId);
+      const editableClip: TimelineClip = {
+        ...clip,
+        ...existingEditableClip,
+        id: editableClipId,
+        trackId: targetTrack.id,
+        name: existingEditableClip?.name || `${clip.name}（重配）`,
+        prompt: clip.prompt,
+        text: clip.text,
+        voiceId: targetTrack.defaultVoiceId || existingEditableClip?.voiceId || DEFAULT_DUBBING_VOICE_ID,
+        startTime: clip.startTime,
+        duration: clip.duration,
+        speaker: clip.speaker,
+        subtitleId: clip.subtitleId,
+        subtitleStartTime: clip.subtitleStartTime,
+        subtitleEndTime: clip.subtitleEndTime,
+        lipStartTime: clip.lipStartTime,
+        lipEndTime: clip.lipEndTime,
+        lipSyncConfidence: clip.lipSyncConfidence,
+        timingSource: clip.timingSource || 'split-vocal-reference',
+        audioUrl: existingEditableClip?.audioUrl,
+        audioSource: existingEditableClip?.audioSource,
+        sourceAudioDuration: existingEditableClip?.sourceAudioDuration,
+        origin: 'ai',
+        isGenerating: false,
+        error: undefined,
+        voiceDirty: false,
+        timingDirty: false,
+      };
+      const nextClips = existingEditableClip
+        ? clipsRef.current.map(item => item.id === editableClipId ? editableClip : item)
+        : [...clipsRef.current, editableClip];
+      clipsRef.current = nextClips;
+      setClips(nextClips);
+      setSelectedTrackId(null);
+      setSelectedClipId(editableClipId);
+      setToast({
+        message: '已保留拆分人声，并在“可编辑配音片段”轨生成新的配音片段。',
+        type: 'info',
+      });
+      window.setTimeout(() => setToast(null), 3_000);
+      await handleGenerateAudioClip(editableClipId);
+      return;
+    }
     const generationTimingSignature = getDubbingTimingSignature(clip);
 
     // Update state to isGenerating
@@ -3460,7 +3536,7 @@ export default function VideoSoundtrack() {
       const sourceStartTime = normalizeOptionalTime(sourceClip.startTime) ?? 0;
       const sourceDuration = normalizePositiveNumber(sourceClip.duration, safeDuration);
       setOriginalAudioSplitProgress(38);
-      setOriginalAudioSplitStage('正在服务器提取原声并分离人声、音乐、环境/音效...');
+      setOriginalAudioSplitStage('正在服务器提取原声并分离人声、音乐/伴奏...');
 
       const response = await fetch('/api/video/separate-original-audio', {
         method: 'POST',
@@ -3484,9 +3560,9 @@ export default function VideoSoundtrack() {
 
       setOriginalAudioSplitProgress(100);
       setOriginalAudioSplitStatus('completed');
-      setOriginalAudioSplitStage('已生成可播放的人声、音乐、环境/音效拆分音频，并已写入多轨。');
+      setOriginalAudioSplitStage('已生成可播放的人声、音乐/伴奏拆分音频，并已写入多轨。');
       showAudioRepairWorkflowToast(
-        `已完成原声拆分：人声短句、音乐、环境/音效都已绑定音频。${data.engine ? ` 引擎：${data.engine}` : ''}`,
+        `已完成原声拆分：人声短句、音乐/伴奏都已绑定音频。${data.engine ? ` 引擎：${data.engine}` : ''}`,
       );
     } catch (err: any) {
       if (originalAudioSplitRunRef.current !== runId) return;
@@ -3505,8 +3581,291 @@ export default function VideoSoundtrack() {
     showAudioRepairWorkflowToast('已放置“声音克隆/参考”入口：下一步会从拆分出来的人声轨提取参考音色，并应用到当前配音轨。');
   };
 
-  const handleLipFriendlyRewriteWorkflow = () => {
+  const handleMatchSimilarVoicesWorkflow = async () => {
+    if (!selectedTrack || selectedTrack.type !== 'dubbing') return;
+    if (isMatchingSimilarVoices) return;
+
+    const selectedReferenceClip = selectedClip
+      && selectedClip.audioUrl
+      && selectedClipTrack?.type === 'dubbing'
+      ? selectedClip
+      : clipsRef.current.find(clip => (
+        clip.trackId === selectedTrack.id && Boolean(clip.audioUrl)
+      )) || clipsRef.current.find(clip => (
+        clip.trackId === SPLIT_VOCAL_TRACK_ID && Boolean(clip.audioUrl)
+      ));
+
+    const referenceAudioUrl = selectedReferenceClip?.audioUrl;
+    if (!referenceAudioUrl) {
+      showAudioRepairWorkflowToast('请先拆分出可播放的人声片段，或选中一个带音频的人声短句后再匹配相似声音。');
+      return;
+    }
+
+    setIsMatchingSimilarVoices(true);
+    setSimilarVoiceRecommendations([]);
+    setSimilarVoiceSourceDescription('');
+    setVoiceSearchQuery('');
+    setVoiceGenderFilter('all');
+    setVoiceActiveCategory('全部');
+    try {
+      const response = await fetch('/api/video/match-similar-voices', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audioUrl: referenceAudioUrl,
+          voices: displayVoices,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || '匹配相似声音失败，请稍后重试。');
+      }
+      const recommendations: SimilarVoiceRecommendation[] = Array.isArray(data.recommendations)
+        ? data.recommendations
+          .map((item: any) => ({
+            voiceId: String(item?.voiceId || ''),
+            score: Number(item?.score || 0),
+            reason: String(item?.reason || '音色接近。'),
+          }))
+          .filter((item: SimilarVoiceRecommendation) => (
+            item.voiceId && displayVoices.some(voice => voice.id === item.voiceId)
+          ))
+        : [];
+      if (recommendations.length === 0) {
+        throw new Error('没有在当前声音库中找到相似声音，请刷新 ElevenLabs 声音库后再试。');
+      }
+      setSimilarVoiceRecommendations(recommendations);
+      setSimilarVoiceSourceDescription(String(data.sourceDescription || '已根据拆分人声音频匹配相似声音。'));
+      setToast({ message: `已匹配到 ${recommendations.length} 个相似声音，声音库已切换为推荐列表。`, type: 'success' });
+      window.setTimeout(() => setToast(null), 4_000);
+    } catch (err: any) {
+      const message = err?.message || '匹配相似声音失败，请稍后重试。';
+      setToast({ message, type: 'error' });
+      window.setTimeout(() => setToast(null), 4_000);
+    } finally {
+      setIsMatchingSimilarVoices(false);
+    }
+  };
+
+  const handleDeprecatedLipFriendlyRewriteWorkflow = () => {
     showAudioRepairWorkflowToast('已放置“口型友好局部修改”入口：下一步会评估新台词长度、原句停顿和口型风险，再局部重配这一句。');
+  };
+
+  const handleLipFriendlyRewriteWorkflow = async () => {
+    if (subtitleSegmentStatus === 'running') return;
+    if (!videoFile) {
+      setSubtitleSegmentStatus('error');
+      setSubtitleSegmentProgress(0);
+      setSubtitleSegmentStage('请先上传一个带字幕/台词的视频。');
+      return;
+    }
+    if (isUploadingToServer || !videoFile.isUploaded) {
+      setSubtitleSegmentStatus('error');
+      setSubtitleSegmentProgress(0);
+      setSubtitleSegmentStage('视频还在上传到服务器，请上传完成后再识别字幕。');
+      return;
+    }
+
+    const isUsingSplitVocalAsSource = selectedClip?.trackId === SPLIT_VOCAL_TRACK_ID
+      || selectedTrack?.id === SPLIT_VOCAL_TRACK_ID;
+    const targetTrack = isUsingSplitVocalAsSource
+      ? getOrCreateSplitDubbingEditTrack()
+      : selectedClipTrack?.type === 'dubbing'
+        ? selectedClipTrack
+        : selectedTrack?.type === 'dubbing'
+          ? selectedTrack
+          : tracksRef.current.find(track => track.type === 'dubbing');
+    if (!targetTrack) {
+      setSubtitleSegmentStatus('error');
+      setSubtitleSegmentProgress(0);
+      setSubtitleSegmentStage('没有找到可写入的配音轨道，请先添加一条配音轨。');
+      return;
+    }
+
+    const runId = subtitleSegmentRunRef.current + 1;
+    subtitleSegmentRunRef.current = runId;
+    setSubtitleSegmentStatus('running');
+    setSubtitleSegmentProgress(8);
+    setSubtitleSegmentCount(0);
+    setSubtitleSegmentStage('正在读取视频字幕变化和口型窗口...');
+    setError(null);
+
+    try {
+      setSubtitleSegmentProgress(28);
+      const response = await fetch('/api/video/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileName: videoFile.name,
+          videoDuration,
+          bgmEnabled: false,
+          sfxEnabled: false,
+          dubbingEnabled: true,
+          analysisMode: 'full-video-dubbing-sync',
+          dubbingSyncMode: 'subtitle-and-lip',
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || '字幕识别失败，请稍后重试。');
+      }
+      if (subtitleSegmentRunRef.current !== runId) return;
+
+      setSubtitleSegmentProgress(68);
+      setSubtitleSegmentStage('正在按字幕变化生成可编辑配音片段...');
+
+      const existingTargetClips = clipsRef.current.filter(clip => clip.trackId === targetTrack.id);
+      const matchedExistingClipIds = new Set<string>();
+      const findReusableClip = (
+        subtitleId: string,
+        startTime: number,
+        duration: number,
+      ) => {
+        const endTime = startTime + duration;
+        const exactSubtitleMatch = existingTargetClips.find(clip => (
+          clip.subtitleId
+          && clip.subtitleId === subtitleId
+          && !matchedExistingClipIds.has(clip.id)
+        ));
+        if (exactSubtitleMatch) return exactSubtitleMatch;
+        let bestMatch: TimelineClip | undefined;
+        let bestOverlap = 0;
+        existingTargetClips.forEach(clip => {
+          if (matchedExistingClipIds.has(clip.id)) return;
+          const clipStart = normalizeOptionalTime(clip.startTime) ?? 0;
+          const clipDuration = normalizePositiveNumber(clip.duration, 0);
+          const clipEnd = clipStart + clipDuration;
+          const overlap = Math.max(0, Math.min(endTime, clipEnd) - Math.max(startTime, clipStart));
+          const overlapRatio = overlap / Math.max(duration, clipDuration, 0.001);
+          if (overlapRatio > bestOverlap) {
+            bestOverlap = overlapRatio;
+            bestMatch = clip;
+          }
+        });
+        return bestOverlap >= 0.45 ? bestMatch : undefined;
+      };
+
+      const analysisRunId = Date.now().toString(36);
+      const subtitleClips: TimelineClip[] = Array.isArray(data.clips)
+        ? data.clips
+          .filter((clip: any) => String(clip?.trackId || '') === 'dubbing')
+          .map((clip: any, index: number): TimelineClip | null => {
+            const rawText = String(clip?.text ?? clip?.dialogue ?? clip?.caption ?? '').trim();
+            if (!rawText) return null;
+            const rawStart = normalizeOptionalTime(clip?.subtitleStartTime ?? clip?.subtitleStart ?? clip?.startTime) ?? 0;
+            const rawEnd = normalizeOptionalTime(clip?.subtitleEndTime ?? clip?.subtitleEnd);
+            const rawDuration = normalizePositiveNumber(clip?.duration, 0);
+            const startTime = Math.min(safeDuration, Math.max(0, rawStart));
+            const fallbackEndTime = startTime + (rawDuration > 0 ? rawDuration : 2);
+            const endTime = Math.min(
+              safeDuration,
+              Math.max(startTime + 0.05, rawEnd ?? fallbackEndTime),
+            );
+            const duration = Number(Math.max(0.05, endTime - startTime).toFixed(3));
+            const subtitleId = String(
+              clip?.subtitleId || clip?.id || `subtitle-${String(index + 1).padStart(3, '0')}`,
+            );
+            const reusableClip = findReusableClip(subtitleId, startTime, duration);
+            if (reusableClip) matchedExistingClipIds.add(reusableClip.id);
+            const prompt = String(
+              clip?.prompt
+              || clip?.tonePrompt
+              || clip?.emotionPrompt
+              || `Tone reference: match the on-screen character's emotion, pace, breath, and delivery for this subtitle line.`,
+            ).trim();
+            return {
+              ...reusableClip,
+              id: reusableClip?.id || `clip-subtitle-dubbing-${analysisRunId}-${index}`,
+              trackId: targetTrack.id,
+              name: `字幕配音 ${String(index + 1).padStart(2, '0')}`,
+              prompt,
+              text: rawText,
+              voiceId: targetTrack.defaultVoiceId || reusableClip?.voiceId || DEFAULT_DUBBING_VOICE_ID,
+              startTime,
+              duration,
+              volume: reusableClip?.volume ?? 0.85,
+              origin: 'ai',
+              isGenerating: false,
+              error: undefined,
+              speed: normalizeManualSpeed(reusableClip?.speed),
+              autoSpeed: normalizeAutoSpeed(reusableClip?.autoSpeed),
+              sourceAudioDuration: reusableClip?.sourceAudioDuration,
+              audioUrl: reusableClip?.audioUrl,
+              audioSource: reusableClip?.audioSource,
+              speaker: typeof clip?.speaker === 'string' ? clip.speaker.trim() : reusableClip?.speaker,
+              subtitleId,
+              subtitleStartTime: startTime,
+              subtitleEndTime: endTime,
+              lipStartTime: normalizeOptionalTime(clip?.lipStartTime ?? clip?.lipStart) ?? startTime,
+              lipEndTime: normalizeOptionalTime(clip?.lipEndTime ?? clip?.lipEnd) ?? endTime,
+              lipSyncConfidence: normalizeUnitVolume(clip?.lipSyncConfidence ?? clip?.syncConfidence, 0),
+              timingSource: typeof clip?.timingSource === 'string' ? clip.timingSource : 'subtitle',
+              timingDirty: false,
+              voiceDirty: false,
+            };
+          })
+          .filter(Boolean) as TimelineClip[]
+        : [];
+
+      if (subtitleClips.length === 0) {
+        throw new Error('没有识别到可按字幕切分的台词片段；请确认视频里有清晰字幕或人声台词。');
+      }
+
+      setSubtitleSegmentProgress(88);
+      const nextClipIds = new Set(subtitleClips.map(clip => clip.id));
+      clipsRef.current
+        .filter(clip => clip.trackId === targetTrack.id && !nextClipIds.has(clip.id))
+        .forEach(clip => {
+          const cachedAudio = audioInstancesRef.current[clip.id];
+          if (cachedAudio) {
+            cachedAudio.pause();
+            delete audioInstancesRef.current[clip.id];
+          }
+        });
+
+      setClips(prev => [
+        ...prev.filter(clip => clip.trackId !== targetTrack.id),
+        ...subtitleClips,
+      ].sort((left, right) => left.startTime - right.startTime));
+      subtitleClips.forEach(clip => {
+        if (clip.audioUrl) {
+          replaceCachedClipAudio(
+            clip.id,
+            clip.audioUrl,
+            clip.volume,
+            getEffectiveClipSpeed(clip),
+            clip.trackId,
+          );
+        }
+      });
+      setSelectedTrackId(null);
+      setSelectedClipId(subtitleClips[0]?.id || null);
+
+      setSubtitleSegmentCount(subtitleClips.length);
+      setSubtitleSegmentProgress(100);
+      setSubtitleSegmentStatus('completed');
+      setSubtitleSegmentStage(
+        isUsingSplitVocalAsSource
+          ? `已在“可编辑配音片段”轨生成 ${subtitleClips.length} 个片段，拆分人声已保留。`
+          : `已按字幕变化生成 ${subtitleClips.length} 个可编辑配音片段。`,
+      );
+      setToast({
+        message: isUsingSplitVocalAsSource
+          ? `已新建/更新“可编辑配音片段”轨，拆分人声轨不会被覆盖。`
+          : `已按字幕变化生成 ${subtitleClips.length} 个配音片段；每段都带台词文案和语气提示词。`,
+        type: 'success',
+      });
+      window.setTimeout(() => setToast(null), 4_000);
+    } catch (err: any) {
+      if (subtitleSegmentRunRef.current !== runId) return;
+      const message = err?.message || '字幕识别失败，请稍后重试。';
+      setSubtitleSegmentStatus('error');
+      setSubtitleSegmentProgress(0);
+      setSubtitleSegmentStage(message);
+      setError(message);
+      setToast({ message, type: 'error' });
+      window.setTimeout(() => setToast(null), 4_000);
+    }
   };
 
   // Mix all audio layers into original video using high performance ffmpeg
@@ -5008,7 +5367,7 @@ export default function VideoSoundtrack() {
                       <div className="rounded-xl border border-amber-500/20 bg-amber-950/10 p-3">
                         <p className="text-[10px] font-bold uppercase tracking-wider text-amber-300">视频原声轨说明</p>
                         <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
-                          这里用于控制整条原声轨的音量、静音和导出参与状态。需要拆分人声/音乐/音效时，请点击时间轴里的“视频原声”音频片段，在片段属性面板中处理。
+                          这里用于控制整条原声轨的音量、静音和导出参与状态。需要拆分人声/音乐时，请点击时间轴里的“视频原声”音频片段，在片段属性面板中处理；单独音效建议在音效轨里新增或上传。
                         </p>
                       </div>
                     )}
@@ -5045,7 +5404,7 @@ export default function VideoSoundtrack() {
                         <div className="space-y-3 rounded-xl border border-purple-500/25 bg-purple-950/20 p-3">
                           <div className="flex items-start justify-between gap-3">
                             <div>
-                              <p className="text-[10px] font-bold uppercase tracking-wider text-purple-300">声音克隆 / 参考</p>
+                              <p className="text-[10px] font-bold uppercase tracking-wider text-purple-300">相似声音匹配 / 参考</p>
                               <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
                                 从拆分出来的人声轨提取当前角色的音色、语气和情绪参考，再应用到本配音轨的局部重配。
                               </p>
@@ -5054,14 +5413,19 @@ export default function VideoSoundtrack() {
                           </div>
                           <button
                             type="button"
-                            onClick={handleCloneVoiceWorkflow}
-                            className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-purple-500/30 bg-purple-500/10 px-3 py-2 text-[10px] font-bold text-purple-200 transition-colors hover:bg-purple-500/20 hover:text-white"
+                            onClick={() => void handleMatchSimilarVoicesWorkflow()}
+                            disabled={isMatchingSimilarVoices}
+                            className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-purple-500/30 bg-purple-500/10 px-3 py-2 text-[10px] font-bold text-purple-200 transition-colors hover:bg-purple-500/20 hover:text-white disabled:cursor-wait disabled:opacity-60"
                           >
-                            <Sparkles className="h-3.5 w-3.5" />
-                            <span>从人声轨克隆/提取参考声音</span>
+                            {isMatchingSimilarVoices ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Sparkles className="h-3.5 w-3.5" />
+                            )}
+                            <span>{isMatchingSimilarVoices ? '正在匹配相似声音...' : '匹配 ElevenLabs 相似声音'}</span>
                           </button>
                           <p className="text-[9px] leading-relaxed text-slate-600">
-                            建议优先使用已授权声音；克隆后可选择应用到整条配音轨，或只用于选中短句的局部修补。
+                            建议优先使用已授权声音；匹配后可在下方声音库中试听并应用到整条配音轨，或只用于选中短句的局部修补。
                           </p>
                         </div>
 
@@ -5185,6 +5549,27 @@ export default function VideoSoundtrack() {
                           })}
                         </div>
 
+                        {similarVoiceRecommendations.length > 0 && (
+                          <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/10 p-2 text-[10px] leading-relaxed text-emerald-100">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-bold text-emerald-300">已显示相似声音推荐</span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSimilarVoiceRecommendations([]);
+                                  setSimilarVoiceSourceDescription('');
+                                }}
+                                className="shrink-0 rounded border border-emerald-500/30 px-1.5 py-0.5 text-[9px] font-bold text-emerald-200 hover:bg-emerald-500/20"
+                              >
+                                清除推荐
+                              </button>
+                            </div>
+                            {similarVoiceSourceDescription && (
+                              <p className="mt-1 text-emerald-100/70">{similarVoiceSourceDescription}</p>
+                            )}
+                          </div>
+                        )}
+
                         <div className="max-h-72 space-y-1 overflow-y-auto pr-1 custom-scrollbar">
                           {isLoadingVoices ? (
                             <div className="flex items-center justify-center gap-2 py-8 text-[11px] text-slate-500">
@@ -5197,6 +5582,7 @@ export default function VideoSoundtrack() {
                             filteredVoiceOptions.map(voice => {
                               const isSelected = selectedTrackVoiceId === voice.id;
                               const isVoicePlaying = playingVoiceId === voice.id;
+                              const similarRecommendation = similarVoiceRecommendationById.get(voice.id);
                               return (
                                 <div
                                   key={voice.id}
@@ -5219,6 +5605,12 @@ export default function VideoSoundtrack() {
                                       <span className="shrink-0 rounded border border-slate-800 bg-slate-950 px-1 text-[9px] text-slate-500">{voice.category}</span>
                                     </div>
                                     <p className="mt-1 truncate text-[10px] text-slate-500">{voice.description}</p>
+                                    {similarRecommendation && (
+                                      <div className="mt-1 rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 text-[9px] leading-relaxed text-emerald-200">
+                                        <span className="font-bold text-emerald-300">相似度 {Math.round(similarRecommendation.score)}%</span>
+                                        <span className="ml-1 text-emerald-200/80">{similarRecommendation.reason}</span>
+                                      </div>
+                                    )}
                                     <div className="mt-1 flex flex-wrap gap-1">
                                       {voice.tags.slice(0, 3).map(tag => (
                                         <span key={tag} className="rounded-sm bg-purple-500/10 px-1 text-[9px] text-purple-400">#{tag}</span>
@@ -5304,7 +5696,7 @@ export default function VideoSoundtrack() {
                           <div>
                             <p className="text-[10px] font-bold uppercase tracking-wider text-amber-300">一键拆分与可编辑配音片段</p>
                             <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
-                              当前选中的是视频原声音频片段。系统会基于这段原始素材分离人声、音乐、环境/音效，并结合字幕、停顿和画面口型，把人声切成可单句修改的配音片段。
+                              当前选中的是视频原声音频片段。系统会基于这段原始素材分离人声和音乐/伴奏，并结合字幕、停顿和画面口型，把人声切成可单句修改的配音片段。单独音效建议在音效轨里手动新增或上传。
                             </p>
                           </div>
                           <Film className="h-5 w-5 shrink-0 text-amber-400" />
@@ -5393,6 +5785,72 @@ export default function VideoSoundtrack() {
                             className="w-full h-16 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 resize-none custom-scrollbar"
                           />
                         </div>
+                        <div className="rounded-xl border border-cyan-500/25 bg-cyan-950/20 p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="text-[10px] font-bold uppercase tracking-wider text-cyan-200">字幕识别 / 可编辑台词片段</p>
+                              <p className="mt-1 text-[10px] leading-relaxed text-slate-400">
+                                按视频画面里的字幕变化来分段；每个片段会带台词文案、语气提示词，并保留字幕时间和口型参考。
+                              </p>
+                            </div>
+                            <Gauge className="h-5 w-5 shrink-0 text-cyan-300" />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => void handleLipFriendlyRewriteWorkflow()}
+                            disabled={subtitleSegmentStatus === 'running'}
+                            className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-[10px] font-bold text-cyan-100 transition-colors hover:bg-cyan-500/20 hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {subtitleSegmentStatus === 'running' ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Sparkles className="h-3.5 w-3.5" />
+                            )}
+                            <span>{subtitleSegmentStatus === 'running' ? '正在识别字幕并生成片段...' : '识别字幕并生成配音片段'}</span>
+                          </button>
+                          {subtitleSegmentStatus !== 'idle' && (
+                            <div className={`mt-3 rounded-lg border px-2.5 py-2 ${
+                              subtitleSegmentStatus === 'error'
+                                ? 'border-red-500/25 bg-red-500/10'
+                                : subtitleSegmentStatus === 'completed'
+                                  ? 'border-emerald-500/25 bg-emerald-500/10'
+                                  : 'border-cyan-500/25 bg-slate-950/50'
+                            }`}>
+                              <div className="mb-1.5 flex items-center justify-between gap-2">
+                                <span className={`text-[10px] font-bold ${
+                                  subtitleSegmentStatus === 'error'
+                                    ? 'text-red-300'
+                                    : subtitleSegmentStatus === 'completed'
+                                      ? 'text-emerald-300'
+                                      : 'text-cyan-200'
+                                }`}>
+                                  {subtitleSegmentStage}
+                                </span>
+                                <span className="shrink-0 font-mono text-[10px] font-bold text-slate-400">
+                                  {Math.round(subtitleSegmentProgress)}%
+                                </span>
+                              </div>
+                              <div className="h-1.5 overflow-hidden rounded-full bg-slate-950">
+                                <div
+                                  className={`h-full rounded-full transition-all duration-300 ${
+                                    subtitleSegmentStatus === 'error'
+                                      ? 'bg-red-500'
+                                      : subtitleSegmentStatus === 'completed'
+                                        ? 'bg-emerald-500'
+                                        : 'bg-cyan-400'
+                                  }`}
+                                  style={{ width: `${Math.min(100, Math.max(0, subtitleSegmentProgress))}%` }}
+                                />
+                              </div>
+                              {subtitleSegmentStatus === 'completed' && subtitleSegmentCount > 0 && (
+                                <p className="mt-1.5 text-[10px] text-emerald-200">
+                                  已写入 {subtitleSegmentCount} 个按字幕变化切分的配音片段。
+                                </p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                        {false && (
                         <div className="rounded-xl border border-rose-500/20 bg-rose-950/15 p-3">
                           <div className="flex items-start justify-between gap-3">
                             <div>
@@ -5412,6 +5870,7 @@ export default function VideoSoundtrack() {
                             <span>检查口型风险并局部重配此句</span>
                           </button>
                         </div>
+                        )}
                         {(() => {
                           const dubbingTrack = tracks.find(track => track.id === selectedClip.trackId);
                           const inheritedVoiceId = dubbingTrack?.defaultVoiceId || DEFAULT_DUBBING_VOICE_ID;
