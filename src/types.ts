@@ -41,9 +41,13 @@ export interface TimelineClip {
   voiceId?: string; // Voice used by generated audio, or the inherited voice before generation
   startTime: number; // in seconds
   duration: number; // in seconds
-  volume: number; // Clip-relative volume from 0 to 1; multiplied by its track volume
+  volume: number; // Clip fader position from 0 to 1; 0.8 is unity, above 0.8 adds gain
   audioUrl?: string; // Generated or uploaded file URL
   audioSource?: 'generated' | 'uploaded';
+  sourceOffset?: number; // Offset in the source audio file, used when a clip has been cut from a longer source
+  fadeIn?: number; // Fade-in duration in seconds
+  fadeOut?: number; // Fade-out duration in seconds
+  audioEnhancementPreset?: 'none' | 'voice_clean' | 'voice_warm' | 'sfx_punch' | 'bgm_bed' | 'broadcast';
   origin?: 'ai' | 'manual'; // Whether the timeline item came from AI planning or a user action
   isGenerating?: boolean;
   error?: string;

@@ -9,6 +9,7 @@ import { createServer as createViteServer } from 'vite';
 import JSZip from 'jszip';
 import ffmpegStatic from 'ffmpeg-static';
 import { DEFAULT_CATEGORIES, INITIAL_SOUNDS } from './src/data/sfxData';
+import type { SoundEffect } from './src/data/sfxData';
 import multer from 'multer';
 import {
   analyzeAudioDesign,
@@ -56,7 +57,7 @@ async function startServer() {
   const MAX_CHUNK_COUNT = 100;
   const normalizeUnitVolume = (value: unknown) => (
     typeof value === 'number' && Number.isFinite(value)
-      ? Math.min(1, Math.max(0, value))
+      ? Math.min(4, Math.max(0, value))
       : 1
   );
   const ALLOWED_VIDEO_EXTENSIONS = new Set([
@@ -261,6 +262,156 @@ async function startServer() {
   const categoriesFile = path.join(dataDir, 'categories.json');
   const soundsFile = path.join(dataDir, 'sounds.json');
 
+  type AudioAssetSource = 'uploaded' | 'generated' | 'external' | 'library';
+  type AudioAssetKind = 'music' | 'sfx';
+  type IndexedAudioAsset = SoundEffect & {
+    assetKind: AudioAssetKind;
+    source: AudioAssetSource;
+    downloadUrl: string;
+    searchableText: string;
+    score?: number;
+  };
+
+  const readSfxSounds = (): SoundEffect[] => {
+    try {
+      if (!fs.existsSync(soundsFile)) return INITIAL_SOUNDS;
+      const content = fs.readFileSync(soundsFile, 'utf-8');
+      const parsed = JSON.parse(content);
+      return Array.isArray(parsed) ? parsed : INITIAL_SOUNDS;
+    } catch (err) {
+      console.error('Error reading indexed sounds:', err);
+      return INITIAL_SOUNDS;
+    }
+  };
+
+  const normalizeSearchText = (value: unknown) => String(value || '').trim().toLowerCase();
+
+  const inferAudioAssetSource = (sound: SoundEffect): AudioAssetSource => {
+    const url = normalizeSearchText(sound.url);
+    const fileName = normalizeSearchText(sound.fileName);
+    const designer = normalizeSearchText(sound.designer);
+
+    if (url.startsWith('/uploads/') || fileName.startsWith('upload_') || fileName.startsWith('audio_')) {
+      return 'uploaded';
+    }
+    if (designer.includes('gemini') || designer.includes('elevenlabs') || designer.includes('ai')) {
+      return 'generated';
+    }
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      return 'external';
+    }
+    return 'library';
+  };
+
+  const inferAudioAssetKind = (sound: SoundEffect): AudioAssetKind => {
+    const text = normalizeSearchText(`${sound.category} ${sound.subcategory || ''} ${sound.fileName} ${sound.path}`);
+    return text.includes('music')
+      || text.includes('bgm')
+      || text.includes('配乐')
+      || text.includes('音乐')
+      || text.includes('闊充箰')
+      ? 'music'
+      : 'sfx';
+  };
+
+  const toIndexedAudioAsset = (sound: SoundEffect): IndexedAudioAsset => {
+    const source = inferAudioAssetSource(sound);
+    const assetKind = inferAudioAssetKind(sound);
+    const searchableText = [
+      sound.name,
+      sound.fileName,
+      sound.category,
+      sound.subcategory,
+      sound.designer,
+      sound.path,
+      sound.format,
+      sound.sampleRate,
+      sound.channels,
+      ...(sound.tags || []),
+      source,
+      assetKind,
+    ].map(normalizeSearchText).filter(Boolean).join(' ');
+
+    return {
+      ...sound,
+      source,
+      assetKind,
+      downloadUrl: sound.url || '',
+      searchableText,
+    };
+  };
+
+  const scoreAudioAsset = (asset: IndexedAudioAsset, query: string) => {
+    const normalizedQuery = normalizeSearchText(query);
+    if (!normalizedQuery) return 0;
+
+    const tokens = normalizedQuery.split(/[\s,，、/\\|;；]+/).filter(Boolean);
+    const name = normalizeSearchText(asset.name);
+    const fileName = normalizeSearchText(asset.fileName);
+    const category = normalizeSearchText(asset.category);
+    const subcategory = normalizeSearchText(asset.subcategory);
+    const tags = (asset.tags || []).map(normalizeSearchText);
+
+    let score = 0;
+    for (const token of tokens) {
+      if (name === token || fileName === token) score += 120;
+      if (name.includes(token)) score += 60;
+      if (fileName.includes(token)) score += 55;
+      if (tags.some(tag => tag === token)) score += 45;
+      if (tags.some(tag => tag.includes(token))) score += 28;
+      if (category.includes(token)) score += 22;
+      if (subcategory.includes(token)) score += 18;
+      if (asset.searchableText.includes(token)) score += 8;
+    }
+    return score;
+  };
+
+  const getAudioAssetStats = (assets: IndexedAudioAsset[]) => {
+    const byCategory: Record<string, number> = {};
+    const byFormat: Record<string, number> = {};
+    const bySource: Record<AudioAssetSource, number> = {
+      uploaded: 0,
+      generated: 0,
+      external: 0,
+      library: 0,
+    };
+    const byKind: Record<AudioAssetKind, number> = {
+      music: 0,
+      sfx: 0,
+    };
+    const tagCounts: Record<string, number> = {};
+
+    for (const asset of assets) {
+      byCategory[asset.category || '未分类'] = (byCategory[asset.category || '未分类'] || 0) + 1;
+      byFormat[asset.format || 'UNKNOWN'] = (byFormat[asset.format || 'UNKNOWN'] || 0) + 1;
+      bySource[asset.source] += 1;
+      byKind[asset.assetKind] += 1;
+      for (const tag of asset.tags || []) {
+        if (!tag) continue;
+        tagCounts[tag] = (tagCounts[tag] || 0) + 1;
+      }
+    }
+
+    return {
+      total: assets.length,
+      uploaded: bySource.uploaded,
+      generated: bySource.generated,
+      external: bySource.external,
+      library: bySource.library,
+      byCategory,
+      byFormat,
+      bySource,
+      byKind,
+      topTags: Object.entries(tagCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 20)
+        .map(([tag, count]) => ({ tag, count })),
+      indexedAt: new Date().toISOString(),
+    };
+  };
+
+  const getIndexedAudioAssets = () => readSfxSounds().map(toIndexedAudioAsset);
+
   // Serve uploaded files statically
   app.use('/uploads', express.static(uploadsDir));
 
@@ -352,6 +503,83 @@ async function startServer() {
     } catch (err: any) {
       console.error('Error saving sounds:', err);
       return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/audio-assets', (req, res) => {
+    try {
+      const query = typeof req.query.q === 'string' ? req.query.q : '';
+      const category = normalizeSearchText(req.query.category);
+      const subcategory = normalizeSearchText(req.query.subcategory);
+      const tag = normalizeSearchText(req.query.tag);
+      const format = normalizeSearchText(req.query.format);
+      const source = normalizeSearchText(req.query.source);
+      const kind = normalizeSearchText(req.query.kind);
+      const limitValue = Number.parseInt(String(req.query.limit || '120'), 10);
+      const limit = Number.isFinite(limitValue) ? Math.min(Math.max(limitValue, 1), 500) : 120;
+
+      const assets = getIndexedAudioAssets()
+        .map(asset => ({ ...asset, score: scoreAudioAsset(asset, query) }))
+        .filter(asset => {
+          if (query && (asset.score || 0) <= 0) return false;
+          if (category && normalizeSearchText(asset.category) !== category) return false;
+          if (subcategory && normalizeSearchText(asset.subcategory) !== subcategory) return false;
+          if (tag && !(asset.tags || []).some(item => normalizeSearchText(item) === tag || normalizeSearchText(item).includes(tag))) return false;
+          if (format && normalizeSearchText(asset.format) !== format) return false;
+          if (source && asset.source !== source) return false;
+          if (kind && asset.assetKind !== kind) return false;
+          return true;
+        })
+        .sort((a, b) => {
+          if (query) return (b.score || 0) - (a.score || 0);
+          if (a.source === 'uploaded' && b.source !== 'uploaded') return -1;
+          if (a.source !== 'uploaded' && b.source === 'uploaded') return 1;
+          return a.name.localeCompare(b.name, 'zh-CN');
+        });
+
+      return res.json({
+        assets: assets.slice(0, limit),
+        total: assets.length,
+        limit,
+        indexedAt: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      console.error('Error searching audio assets:', err);
+      return res.status(500).json({ error: err.message || 'Failed to search audio assets' });
+    }
+  });
+
+  app.get('/api/audio-assets/stats', (_req, res) => {
+    try {
+      return res.json(getAudioAssetStats(getIndexedAudioAssets()));
+    } catch (err: any) {
+      console.error('Error reading audio asset stats:', err);
+      return res.status(500).json({ error: err.message || 'Failed to read audio asset stats' });
+    }
+  });
+
+  app.post('/api/audio-assets/reindex', (_req, res) => {
+    try {
+      const assets = getIndexedAudioAssets();
+      return res.json({
+        success: true,
+        message: 'Audio asset index refreshed from the existing SFX library.',
+        stats: getAudioAssetStats(assets),
+      });
+    } catch (err: any) {
+      console.error('Error refreshing audio asset index:', err);
+      return res.status(500).json({ error: err.message || 'Failed to refresh audio asset index' });
+    }
+  });
+
+  app.get('/api/audio-assets/:id', (req, res) => {
+    try {
+      const asset = getIndexedAudioAssets().find(item => item.id === req.params.id);
+      if (!asset) return res.status(404).json({ error: 'Audio asset not found' });
+      return res.json(asset);
+    } catch (err: any) {
+      console.error('Error reading audio asset:', err);
+      return res.status(500).json({ error: err.message || 'Failed to read audio asset' });
     }
   });
 
@@ -812,16 +1040,45 @@ async function startServer() {
         Math.min(clipDuration, subtitleEndTime - clipStartTime),
       );
     }
+    const clipSpeed = parseNumber(clip?.speed, 1, 0.25, 4);
+    const sourceOffset = parseNumber(clip?.sourceOffset, 0, 0, 3_600);
     const delayMs = Math.max(0, Math.round(clipStartTime * 1_000));
-    const atempoFilter = buildAtempoFilter(clip?.speed);
+    const atempoFilter = buildAtempoFilter(clipSpeed);
     const speedSegment = atempoFilter ? `,${atempoFilter}` : '';
+    const sourceReadDuration = Number((clipDuration * clipSpeed).toFixed(3));
+    const sourceTrimSegment = `,atrim=start=${Number(sourceOffset.toFixed(3))}:duration=${sourceReadDuration},asetpts=PTS-STARTPTS`;
     // Generated speech must never bleed into the following subtitle. Padding
     // keeps a short line aligned to its full window; atrim caps long lines.
     const dubbingWindow = isDubbingClip
       ? `,apad,atrim=duration=${Number(clipDuration.toFixed(3))},asetpts=PTS-STARTPTS`
       : '';
+    const fadeIn = parseNumber(clip?.fadeIn, 0, 0, Math.min(5, clipDuration / 2));
+    const fadeOut = parseNumber(clip?.fadeOut, 0, 0, Math.min(5, clipDuration / 2));
+    const fadeInSegment = fadeIn > 0.001
+      ? `,afade=t=in:st=0:d=${Number(fadeIn.toFixed(3))}`
+      : '';
+    const fadeOutSegment = fadeOut > 0.001
+      ? `,afade=t=out:st=${Number(Math.max(0, clipDuration - fadeOut).toFixed(3))}:d=${Number(fadeOut.toFixed(3))}`
+      : '';
+    const enhancementPreset = String(clip?.audioEnhancementPreset || 'none').trim();
+    const enhancementSegment = (() => {
+      switch (enhancementPreset) {
+        case 'voice_clean':
+          return ',highpass=f=80,lowpass=f=13000,afftdn=nf=-25,dynaudnorm=f=150:g=8';
+        case 'voice_warm':
+          return ',highpass=f=70,lowpass=f=14000,equalizer=f=180:t=q:w=1:g=1.5,equalizer=f=3200:t=q:w=1:g=1.2,dynaudnorm=f=150:g=6';
+        case 'broadcast':
+          return ',highpass=f=90,lowpass=f=12000,equalizer=f=3500:t=q:w=1:g=2,dynaudnorm=f=120:g=7,alimiter=limit=0.95';
+        case 'sfx_punch':
+          return ',highpass=f=30,equalizer=f=100:t=q:w=1:g=1.5,equalizer=f=4500:t=q:w=1:g=2,alimiter=limit=0.98';
+        case 'bgm_bed':
+          return ',highpass=f=35,lowpass=f=16000,equalizer=f=2500:t=q:w=1.2:g=-1.5,alimiter=limit=0.92';
+        default:
+          return '';
+      }
+    })();
 
-    return `[${inputIndex}:a]aformat=sample_rates=${sampleRate}:channel_layouts=stereo${speedSegment}${dubbingWindow},volume=${normalizeUnitVolume(clip?.volume)},adelay=${delayMs}|${delayMs}[${outputLabel}]`;
+    return `[${inputIndex}:a]aformat=sample_rates=${sampleRate}:channel_layouts=stereo${sourceTrimSegment}${speedSegment}${dubbingWindow}${enhancementSegment}${fadeInSegment}${fadeOutSegment},volume=${normalizeUnitVolume(clip?.volume)},adelay=${delayMs}|${delayMs}[${outputLabel}]`;
   };
 
   const resolveValidatedUploadedVideo = async (fileName: unknown) => {

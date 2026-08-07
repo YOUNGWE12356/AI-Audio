@@ -11,10 +11,7 @@ import {
   Waves, 
   Mic, 
   Settings, 
-  Languages, 
-  Clock, 
   Folder, 
-  History,
   Volume2,
   Database,
   ClipboardList,
@@ -43,12 +40,6 @@ export default function Sidebar({ currentTab, setCurrentTab, isMobileOpen, onMob
     { id: 'sfx-requirements' as const, label: '音效需求表', icon: ClipboardList },
     { id: 'sfx-library' as const, label: '音效库', icon: Database },
     { id: 'settings' as const, label: '设置', icon: Settings },
-  ];
-
-  const comingSoonFeatures = [
-    { label: '翻译字幕', icon: Languages },
-    { label: '时间线', icon: Clock },
-    { label: '生成历史', icon: History },
   ];
 
   React.useEffect(() => {
@@ -118,25 +109,6 @@ export default function Sidebar({ currentTab, setCurrentTab, isMobileOpen, onMob
           })}
         </div>
 
-        {/* Coming Soon Segment */}
-        <div className="space-y-1.5">
-          <p className="px-3 text-[10px] font-bold text-slate-400 tracking-wider uppercase mb-2">即将推出</p>
-          {comingSoonFeatures.map((item, index) => {
-            const Icon = item.icon;
-            return (
-              <div
-                key={index}
-                className="flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold text-slate-400 cursor-not-allowed"
-              >
-                <div className="flex items-center gap-3">
-                  <Icon className="w-4 h-4 text-slate-300" />
-                  <span>{item.label}</span>
-                </div>
-                <span className="text-[9px] scale-90 text-slate-400 bg-slate-50 border border-slate-150 px-1 rounded font-normal">Soon</span>
-              </div>
-            );
-          })}
-        </div>
       </div>
 
       {/* Footer User Profile (Light Emerald style) */}

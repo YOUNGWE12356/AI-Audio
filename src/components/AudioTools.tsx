@@ -22,7 +22,9 @@ import {
   RefreshCw,
   FolderOpen,
   Music,
-  Sparkles
+  Sparkles,
+  BarChart3,
+  FileText
 } from 'lucide-react';
 import { 
   resampleAudioBuffer, 
@@ -31,6 +33,102 @@ import {
 } from '../services/audioEncoderService';
 import { isolateAudio } from '../services/elevenLabsService';
 import AudioWorkstation from './AudioWorkstation';
+
+const AudioAnalyzer = React.lazy(() => import('./AudioAnalyzer'));
+
+interface FactoryConversionResult {
+  id: string;
+  sourceName: string;
+  sourceRelativePath?: string;
+  sourceSize: number;
+  sourceType: string;
+  duration?: number;
+  blob?: Blob;
+  url?: string;
+  error?: string;
+  loudness?: FactoryLoudnessInfo;
+}
+
+interface FactoryLoudnessInfo {
+  beforeLufs: number;
+  afterLufs: number;
+  targetLufs: number;
+  requestedGainDb: number;
+  appliedGainDb: number;
+  peakCeilingDb: number;
+  peakDb: number;
+}
+
+type RenameCaseMode = 'keep' | 'lower' | 'upper' | 'snake' | 'pascal';
+type RenameNumberPosition = 'none' | 'prefix' | 'suffix';
+
+interface RenameRules {
+  template: string;
+  category: string;
+  scene: string;
+  action: string;
+  variation: string;
+  findText: string;
+  replaceText: string;
+  removeText: string;
+  removeFromStart: number;
+  removeFromEnd: number;
+  prefix: string;
+  suffix: string;
+  separator: string;
+  caseMode: RenameCaseMode;
+  normalizeSeparators: boolean;
+  numberPosition: RenameNumberPosition;
+  numberStart: number;
+  numberPadding: number;
+}
+
+interface RenamePreviewItem {
+  id: string;
+  file: File;
+  sourceName: string;
+  sourceRelativePath: string;
+  outputName: string;
+  outputRelativePath: string;
+  status: 'ready' | 'changed' | 'duplicate-fixed' | 'manual';
+  statusLabel: string;
+}
+
+const FACTORY_LOUDNESS_PRESETS = [
+  { label: 'Avatar 出场', value: -13.5, hint: '-12 ~ -15 LUFS', group: '导出' },
+  { label: '礼物', value: -16, hint: '-15 ~ -17 LUFS', group: '导出' },
+  { label: 'JK 击杀', value: -21.5, hint: '-20 ~ -23 LUFS', group: '导出' },
+  { label: 'JK 其他', value: -26.5, hint: '-25 ~ -28 LUFS', group: '导出' },
+  { label: '酒馆质疑', value: -20, hint: '-20 LUFS', group: '导出' },
+  { label: '酒馆出牌', value: -25, hint: '-25 LUFS', group: '导出' },
+  { label: '游戏 BGM 音乐', value: -21.5, hint: '-20 ~ -23 LUFS', group: '游戏' },
+  { label: '游戏环境氛围', value: -35, hint: '-30 ~ -40 LUFS', group: '游戏' },
+  { label: '游戏音效', value: -25, hint: '-20 ~ -30 LUFS', group: '游戏' },
+  { label: '游戏语音', value: -16.5, hint: '-15 ~ -18 LUFS', group: '游戏' },
+];
+
+const MIN_ANALYSIS_DB = -80;
+
+const DEFAULT_RENAME_RULES: RenameRules = {
+  template: '{original}',
+  category: 'sfx',
+  scene: 'ui',
+  action: '',
+  variation: '',
+  findText: '',
+  replaceText: '',
+  removeText: '',
+  removeFromStart: 0,
+  removeFromEnd: 0,
+  prefix: '',
+  suffix: '',
+  separator: '_',
+  caseMode: 'keep',
+  normalizeSeparators: true,
+  numberPosition: 'none',
+  numberStart: 1,
+  numberPadding: 2,
+};
 
 // Helper to extract audio from video/audio files via MediaElement fallback
 async function extractAudioViaMediaElement(file: File): Promise<AudioBuffer> {
@@ -179,8 +277,89 @@ async function decodeAudioWithFallback(file: File, arrayBuffer: ArrayBuffer, aud
   }
 }
 
+function linearToDb(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return MIN_ANALYSIS_DB;
+  return Math.max(MIN_ANALYSIS_DB, 20 * Math.log10(value));
+}
+
+function dbToLinear(db: number): number {
+  return 10 ** (db / 20);
+}
+
+function analyzeAudioLoudness(buffer: AudioBuffer) {
+  let sumSquares = 0;
+  let peak = 0;
+  let sampleCount = 0;
+
+  for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+    const data = buffer.getChannelData(channel);
+    sampleCount += data.length;
+    for (let index = 0; index < data.length; index += 1) {
+      const sample = data[index];
+      sumSquares += sample * sample;
+      const abs = Math.abs(sample);
+      if (abs > peak) peak = abs;
+    }
+  }
+
+  const rms = sampleCount > 0 ? Math.sqrt(sumSquares / sampleCount) : 0;
+
+  return {
+    lufs: linearToDb(rms),
+    peak,
+    peakDb: linearToDb(peak),
+  };
+}
+
+function normalizeAudioBuffer(
+  sourceBuffer: AudioBuffer,
+  targetLufs: number,
+  peakCeilingDb: number,
+): { buffer: AudioBuffer; loudness: FactoryLoudnessInfo } {
+  const before = analyzeAudioLoudness(sourceBuffer);
+  const requestedGainDb = targetLufs - before.lufs;
+  const requestedGainLinear = dbToLinear(requestedGainDb);
+  const peakCeilingLinear = dbToLinear(peakCeilingDb);
+
+  let appliedGainLinear = requestedGainLinear;
+  const projectedPeak = before.peak * requestedGainLinear;
+  if (before.peak > 0 && projectedPeak > peakCeilingLinear) {
+    appliedGainLinear = peakCeilingLinear / before.peak;
+  }
+
+  const outputBuffer = new AudioBuffer({
+    length: sourceBuffer.length,
+    numberOfChannels: sourceBuffer.numberOfChannels,
+    sampleRate: sourceBuffer.sampleRate,
+  });
+
+  for (let channel = 0; channel < sourceBuffer.numberOfChannels; channel += 1) {
+    const input = sourceBuffer.getChannelData(channel);
+    const output = outputBuffer.getChannelData(channel);
+    for (let index = 0; index < input.length; index += 1) {
+      output[index] = Math.max(-1, Math.min(1, input[index] * appliedGainLinear));
+    }
+  }
+
+  const after = analyzeAudioLoudness(outputBuffer);
+  const appliedGainDb = linearToDb(appliedGainLinear);
+
+  return {
+    buffer: outputBuffer,
+    loudness: {
+      beforeLufs: before.lufs,
+      afterLufs: after.lufs,
+      targetLufs,
+      requestedGainDb,
+      appliedGainDb,
+      peakCeilingDb,
+      peakDb: after.peakDb,
+    },
+  };
+}
+
 export default function AudioTools() {
-  const [activeSubTab, setActiveSubTab] = useState<'workstation' | 'factory' | 'isolation'>('workstation');
+  const [activeSubTab, setActiveSubTab] = useState<'workstation' | 'analysis' | 'factory' | 'renamer' | 'isolation'>('workstation');
 
   // ==========================================================
   // COMMON STATE / FUNCTIONS
@@ -192,6 +371,57 @@ export default function AudioTools() {
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+  };
+
+  const formatLufs = (value: number): string => {
+    if (!Number.isFinite(value) || value <= MIN_ANALYSIS_DB + 0.1) return '静音';
+    return `${value.toFixed(1)} LUFS`;
+  };
+
+  const formatSignedDb = (value: number): string => {
+    if (!Number.isFinite(value)) return '0.0 dB';
+    return `${value >= 0 ? '+' : ''}${value.toFixed(1)} dB`;
+  };
+
+  const getFactoryFilePath = (file: File): string => (
+    (file as any).webkitRelativePath || file.name
+  );
+
+  const getFactoryOutputFileName = (sourceName: string): string => {
+    const baseName = sourceName.substring(0, sourceName.lastIndexOf('.')) || sourceName;
+    return `${baseName}_converted.${factoryFormat}`;
+  };
+
+  const sanitizeArchiveName = (name: string): string => (
+    name.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim() || 'converted_audio'
+  );
+
+  const getFactoryOutputFolderName = (): string => {
+    const relativePaths = factoryResults
+      .map((item) => item.sourceRelativePath)
+      .filter((path): path is string => Boolean(path && path.includes('/')));
+    const rootCandidates = relativePaths
+      .map((path) => path.split('/')[0])
+      .filter((root): root is string => Boolean(root));
+    const uniqueRoots = Array.from(new Set<string>(rootCandidates));
+
+    if (uniqueRoots.length === 1) return `${sanitizeArchiveName(uniqueRoots[0])}_1`;
+
+    if (factoryFile) {
+      const baseName = factoryFile.name.substring(0, factoryFile.name.lastIndexOf('.')) || factoryFile.name;
+      return `${sanitizeArchiveName(baseName)}_1`;
+    }
+
+    return 'converted_audio_1';
+  };
+
+  const getFactoryOutputRelativePath = (item: FactoryConversionResult): string => {
+    const relativePath = item.sourceRelativePath || item.sourceName;
+    const normalizedPath = relativePath.replace(/\\/g, '/').replace(/^\/+/, '');
+    const pathParts = normalizedPath.split('/').filter(Boolean);
+    const fileName = pathParts.pop() || item.sourceName;
+    if (pathParts.length > 0) pathParts.shift();
+    return [...pathParts, getFactoryOutputFileName(fileName)].join('/') || getFactoryOutputFileName(item.sourceName);
   };
 
   // ==========================================================
@@ -279,24 +509,190 @@ export default function AudioTools() {
   // ==========================================================
   // MUSIC CONVERSION STATE
   // ==========================================================
-  const [factoryFile, setFactoryFile] = useState<File | null>(null);
+  const [factoryFiles, setFactoryFiles] = useState<File[]>([]);
   const [factoryFormat, setFactoryFormat] = useState<'mp3' | 'wav'>('mp3');
   const [factorySampleRate, setFactorySampleRate] = useState<number>(44100);
   const [factoryBitrate, setFactoryBitrate] = useState<number>(128); // for MP3
+  const [factoryNormalizeEnabled, setFactoryNormalizeEnabled] = useState<boolean>(false);
+  const [factoryTargetLufs, setFactoryTargetLufs] = useState<number>(-16);
+  const [factoryPeakCeilingDb, setFactoryPeakCeilingDb] = useState<number>(-1);
   const [factoryStatus, setFactoryStatus] = useState<string>('');
   const [factoryLoading, setFactoryLoading] = useState<boolean>(false);
   const [factoryProgress, setFactoryProgress] = useState<number>(0);
   const [factoryError, setFactoryError] = useState<string | null>(null);
-  const [factoryAudioUrl, setFactoryAudioUrl] = useState<string | null>(null);
-  const [factoryBlob, setFactoryBlob] = useState<Blob | null>(null);
-  const [factoryOriginalDuration, setFactoryOriginalDuration] = useState<number | null>(null);
+  const [factoryResults, setFactoryResults] = useState<FactoryConversionResult[]>([]);
 
   const factoryInputRef = useRef<HTMLInputElement>(null);
+  const factoryFolderInputRef = useRef<HTMLInputElement>(null);
   const [factoryDragActive, setFactoryDragActive] = useState<boolean>(false);
+  const factoryFile = factoryFiles[0] || null;
+  const primaryFactoryResult = factoryResults.find(item => item.blob && item.url) || null;
+  const factoryAudioUrl = primaryFactoryResult?.url || null;
+  const factoryBlob = primaryFactoryResult?.blob || null;
+  const factoryOriginalDuration = primaryFactoryResult?.duration || null;
+
+  const bindFactoryFolderInput = React.useCallback((node: HTMLInputElement | null) => {
+    factoryFolderInputRef.current = node;
+    if (!node) return;
+    node.webkitdirectory = true;
+    node.setAttribute('webkitdirectory', '');
+    node.setAttribute('directory', '');
+  }, []);
+
+  const openFactoryFilePicker = React.useCallback(() => {
+    if (factoryInputRef.current) factoryInputRef.current.value = '';
+    factoryInputRef.current?.click();
+  }, []);
+
+  const openFactoryFolderPicker = React.useCallback(() => {
+    const folderInput = factoryFolderInputRef.current;
+    if (!folderInput) return;
+    folderInput.value = '';
+    folderInput.webkitdirectory = true;
+    folderInput.setAttribute('webkitdirectory', '');
+    folderInput.setAttribute('directory', '');
+    folderInput.click();
+  }, []);
+
+  const revokeFactoryResultUrls = (results: FactoryConversionResult[]) => {
+    results.forEach((item) => {
+      if (item.url) URL.revokeObjectURL(item.url);
+    });
+  };
+
+  const updatePrimaryFactoryResult = (patch: Partial<FactoryConversionResult> | null) => {
+    if (patch === null) {
+      revokeFactoryResultUrls(factoryResults);
+      setFactoryResults([]);
+      return;
+    }
+    setFactoryResults((prev) => {
+      const base = prev[0] || {
+        id: factoryFile ? `${factoryFile.name}-${factoryFile.size}-${factoryFile.lastModified}` : `converted-${Date.now()}`,
+        sourceName: factoryFile?.name || 'converted-audio',
+        sourceRelativePath: factoryFile ? getFactoryFilePath(factoryFile) : undefined,
+        sourceSize: factoryFile?.size || 0,
+        sourceType: factoryFile?.type || 'unknown',
+      };
+      return [{ ...base, ...patch }, ...prev.slice(1)];
+    });
+  };
+
+  const setFactoryFile = (file: File | null) => {
+    setFactoryFiles(file ? [file] : []);
+  };
+  const setFactoryAudioUrl = (url: string | null) => updatePrimaryFactoryResult(url ? { url } : null);
+  const setFactoryBlob = (blob: Blob | null) => updatePrimaryFactoryResult(blob ? { blob } : null);
+  const setFactoryOriginalDuration = (duration: number | null) => {
+    if (duration !== null) updatePrimaryFactoryResult({ duration });
+  };
+
+  // ==========================================================
+  // BATCH RENAMER STATE
+  // ==========================================================
+  const [renameFiles, setRenameFiles] = useState<File[]>([]);
+  const [renameRules, setRenameRules] = useState<RenameRules>(DEFAULT_RENAME_RULES);
+  const [renameManualNames, setRenameManualNames] = useState<Record<string, string>>({});
+  const [renameDragActive, setRenameDragActive] = useState<boolean>(false);
+  const [renameStatus, setRenameStatus] = useState<string>('');
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [renameExporting, setRenameExporting] = useState<boolean>(false);
+  const renameInputRef = useRef<HTMLInputElement>(null);
+  const renameFolderInputRef = useRef<HTMLInputElement>(null);
+
+  const bindRenameFolderInput = React.useCallback((node: HTMLInputElement | null) => {
+    renameFolderInputRef.current = node;
+    if (!node) return;
+    node.webkitdirectory = true;
+    node.setAttribute('webkitdirectory', '');
+    node.setAttribute('directory', '');
+  }, []);
+
+  const openRenameFilePicker = React.useCallback(() => {
+    if (renameInputRef.current) renameInputRef.current.value = '';
+    renameInputRef.current?.click();
+  }, []);
+
+  const openRenameFolderPicker = React.useCallback(() => {
+    const folderInput = renameFolderInputRef.current;
+    if (!folderInput) return;
+    folderInput.value = '';
+    folderInput.webkitdirectory = true;
+    folderInput.setAttribute('webkitdirectory', '');
+    folderInput.setAttribute('directory', '');
+    folderInput.click();
+  }, []);
 
   // ==========================================================
   // MUSIC CONVERSION ACTION
   // ==========================================================
+  const isFactorySupportedFile = (file: File) => (
+    file.type.startsWith('audio/')
+    || file.type.startsWith('video/')
+    || /\.(mp3|wav|m4a|aac|ogg|flac|webm|mp4|mov|mkv|avi)$/i.test(file.name)
+  );
+
+  const handleFactoryFilesChange = (files: FileList | File[]) => {
+    const selectedFiles = Array.from(files).filter(isFactorySupportedFile);
+    if (selectedFiles.length === 0) {
+      setFactoryError('请选择音频/视频文件，或包含音频/视频的文件夹。');
+      return;
+    }
+    setFactoryFiles(selectedFiles);
+    setFactoryError(null);
+    revokeFactoryResultUrls(factoryResults);
+    setFactoryResults([]);
+    setFactoryProgress(0);
+    setFactoryStatus(`已载入 ${selectedFiles.length} 个待转换文件，请设置参数后点击“开始批量转换”。`);
+  };
+
+  const convertFactoryFile = async (
+    file: File,
+    onStepProgress: (stepProgress: number, message: string) => void,
+  ): Promise<FactoryConversionResult> => {
+    onStepProgress(0.15, `正在读取：${file.name}`);
+    const arrayBuffer = await file.arrayBuffer();
+
+    onStepProgress(0.35, `正在解码：${file.name}`);
+    const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+    const audioCtx = new AudioContext();
+    let decodedBuffer: AudioBuffer;
+    try {
+      decodedBuffer = await decodeAudioWithFallback(file, arrayBuffer, audioCtx);
+    } finally {
+      await audioCtx.close();
+    }
+
+    let processingBuffer = decodedBuffer;
+    let loudness: FactoryLoudnessInfo | undefined;
+    if (factoryNormalizeEnabled) {
+      onStepProgress(0.52, `正在统一响度至 ${factoryTargetLufs.toFixed(1)} LUFS：${file.name}`);
+      const normalized = normalizeAudioBuffer(decodedBuffer, factoryTargetLufs, factoryPeakCeilingDb);
+      processingBuffer = normalized.buffer;
+      loudness = normalized.loudness;
+    }
+
+    onStepProgress(0.68, `正在重采样至 ${factorySampleRate.toLocaleString()} Hz：${file.name}`);
+    const resampledBuffer = await resampleAudioBuffer(processingBuffer, factorySampleRate);
+
+    onStepProgress(0.85, `正在封装为 ${factoryFormat.toUpperCase()}：${file.name}`);
+    const finalBlob = factoryFormat === 'wav'
+      ? encodeWav(resampledBuffer)
+      : encodeMp3(resampledBuffer, factoryBitrate);
+
+    return {
+      id: `${file.name}-${file.size}-${file.lastModified}`,
+      sourceName: file.name,
+      sourceRelativePath: getFactoryFilePath(file),
+      sourceSize: file.size,
+      sourceType: file.type || 'unknown',
+      duration: decodedBuffer.duration,
+      blob: finalBlob,
+      url: URL.createObjectURL(finalBlob),
+      loudness,
+    };
+  };
+
   const handleFactoryFileChange = (file: File) => {
     if (!file) return;
     setFactoryFile(file);
@@ -309,6 +705,54 @@ export default function AudioTools() {
 
   const handleFactorySubmit = async () => {
     if (!factoryFile) return;
+
+    if (factoryFiles.length >= 1) {
+      setFactoryLoading(true);
+      setFactoryError(null);
+      revokeFactoryResultUrls(factoryResults);
+      setFactoryResults([]);
+      setFactoryProgress(1);
+      setFactoryStatus(factoryFiles.length > 1 ? `准备批量转换 ${factoryFiles.length} 个文件...` : '准备转换 1 个文件...');
+
+      try {
+        const nextResults: FactoryConversionResult[] = [];
+        for (let index = 0; index < factoryFiles.length; index += 1) {
+          const file = factoryFiles[index];
+          try {
+            const result = await convertFactoryFile(file, (stepProgress, message) => {
+              const overallProgress = Math.round(((index + stepProgress) / factoryFiles.length) * 100);
+              setFactoryProgress(Math.min(99, Math.max(1, overallProgress)));
+              setFactoryStatus(`[${index + 1}/${factoryFiles.length}] ${message}`);
+            });
+            nextResults.push(result);
+          } catch (err: any) {
+            nextResults.push({
+              id: `${file.name}-${file.size}-${file.lastModified}-error`,
+              sourceName: file.name,
+              sourceRelativePath: getFactoryFilePath(file),
+              sourceSize: file.size,
+              sourceType: file.type || 'unknown',
+              error: err?.message || '转换失败，请确认文件格式是否能被浏览器解码。',
+            });
+          }
+          setFactoryResults([...nextResults]);
+        }
+
+        const successCount = nextResults.filter(item => item.blob).length;
+        const failedCount = nextResults.length - successCount;
+        setFactoryProgress(100);
+        setFactoryStatus(`批量转换完成：成功 ${successCount} 个，失败 ${failedCount} 个。`);
+        setFactoryError(successCount === 0 ? '全部文件转换失败，请检查文件格式或浏览器解码支持。' : null);
+      } catch (err: any) {
+        const errMsg = err?.message || '批量转换出错，请重新核对音频选项。';
+        setFactoryError(errMsg);
+        setFactoryStatus(errMsg);
+        setFactoryProgress(0);
+      } finally {
+        setFactoryLoading(false);
+      }
+      return;
+    }
 
     setFactoryLoading(true);
     setFactoryError(null);
@@ -385,6 +829,310 @@ export default function AudioTools() {
     }
   };
 
+  const attachFactoryRelativePath = (file: File, relativePath: string): File => {
+    if (!relativePath) return file;
+    try {
+      Object.defineProperty(file, 'webkitRelativePath', {
+        value: relativePath.replace(/^\/+/, ''),
+        configurable: true,
+      });
+    } catch (err) {
+      console.warn('Unable to attach dropped file relative path.', err);
+    }
+    return file;
+  };
+
+  const readDroppedEntryFiles = async (entry: any): Promise<File[]> => {
+    if (!entry) return [];
+    if (entry.isFile) {
+      return new Promise<File[]>((resolve) => {
+        entry.file(
+          (file: File) => resolve([attachFactoryRelativePath(file, entry.fullPath || file.name)]),
+          () => resolve([]),
+        );
+      });
+    }
+
+    if (!entry.isDirectory) return [];
+
+    const reader = entry.createReader();
+    const readBatch = async (): Promise<any[]> => new Promise((resolve) => {
+      reader.readEntries(
+        (entries: any[]) => resolve(entries),
+        () => resolve([]),
+      );
+    });
+
+    const children: any[] = [];
+    let batch = await readBatch();
+    while (batch.length > 0) {
+      children.push(...batch);
+      batch = await readBatch();
+    }
+
+    const nestedFiles = await Promise.all(children.map(readDroppedEntryFiles));
+    return nestedFiles.flat();
+  };
+
+  const getFactoryDroppedFiles = async (dataTransfer: DataTransfer): Promise<File[]> => {
+    const items = Array.from(dataTransfer.items || []);
+    const entries = items
+      .map((item: any) => item.webkitGetAsEntry?.())
+      .filter(Boolean);
+
+    if (entries.length > 0) {
+      const files = await Promise.all(entries.map(readDroppedEntryFiles));
+      return files.flat();
+    }
+
+    return Array.from(dataTransfer.files || []);
+  };
+
+  const isRenameSupportedFile = (file: File) => (
+    file.type.startsWith('audio/')
+    || /\.(mp3|wav|m4a|aac|ogg|flac|webm|aif|aiff|opus)$/i.test(file.name)
+  );
+
+  const getRenameFileId = (file: File): string => `${getFactoryFilePath(file)}-${file.size}-${file.lastModified}`;
+
+  const splitFileName = (fileName: string): { base: string; extension: string } => {
+    const dotIndex = fileName.lastIndexOf('.');
+    if (dotIndex <= 0) return { base: fileName, extension: '' };
+    return {
+      base: fileName.slice(0, dotIndex),
+      extension: fileName.slice(dotIndex),
+    };
+  };
+
+  const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  const trimBySeparator = (value: string, separator: string): string => {
+    const safeSeparator = escapeRegExp(separator || '_');
+    return value
+      .replace(new RegExp(`${safeSeparator}{2,}`, 'g'), separator || '_')
+      .replace(new RegExp(`^${safeSeparator}+|${safeSeparator}+$`, 'g'), '');
+  };
+
+  const normalizeRenameText = (value: string, separator: string): string => {
+    const safeSeparator = separator || '_';
+    return trimBySeparator(
+      value
+        .replace(/[<>:"/\\|?*\x00-\x1F]/g, safeSeparator)
+        .replace(/[\s\-_]+/g, safeSeparator),
+      safeSeparator,
+    );
+  };
+
+  const toPascalCase = (value: string): string => (
+    value
+      .split(/[\s\-_]+/g)
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+      .join('')
+  );
+
+  const applyRenameCase = (value: string, mode: RenameCaseMode, separator: string): string => {
+    if (mode === 'lower') return value.toLowerCase();
+    if (mode === 'upper') return value.toUpperCase();
+    if (mode === 'snake') return normalizeRenameText(value, separator || '_').toLowerCase();
+    if (mode === 'pascal') return toPascalCase(value);
+    return value;
+  };
+
+  const getRenameOutputRootName = (): string => {
+    const relativePaths = renameFiles
+      .map((file) => getFactoryFilePath(file))
+      .filter((path) => path.includes('/'));
+    const roots = Array.from(new Set<string>(relativePaths
+      .map((path) => path.split('/')[0])
+      .filter((root): root is string => Boolean(root))));
+    if (roots.length === 1) return `${sanitizeArchiveName(roots[0])}_renamed`;
+    return 'renamed_audio_1';
+  };
+
+  const applyRenameRulesToBase = (sourceBase: string, index: number): string => {
+    const separator = renameRules.separator || '_';
+    let processedBase = sourceBase;
+
+    if (renameRules.findText) {
+      processedBase = processedBase.replace(new RegExp(escapeRegExp(renameRules.findText), 'g'), renameRules.replaceText);
+    }
+    if (renameRules.removeText) {
+      processedBase = processedBase.replace(new RegExp(escapeRegExp(renameRules.removeText), 'g'), '');
+    }
+    if (renameRules.removeFromStart > 0) {
+      processedBase = processedBase.slice(Math.min(renameRules.removeFromStart, processedBase.length));
+    }
+    if (renameRules.removeFromEnd > 0) {
+      processedBase = processedBase.slice(0, Math.max(0, processedBase.length - renameRules.removeFromEnd));
+    }
+    if (renameRules.normalizeSeparators) {
+      processedBase = normalizeRenameText(processedBase, separator);
+    }
+    processedBase = applyRenameCase(processedBase, renameRules.caseMode, separator);
+
+    const template = renameRules.template.trim() || '{original}';
+    const tokenValues: Record<string, string> = {
+      original: processedBase,
+      category: renameRules.category,
+      scene: renameRules.scene,
+      action: renameRules.action,
+      variation: renameRules.variation,
+      index: String(renameRules.numberStart + index).padStart(renameRules.numberPadding, '0'),
+    };
+
+    let outputBase = template.replace(/\{(original|category|scene|action|variation|index)\}/g, (_, token) => tokenValues[token] || '');
+    outputBase = [renameRules.prefix, outputBase, renameRules.suffix].filter(Boolean).join('');
+
+    if (renameRules.numberPosition !== 'none') {
+      const paddedNumber = String(renameRules.numberStart + index).padStart(renameRules.numberPadding, '0');
+      outputBase = renameRules.numberPosition === 'prefix'
+        ? `${paddedNumber}${separator}${outputBase}`
+        : `${outputBase}${separator}${paddedNumber}`;
+    }
+
+    const normalizedOutput = renameRules.normalizeSeparators
+      ? normalizeRenameText(outputBase, separator)
+      : outputBase.replace(/[<>:"/\\|?*\x00-\x1F]/g, separator);
+
+    return applyRenameCase(normalizedOutput, renameRules.caseMode, separator) || 'renamed_audio';
+  };
+
+  const getUniqueRenamePath = (relativePath: string, usedPaths: Set<string>): { path: string; fixed: boolean } => {
+    const safePath = relativePath
+      .split('/')
+      .filter(Boolean)
+      .map(sanitizeArchiveName)
+      .join('/');
+
+    if (!usedPaths.has(safePath)) {
+      usedPaths.add(safePath);
+      return { path: safePath, fixed: false };
+    }
+
+    const parts = safePath.split('/');
+    const fileName = parts.pop() || 'renamed_audio';
+    const { base, extension } = splitFileName(fileName);
+    let counter = 2;
+
+    while (true) {
+      const candidate = [...parts, `${base}_${counter}${extension}`].join('/');
+      if (!usedPaths.has(candidate)) {
+        usedPaths.add(candidate);
+        return { path: candidate, fixed: true };
+      }
+      counter += 1;
+    }
+  };
+
+  const renamePreviewItems = React.useMemo<RenamePreviewItem[]>(() => {
+    const usedPaths = new Set<string>();
+    return renameFiles.map((file, index) => {
+      const id = getRenameFileId(file);
+      const sourceRelativePath = getFactoryFilePath(file).replace(/\\/g, '/').replace(/^\/+/, '');
+      const sourceParts = sourceRelativePath.split('/').filter(Boolean);
+      const sourceName = sourceParts.pop() || file.name;
+      if (sourceParts.length > 0) sourceParts.shift();
+
+      const { base, extension } = splitFileName(sourceName);
+      const manualName = renameManualNames[id]?.trim();
+      let outputName = manualName || `${applyRenameRulesToBase(base, index)}${extension}`;
+      if (manualName && !splitFileName(manualName).extension) outputName = `${manualName}${extension}`;
+      outputName = sanitizeArchiveName(outputName);
+
+      const { path: outputRelativePath, fixed } = getUniqueRenamePath([...sourceParts, outputName].join('/'), usedPaths);
+      const finalOutputName = outputRelativePath.split('/').pop() || outputName;
+      const changed = finalOutputName !== sourceName || outputRelativePath !== [...sourceParts, sourceName].join('/');
+      const status: RenamePreviewItem['status'] = manualName ? 'manual' : fixed ? 'duplicate-fixed' : changed ? 'changed' : 'ready';
+
+      return {
+        id,
+        file,
+        sourceName,
+        sourceRelativePath,
+        outputName: finalOutputName,
+        outputRelativePath,
+        status,
+        statusLabel: manualName ? '手动命名' : fixed ? '重名已修正' : changed ? '已改名' : '未变化',
+      };
+    });
+  }, [renameFiles, renameManualNames, renameRules]);
+
+  const handleRenameFilesChange = (files: FileList | File[]) => {
+    const selectedFiles = Array.from(files).filter(isRenameSupportedFile);
+    if (selectedFiles.length === 0) {
+      setRenameError('请选择音频文件，或包含音频文件的文件夹。');
+      return;
+    }
+    setRenameFiles(selectedFiles);
+    setRenameManualNames({});
+    setRenameError(null);
+    setRenameStatus(`已载入 ${selectedFiles.length} 个音频文件，可在右侧实时预览新命名。`);
+  };
+
+  const handleRenameDrag = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === 'dragenter' || e.type === 'dragover') {
+      setRenameDragActive(true);
+    } else if (e.type === 'dragleave') {
+      setRenameDragActive(false);
+    }
+  };
+
+  const handleRenameDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setRenameDragActive(false);
+    const droppedFiles = await getFactoryDroppedFiles(e.dataTransfer);
+    if (droppedFiles.length > 0) handleRenameFilesChange(droppedFiles);
+  };
+
+  const downloadRenameCsv = () => {
+    if (renamePreviewItems.length === 0) return;
+    const rows = [
+      ['原始路径', '原文件名', '新路径', '新文件名', '状态'],
+      ...renamePreviewItems.map((item) => [
+        item.sourceRelativePath,
+        item.sourceName,
+        item.outputRelativePath,
+        item.outputName,
+        item.statusLabel,
+      ]),
+    ];
+    const csv = rows
+      .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+      .join('\n');
+    downloadNamedBlob(new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' }), `${getRenameOutputRootName()}_命名对照.csv`);
+  };
+
+  const exportRenamedZip = async () => {
+    if (renamePreviewItems.length === 0) return;
+    setRenameExporting(true);
+    setRenameError(null);
+    try {
+      const { default: JSZip } = await import('jszip');
+      const zip = new JSZip();
+      const rootName = getRenameOutputRootName();
+
+      renamePreviewItems.forEach((item) => {
+        zip.file(`${rootName}/${item.outputRelativePath}`, item.file, { binary: true });
+      });
+
+      setRenameStatus(`正在打包 ${renamePreviewItems.length} 个重命名音频为 ${rootName}.zip...`);
+      const zipBlob = await zip.generateAsync(
+        { type: 'blob', compression: 'STORE', streamFiles: true },
+        (metadata) => setRenameStatus(`正在生成重命名 ZIP ${Math.round(metadata.percent)}%：${rootName}.zip`),
+      );
+      downloadNamedBlob(zipBlob, `${rootName}.zip`);
+      setRenameStatus(`已生成并开始下载 ${rootName}.zip。`);
+    } catch (err: any) {
+      setRenameError(err?.message || '导出重命名 ZIP 失败。');
+    } finally {
+      setRenameExporting(false);
+    }
+  };
+
   // Drag and drop for factory
   const handleFactoryDrag = (e: React.DragEvent) => {
     e.preventDefault();
@@ -396,12 +1144,13 @@ export default function AudioTools() {
     }
   };
 
-  const handleFactoryDrop = (e: React.DragEvent) => {
+  const handleFactoryDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
     setFactoryDragActive(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      handleFactoryFileChange(e.dataTransfer.files[0]);
+    const droppedFiles = await getFactoryDroppedFiles(e.dataTransfer);
+    if (droppedFiles.length > 0) {
+      handleFactoryFilesChange(droppedFiles);
     }
   };
 
@@ -416,6 +1165,132 @@ export default function AudioTools() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  };
+
+  const downloadNamedBlob = (blob: Blob, fileName: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const writeFactoryResultToDirectory = async (
+    rootHandle: any,
+    relativePath: string,
+    blob: Blob,
+  ) => {
+    const pathParts = relativePath.split('/').filter(Boolean);
+    const fileName = pathParts.pop();
+    if (!fileName) return;
+
+    let currentHandle = rootHandle;
+    for (const folderName of pathParts) {
+      currentHandle = await currentHandle.getDirectoryHandle(sanitizeArchiveName(folderName), { create: true });
+    }
+
+    const fileHandle = await currentHandle.getFileHandle(sanitizeArchiveName(fileName), { create: true });
+    const writable = await fileHandle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+  };
+
+  const downloadFactoryResultsIndividually = (successfulResults: Array<FactoryConversionResult & { blob: Blob }>) => {
+    successfulResults.forEach((item, index) => {
+      window.setTimeout(() => {
+        const outputPath = getFactoryOutputRelativePath(item);
+        const outputFileName = outputPath.split('/').pop() || getFactoryOutputFileName(item.sourceName);
+        downloadNamedBlob(item.blob, outputFileName);
+      }, index * 250);
+    });
+  };
+
+  const getUniqueFactoryArchivePath = (path: string, usedPaths: Set<string>): string => {
+    const safePath = path
+      .split('/')
+      .filter(Boolean)
+      .map(sanitizeArchiveName)
+      .join('/');
+
+    if (!usedPaths.has(safePath)) {
+      usedPaths.add(safePath);
+      return safePath;
+    }
+
+    const parts = safePath.split('/');
+    const fileName = parts.pop() || 'converted_audio';
+    const dotIndex = fileName.lastIndexOf('.');
+    const baseName = dotIndex > 0 ? fileName.slice(0, dotIndex) : fileName;
+    const extension = dotIndex > 0 ? fileName.slice(dotIndex) : '';
+    let counter = 2;
+
+    while (true) {
+      const candidate = [...parts, `${baseName}_${counter}${extension}`].join('/');
+      if (!usedPaths.has(candidate)) {
+        usedPaths.add(candidate);
+        return candidate;
+      }
+      counter += 1;
+    }
+  };
+
+  const downloadFactoryResultsAsZip = async (successfulResults: Array<FactoryConversionResult & { blob: Blob }>) => {
+    const outputFolderName = getFactoryOutputFolderName();
+    const zipFileName = `${outputFolderName}.zip`;
+    const totalBytes = successfulResults.reduce((sum, item) => sum + item.blob.size, 0);
+    const usedPaths = new Set<string>();
+
+    setFactoryStatus(`正在打包 ${successfulResults.length} 个文件为 ${zipFileName}（${formatBytes(totalBytes)}），完成后会直接触发浏览器下载。`);
+
+    const { default: JSZip } = await import('jszip');
+    const zip = new JSZip();
+
+    successfulResults.forEach((item) => {
+      const relativePath = getUniqueFactoryArchivePath(
+        `${outputFolderName}/${getFactoryOutputRelativePath(item)}`,
+        usedPaths,
+      );
+      zip.file(relativePath, item.blob, { binary: true });
+    });
+
+    const zipBlob = await zip.generateAsync(
+      {
+        type: 'blob',
+        compression: 'STORE',
+        streamFiles: true,
+      },
+      (metadata) => {
+        setFactoryStatus(`正在生成压缩包 ${Math.round(metadata.percent)}%：${zipFileName}`);
+      },
+    );
+
+    downloadNamedBlob(zipBlob, zipFileName);
+    setFactoryStatus(`已生成并开始下载 ${zipFileName}，压缩包内保留 ${outputFolderName} 文件夹结构。`);
+    setFactoryError(null);
+  };
+
+  const downloadFactoryResults = async () => {
+    const successfulResults = factoryResults
+      .filter((item): item is FactoryConversionResult & { blob: Blob } => Boolean(item.blob));
+
+    if (successfulResults.length === 0) return;
+
+    if (successfulResults.length === 1) {
+      downloadFile(successfulResults[0].blob, successfulResults[0].sourceName, factoryFormat);
+      return;
+    }
+
+    try {
+      await downloadFactoryResultsAsZip(successfulResults);
+    } catch (err) {
+      console.warn('Zip download failed, falling back to individual downloads.', err);
+      setFactoryError('压缩包下载失败，已改为逐个下载全部成功文件。');
+      setFactoryStatus('压缩包生成失败，正在逐个触发浏览器下载。');
+      downloadFactoryResultsIndividually(successfulResults);
+    }
   };
 
   return (
@@ -438,6 +1313,19 @@ export default function AudioTools() {
             <span>音频工作站</span>
           </button>
 
+          {/* Subtab Button: 音频分析 */}
+          <button
+            onClick={() => setActiveSubTab('analysis')}
+            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 ${
+              activeSubTab === 'analysis'
+                ? 'bg-emerald-50 text-emerald-700 shadow-sm border border-emerald-100'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+            }`}
+          >
+            <BarChart3 className={`w-4 h-4 transition-colors ${activeSubTab === 'analysis' ? 'text-emerald-600' : 'text-slate-400'}`} />
+            <span>音频分析</span>
+          </button>
+
           {/* Subtab Button 1: 音频转换 */}
           <button
             onClick={() => setActiveSubTab('factory')}
@@ -449,6 +1337,19 @@ export default function AudioTools() {
           >
             <RefreshCw className={`w-4 h-4 transition-colors ${activeSubTab === 'factory' ? 'text-emerald-600' : 'text-slate-400'}`} />
             <span>音频转换/压缩</span>
+          </button>
+
+          {/* Subtab Button: 批量命名 */}
+          <button
+            onClick={() => setActiveSubTab('renamer')}
+            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 ${
+              activeSubTab === 'renamer'
+                ? 'bg-emerald-50 text-emerald-700 shadow-sm border border-emerald-100'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+            }`}
+          >
+            <FileText className={`w-4 h-4 transition-colors ${activeSubTab === 'renamer' ? 'text-emerald-600' : 'text-slate-400'}`} />
+            <span>批量命名</span>
           </button>
 
           {/* Subtab Button 2: 人声分离 */}
@@ -477,7 +1378,402 @@ export default function AudioTools() {
       )}
 
       {/* ==========================================================
-          SUB-TAB 2: MUSIC CONVERSION FACTORY
+          SUB-TAB 1: AUDIO ANALYZER
+          ========================================================== */}
+      {activeSubTab === 'analysis' && (
+        <React.Suspense
+          fallback={
+            <div className="flex min-h-[360px] items-center justify-center rounded-3xl border border-slate-200 bg-white text-sm font-semibold text-slate-500 shadow-sm">
+              <Loader2 className="mr-2 h-4 w-4 animate-spin text-emerald-600" />
+              正在加载音频分析器…
+            </div>
+          }
+        >
+          <AudioAnalyzer />
+        </React.Suspense>
+      )}
+
+      {/* ==========================================================
+          SUB-TAB 2: BATCH RENAMER
+          ========================================================== */}
+      {activeSubTab === 'renamer' && (
+        <div className="max-w-6xl mx-auto grid grid-cols-1 xl:grid-cols-5 gap-6">
+          <div className="xl:col-span-3 space-y-5">
+            <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-5">
+              <div>
+                <h3 className="text-sm font-bold text-slate-800">批量命名</h3>
+                <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
+                  面向音效资产的批量重命名工具。支持查找替换、删除字符、前后缀、自动编号、命名模板和实时预览。
+                </p>
+              </div>
+
+              <div
+                onDragEnter={handleRenameDrag}
+                onDragOver={handleRenameDrag}
+                onDragLeave={handleRenameDrag}
+                onDrop={handleRenameDrop}
+                onClick={openRenameFilePicker}
+                className={`border-2 border-dashed rounded-2xl p-7 flex flex-col items-center justify-center cursor-pointer transition-all ${
+                  renameDragActive
+                    ? 'border-emerald-500 bg-emerald-50/60 scale-[0.99]'
+                    : renameFiles.length > 0
+                    ? 'border-slate-250 bg-slate-50/20 hover:bg-slate-50/60'
+                    : 'border-slate-200 hover:border-emerald-400 hover:bg-slate-50'
+                }`}
+              >
+                <input
+                  ref={renameInputRef}
+                  type="file"
+                  accept="audio/*"
+                  multiple
+                  onChange={(e) => {
+                    if (e.target.files && e.target.files.length > 0) handleRenameFilesChange(e.target.files);
+                  }}
+                  className="hidden"
+                />
+                <input
+                  ref={bindRenameFolderInput}
+                  type="file"
+                  multiple
+                  onChange={(e) => {
+                    if (e.target.files && e.target.files.length > 0) handleRenameFilesChange(e.target.files);
+                  }}
+                  className="hidden"
+                />
+
+                <div className="text-center space-y-3">
+                  <div className="w-12 h-12 rounded-2xl bg-emerald-50 border border-emerald-100 flex items-center justify-center mx-auto text-emerald-600 shadow-sm">
+                    <FileText className="w-6 h-6" />
+                  </div>
+                  {renameFiles.length > 0 ? (
+                    <div>
+                      <p className="text-xs font-bold text-slate-800">已载入 {renameFiles.length} 个音频文件</p>
+                      <p className="text-[10px] text-slate-500 mt-0.5">
+                        合计 {formatBytes(renameFiles.reduce((sum, file) => sum + file.size, 0))} · 输出文件夹 {getRenameOutputRootName()}
+                      </p>
+                    </div>
+                  ) : (
+                    <div>
+                      <p className="text-xs font-bold text-slate-700">点击上传、多选音频，或拖入音频文件/文件夹</p>
+                      <p className="text-[10px] text-slate-400 mt-1 max-w-sm mx-auto leading-relaxed">
+                        不覆盖原文件，导出时会生成包含新命名文件的 ZIP，并可导出命名前后对照 CSV。
+                      </p>
+                    </div>
+                  )}
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    <button
+                      type="button"
+                      className="text-[10px] text-slate-500 hover:text-emerald-700 font-bold border border-slate-200 px-3 py-1 rounded-lg bg-white shadow-sm cursor-pointer"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openRenameFilePicker();
+                      }}
+                    >
+                      选择音频文件
+                    </button>
+                    <button
+                      type="button"
+                      className="text-[10px] text-slate-500 hover:text-emerald-700 font-bold border border-slate-200 px-3 py-1 rounded-lg bg-white shadow-sm cursor-pointer"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openRenameFolderPicker();
+                      }}
+                    >
+                      选择文件夹
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-slate-50 border border-slate-150 p-5 rounded-2xl space-y-5">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <Sliders className="w-4 h-4 text-emerald-600" />
+                    <span className="text-xs font-bold text-slate-700">命名规则</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRenameRules(DEFAULT_RENAME_RULES);
+                      setRenameManualNames({});
+                    }}
+                    className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-[10px] font-bold text-slate-500 hover:text-emerald-700"
+                  >
+                    重置规则
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <label className="space-y-1.5 md:col-span-2">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">命名模板</span>
+                    <input
+                      value={renameRules.template}
+                      onChange={(e) => setRenameRules((prev) => ({ ...prev, template: e.target.value }))}
+                      placeholder="sfx_{scene}_{action}_{variation}"
+                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all font-mono"
+                    />
+                    <span className="block text-[10px] text-slate-400">
+                      可用变量：{'{original}'} / {'{category}'} / {'{scene}'} / {'{action}'} / {'{variation}'} / {'{index}'}
+                    </span>
+                  </label>
+
+                  {([
+                    ['category', '类型', 'sfx'],
+                    ['scene', '场景', 'ui'],
+                    ['action', '动作', 'UpgradePage_Open'],
+                    ['variation', '变体', '01'],
+                  ] as Array<[keyof RenameRules, string, string]>).map(([key, label, placeholder]) => (
+                    <label key={key} className="space-y-1.5">
+                      <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">{label}</span>
+                      <input
+                        value={String(renameRules[key])}
+                        onChange={(e) => setRenameRules((prev) => ({ ...prev, [key]: e.target.value }))}
+                        placeholder={placeholder}
+                        className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
+                      />
+                    </label>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-slate-200 pt-4">
+                  <label className="space-y-1.5">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">查找字符</span>
+                    <input
+                      value={renameRules.findText}
+                      onChange={(e) => setRenameRules((prev) => ({ ...prev, findText: e.target.value }))}
+                      placeholder="例如：空格、gold、copy"
+                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
+                    />
+                  </label>
+                  <label className="space-y-1.5">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">替换为</span>
+                    <input
+                      value={renameRules.replaceText}
+                      onChange={(e) => setRenameRules((prev) => ({ ...prev, replaceText: e.target.value }))}
+                      placeholder="例如：_"
+                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
+                    />
+                  </label>
+                  <label className="space-y-1.5 md:col-span-2">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">批量删除字符/词</span>
+                    <input
+                      value={renameRules.removeText}
+                      onChange={(e) => setRenameRules((prev) => ({ ...prev, removeText: e.target.value }))}
+                      placeholder="例如：未命名、_old、copy"
+                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
+                    />
+                  </label>
+                  <label className="space-y-1.5">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">删除开头 N 个字符</span>
+                    <input
+                      type="number"
+                      min={0}
+                      value={renameRules.removeFromStart}
+                      onChange={(e) => setRenameRules((prev) => ({ ...prev, removeFromStart: Math.max(0, Number(e.target.value) || 0) }))}
+                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
+                    />
+                  </label>
+                  <label className="space-y-1.5">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">删除结尾 N 个字符</span>
+                    <input
+                      type="number"
+                      min={0}
+                      value={renameRules.removeFromEnd}
+                      onChange={(e) => setRenameRules((prev) => ({ ...prev, removeFromEnd: Math.max(0, Number(e.target.value) || 0) }))}
+                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
+                    />
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-slate-200 pt-4">
+                  <label className="space-y-1.5">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">添加前缀</span>
+                    <input
+                      value={renameRules.prefix}
+                      onChange={(e) => setRenameRules((prev) => ({ ...prev, prefix: e.target.value }))}
+                      placeholder="例如：sfx_ui_"
+                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
+                    />
+                  </label>
+                  <label className="space-y-1.5">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">添加后缀</span>
+                    <input
+                      value={renameRules.suffix}
+                      onChange={(e) => setRenameRules((prev) => ({ ...prev, suffix: e.target.value }))}
+                      placeholder="例如：_v1"
+                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
+                    />
+                  </label>
+                  <label className="space-y-1.5">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">大小写/命名风格</span>
+                    <select
+                      value={renameRules.caseMode}
+                      onChange={(e) => setRenameRules((prev) => ({ ...prev, caseMode: e.target.value as RenameCaseMode }))}
+                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all font-semibold"
+                    >
+                      <option value="keep">保持原样</option>
+                      <option value="lower">全部小写</option>
+                      <option value="upper">全部大写</option>
+                      <option value="snake">snake_case</option>
+                      <option value="pascal">PascalCase</option>
+                    </select>
+                  </label>
+                  <label className="space-y-1.5">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">分隔符</span>
+                    <input
+                      value={renameRules.separator}
+                      maxLength={2}
+                      onChange={(e) => setRenameRules((prev) => ({ ...prev, separator: e.target.value || '_' }))}
+                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all font-mono"
+                    />
+                  </label>
+                  <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-semibold text-slate-600">
+                    <input
+                      type="checkbox"
+                      checked={renameRules.normalizeSeparators}
+                      onChange={(e) => setRenameRules((prev) => ({ ...prev, normalizeSeparators: e.target.checked }))}
+                      className="accent-emerald-600"
+                    />
+                    自动清理空格、重复下划线和非法字符
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 border-t border-slate-200 pt-4">
+                  <label className="space-y-1.5">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">自动编号</span>
+                    <select
+                      value={renameRules.numberPosition}
+                      onChange={(e) => setRenameRules((prev) => ({ ...prev, numberPosition: e.target.value as RenameNumberPosition }))}
+                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all font-semibold"
+                    >
+                      <option value="none">不编号</option>
+                      <option value="suffix">后缀编号</option>
+                      <option value="prefix">前缀编号</option>
+                    </select>
+                  </label>
+                  <label className="space-y-1.5">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">起始编号</span>
+                    <input
+                      type="number"
+                      min={0}
+                      value={renameRules.numberStart}
+                      onChange={(e) => setRenameRules((prev) => ({ ...prev, numberStart: Math.max(0, Number(e.target.value) || 0) }))}
+                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
+                    />
+                  </label>
+                  <label className="space-y-1.5">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">编号位数</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={6}
+                      value={renameRules.numberPadding}
+                      onChange={(e) => setRenameRules((prev) => ({ ...prev, numberPadding: Math.min(6, Math.max(1, Number(e.target.value) || 1)) }))}
+                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
+                    />
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="xl:col-span-2 space-y-5">
+            <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm space-y-4 sticky top-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-800">命名实时预览</h3>
+                  <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
+                    先预览，再导出。不会覆盖原文件。
+                  </p>
+                </div>
+                <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-black text-emerald-700 border border-emerald-100">
+                  {renamePreviewItems.length} 个
+                </span>
+              </div>
+
+              {renameStatus && (
+                <div className="rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2 text-[11px] font-semibold text-emerald-800">
+                  {renameStatus}
+                </div>
+              )}
+              {renameError && (
+                <div className="rounded-xl border border-rose-100 bg-rose-50 px-3 py-2 text-[11px] font-semibold text-rose-700">
+                  {renameError}
+                </div>
+              )}
+
+              <div className="max-h-[520px] overflow-y-auto pr-1 custom-scrollbar space-y-2">
+                {renamePreviewItems.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-8 text-center">
+                    <FileAudio className="w-8 h-8 mx-auto text-slate-300" />
+                    <p className="mt-3 text-xs font-bold text-slate-500">还没有待命名的音频</p>
+                    <p className="mt-1 text-[10px] text-slate-400">上传文件后这里会显示原文件名和新文件名。</p>
+                  </div>
+                ) : (
+                  renamePreviewItems.map((item, index) => (
+                    <div
+                      key={item.id}
+                      className="rounded-xl border border-slate-200 bg-slate-50/70 p-3 text-[11px] text-slate-600"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="truncate font-semibold text-slate-500">
+                            {index + 1}. {item.sourceName}
+                          </p>
+                          <p className="mt-1 truncate font-black text-slate-900">{item.outputName}</p>
+                          {item.outputRelativePath.includes('/') && (
+                            <p className="mt-1 truncate font-mono text-[10px] text-slate-400">{item.outputRelativePath}</p>
+                          )}
+                        </div>
+                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[9px] font-black ${
+                          item.status === 'ready'
+                            ? 'bg-slate-100 text-slate-500'
+                            : item.status === 'duplicate-fixed'
+                            ? 'bg-amber-50 text-amber-700 border border-amber-100'
+                            : item.status === 'manual'
+                            ? 'bg-sky-50 text-sky-700 border border-sky-100'
+                            : 'bg-emerald-50 text-emerald-700 border border-emerald-100'
+                        }`}>
+                          {item.statusLabel}
+                        </span>
+                      </div>
+                      <input
+                        value={renameManualNames[item.id] || ''}
+                        onChange={(e) => setRenameManualNames((prev) => ({ ...prev, [item.id]: e.target.value }))}
+                        placeholder="可选：手动覆盖这个文件的新文件名"
+                        className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-[10px] text-slate-700 outline-none focus:border-emerald-500"
+                      />
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 border-t border-slate-100 pt-3">
+                <button
+                  type="button"
+                  disabled={renamePreviewItems.length === 0}
+                  onClick={downloadRenameCsv}
+                  className="h-10 rounded-xl border border-slate-200 bg-white text-[11px] font-bold text-slate-600 hover:text-emerald-700 disabled:opacity-50 disabled:hover:text-slate-600"
+                >
+                  导出 CSV 对照
+                </button>
+                <button
+                  type="button"
+                  disabled={renamePreviewItems.length === 0 || renameExporting}
+                  onClick={exportRenamedZip}
+                  className="h-10 rounded-xl bg-slate-900 text-[11px] font-black text-white shadow-lg hover:bg-slate-800 disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {renameExporting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                  <span>导出重命名 ZIP</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==========================================================
+          SUB-TAB 3: MUSIC CONVERSION FACTORY
           ========================================================== */}
       {activeSubTab === 'factory' && (
         <div className="max-w-4xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -486,9 +1782,9 @@ export default function AudioTools() {
           <div className="lg:col-span-2 space-y-5">
             <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-5">
               <div>
-                <h3 className="text-sm font-bold text-slate-800">音频转换</h3>
+                <h3 className="text-sm font-bold text-slate-800">格式转换、压缩、音量标准化</h3>
                 <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
-                  多功能音频转化中枢。支持提取视频音轨、格式转换、自由修改采样率 (Sample Rate) 与压缩比特率。
+                  支持批量格式转换、音频压缩、采样率/比特率调整，并可统一目标响度。
                 </p>
               </div>
 
@@ -498,7 +1794,7 @@ export default function AudioTools() {
                 onDragOver={handleFactoryDrag}
                 onDragLeave={handleFactoryDrag}
                 onDrop={handleFactoryDrop}
-                onClick={() => factoryInputRef.current?.click()}
+                onClick={openFactoryFilePicker}
                 className={`border-2 border-dashed rounded-2xl p-8 flex flex-col items-center justify-center cursor-pointer transition-all ${
                   factoryDragActive
                     ? 'border-emerald-500 bg-emerald-50/50 scale-[0.99]'
@@ -512,9 +1808,21 @@ export default function AudioTools() {
                   ref={factoryInputRef}
                   type="file"
                   accept="audio/*,video/*"
+                  multiple
                   onChange={(e) => {
-                    if (e.target.files && e.target.files[0]) {
-                      handleFactoryFileChange(e.target.files[0]);
+                    if (e.target.files && e.target.files.length > 0) {
+                      handleFactoryFilesChange(e.target.files);
+                    }
+                  }}
+                  className="hidden"
+                />
+                <input
+                  ref={bindFactoryFolderInput}
+                  type="file"
+                  multiple
+                  onChange={(e) => {
+                    if (e.target.files && e.target.files.length > 0) {
+                      handleFactoryFilesChange(e.target.files);
                     }
                   }}
                   className="hidden"
@@ -534,17 +1842,34 @@ export default function AudioTools() {
                       <p className="text-[10px] text-slate-500 mt-0.5">
                         原始大小: {formatBytes(factoryFile.size)} · 格式: {factoryFile.type || '未知'}
                       </p>
+                      {factoryFiles.length > 1 && (
+                        <p className="text-[10px] text-emerald-700 font-bold mt-1">
+                          已加入批量队列：{factoryFiles.length} 个文件 · 合计 {formatBytes(factoryFiles.reduce((sum, item) => sum + item.size, 0))}
+                        </p>
+                      )}
                     </div>
-                    <button
-                      type="button"
-                      className="text-[10px] text-slate-500 hover:text-emerald-700 font-bold border border-slate-200 px-3 py-1 rounded-lg bg-white shadow-sm cursor-pointer"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        factoryInputRef.current?.click();
-                      }}
-                    >
-                      重新选择文件
-                    </button>
+                    <div className="flex flex-wrap items-center justify-center gap-2">
+                      <button
+                        type="button"
+                        className="text-[10px] text-slate-500 hover:text-emerald-700 font-bold border border-slate-200 px-3 py-1 rounded-lg bg-white shadow-sm cursor-pointer"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openFactoryFilePicker();
+                        }}
+                      >
+                        重新选择文件
+                      </button>
+                      <button
+                        type="button"
+                        className="text-[10px] text-slate-500 hover:text-emerald-700 font-bold border border-slate-200 px-3 py-1 rounded-lg bg-white shadow-sm cursor-pointer"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openFactoryFolderPicker();
+                        }}
+                      >
+                        选择文件夹
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <div className="text-center space-y-3">
@@ -552,11 +1877,21 @@ export default function AudioTools() {
                       <Upload className="w-6 h-6" />
                     </div>
                     <div>
-                      <p className="text-xs font-bold text-slate-700">点击上传或将媒体文件拖拽到此处</p>
+                      <p className="text-xs font-bold text-slate-700">点击上传、批量多选，或将媒体文件/文件夹拖拽到此处</p>
                       <p className="text-[10px] text-slate-400 mt-1 max-w-xs mx-auto leading-relaxed">
-                        支持任意格式，可转换为高保真 WAV 或高压缩 MP3 格式。
+                        支持多文件和文件夹批量转换，可转换为高保真 WAV 或高压缩 MP3 格式。
                       </p>
                     </div>
+                    <button
+                      type="button"
+                      className="text-[10px] text-emerald-700 hover:text-emerald-800 font-bold border border-emerald-100 px-3 py-1 rounded-lg bg-white shadow-sm cursor-pointer"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openFactoryFolderPicker();
+                      }}
+                    >
+                      选择文件夹批量上传
+                    </button>
                   </div>
                 )}
               </div>
@@ -641,6 +1976,113 @@ export default function AudioTools() {
                     </div>
                   )}
 
+                  {/* Loudness Normalization */}
+                  <div className="md:col-span-2 rounded-2xl border border-emerald-100 bg-white p-4 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">目标响度统一 (LUFS)</label>
+                        <p className="text-[10px] text-slate-400 mt-0.5">可用预设，也可自定义目标响度；转换时会自动做峰值保护。</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setFactoryNormalizeEnabled((prev) => !prev)}
+                        className={`rounded-full px-3 py-1.5 text-[10px] font-black transition-all ${
+                          factoryNormalizeEnabled
+                            ? 'bg-emerald-600 text-white shadow-sm shadow-emerald-600/20'
+                            : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                        }`}
+                      >
+                        {factoryNormalizeEnabled ? '已启用响度统一' : '启用响度统一'}
+                      </button>
+                    </div>
+
+                    <div className={`grid grid-cols-2 lg:grid-cols-5 gap-2 transition-opacity ${factoryNormalizeEnabled ? 'opacity-100' : 'opacity-60'}`}>
+                      {FACTORY_LOUDNESS_PRESETS.map((preset) => {
+                        const isActive = factoryNormalizeEnabled && Math.abs(factoryTargetLufs - preset.value) < 0.01;
+                        return (
+                          <button
+                            key={`${preset.group}-${preset.label}`}
+                            type="button"
+                            onClick={() => {
+                              if (isActive) {
+                                setFactoryNormalizeEnabled(false);
+                              } else {
+                                setFactoryNormalizeEnabled(true);
+                                setFactoryTargetLufs(preset.value);
+                              }
+                            }}
+                            className={`rounded-xl border px-2.5 py-2 text-left transition-all ${
+                              isActive
+                                ? 'border-emerald-400 bg-emerald-50 text-emerald-800 shadow-sm'
+                                : 'border-slate-200 bg-slate-50/70 text-slate-600 hover:border-emerald-200 hover:bg-white'
+                            }`}
+                          >
+                            <span className="block text-[10px] font-black leading-tight">{preset.label}</span>
+                            <span className="mt-0.5 block text-[9px] font-semibold text-slate-400">{preset.hint}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <p className="rounded-lg bg-slate-50 px-3 py-2 text-[10px] font-semibold text-slate-500">
+                      {factoryNormalizeEnabled
+                        ? '当前会按所选 LUFS 统一响度；再次点击已选中的预设，可切回“使用音频本身音量”。'
+                        : '当前使用音频本身音量，不做响度统一。点击任意预设或自定义 LUFS 后再启用。'}
+                    </p>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">自定义目标响度</label>
+                        <div className="flex items-center rounded-xl border border-slate-200 bg-slate-50 px-3">
+                          <input
+                            type="number"
+                            min={-45}
+                            max={-6}
+                            step={0.5}
+                            value={factoryTargetLufs}
+                            onFocus={() => setFactoryNormalizeEnabled(true)}
+                            onChange={(e) => {
+                              const nextValue = Number(e.target.value);
+                              if (Number.isFinite(nextValue)) {
+                                setFactoryNormalizeEnabled(true);
+                                setFactoryTargetLufs(nextValue);
+                              }
+                            }}
+                            className="w-full bg-transparent py-2 text-xs font-bold text-slate-800 outline-none"
+                          />
+                          <span className="text-[10px] font-bold text-slate-400">LUFS</span>
+                        </div>
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">峰值上限保护</label>
+                        <div className="flex items-center rounded-xl border border-slate-200 bg-slate-50 px-3">
+                          <input
+                            type="number"
+                            min={-6}
+                            max={0}
+                            step={0.1}
+                            value={factoryPeakCeilingDb}
+                            onFocus={() => setFactoryNormalizeEnabled(true)}
+                            onChange={(e) => {
+                              const nextValue = Number(e.target.value);
+                              if (Number.isFinite(nextValue)) {
+                                setFactoryNormalizeEnabled(true);
+                                setFactoryPeakCeilingDb(nextValue);
+                              }
+                            }}
+                            className="w-full bg-transparent py-2 text-xs font-bold text-slate-800 outline-none"
+                          />
+                          <span className="text-[10px] font-bold text-slate-400">dBFS</span>
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] text-slate-500 leading-relaxed">
+                        当前模式：<span className="font-black text-slate-800">{factoryNormalizeEnabled ? `${factoryTargetLufs.toFixed(1)} LUFS` : '使用原音量'}</span>
+                        <br />
+                        峰值不超过：<span className="font-black text-slate-800">{factoryPeakCeilingDb.toFixed(1)} dBFS</span>
+                      </div>
+                    </div>
+                  </div>
+
                 </div>
 
                 {/* Compression Recommendation Note */}
@@ -698,7 +2140,7 @@ export default function AudioTools() {
                 ) : (
                   <>
                     <RefreshCw className="w-4 h-4" />
-                    <span>开始音频转换</span>
+                    <span>{factoryFiles.length > 1 ? `开始批量转换 (${factoryFiles.length})` : '开始音频转换'}</span>
                   </>
                 )}
               </button>
@@ -710,11 +2152,11 @@ export default function AudioTools() {
             <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-5">
               <h3 className="text-sm font-bold text-slate-800">音频转换结果</h3>
               
-              {!factoryAudioUrl ? (
+              {factoryResults.length === 0 ? (
                 <div className="py-8 text-center text-slate-400 space-y-2">
                   <FolderOpen className="w-8 h-8 mx-auto stroke-1" />
                   <p className="text-xs">等待转换文件</p>
-                  <p className="text-[10px] text-slate-400">配置完左侧选项后，点击开始转换获取高保真音频结果。</p>
+                  <p className="text-[10px] text-slate-400">配置完左侧选项后，点击开始转换获取高保真音频结果。支持多文件和文件夹批量转换。</p>
                 </div>
               ) : (
                 <div className="space-y-5">
@@ -753,32 +2195,112 @@ export default function AudioTools() {
                           <span className="font-bold text-slate-800">{factoryOriginalDuration.toFixed(1)} 秒</span>
                         </div>
                       )}
+                      {primaryFactoryResult?.loudness && (
+                        <div className="grid grid-cols-2 gap-2 border-t border-slate-100/50 pt-2">
+                          <div className="rounded-lg bg-white/70 px-2 py-1.5">
+                            <span className="block text-[9px] text-slate-400">原始响度</span>
+                            <span className="font-bold text-slate-800">{formatLufs(primaryFactoryResult.loudness.beforeLufs)}</span>
+                          </div>
+                          <div className="rounded-lg bg-white/70 px-2 py-1.5">
+                            <span className="block text-[9px] text-slate-400">处理后 / 目标</span>
+                            <span className="font-bold text-slate-800">
+                              {formatLufs(primaryFactoryResult.loudness.afterLufs)} / {primaryFactoryResult.loudness.targetLufs.toFixed(1)}
+                            </span>
+                          </div>
+                          <div className="rounded-lg bg-white/70 px-2 py-1.5">
+                            <span className="block text-[9px] text-slate-400">实际增益</span>
+                            <span className="font-bold text-slate-800">{formatSignedDb(primaryFactoryResult.loudness.appliedGainDb)}</span>
+                          </div>
+                          <div className="rounded-lg bg-white/70 px-2 py-1.5">
+                            <span className="block text-[9px] text-slate-400">峰值上限</span>
+                            <span className="font-bold text-slate-800">{primaryFactoryResult.loudness.peakCeilingDb.toFixed(1)} dBFS</span>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
 
+                  {factoryResults.length > 0 && (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">批量转换队列</label>
+                      </div>
+                      <div className="max-h-64 space-y-2 overflow-y-auto pr-1 custom-scrollbar">
+                        {factoryResults.map((item, index) => (
+                          <div
+                            key={item.id}
+                            className={`rounded-xl border p-3 text-[11px] ${
+                              item.error
+                                ? 'border-rose-100 bg-rose-50 text-rose-700'
+                                : 'border-emerald-100 bg-emerald-50/50 text-slate-700'
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="truncate font-bold text-slate-800">
+                                  {index + 1}. {item.sourceName}
+                                </p>
+                                <p className="mt-0.5 text-[10px] text-slate-500">
+                                  {formatBytes(item.sourceSize)}
+                                  {item.duration ? ` · ${item.duration.toFixed(1)} 秒` : ''}
+                                  {item.blob ? ` · 输出 ${formatBytes(item.blob.size)}` : ''}
+                                </p>
+                                {item.loudness && (
+                                  <p className="mt-1 rounded-lg bg-white/70 px-2 py-1 text-[10px] font-semibold text-slate-600">
+                                    响度 {formatLufs(item.loudness.beforeLufs)} → {formatLufs(item.loudness.afterLufs)}
+                                    {' · '}
+                                    目标 {item.loudness.targetLufs.toFixed(1)} LUFS
+                                    {' · '}
+                                    增益 {formatSignedDb(item.loudness.appliedGainDb)}
+                                  </p>
+                                )}
+                                {item.error && <p className="mt-1 text-[10px] text-rose-600">{item.error}</p>}
+                              </div>
+                              {item.blob && (
+                                <button
+                                  type="button"
+                                  onClick={() => downloadFile(item.blob!, item.sourceName, factoryFormat)}
+                                  className="shrink-0 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-700 hover:text-emerald-700"
+                                >
+                                  下载
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   {/* Audio Preview */}
-                  <div className="space-y-1.5">
-                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">音质即时预览</label>
-                    <audio 
-                      src={factoryAudioUrl} 
-                      controls 
-                      className="w-full h-8 accent-emerald-600 outline-none rounded-lg"
-                    />
-                  </div>
+                  {factoryAudioUrl && (
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">音质即时预览</label>
+                      <audio
+                        src={factoryAudioUrl}
+                        controls
+                        className="w-full h-8 accent-emerald-600 outline-none rounded-lg"
+                      />
+                    </div>
+                  )}
 
                   {/* Download Button */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (factoryBlob && factoryFile) {
-                        downloadFile(factoryBlob, factoryFile.name, factoryFormat);
-                      }
-                    }}
-                    className="w-full h-11 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer border border-slate-800"
-                  >
-                    <Download className="w-4 h-4" />
-                    <span>立即下载转换后音频 ({factoryFormat.toUpperCase()})</span>
-                  </button>
+                  {factoryBlob && factoryFile && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (factoryResults.length > 1) {
+                          void downloadFactoryResults();
+                        } else {
+                          downloadFile(factoryBlob, factoryFile.name, factoryFormat);
+                        }
+                      }}
+                      className="w-full h-11 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer border border-slate-800"
+                    >
+                      <Download className="w-4 h-4" />
+                      <span>{factoryResults.length > 1 ? '打包 ZIP 下载全部结果' : `立即下载转换后音频 (${factoryFormat.toUpperCase()})`}</span>
+                    </button>
+                  )}
 
                 </div>
               )}

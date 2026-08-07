@@ -36,7 +36,7 @@ const DEMO_ROWS: Record<TemplateType, any[]> = {
   game_sfx_general: [
     {
       index: 1,
-      filename: "sound_ui_button",
+      filename: "sfx_ui_common_button_click",
       duration_logic: "1s, 单次播放",
       scene: "通用与主界面&游戏内的ui点击按键",
       description: "清脆的交互点击声，带有轻微的拟物触感与中高频数字质感",
@@ -45,7 +45,7 @@ const DEMO_ROWS: Record<TemplateType, any[]> = {
     },
     {
       index: 2,
-      filename: "bgm_battle_01",
+      filename: "bgm_battle",
       duration_logic: "loop, 循环播放",
       scene: "关卡内战斗场景、遭遇战",
       description: "热血、紧张有战斗感的电子摇滚乐，由重击鼓点、失真吉他与动感合成器主导",
@@ -54,7 +54,7 @@ const DEMO_ROWS: Record<TemplateType, any[]> = {
     },
     {
       index: 3,
-      filename: "sfx_player_dash_01",
+      filename: "sfx_player_dash",
       duration_logic: "0.8s, 单次播放",
       scene: "主角执行前冲闪避、瞬移的一瞬间",
       description: "带有疾风气流撕裂声，高频气流破空音色叠合电声粒子回馈",
@@ -74,7 +74,7 @@ const DEMO_ROWS: Record<TemplateType, any[]> = {
   game_sfx_middleware: [
     {
       index: 1,
-      filename: "sfx_footstep_grass_01",
+      filename: "sfx_footstep_grass",
       event_name: "event:/SFX/Player/Footstep_Grass",
       duration: "0.5s",
       scene: "角色在草地上行走或奔跑时",
@@ -104,7 +104,7 @@ const DEMO_ROWS: Record<TemplateType, any[]> = {
       index: 1,
       scene: "主线关卡第一章，主角目睹家园毁灭时的内心独白",
       tone: "悲愤、压抑，随后转为坚毅，略带沙哑的呼吸声",
-      filename: "vo_hero_monologue_01",
+      filename: "vo_hero_monologue",
       script: "我曾经以为... 只要守在这里，就能避开这世间的纷争。但我错了，他们夺走了我的一切..."
     },
     {
@@ -173,6 +173,137 @@ const LOADING_STEPS = [
   "正在为您进行高精度的排版排程，即将呈现..."
 ];
 
+const stripGeneratedVariantSuffix = (value: unknown) => (
+  typeof value === 'string' ? value.trim().replace(/_(\d{2,3})$/i, '') : ''
+);
+
+const normalizeGeneratedFilename = (value: unknown) => {
+  if (typeof value !== 'string') return '';
+  return value
+    .trim()
+    .replace(/\.[a-z0-9]+$/i, '')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase();
+};
+
+const includesAny = (value: string, keywords: string[]) => (
+  keywords.some(keyword => value.includes(keyword.toLowerCase()))
+);
+
+const hasSceneTermsInOrder = (sceneText: string, firstTerms: string[], secondTerms: string[]) => (
+  firstTerms.some(firstTerm => (
+    secondTerms.some(secondTerm => {
+      const firstIndex = sceneText.indexOf(firstTerm.toLowerCase());
+      const secondIndex = sceneText.indexOf(secondTerm.toLowerCase());
+      return firstIndex >= 0 && secondIndex >= 0 && firstIndex <= secondIndex;
+    })
+  ))
+);
+
+const inferScenarioFirstFilename = (item: any, normalizedFilename: string) => {
+  const sceneText = [
+    item?.scene,
+    item?.duration_logic,
+    item?.duration,
+    item?.playback_logic,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  if (!sceneText || !normalizedFilename.startsWith('sfx_')) return normalizedFilename;
+
+  const upgradeTerms = ['升级', '升級', 'upgrade', 'level up', 'levelup'];
+  const successTerms = ['成功', '完成', '达成', '達成', 'success', 'complete', 'completed'];
+  const failTerms = ['失败', '失敗', 'fail', 'failed', 'error'];
+  const pageTerms = ['页面', '頁面', '界面', '页', '頁', 'page', 'screen'];
+  const openTerms = ['打开', '开启', '进入', '出現', '出现', '弹出', '彈出', 'open', 'enter', 'show', 'popup'];
+  const closeTerms = ['关闭', '关掉', '退出', '返回', '收起', 'close', 'exit', 'back', 'dismiss'];
+  const claimTerms = ['领取', '获得', '收取', '结算', 'claim', 'collect', 'receive'];
+  const rewardTerms = ['奖励', '獎勵', 'reward'];
+  const coinTerms = ['金币', '金幣', 'coin', 'coins', 'gold'];
+  const pickupTerms = ['拾取', '捡起', '撿起', 'pickup', 'pick up', 'collect'];
+
+  if (includesAny(sceneText, upgradeTerms) && includesAny(sceneText, pageTerms) && includesAny(sceneText, closeTerms)) {
+    return 'sfx_ui_upgrade_page_close';
+  }
+  if (includesAny(sceneText, upgradeTerms) && includesAny(sceneText, pageTerms) && includesAny(sceneText, openTerms)) {
+    return 'sfx_ui_upgrade_page_open';
+  }
+  if (hasSceneTermsInOrder(sceneText, upgradeTerms, successTerms)) {
+    return 'sfx_ui_upgrade_success';
+  }
+  if (hasSceneTermsInOrder(sceneText, upgradeTerms, failTerms)) {
+    return 'sfx_ui_upgrade_fail';
+  }
+  if (includesAny(sceneText, rewardTerms) && includesAny(sceneText, claimTerms)) {
+    return 'sfx_ui_reward_claim';
+  }
+  if (includesAny(sceneText, coinTerms) && includesAny(sceneText, pickupTerms)) {
+    return 'sfx_item_coin_pickup';
+  }
+
+  return normalizedFilename;
+};
+
+const replaceEventNameFilenameTail = (
+  eventName: unknown,
+  previousFilename: string,
+  nextFilename: string,
+) => {
+  if (typeof eventName !== 'string' || !previousFilename || previousFilename === nextFilename) {
+    return eventName;
+  }
+  const escapedPrevious = previousFilename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escapedNormalizedPrevious = normalizeGeneratedFilename(previousFilename)
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return eventName
+    .replace(new RegExp(`${escapedPrevious}$`, 'i'), nextFilename)
+    .replace(new RegExp(`${escapedNormalizedPrevious}$`, 'i'), nextFilename);
+};
+
+const normalizeRequirementFilenames = (items: any[]) => items.map((item) => {
+  const originalFilename = typeof item?.filename === 'string' ? item.filename.trim() : '';
+  const normalizedFilename = normalizeGeneratedFilename(originalFilename);
+  const scenarioFirstFilename = inferScenarioFirstFilename(item, normalizedFilename);
+  if (!scenarioFirstFilename || scenarioFirstFilename === originalFilename) return item;
+  return {
+    ...item,
+    filename: scenarioFirstFilename,
+    event_name: replaceEventNameFilenameTail(item.event_name, originalFilename, scenarioFirstFilename),
+  };
+});
+
+const simplifySingletonFilenameSuffixes = (items: any[]) => {
+  const normalizedItems = normalizeRequirementFilenames(items);
+  const baseNameCounts = new Map<string, number>();
+  normalizedItems.forEach((item) => {
+    const filename = typeof item?.filename === 'string' ? item.filename.trim() : '';
+    if (!/_\d{2,3}$/i.test(filename)) return;
+    const baseName = stripGeneratedVariantSuffix(filename);
+    if (!baseName) return;
+    baseNameCounts.set(baseName, (baseNameCounts.get(baseName) || 0) + 1);
+  });
+
+  return normalizedItems.map((item) => {
+    const filename = typeof item?.filename === 'string' ? item.filename.trim() : '';
+    if (!/_\d{2,3}$/i.test(filename)) return item;
+
+    const baseName = stripGeneratedVariantSuffix(filename);
+    if ((baseNameCounts.get(baseName) || 0) !== 1) return item;
+
+    const simplifiedItem = { ...item, filename: baseName };
+    if (typeof simplifiedItem.event_name === 'string') {
+      simplifiedItem.event_name = replaceEventNameFilenameTail(simplifiedItem.event_name, filename, baseName);
+    }
+    return simplifiedItem;
+  });
+};
+
 export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) {
   const [templateType, setTemplateType] = useState<TemplateType>('game_sfx_general');
   const [inputText, setInputText] = useState('');
@@ -183,6 +314,7 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
   const [screenshotPreview, setScreenshotPreview] = useState<string | null>(null);
   const [screenshotBase64, setScreenshotBase64] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [pasteMessage, setPasteMessage] = useState<string | null>(null);
 
   // Loading & Error states
   const [loading, setLoading] = useState(false);
@@ -214,13 +346,17 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
     setIsDragging(false);
   };
 
-  const processImageFile = (file: File) => {
+  const processImageFile = (file: File, source: 'upload' | 'drop' | 'paste' = 'upload') => {
     if (!file.type.startsWith('image/')) {
       setError('只支持上传截图（图片格式文件）');
       return;
     }
     setError(null);
+    setPasteMessage(source === 'paste' ? '已从剪贴板粘贴截图，可以直接生成/优化需求表。' : null);
     setScreenshot(file);
+    if (screenshotPreview) {
+      URL.revokeObjectURL(screenshotPreview);
+    }
     const previewUrl = URL.createObjectURL(file);
     setScreenshotPreview(previewUrl);
 
@@ -239,14 +375,40 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
     e.preventDefault();
     setIsDragging(false);
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      processImageFile(e.dataTransfer.files[0]);
+      processImageFile(e.dataTransfer.files[0], 'drop');
     }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      processImageFile(e.target.files[0]);
+      processImageFile(e.target.files[0], 'upload');
     }
+  };
+
+  const getClipboardImageFile = (clipboardData: DataTransfer | null): File | null => {
+    if (!clipboardData) return null;
+
+    const clipboardItems = Array.from(clipboardData.items || []);
+    const imageItem = clipboardItems.find(item => item.kind === 'file' && item.type.startsWith('image/'));
+    const pastedFile = imageItem?.getAsFile();
+    if (pastedFile) {
+      const extension = pastedFile.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png';
+      return new File(
+        [pastedFile],
+        `pasted-requirements-screenshot-${Date.now()}.${extension}`,
+        { type: pastedFile.type || 'image/png' },
+      );
+    }
+
+    const clipboardFiles = Array.from(clipboardData.files || []);
+    return clipboardFiles.find(file => file.type.startsWith('image/')) || null;
+  };
+
+  const handlePasteScreenshot = (e: React.ClipboardEvent | ClipboardEvent) => {
+    const imageFile = getClipboardImageFile(e.clipboardData);
+    if (!imageFile) return;
+    e.preventDefault();
+    processImageFile(imageFile, 'paste');
   };
 
   const handleRemoveScreenshot = () => {
@@ -256,8 +418,17 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
     }
     setScreenshotPreview(null);
     setScreenshotBase64(null);
+    setPasteMessage(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
+
+  useEffect(() => {
+    const handleWindowPaste = (event: ClipboardEvent) => {
+      handlePasteScreenshot(event);
+    };
+    window.addEventListener('paste', handleWindowPaste);
+    return () => window.removeEventListener('paste', handleWindowPaste);
+  }, [screenshotPreview]);
 
   // Table rows actions
   const handleCellChange = (rowIndex: number, key: string, value: string | number) => {
@@ -334,7 +505,7 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
       const response = await generateSfxRequirements(inputText, imageObj, templateType);
       
       if (response && Array.isArray(response.items)) {
-        setRows(response.items);
+        setRows(simplifySingletonFilenameSuffixes(response.items));
         setSuccess(true);
       } else {
         throw new Error('AI 返回了不完整的数据，请稍后重试');
@@ -524,7 +695,11 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
               onDrop={handleDrop}
+              onPaste={handlePasteScreenshot}
               onClick={() => fileInputRef.current?.click()}
+              tabIndex={0}
+              role="button"
+              aria-label="上传、拖拽或粘贴需求表截图"
               className={`flex-1 min-h-[170px] border-2 border-dashed rounded-xl flex flex-col items-center justify-center p-4 text-center cursor-pointer transition-all ${
                 isDragging 
                   ? 'border-emerald-500 bg-emerald-50' 
@@ -547,8 +722,8 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
                     <Upload className="w-5 h-5 text-slate-400" />
                   </div>
                   <div>
-                    <p className="text-xs font-semibold text-slate-700">拖拽已有表格截图到此</p>
-                    <p className="text-[10px] text-slate-400 mt-1">或点击浏览文件（支持 PNG, JPG 等）</p>
+                    <p className="text-xs font-semibold text-slate-700">拖拽或粘贴已有表格截图到此</p>
+                    <p className="text-[10px] text-slate-400 mt-1">支持 Ctrl+V 粘贴，也可点击浏览文件（PNG, JPG 等）</p>
                   </div>
                 </div>
               ) : (
@@ -580,6 +755,12 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
                 </div>
               )}
             </div>
+            {pasteMessage && (
+              <div className="flex items-center gap-1.5 rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-[10px] font-medium text-emerald-700">
+                <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                <span>{pasteMessage}</span>
+              </div>
+            )}
 
             {/* Run Generation Button Action */}
             <div className="pt-2 shrink-0">

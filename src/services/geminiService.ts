@@ -1071,7 +1071,7 @@ export async function generateSfxRequirements(
       【游戏音效配乐通用需求表模板参考1】
       该模板主要包含以下字段，请在输出 JSON 时填充：
       - index (序号): 整数，从1开始递增。
-      - filename (文件命名): 采用下划线小写英文命名规范。例如 sfx_ui_button, bgm_battle_01, sfx_foley_footstep_wood_01。
+      - filename (文件命名): 采用下划线小写英文命名规范。例如 sfx_ui_button, bgm_battle, sfx_foley_footstep_wood_01。只有同一基础音效存在多个变体/随机样本时才使用 _01/_02/_03；如果该类型只有一个音效，不要添加尾号。
       - duration_logic (时长&播放逻辑): 声效时长描述及触发/播放逻辑，例如 "1s, 单次播放", "10s, 循环播放", "3s, 随机多样本触发"。
       - scene (应用场景): 音效触发的具体场景与时机描述，如 "通用与主界面&游戏内的ui点击按键"。
       - description (描述): 对声音声学物理表现与听觉感受的文字描述，如 "清脆的交互点击声，带有科技高频感"。
@@ -1105,8 +1105,8 @@ export async function generateSfxRequirements(
       【游戏音效需求表模板参考2（应用到FMOD,WWISE音频中间件引擎的需求表）】
       该模板主要包含以下字段，请在输出 JSON 时填充：
       - index (序号): 整数，从1开始递增。
-      - filename (文件命名): 采用下划线小写英文命名规范。如 sfx_player_dash_01。
-      - event_name (事件命名): 音频中间件事件路径规范。如 "event:/SFX/Player/dash" 或 "Play_sfx_player_dash_01"。
+      - filename (文件命名): 采用下划线小写英文命名规范。如 sfx_player_dash。只有同一基础音效存在多个变体/随机样本时才使用 _01/_02/_03，例如 sfx_footstep_grass_01。
+      - event_name (事件命名): 音频中间件事件路径规范。如 "event:/SFX/Player/dash" 或 "Play_sfx_player_dash"；只有多个变体时才在末尾编号。
       - duration (时长): 预估的时长，如 "0.5s", "12s", "loop"。
       - scene (应用场景): 音效在游戏/关卡/引擎中的应用时机，如 "玩家瞬间前冲闪避时"。
       - description (描述): 对声效材质、空间、力量感的详细描述，如 "带有疾风气流破空声，以及微弱的粒子汇聚声"。
@@ -1149,7 +1149,7 @@ export async function generateSfxRequirements(
       - index (序号): 整数，从1开始递增。
       - scene (应用场景): 触发台词的具体关卡、动画或时机，如 "主角击杀首领后的剧情独白"。
       - tone (语气描述): 语气与角色心理描述，如 "沉重而略带自嘲，缓缓道来"。
-      - filename (文件命名): 配音文件下划线英文命名规范，如 "vo_chapter1_monologue_01"。
+      - filename (文件命名): 配音文件下划线英文命名规范，如 "vo_chapter1_monologue"。只有同一角色/场景下有多句同类变体时才使用 _01/_02/_03。
       - script (台词文案): 角色要说的中文台词内容。
     `;
     schema = {
@@ -1177,7 +1177,7 @@ export async function generateSfxRequirements(
       【配音需求表模板2（多语种）】
       该模板主要包含以下字段，请在输出 JSON 时填充：
       - index (序号): 整数，从1开始递增。
-      - filename (文件命名): 配音文件英文下划线命名规范，如 "vo_npc_guide_greet_01"。
+      - filename (文件命名): 配音文件英文下划线命名规范，如 "vo_npc_guide_greet"。只有同一角色/场景下有多句同类变体时才使用 _01/_02/_03。
       - scene (应用场景): 触发场景，如 "新手村向导NPC首次与玩家对话"。
       - tone (语气描述): 语气描述，如 "热情、亲切，带有温暖的笑意"。
       - script_zh (台词文案（简中）): 简体中文台词文案，如 "旅行者，欢迎来到晨曦之城！这里的阳光永远璀璨。"。
@@ -1220,13 +1220,21 @@ export async function generateSfxRequirements(
 
     2. **文件名命名优化与直接保留**：
        - 如果用户输入或上传的截图/草稿表格中**本身就带有文件命名或名称**（如 \`sfx_click\`, \`bg_battle\`, \`刀剑砍击声\` 等）：
-         - 你可以根据专业的下划线英文命名规范（如：\`[sfx / bgm / vo]_[模块]_[动作/角色]_[描述]_[序号]\`）来智能优化重构这些命名；
+         - 你可以根据专业的下划线英文命名规范（如：\`[sfx / bgm / vo]_[模块]_[动作/角色]_[描述]\`，多变体时才追加 \`_[序号]\`）来智能优化重构这些命名；
          - 如果用户提供的命名已经相当成熟、合理或带有特定的版本代号，你应当**直接使用和保留**给到的命名；
          - 确保优化的命名与原始名称的意图保持强关联，不得凭空捏造全新的无关名称。
 
     3. **专业化设计与规范**：
        - **工程化文件命名 (filename)**：禁止用中文命名文件。所有文件名必须是标准的下划线英文小写结构。
-         格式：\`[sfx / bgm / vo]_[模块]_[动作/角色]_[描述]_[序号]\`。例如：\`sfx_ui_confirm_01\`、\`sfx_enemy_zombie_growl_03\`、\`vo_narrator_intro_01\`。
+         格式：\`[sfx / bgm / vo]_[模块]_[动作/角色]_[描述]\`；只有同一基础音效/台词存在多个变体、随机样本、连号资产时，才追加 \`_[序号]\`。
+         例如：单个确认点击用 \`sfx_ui_confirm\`，单个战斗 BGM 用 \`bgm_battle_loop\`，单句旁白用 \`vo_narrator_intro\`；多个脚步随机样本才用 \`sfx_footstep_grass_01\`、\`sfx_footstep_grass_02\`、\`sfx_footstep_grass_03\`。
+       - **命名必须简约、明确、语义准确**：filename 必须优先从“应用场景/触发时机”里提取真实模块、页面、对象和动作；“描述”只用于理解音色、材质、情绪和制作方式，不能把描述里的装饰性词汇误当成文件名主体。
+         命名优先级：应用场景/触发时机 > 原始名称 > 描述。除非“应用场景”明确说是金币、奖励、宝箱、道具拾取，否则不要因为描述中出现“金色闪光、金币质感、奖励感”等词，就在 filename 里加入 \`gold\`、\`coin\`、\`reward\`。
+         例如应用场景是“升级成功提示/升级完成反馈”，即使描述里写了“金色粒子、奖励闪光”，也应命名为 \`sfx_ui_upgrade_success\`，不要命名为 \`sfx_ui_upgrade_gold\` 或 \`sfx_ui_upgrade_success_gold\`。
+       UI 音效推荐格式：\`sfx_ui_[screen_or_widget]_[action]\`，例如“升级页打开”应命名为 \`sfx_ui_upgrade_page_open\`，而不是 \`sfx_ui_button\` 或 \`sfx_ui_click_01\`。
+         常用 action 词优先使用：\`open\`, \`close\`, \`click\`, \`confirm\`, \`cancel\`, \`select\`, \`switch\`, \`unlock\`, \`upgrade\`, \`reward\`, \`popup\`, \`warning\`, \`error\`。
+         BGM 推荐格式：\`bgm_[scene]_[style_or_state]\`；配音推荐格式：\`vo_[speaker_or_role]_[intent]\`。
+         所有单词必须小写 snake_case，不使用 CamelCase / PascalCase，例如使用 \`sfx_ui_upgrade_page_open\`，不要输出 \`sfx_ui_UpgradePage_Open\`。
        - **FMOD/Wwise 事件路径命名 (event_name)**：如果是音频中间件模板，对应的事件必须有规范的虚空间路径格式，例如：\`event:/SFX/Player/jump\` 或 \`event:/VO/Hero/attack\`。
        - **时长与播放逻辑**：用声效术语编写，例如 "1s, 单次播放", "loop, 循环播放"。
        - **3D 距离规范 (distance_3d)**：对于 FMOD/Wwise 中间件需求表，如果是 3D 事件（如备注或播放逻辑里包含 3D 空间、3D 空间定位等），必须在 \`distance_3d\` 中增加一个 3D 距离，默认值为 \`"20"\`（或根据音量、场景大小评估为 "15", "30" 等数字字符串）；如果是 2D 事件，则该字段输出为 \`"-"\`。

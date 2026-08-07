@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import JSZip from 'jszip';
 import { 
   Database, 
@@ -64,6 +64,33 @@ interface ImportItem {
   duration: number;
   status?: 'pending' | 'uploading' | 'success' | 'error';
 }
+
+interface AudioAssetLibraryStats {
+  total: number;
+  uploaded: number;
+  generated: number;
+  external: number;
+  library: number;
+  byCategory: Record<string, number>;
+  byFormat: Record<string, number>;
+  bySource: Record<string, number>;
+  byKind: Record<string, number>;
+  topTags: Array<{ tag: string; count: number }>;
+  indexedAt: string;
+}
+
+const isUploadedAudioAsset = (sound: SoundEffect) => {
+  const url = (sound.url || '').toLowerCase();
+  const fileName = (sound.fileName || '').toLowerCase();
+  return url.startsWith('/uploads/') || fileName.startsWith('upload_') || fileName.startsWith('audio_');
+};
+
+const inferAudioAssetKind = (sound: SoundEffect): 'music' | 'sfx' => {
+  const text = `${sound.category || ''} ${sound.subcategory || ''} ${sound.fileName || ''} ${sound.path || ''}`.toLowerCase();
+  return text.includes('music') || text.includes('bgm') || text.includes('配乐') || text.includes('音乐') || text.includes('闊充箰')
+    ? 'music'
+    : 'sfx';
+};
 
 export const LOCAL_DEFAULT_CATEGORIES: CategoryGroup[] = [
   {
@@ -595,24 +622,115 @@ export default function SfxLibrary() {
   });
 
   const isLoadedFromServer = useRef(false);
+  const [serverAssetStats, setServerAssetStats] = useState<AudioAssetLibraryStats | null>(null);
+  const [isRefreshingAssetIndex, setIsRefreshingAssetIndex] = useState(false);
+
+  const localAssetStats = useMemo<AudioAssetLibraryStats>(() => {
+    const byCategory: Record<string, number> = {};
+    const byFormat: Record<string, number> = {};
+    const bySource: Record<string, number> = {
+      uploaded: 0,
+      generated: 0,
+      external: 0,
+      library: 0,
+    };
+    const byKind: Record<string, number> = {
+      music: 0,
+      sfx: 0,
+    };
+    const tagCounts: Record<string, number> = {};
+
+    sounds.forEach(sound => {
+      const source = isUploadedAudioAsset(sound)
+        ? 'uploaded'
+        : (sound.url || '').startsWith('http')
+          ? 'external'
+          : ((sound.designer || '').toLowerCase().includes('ai') || (sound.designer || '').toLowerCase().includes('gemini') || (sound.designer || '').toLowerCase().includes('elevenlabs'))
+            ? 'generated'
+            : 'library';
+      const kind = inferAudioAssetKind(sound);
+      byCategory[sound.category || '未分类'] = (byCategory[sound.category || '未分类'] || 0) + 1;
+      byFormat[sound.format || 'UNKNOWN'] = (byFormat[sound.format || 'UNKNOWN'] || 0) + 1;
+      bySource[source] = (bySource[source] || 0) + 1;
+      byKind[kind] = (byKind[kind] || 0) + 1;
+      (sound.tags || []).forEach(tag => {
+        if (tag) tagCounts[tag] = (tagCounts[tag] || 0) + 1;
+      });
+    });
+
+    return {
+      total: sounds.length,
+      uploaded: bySource.uploaded || 0,
+      generated: bySource.generated || 0,
+      external: bySource.external || 0,
+      library: bySource.library || 0,
+      byCategory,
+      byFormat,
+      bySource,
+      byKind,
+      topTags: Object.entries(tagCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 8)
+        .map(([tag, count]) => ({ tag, count })),
+      indexedAt: new Date().toISOString(),
+    };
+  }, [sounds]);
+
+  const assetStats = serverAssetStats && serverAssetStats.total === localAssetStats.total
+    ? serverAssetStats
+    : localAssetStats;
+
+  const refreshAudioAssetIndex = async () => {
+    setIsRefreshingAssetIndex(true);
+    try {
+      const response = await fetch('/api/audio-assets/reindex', { method: 'POST' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json();
+      if (payload?.stats) {
+        setServerAssetStats(payload.stats);
+        showCustomAlert(
+          '素材索引已刷新',
+          `当前可调取音频素材 ${payload.stats.total} 个，其中本地上传 ${payload.stats.uploaded} 个。`
+        );
+      }
+    } catch (err: any) {
+      console.error('Failed to refresh audio asset index:', err);
+      setServerAssetStats(localAssetStats);
+      showCustomAlert('索引刷新失败', `已使用本地缓存统计继续显示。详情: ${err.message || '未知错误'}`);
+    } finally {
+      setIsRefreshingAssetIndex(false);
+    }
+  };
+
+  const fetchJsonIfAvailable = async <T,>(url: string): Promise<T | null> => {
+    const response = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!response.ok) return null;
+
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.toLowerCase().includes('application/json')) return null;
+
+    return response.json() as Promise<T>;
+  };
 
   // Load categories and sounds from full-stack backend on mount
   useEffect(() => {
     const loadServerData = async () => {
       try {
-        const [catRes, soundRes] = await Promise.all([
-          fetch('/api/sfx/categories'),
-          fetch('/api/sfx/sounds')
+        const [catData, soundData, assetStatsData] = await Promise.all([
+          fetchJsonIfAvailable<CategoryGroup[]>('/api/sfx/categories'),
+          fetchJsonIfAvailable<SoundEffect[]>('/api/sfx/sounds'),
+          fetchJsonIfAvailable<AudioAssetLibraryStats>('/api/audio-assets/stats')
         ]);
-        if (catRes.ok) {
-          const catData = await catRes.json();
+        if (Array.isArray(catData)) {
           setCategories(catData);
           localStorage.setItem('sfx_library_categories', JSON.stringify(catData));
         }
-        if (soundRes.ok) {
-          const soundData = await soundRes.json();
+        if (Array.isArray(soundData)) {
           setSounds(soundData);
           localStorage.setItem('sfx_library_sounds', JSON.stringify(soundData));
+        }
+        if (assetStatsData) {
+          setServerAssetStats(assetStatsData);
         }
       } catch (err) {
         console.error("Failed to load sfx library database from server:", err);
@@ -2342,6 +2460,57 @@ export default function SfxLibrary() {
         {/* ==================== LEFT COLUMN: Directory Tree & Tag Cloud ==================== */}
         <aside id="sfx-lib-left-panel" className="w-60 bg-white border-r border-slate-200 flex flex-col justify-between shrink-0 overflow-y-auto custom-scrollbar">
           <div className="p-4 space-y-6">
+
+            {/* Audio Asset Index Status */}
+            <div className="rounded-2xl border border-emerald-100 bg-gradient-to-br from-emerald-50 via-white to-slate-50 p-3 shadow-sm">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="text-[10px] font-black uppercase tracking-[0.18em] text-emerald-700">Asset Index</p>
+                  <h3 className="mt-1 text-xs font-black text-slate-800">可调取音频素材库</h3>
+                  <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
+                    保留本地上传；上传成功的音效会自动进入索引，其他人可按分类、标签、文件名检索调用。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={refreshAudioAssetIndex}
+                  disabled={isRefreshingAssetIndex}
+                  className="rounded-lg border border-emerald-100 bg-white p-1.5 text-emerald-700 shadow-sm transition-all hover:bg-emerald-600 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  title="刷新服务端素材索引"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingAssetIndex ? 'animate-spin' : ''}`} />
+                </button>
+              </div>
+
+              <div className="mt-3 grid grid-cols-2 gap-2 text-[10px]">
+                <div className="rounded-xl border border-white/70 bg-white/80 p-2">
+                  <p className="font-mono text-base font-black text-slate-800">{assetStats.total}</p>
+                  <p className="font-bold text-slate-400">总素材</p>
+                </div>
+                <div className="rounded-xl border border-white/70 bg-white/80 p-2">
+                  <p className="font-mono text-base font-black text-emerald-700">{assetStats.uploaded}</p>
+                  <p className="font-bold text-slate-400">本地上传</p>
+                </div>
+                <div className="rounded-xl border border-white/70 bg-white/80 p-2">
+                  <p className="font-mono text-sm font-black text-indigo-700">{assetStats.byKind.sfx || 0}</p>
+                  <p className="font-bold text-slate-400">音效</p>
+                </div>
+                <div className="rounded-xl border border-white/70 bg-white/80 p-2">
+                  <p className="font-mono text-sm font-black text-amber-700">{assetStats.byKind.music || 0}</p>
+                  <p className="font-bold text-slate-400">音乐</p>
+                </div>
+              </div>
+
+              {assetStats.topTags.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-1">
+                  {assetStats.topTags.slice(0, 4).map(item => (
+                    <span key={item.tag} className="rounded-full bg-emerald-100 px-2 py-0.5 text-[9px] font-bold text-emerald-700">
+                      #{item.tag}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
             
             {/* Standard Directory Tree */}
             <div className="space-y-3">
