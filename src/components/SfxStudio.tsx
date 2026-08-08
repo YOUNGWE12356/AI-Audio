@@ -123,11 +123,7 @@ export default function SfxStudio({
       {/* Workspace Banner */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-6">
         <div>
-          <div className="flex items-center gap-2">
-            <Waves className="w-4 h-4 text-emerald-600" />
-            <span className="text-xs font-bold text-emerald-600 uppercase tracking-widest">AI Sound Design Studio</span>
-          </div>
-          <h2 className="text-xl font-black text-slate-800 mt-1">AI 音效</h2>
+          <h2 className="text-xl font-black text-slate-800">AI 音效</h2>
           <p className="text-xs text-slate-500 mt-1">专业拟音与科幻特技合成，输入文字描述即刻收获极具张力的电影声效。</p>
         </div>
       </div>

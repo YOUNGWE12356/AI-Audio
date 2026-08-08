@@ -52,8 +52,8 @@ export default function SpeechToSpeech({
   const stsInputAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // STS Voice Selection States
-  const [stsVoiceRole, setStsVoiceRole] = useState('21m00Tcm4TlvDq8ikWAM'); // Rachel default
-  const [stsVoiceGender, setStsVoiceGender] = useState<'male' | 'female'>('female');
+  const [stsVoiceRole, setStsVoiceRole] = useState('');
+  const [stsVoiceGender, setStsVoiceGender] = useState<'male' | 'female'>('male');
   const [stsVoiceSearchQuery, setStsVoiceSearchQuery] = useState('');
   const [stsVoiceActiveCategory, setStsVoiceActiveCategory] = useState('全部');
   const [stsVoiceGenderFilter, setStsVoiceGenderFilter] = useState<'all' | 'male' | 'female'>('all');
@@ -133,6 +133,10 @@ export default function SpeechToSpeech({
   const handleStsGenerate = async () => {
     if (!stsFile) {
       setStsError('请先上传需要变声的源音频文件');
+      return;
+    }
+    if (!stsVoiceRole) {
+      setStsError('当前配音库暂无可用声线，请先在 ElevenLabs 添加或恢复声线');
       return;
     }
 
@@ -420,7 +424,7 @@ export default function SpeechToSpeech({
 
                         {/* Category filter */}
                         <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
-                          {['全部', '经典人声', '游戏动漫', '叙事小说', '媒体广告', '高雅格调', '我的克隆'].map(cat => {
+                          {['全部', 'ElevenLabs 人声库', '我的克隆'].map(cat => {
                             if (cat === '我的克隆' && !displayVoices.some(v => v.category === '我的克隆')) {
                               return null;
                             }
@@ -576,7 +580,7 @@ export default function SpeechToSpeech({
           {/* Trigger button */}
           <button
             onClick={handleStsGenerate}
-            disabled={stsLoading || !stsFile}
+            disabled={stsLoading || !stsFile || !stsVoiceRole}
             className="w-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-bold py-3.5 rounded-xl text-xs tracking-wider uppercase transition-all shadow-md shadow-emerald-600/10 disabled:opacity-50 flex items-center justify-center gap-2 cursor-pointer"
           >
             {stsLoading ? (

@@ -49,7 +49,7 @@ import { fetchAvailableVoices } from '../services/elevenLabsService';
 import { extractVideoKeyframes } from '../utils/mediaPreparation';
 
 const MAX_VIDEO_UPLOAD_BYTES = 100 * 1024 * 1024;
-const DEFAULT_DUBBING_VOICE_ID = '21m00Tcm4TlvDq8ikWAM';
+const DEFAULT_DUBBING_VOICE_ID = '';
 const MIN_DUBBING_AUTO_SPEED = 0.25;
 const MAX_DUBBING_AUTO_SPEED = 4;
 const ORIGINAL_AUDIO_TRACK_ID = 'original-audio';
@@ -323,7 +323,7 @@ const createOriginalAudioClip = (
   voiceDirty: false,
 });
 
-const VOICE_CATEGORIES = ['全部', '经典人声', '游戏动漫', '叙事小说', '媒体广告', '高雅格调', '我的克隆'];
+const VOICE_CATEGORIES = ['全部', 'ElevenLabs 人声库', '我的克隆'];
 
 const resolveClipAudioSource = (clip: TimelineClip): TimelineClip['audioSource'] => {
   if (clip.audioSource) return clip.audioSource;
@@ -569,8 +569,10 @@ export default function VideoSoundtrack() {
     try {
       const apiVoices = await fetchAvailableVoices();
       if (apiVoices && apiVoices.length > 0) {
-        const allowedCategories = ['premade', 'cloned', 'professional'];
-        const filteredApiVoices = apiVoices.filter(av => allowedCategories.includes(av.category));
+        const filteredApiVoices = apiVoices.filter(av =>
+          av.source === 'voice_library' ||
+          ['professional', 'cloned', 'generated'].includes(av.category)
+        );
 
         const mapped: VoiceItem[] = filteredApiVoices.map(av => {
           const existing = ELEVENLABS_VOICES.find(ev => ev.id === av.voice_id);
@@ -587,7 +589,16 @@ export default function VideoSoundtrack() {
           } else {
             isMale = /\b(adam|arnold|josh|clyde|antoni|sam|drew|paul|george|thomas|michael|marcus|ethan|henry)\b/i.test(av.name);
           }
-          const category = av.category === 'premade' ? '经典人声' : (av.category === 'cloned' || av.category === 'professional') ? '我的克隆' : '自定义声线';
+          const category = av.source === 'voice_library'
+            ? 'ElevenLabs 人声库'
+            : (av.category === 'cloned' || av.category === 'professional' || av.category === 'generated')
+              ? '我的克隆'
+              : '自定义声线';
+          const tags = [
+            ...Object.values(av.labels || {}).filter(Boolean),
+            av.source === 'voice_library' ? 'Voice Library' : '',
+            'v3',
+          ].filter(Boolean) as string[];
 
           return {
             id: av.voice_id,
@@ -595,8 +606,8 @@ export default function VideoSoundtrack() {
             englishName: av.name,
             gender: isMale ? 'male' as const : 'female' as const,
             category: category,
-            tags: Object.values(av.labels || {}).filter(Boolean) as string[],
-            description: av.labels?.description || `您在 ElevenLabs 中配置的${category}`,
+            tags,
+            description: av.labels?.description || `ElevenLabs ${category} · 已适配 eleven_v3`,
             previewUrl: av.preview_url || ''
           };
         });

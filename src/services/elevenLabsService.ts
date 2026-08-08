@@ -171,8 +171,8 @@ export async function generateVoice(
 
   console.log(`Generating TTS Voice with ID ${voiceId} for text:`, text.substring(0, 30));
 
-  // Use highly stable and officially supported multilingual models
-  const modelsToTry = ["eleven_multilingual_v2", "eleven_turbo_v2_5", "eleven_flash_v1"];
+  // Prefer Eleven v3 for the most expressive voice quality, then fall back to stable multilingual models.
+  const modelsToTry = ["eleven_v3", "eleven_multilingual_v2", "eleven_flash_v2_5"];
   let lastError: any = null;
   let successfulBlob: Blob | null = null;
 
@@ -205,7 +205,7 @@ export async function generateVoice(
         const errorMessage = errorData.detail?.message || response.statusText || "";
         console.warn(`Model ${modelId} failed:`, errorMessage);
         
-        // If it's a voice not found error (404), don't waste time trying next model, just go to fallback voice Rachel directly
+        // If it's a voice not found error (404), don't waste time trying next model, just go to fallback voice directly
         if (response.status === 404 || errorMessage.toLowerCase().includes("not found") || errorMessage.toLowerCase().includes("voice_id")) {
           lastError = new Error(`ElevenLabs API error: ${errorMessage}`);
           break;
@@ -223,13 +223,14 @@ export async function generateVoice(
     return successfulBlob;
   }
 
-  // Fallback if voice ID was not found: try with guaranteed default voice Rachel and stable v2 model
+  // Fallback if voice ID was not found: try with a configured guaranteed default voice and stable v2 model
   const isVoiceNotFoundError = lastError && (lastError.message.toLowerCase().includes("not found") || lastError.message.toLowerCase().includes("voice_id"));
-  if ((isVoiceNotFoundError || !successfulBlob) && voiceId !== '21m00Tcm4TlvDq8ikWAM') {
-    console.warn(`Voice ID '${voiceId}' or model failed. Retrying with guaranteed default voice (Rachel: 21m00Tcm4TlvDq8ikWAM) and eleven_multilingual_v2...`);
+  const guaranteedFallbackVoiceId: string = '';
+  if ((isVoiceNotFoundError || !successfulBlob) && guaranteedFallbackVoiceId && voiceId !== guaranteedFallbackVoiceId) {
+    console.warn(`Voice ID '${voiceId}' or model failed. Retrying with guaranteed default voice (${guaranteedFallbackVoiceId}) and eleven_multilingual_v2...`);
     
     try {
-      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM`, {
+      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${guaranteedFallbackVoiceId}`, {
         method: "POST",
         headers: {
           "xi-api-key": apiKey,
@@ -266,13 +267,113 @@ export interface ElevenLabsVoice {
   name: string;
   category: string;
   preview_url?: string;
+  public_owner_id?: string;
+  source?: 'my_voices' | 'voice_library';
+  usage_character_count_1y?: number;
+  cloned_by_count?: number;
+  featured?: boolean;
+  language?: string;
   labels?: {
     gender?: string;
     description?: string;
     accent?: string;
     age?: string;
+    use_case?: string;
+    descriptive?: string;
+    language?: string;
     [key: string]: string | undefined;
   };
+}
+
+interface ElevenLabsSharedVoice {
+  public_owner_id?: string;
+  voice_id: string;
+  name: string;
+  category?: string;
+  preview_url?: string;
+  gender?: string;
+  accent?: string;
+  age?: string;
+  descriptive?: string;
+  use_case?: string;
+  description?: string;
+  language?: string;
+  usage_character_count_1y?: number;
+  cloned_by_count?: number;
+  featured?: boolean;
+}
+
+const normalizeSharedVoice = (voice: ElevenLabsSharedVoice): ElevenLabsVoice => ({
+  voice_id: voice.voice_id,
+  name: voice.name,
+  category: voice.category || 'professional',
+  preview_url: voice.preview_url,
+  public_owner_id: voice.public_owner_id,
+  source: 'voice_library',
+  usage_character_count_1y: voice.usage_character_count_1y,
+  cloned_by_count: voice.cloned_by_count,
+  featured: voice.featured,
+  language: voice.language,
+  labels: {
+    gender: voice.gender,
+    description: voice.description || voice.descriptive,
+    accent: voice.accent,
+    age: voice.age,
+    use_case: voice.use_case,
+    descriptive: voice.descriptive,
+    language: voice.language,
+  },
+});
+
+const normalizeMyVoice = (voice: ElevenLabsVoice): ElevenLabsVoice => ({
+  ...voice,
+  source: 'my_voices',
+});
+
+const dedupeVoicesById = (voices: ElevenLabsVoice[]) => {
+  const seen = new Set<string>();
+  return voices.filter(voice => {
+    if (!voice.voice_id || seen.has(voice.voice_id)) return false;
+    seen.add(voice.voice_id);
+    return true;
+  });
+};
+
+async function fetchSharedVoiceLibrary(apiKey: string): Promise<ElevenLabsVoice[]> {
+  const requests = [
+    { category: 'high_quality', sort: 'trending' },
+    { category: 'professional', sort: 'trending' },
+    { category: 'professional', sort: 'usage_character_count_1y' },
+  ];
+
+  const voiceLists = await Promise.all(requests.map(async ({ category, sort }) => {
+    const params = new URLSearchParams({
+      page_size: '100',
+      category,
+      sort,
+      include_live_moderated: 'false',
+    });
+
+    const response = await fetch(`https://api.elevenlabs.io/v1/shared-voices?${params.toString()}`, {
+      method: 'GET',
+      headers: {
+        'xi-api-key': apiKey,
+        Accept: 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      console.warn(`Failed to fetch ElevenLabs shared voices (${category}/${sort}):`, response.statusText);
+      return [];
+    }
+
+    const data = await response.json();
+    return Array.isArray(data.voices)
+      ? data.voices.map((voice: ElevenLabsSharedVoice) => normalizeSharedVoice(voice))
+      : [];
+  }));
+
+  return dedupeVoicesById(voiceLists.flat());
 }
 
 export async function fetchAvailableVoices(): Promise<ElevenLabsVoice[]> {
@@ -292,10 +393,34 @@ export async function fetchAvailableVoices(): Promise<ElevenLabsVoice[]> {
     return [];
   }
   try {
+    const [libraryVoices, myVoicesResponse] = await Promise.all([
+      fetchSharedVoiceLibrary(apiKey),
+      fetch("https://api.elevenlabs.io/v2/voices?page_size=100&voice_type=non-default&include_total_count=false", {
+        method: "GET",
+        headers: {
+          "xi-api-key": apiKey,
+          Accept: 'application/json',
+        }
+      }),
+    ]);
+
+    let myVoices: ElevenLabsVoice[] = [];
+    if (myVoicesResponse.ok) {
+      const data = await myVoicesResponse.json();
+      myVoices = Array.isArray(data.voices) ? data.voices.map(normalizeMyVoice) : [];
+    } else {
+      console.warn("Failed to fetch ElevenLabs account voices:", myVoicesResponse.statusText);
+    }
+
+    if (libraryVoices.length > 0 || myVoices.length > 0) {
+      return dedupeVoicesById([...libraryVoices, ...myVoices]);
+    }
+
     const response = await fetch("https://api.elevenlabs.io/v1/voices", {
       method: "GET",
       headers: {
         "xi-api-key": apiKey,
+        Accept: 'application/json',
       }
     });
     if (!response.ok) {
@@ -303,7 +428,7 @@ export async function fetchAvailableVoices(): Promise<ElevenLabsVoice[]> {
       return [];
     }
     const data = await response.json();
-    return data.voices || [];
+    return Array.isArray(data.voices) ? data.voices.map(normalizeMyVoice) : [];
   } catch (err) {
     console.error("Error fetching ElevenLabs voices:", err);
     return [];
@@ -464,6 +589,3 @@ export async function transcribeSpeech(
 
   return await response.json();
 }
-
-
-

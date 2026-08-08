@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { 
   Upload, 
   FileAudio, 
@@ -61,6 +61,7 @@ interface FactoryLoudnessInfo {
 
 type RenameCaseMode = 'keep' | 'lower' | 'upper' | 'snake' | 'pascal';
 type RenameNumberPosition = 'none' | 'prefix' | 'suffix';
+type FactoryAudioFormat = 'mp3' | 'wav' | 'ogg' | 'flac' | 'aac' | 'm4a';
 
 interface RenameRules {
   template: string;
@@ -108,6 +109,24 @@ const FACTORY_LOUDNESS_PRESETS = [
 ];
 
 const MIN_ANALYSIS_DB = -80;
+const AUDIO_TOOLS_SUBNAV_MIN_WIDTH = 64;
+const AUDIO_TOOLS_SUBNAV_COMPACT_WIDTH = 128;
+const AUDIO_TOOLS_SUBNAV_DEFAULT_WIDTH = 240;
+const AUDIO_TOOLS_SUBNAV_MAX_WIDTH = 520;
+
+const FACTORY_FORMAT_OPTIONS: Array<{
+  value: FactoryAudioFormat;
+  label: string;
+  description: string;
+  supported: boolean;
+}> = [
+  { value: 'mp3', label: 'MP3', description: '高兼容压缩，适合快速交付/预览', supported: true },
+  { value: 'wav', label: 'WAV', description: '无损 PCM，适合后期制作/入库', supported: true },
+  { value: 'ogg', label: 'OGG', description: '游戏常用压缩格式，待接入编码器', supported: false },
+  { value: 'flac', label: 'FLAC', description: '无损压缩归档格式，待接入编码器', supported: false },
+  { value: 'aac', label: 'AAC', description: '移动端常用高效压缩，待接入编码器', supported: false },
+  { value: 'm4a', label: 'M4A', description: 'Apple/移动端封装，待接入编码器', supported: false },
+];
 
 const DEFAULT_RENAME_RULES: RenameRules = {
   template: '{original}',
@@ -360,6 +379,46 @@ function normalizeAudioBuffer(
 
 export default function AudioTools() {
   const [activeSubTab, setActiveSubTab] = useState<'workstation' | 'analysis' | 'factory' | 'renamer' | 'isolation'>('workstation');
+  const [subNavWidth, setSubNavWidth] = useState(() => {
+    if (typeof window === 'undefined') return AUDIO_TOOLS_SUBNAV_DEFAULT_WIDTH;
+    const saved = Number(window.localStorage.getItem('ai-audio-tools-subnav-width'));
+    return Number.isFinite(saved)
+      ? Math.max(AUDIO_TOOLS_SUBNAV_MIN_WIDTH, Math.min(AUDIO_TOOLS_SUBNAV_MAX_WIDTH, saved))
+      : AUDIO_TOOLS_SUBNAV_DEFAULT_WIDTH;
+  });
+  const [isResizingSubNav, setIsResizingSubNav] = useState(false);
+  const subNavResizeStartRef = useRef({ width: AUDIO_TOOLS_SUBNAV_DEFAULT_WIDTH, x: 0 });
+  const isSubNavCompact = subNavWidth < AUDIO_TOOLS_SUBNAV_COMPACT_WIDTH;
+
+  useEffect(() => {
+    if (!isResizingSubNav) return;
+
+    const handleMouseMove = (event: MouseEvent) => {
+      const nextWidth = subNavResizeStartRef.current.width + event.clientX - subNavResizeStartRef.current.x;
+      setSubNavWidth(Math.max(AUDIO_TOOLS_SUBNAV_MIN_WIDTH, Math.min(AUDIO_TOOLS_SUBNAV_MAX_WIDTH, nextWidth)));
+    };
+
+    const handleMouseUp = () => {
+      setIsResizingSubNav(false);
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizingSubNav]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('ai-audio-tools-subnav-width', String(subNavWidth));
+  }, [subNavWidth]);
 
   // ==========================================================
   // COMMON STATE / FUNCTIONS
@@ -510,7 +569,7 @@ export default function AudioTools() {
   // MUSIC CONVERSION STATE
   // ==========================================================
   const [factoryFiles, setFactoryFiles] = useState<File[]>([]);
-  const [factoryFormat, setFactoryFormat] = useState<'mp3' | 'wav'>('mp3');
+  const [factoryFormat, setFactoryFormat] = useState<FactoryAudioFormat>('mp3');
   const [factorySampleRate, setFactorySampleRate] = useState<number>(44100);
   const [factoryBitrate, setFactoryBitrate] = useState<number>(128); // for MP3
   const [factoryNormalizeEnabled, setFactoryNormalizeEnabled] = useState<boolean>(false);
@@ -526,6 +585,7 @@ export default function AudioTools() {
   const factoryFolderInputRef = useRef<HTMLInputElement>(null);
   const [factoryDragActive, setFactoryDragActive] = useState<boolean>(false);
   const factoryFile = factoryFiles[0] || null;
+  const selectedFactoryFormatOption = FACTORY_FORMAT_OPTIONS.find(option => option.value === factoryFormat) || FACTORY_FORMAT_OPTIONS[0];
   const primaryFactoryResult = factoryResults.find(item => item.blob && item.url) || null;
   const factoryAudioUrl = primaryFactoryResult?.url || null;
   const factoryBlob = primaryFactoryResult?.blob || null;
@@ -650,6 +710,10 @@ export default function AudioTools() {
     file: File,
     onStepProgress: (stepProgress: number, message: string) => void,
   ): Promise<FactoryConversionResult> => {
+    if (factoryFormat !== 'mp3' && factoryFormat !== 'wav') {
+      throw new Error(`${factoryFormat.toUpperCase()} 格式编码暂未接入，请先选择 MP3 或 WAV。`);
+    }
+
     onStepProgress(0.15, `正在读取：${file.name}`);
     const arrayBuffer = await file.arrayBuffer();
 
@@ -806,9 +870,11 @@ export default function AudioTools() {
       let finalBlob: Blob;
       if (factoryFormat === 'wav') {
         finalBlob = encodeWav(resampledBuffer);
-      } else {
+      } else if (factoryFormat === 'mp3') {
         // MP3
         finalBlob = encodeMp3(resampledBuffer, factoryBitrate);
+      } else {
+        throw new Error(`${factoryFormat.toUpperCase()} 格式编码暂未接入，请先选择 MP3 或 WAV。`);
       }
 
       setFactoryProgress(100);
@@ -1296,79 +1362,109 @@ export default function AudioTools() {
   return (
     <div id="audio-tools-view" className="flex-1 flex flex-col md:flex-row bg-slate-50 min-h-screen overflow-hidden">
       {/* Sub-navigation Sidebar */}
-      <div className="w-full md:w-60 bg-white border-b md:border-b-0 md:border-r border-slate-200 flex flex-col p-4 md:p-5 shrink-0 select-none">
+      <div
+        className={`relative w-full md:w-[var(--audio-tools-subnav-width)] bg-white border-b md:border-b-0 md:border-r border-slate-200 flex flex-col shrink-0 select-none ${
+          isSubNavCompact ? 'p-2 md:p-3' : 'p-4 md:p-5'
+        }`}
+        style={{ '--audio-tools-subnav-width': `${subNavWidth}px` } as React.CSSProperties}
+      >
         <div className="space-y-1.5">
-          <p className="px-3 text-[10px] font-bold text-emerald-800/80 tracking-wider uppercase mb-2">音频工具</p>
-          
           {/* Subtab Button 0: 音频工作站 */}
           <button
             onClick={() => setActiveSubTab('workstation')}
-            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 ${
+            title="音频工作站"
+            className={`w-full flex items-center rounded-xl text-xs font-semibold transition-all duration-200 ${
+              isSubNavCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
+            } ${
               activeSubTab === 'workstation'
                 ? 'bg-emerald-50 text-emerald-700 shadow-sm border border-emerald-100'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
             }`}
           >
             <Music className={`w-4 h-4 transition-colors ${activeSubTab === 'workstation' ? 'text-emerald-600' : 'text-slate-400'}`} />
-            <span>音频工作站</span>
+            <span className={isSubNavCompact ? 'hidden' : ''}>音频工作站</span>
           </button>
 
           {/* Subtab Button: 音频分析 */}
           <button
             onClick={() => setActiveSubTab('analysis')}
-            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 ${
+            title="音频分析"
+            className={`w-full flex items-center rounded-xl text-xs font-semibold transition-all duration-200 ${
+              isSubNavCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
+            } ${
               activeSubTab === 'analysis'
                 ? 'bg-emerald-50 text-emerald-700 shadow-sm border border-emerald-100'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
             }`}
           >
             <BarChart3 className={`w-4 h-4 transition-colors ${activeSubTab === 'analysis' ? 'text-emerald-600' : 'text-slate-400'}`} />
-            <span>音频分析</span>
+            <span className={isSubNavCompact ? 'hidden' : ''}>音频分析</span>
           </button>
 
           {/* Subtab Button 1: 音频转换 */}
           <button
             onClick={() => setActiveSubTab('factory')}
-            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 ${
+            title="音频转换/压缩"
+            className={`w-full flex items-center rounded-xl text-xs font-semibold transition-all duration-200 ${
+              isSubNavCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
+            } ${
               activeSubTab === 'factory'
                 ? 'bg-emerald-50 text-emerald-700 shadow-sm border border-emerald-100'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
             }`}
           >
             <RefreshCw className={`w-4 h-4 transition-colors ${activeSubTab === 'factory' ? 'text-emerald-600' : 'text-slate-400'}`} />
-            <span>音频转换/压缩</span>
+            <span className={isSubNavCompact ? 'hidden' : ''}>音频转换/压缩</span>
           </button>
 
           {/* Subtab Button: 批量命名 */}
           <button
             onClick={() => setActiveSubTab('renamer')}
-            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 ${
+            title="批量命名"
+            className={`w-full flex items-center rounded-xl text-xs font-semibold transition-all duration-200 ${
+              isSubNavCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
+            } ${
               activeSubTab === 'renamer'
                 ? 'bg-emerald-50 text-emerald-700 shadow-sm border border-emerald-100'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
             }`}
           >
             <FileText className={`w-4 h-4 transition-colors ${activeSubTab === 'renamer' ? 'text-emerald-600' : 'text-slate-400'}`} />
-            <span>批量命名</span>
+            <span className={isSubNavCompact ? 'hidden' : ''}>批量命名</span>
           </button>
 
           {/* Subtab Button 2: 人声分离 */}
           <button
             onClick={() => setActiveSubTab('isolation')}
-            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 ${
+            title="人声分离 (AI)"
+            className={`w-full flex items-center rounded-xl text-xs font-semibold transition-all duration-200 ${
+              isSubNavCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
+            } ${
               activeSubTab === 'isolation'
                 ? 'bg-emerald-50 text-emerald-700 shadow-sm border border-emerald-100'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
             }`}
           >
             <Sparkles className={`w-4 h-4 transition-colors ${activeSubTab === 'isolation' ? 'text-emerald-600' : 'text-slate-400'}`} />
-            <span>人声分离 (AI)</span>
+            <span className={isSubNavCompact ? 'hidden' : ''}>人声分离 (AI)</span>
           </button>
         </div>
+        <button
+          type="button"
+          aria-label="拖拽调整音频工具导航宽度"
+          onMouseDown={(event) => {
+            event.preventDefault();
+            subNavResizeStartRef.current = { width: subNavWidth, x: event.clientX };
+            setIsResizingSubNav(true);
+          }}
+          className="absolute right-[-4px] top-0 z-30 hidden h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-emerald-400/25 md:block"
+        >
+          <span className="sr-only">调整音频工具导航宽度</span>
+        </button>
       </div>
 
       {/* Main Workspace Panel */}
-      <div className="flex-1 overflow-y-auto p-6 md:p-8">
+      <div className={`flex-1 overflow-y-auto ${activeSubTab === 'workstation' ? 'p-4 md:p-6' : 'p-6 md:p-8'}`}>
 
       {/* ==========================================================
           SUB-TAB 0: AUDIO WORKSTATION
@@ -1908,30 +2004,27 @@ export default function AudioTools() {
                   {/* Format Selector */}
                   <div className="space-y-1.5">
                     <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">目标音频封装格式</label>
-                    <div className="grid grid-cols-2 gap-2 bg-slate-200/50 p-1 rounded-xl border border-slate-200/60">
-                      <button
-                        type="button"
-                        onClick={() => setFactoryFormat('mp3')}
-                        className={`py-1.5 px-3 rounded-lg text-xs font-bold transition-all text-center ${
-                          factoryFormat === 'mp3'
-                            ? 'bg-white text-emerald-700 shadow-sm border border-slate-250'
-                            : 'text-slate-500 hover:text-slate-800'
-                        }`}
-                      >
-                        MP3 (高保真压缩)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setFactoryFormat('wav')}
-                        className={`py-1.5 px-3 rounded-lg text-xs font-bold transition-all text-center ${
-                          factoryFormat === 'wav'
-                            ? 'bg-white text-emerald-700 shadow-sm border border-slate-250'
-                            : 'text-slate-500 hover:text-slate-800'
-                        }`}
-                      >
-                        WAV (无损原始)
-                      </button>
-                    </div>
+                    <select
+                      value={factoryFormat}
+                      onChange={(e) => {
+                        const nextFormat = e.target.value as FactoryAudioFormat;
+                        const option = FACTORY_FORMAT_OPTIONS.find(item => item.value === nextFormat);
+                        if (!option?.supported) return;
+                        setFactoryFormat(nextFormat);
+                      }}
+                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all font-semibold"
+                    >
+                      {FACTORY_FORMAT_OPTIONS.map(option => (
+                        <option key={option.value} value={option.value} disabled={!option.supported}>
+                          {option.label} - {option.supported ? option.description : `${option.description}（暂不可选）`}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-[9px] text-slate-400 leading-relaxed">
+                      当前：<span className="font-bold text-emerald-700">{selectedFactoryFormatOption.label}</span>
+                      {' · '}
+                      {selectedFactoryFormatOption.description}
+                    </p>
                   </div>
 
                   {/* Sample Rate Selector */}

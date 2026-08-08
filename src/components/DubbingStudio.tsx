@@ -106,6 +106,12 @@ export default function DubbingStudio({
 
   // Active sub-tab state ('tts' = Text-to-Speech, 'sts' = Speech-to-Speech, 'stt' = Speech-to-Text)
   const [activeSubTab, setActiveSubTab] = useState<'tts' | 'sts' | 'stt'>('tts');
+  const [subNavWidth, setSubNavWidth] = useState(() => {
+    if (typeof window === 'undefined') return 240;
+    const saved = Number(window.localStorage.getItem('ai-audio-dubbing-subnav-width'));
+    return Number.isFinite(saved) ? Math.max(180, Math.min(360, saved)) : 240;
+  });
+  const [isResizingSubNav, setIsResizingSubNav] = useState(false);
 
   // STS File Upload & Playing States
   const [stsFile, setStsFile] = useState<File | null>(null);
@@ -116,8 +122,8 @@ export default function DubbingStudio({
   const stsInputAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // STS Voice Selection States
-  const [stsVoiceRole, setStsVoiceRole] = useState('21m00Tcm4TlvDq8ikWAM'); // Rachel
-  const [stsVoiceGender, setStsVoiceGender] = useState<'male' | 'female'>('female');
+  const [stsVoiceRole, setStsVoiceRole] = useState('');
+  const [stsVoiceGender, setStsVoiceGender] = useState<'male' | 'female'>('male');
   const [stsVoiceSearchQuery, setStsVoiceSearchQuery] = useState('');
   const [stsVoiceActiveCategory, setStsVoiceActiveCategory] = useState('全部');
   const [stsVoiceGenderFilter, setStsVoiceGenderFilter] = useState<'all' | 'male' | 'female'>('all');
@@ -129,6 +135,37 @@ export default function DubbingStudio({
   const [stsError, setStsError] = useState<string | null>(null);
   const [stsIsPlaying, setStsIsPlaying] = useState(false);
   const stsAudioRef = useRef<HTMLAudioElement | null>(null);
+  const subNavResizeStartRef = useRef({ width: 240, x: 0 });
+
+  useEffect(() => {
+    if (!isResizingSubNav) return;
+
+    const handleMouseMove = (event: MouseEvent) => {
+      const nextWidth = subNavResizeStartRef.current.width + event.clientX - subNavResizeStartRef.current.x;
+      setSubNavWidth(Math.max(180, Math.min(360, nextWidth)));
+    };
+
+    const handleMouseUp = () => {
+      setIsResizingSubNav(false);
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizingSubNav]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('ai-audio-dubbing-subnav-width', String(subNavWidth));
+  }, [subNavWidth]);
 
   useEffect(() => {
     return () => {
@@ -194,6 +231,10 @@ export default function DubbingStudio({
   const handleStsGenerate = async () => {
     if (!stsFile) {
       setStsError('请先上传需要变声的源音频文件');
+      return;
+    }
+    if (!stsVoiceRole) {
+      setStsError('当前配音库暂无可用声线，请先在 ElevenLabs 添加或恢复声线');
       return;
     }
 
@@ -467,15 +508,46 @@ export default function DubbingStudio({
   // Dynamically fetched voices from ElevenLabs API
   const [fetchedVoices, setFetchedVoices] = useState<VoiceItem[]>([]);
   const [isLoadingVoices, setIsLoadingVoices] = useState(false);
+  const removedDubbingVoiceIds = new Set([
+    '21m00Tcm4TlvDq8ikWAM',
+    'AZnzlk1XvdvUeBnXmlld',
+    'EXAVITQu4vr4xnSDxMaL',
+    'pMs2g89Yc9Y9Dq8ikWAM',
+    'Lcfc5YV999TaS7COCHwv',
+    'MF3mGyEYCl7XYWbV9V6O',
+    'piTKgcLEGmPEe24v88Ie',
+    'jBpfY8zp764RNis60YCH',
+    'pNInz6obpg7IdgWAs6g8',
+    'TxGEqn74MsS85u8PXrvg',
+    'CYw3mofc8g90OBpw9rfg',
+    'IKne3meq5aSn9XLyUdCD',
+    'VR6AHRvj9K9Ge6v96XmY',
+    '29vD33N1CtxCmqQRPOHJ',
+    '5Q0t7uMc9ZUB5L7xkFF1',
+    'TX3LPaxmToCDRxJDt37v',
+  ]);
+  const removedDubbingVoiceNames = new Set(['rachel', 'domi', 'sarah', 'serena', 'emily', 'ellie', 'nicole', 'gigi', 'adam', 'josh', 'dave', 'charlie', 'arnold', 'drew', 'paul', 'liam']);
+  const shouldHideDubbingVoice = (voice: Pick<VoiceItem, 'id' | 'name' | 'englishName'>) => {
+    const name = voice.name.toLowerCase();
+    const englishName = voice.englishName.toLowerCase();
+    return (
+      removedDubbingVoiceIds.has(voice.id) ||
+      removedDubbingVoiceNames.has(englishName) ||
+      Array.from(removedDubbingVoiceNames).some(removedName => name.startsWith(removedName))
+    );
+  };
 
   const loadVoices = async () => {
     setIsLoadingVoices(true);
     try {
       const apiVoices = await fetchAvailableVoices();
       if (apiVoices && apiVoices.length > 0) {
-        // Only keep official ElevenLabs premade voices or user's own instant/professional cloned voices
-        const allowedCategories = ['premade', 'cloned', 'professional'];
-        const filteredApiVoices = apiVoices.filter(av => allowedCategories.includes(av.category));
+        // Keep high-quality ElevenLabs Voice Library voices and the user's own non-default voices.
+        // Premade/default voices are intentionally excluded because they were removed from the product library.
+        const filteredApiVoices = apiVoices.filter(av =>
+          av.source === 'voice_library' ||
+          ['professional', 'cloned', 'generated'].includes(av.category)
+        );
 
         // Map API voices to our VoiceItem structure
         const mapped: VoiceItem[] = filteredApiVoices.map(av => {
@@ -498,7 +570,16 @@ export default function DubbingStudio({
             // Check name with word boundary to avoid partial matching (e.g. Samantha matching "sam", or Georgia matching "george")
             isMale = /\b(adam|arnold|josh|clyde|antoni|sam|drew|paul|george|thomas|michael|marcus|ethan|henry)\b/i.test(av.name);
           }
-          const category = av.category === 'premade' ? '经典人声' : (av.category === 'cloned' || av.category === 'professional') ? '我的克隆' : '自定义声线';
+          const category = av.source === 'voice_library'
+            ? 'ElevenLabs 人声库'
+            : (av.category === 'cloned' || av.category === 'professional' || av.category === 'generated')
+              ? '我的克隆'
+              : '自定义声线';
+          const tags = [
+            ...Object.values(av.labels || {}).filter(Boolean),
+            av.source === 'voice_library' ? 'Voice Library' : '',
+            'v3',
+          ].filter(Boolean) as string[];
           
           return {
             id: av.voice_id,
@@ -506,12 +587,12 @@ export default function DubbingStudio({
             englishName: av.name,
             gender: isMale ? 'male' as const : 'female' as const,
             category: category,
-            tags: Object.values(av.labels || {}).filter(Boolean) as string[],
-            description: av.labels?.description || `您在 ElevenLabs 中配置的${category}`,
+            tags,
+            description: av.labels?.description || `ElevenLabs ${category} · 已适配 eleven_v3`,
             previewUrl: av.preview_url || ''
           };
         });
-        setFetchedVoices(mapped);
+        setFetchedVoices(mapped.filter(voice => !shouldHideDubbingVoice(voice)));
       } else {
         setFetchedVoices([]);
       }
@@ -535,9 +616,11 @@ export default function DubbingStudio({
   }, [showVoiceDropdown]);
 
   // Compute final voices list to display (merge pre-made voices with user's fetched custom voices, filtering duplicates)
-  const displayVoices = fetchedVoices.length > 0 
-    ? [...ELEVENLABS_VOICES, ...fetchedVoices.filter(fv => !ELEVENLABS_VOICES.some(ev => ev.id === fv.id))]
-    : ELEVENLABS_VOICES;
+  const displayVoices = (
+    fetchedVoices.length > 0
+      ? [...ELEVENLABS_VOICES, ...fetchedVoices.filter(fv => !ELEVENLABS_VOICES.some(ev => ev.id === fv.id))]
+      : ELEVENLABS_VOICES
+  ).filter(voice => !shouldHideDubbingVoice(voice));
 
   // Derived state to check if current standaloneVoiceRole is an ElevenLabs Premium Voice ID
   const isPremiumVoiceSelected = displayVoices.some(v => v.id === standaloneVoiceRole);
@@ -550,8 +633,8 @@ export default function DubbingStudio({
         setStandaloneVoiceRole(displayVoices[0].id);
         setStandaloneVoiceGender(displayVoices[0].gender);
       } else {
-        setStandaloneVoiceRole('21m00Tcm4TlvDq8ikWAM');
-        setStandaloneVoiceGender('female');
+        setStandaloneVoiceRole('');
+        setStandaloneVoiceGender('male');
       }
     }
   }, [standaloneVoiceRole, displayVoices]);
@@ -815,7 +898,10 @@ export default function DubbingStudio({
   return (
     <div id="dubbingstudio-view" className="flex-1 flex flex-col md:flex-row bg-slate-50 min-h-screen overflow-hidden">
       {/* Sub-navigation Sidebar */}
-      <div className="w-full md:w-60 bg-white border-b md:border-b-0 md:border-r border-slate-200 flex flex-col p-4 md:p-5 shrink-0 select-none">
+      <div
+        className="relative w-full md:w-[var(--dubbing-subnav-width)] bg-white border-b md:border-b-0 md:border-r border-slate-200 flex flex-col p-4 md:p-5 shrink-0 select-none"
+        style={{ '--dubbing-subnav-width': `${subNavWidth}px` } as React.CSSProperties}
+      >
         <div className="space-y-1.5">
           <p className="px-3 text-[10px] font-bold text-emerald-800/80 tracking-wider uppercase mb-2">AI配音</p>
           
@@ -869,6 +955,18 @@ export default function DubbingStudio({
             <span>语音转文本</span>
           </button>
         </div>
+        <button
+          type="button"
+          aria-label="拖拽调整配音导航宽度"
+          onMouseDown={(event) => {
+            event.preventDefault();
+            subNavResizeStartRef.current = { width: subNavWidth, x: event.clientX };
+            setIsResizingSubNav(true);
+          }}
+          className="absolute right-[-4px] top-0 z-30 hidden h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-emerald-400/25 md:block"
+        >
+          <span className="sr-only">调整配音导航宽度</span>
+        </button>
       </div>
 
       {/* Main Workspace Panel */}
@@ -876,11 +974,7 @@ export default function DubbingStudio({
         {/* Workspace Banner */}
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-6 mb-6">
           <div>
-            <div className="flex items-center gap-2">
-              <Mic className="w-4 h-4 text-emerald-600" />
-              <span className="text-xs font-bold text-emerald-600 uppercase tracking-widest">AI Character Dubbing Studio</span>
-            </div>
-            <h2 className="text-xl font-black text-slate-800 mt-1">AI 配音</h2>
+            <h2 className="text-xl font-black text-slate-800">AI 配音</h2>
             <p className="text-xs text-slate-500 mt-1">输入文字或上传语音，自定义声音库，多场景拟真人声配音、跨音色变声体验。</p>
           </div>
         </div>
@@ -1083,7 +1177,7 @@ export default function DubbingStudio({
 
                             {/* Category Filter Tabs */}
                             <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
-                              {['全部', '经典人声', '游戏动漫', '叙事小说', '媒体广告', '高雅格调', '我的克隆'].map(cat => {
+                              {['全部', 'ElevenLabs 人声库', '我的克隆'].map(cat => {
                                 if (cat === '我的克隆' && !displayVoices.some(v => v.category === '我的克隆')) {
                                   return null;
                                 }
@@ -1112,7 +1206,7 @@ export default function DubbingStudio({
                                   <span>正在同步您的 ElevenLabs 声线库...</span>
                                 </div>
                               ) : (() => {
-                                const categories = ['全部', '经典人声', '游戏动漫', '叙事小说', '媒体广告', '高雅格调', '我的克隆'];
+                                const categories = ['全部', 'ElevenLabs 人声库', '我的克隆'];
                                 const filteredVoices = displayVoices.filter(voice => {
                                   if (voiceActiveCategory !== '全部' && voice.category !== voiceActiveCategory) return false;
                                   if (voiceGenderFilter !== 'all' && voice.gender !== voiceGenderFilter) return false;
@@ -1290,7 +1384,7 @@ export default function DubbingStudio({
             {/* Dub generation button */}
             <button
               onClick={handleStandaloneVoiceGenerate}
-              disabled={standaloneVoiceLoading || !standaloneVoicePrompt.trim()}
+              disabled={standaloneVoiceLoading || !standaloneVoicePrompt.trim() || !standaloneVoiceRole}
               className="w-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-bold py-3.5 rounded-xl text-xs tracking-wider uppercase transition-all shadow-md shadow-emerald-600/10 disabled:opacity-50 flex items-center justify-center gap-2 cursor-pointer"
             >
               {standaloneVoiceLoading ? (

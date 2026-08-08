@@ -3,17 +3,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef } from 'react';
+import React from 'react';
 import { 
   Sparkles, 
   Music, 
   Waves, 
   Mic, 
-  Play, 
-  Pause, 
-  Download, 
-  Clock,
-  ArrowRight
+  ArrowRight,
+  Film,
+  SlidersHorizontal,
+  ClipboardList,
+  Database
 } from 'lucide-react';
 import { HistoryItem, TabType } from '../types';
 
@@ -22,59 +22,7 @@ interface WorkbenchProps {
   historyList: HistoryItem[];
 }
 
-const historyTypeMeta: Record<HistoryItem['type'], { label: string; tab: TabType; badgeClass: string }> = {
-  music: {
-    label: '音乐',
-    tab: 'music-studio',
-    badgeClass: 'border-indigo-100 bg-indigo-50 text-indigo-700',
-  },
-  sfx: {
-    label: '音效',
-    tab: 'sfx-studio',
-    badgeClass: 'border-emerald-100 bg-emerald-50 text-emerald-700',
-  },
-  voice: {
-    label: '配音',
-    tab: 'dubbing-studio',
-    badgeClass: 'border-sky-100 bg-sky-50 text-sky-700',
-  },
-  director: {
-    label: '音频设计',
-    tab: 'audio-director',
-    badgeClass: 'border-teal-100 bg-teal-50 text-teal-700',
-  },
-  'video-soundtrack': {
-    label: '视频声音制作',
-    tab: 'video-soundtrack',
-    badgeClass: 'border-amber-100 bg-amber-50 text-amber-700',
-  },
-};
-
 export default function Workbench({ setCurrentTab, historyList }: WorkbenchProps) {
-  const [playingId, setPlayingId] = useState<string | null>(null);
-  const audioRefs = useRef<{ [key: string]: HTMLAudioElement | null }>({});
-  const recentHistory = [...historyList]
-    .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
-    .slice(0, 3);
-
-  const handlePlayPause = (id: string, url: string) => {
-    // If we're playing another audio, pause it first
-    if (playingId && playingId !== id && audioRefs.current[playingId]) {
-      audioRefs.current[playingId]?.pause();
-    }
-
-    const currentAudio = audioRefs.current[id];
-    if (currentAudio) {
-      if (playingId === id) {
-        currentAudio.pause();
-        setPlayingId(null);
-      } else {
-        currentAudio.play().catch(e => console.error("Play failed:", e));
-        setPlayingId(id);
-      }
-    }
-  };
-
   const studios = [
     {
       id: 'audio-director' as const,
@@ -110,66 +58,99 @@ export default function Workbench({ setCurrentTab, historyList }: WorkbenchProps
     }
   ];
 
+  const featureGuide = [
+    {
+      id: 'video-soundtrack' as const,
+      title: '视频声音制作',
+      tag: '视频配声',
+      icon: Film,
+      accent: 'bg-amber-50 text-amber-700 border-amber-100',
+      intro: '围绕视频片段组织配音、音效、音乐和时间线，适合做短片、广告、游戏演示的完整声音层。',
+      usage: '导入视频或素材后，按画面段落添加声音需求，逐步完成角色配音、环境声、强调音效和背景音乐。',
+      functions: ['视频声轨规划', '时间线式整理', '多类型声音组合'],
+    },
+    {
+      id: 'audio-director' as const,
+      title: 'AI 音频设计',
+      tag: '总策划',
+      icon: Sparkles,
+      accent: 'bg-emerald-50 text-emerald-700 border-emerald-100',
+      intro: '把场景、画面或创意描述拆成可执行的声音方案，帮助先确定整体声音风格和制作清单。',
+      usage: '输入项目背景、情绪、场景节奏或参考方向，让系统生成声音设计建议，再进入具体模块制作。',
+      functions: ['声音方案规划', '素材需求拆解', '音乐与音效排程'],
+    },
+    {
+      id: 'music-studio' as const,
+      title: 'AI 音乐',
+      tag: '作曲',
+      icon: Music,
+      accent: 'bg-indigo-50 text-indigo-700 border-indigo-100',
+      intro: '根据文字提示生成背景音乐 Demo，可用于氛围铺底、片头片尾、宣传片和游戏循环音乐。',
+      usage: '描述风格、速度、情绪、乐器和时长；需要人声时补充歌词或演唱方向。',
+      functions: ['纯音乐生成', '带词音乐草稿', '风格/情绪控制'],
+    },
+    {
+      id: 'sfx-studio' as const,
+      title: 'AI 音效',
+      tag: 'Foley',
+      icon: Waves,
+      accent: 'bg-blue-50 text-blue-700 border-blue-100',
+      intro: '快速生成单个或一组场景音效，适合动作、机械、自然、科幻、转场等声音素材。',
+      usage: '输入对象、动作、材质、空间和强度，例如“金属机器人缓慢脚步，近距离，厚重”。',
+      functions: ['独立音效生成', '场景氛围声', '动作/材质音色描述'],
+    },
+    {
+      id: 'dubbing-studio' as const,
+      title: 'AI 配音',
+      tag: 'TTS',
+      icon: Mic,
+      accent: 'bg-pink-50 text-pink-700 border-pink-100',
+      intro: '把文本转成角色配音，适合旁白、角色对白、产品介绍、教学说明和情绪化表达。',
+      usage: '选择声线与语气，输入台词，按需要调整速度、情绪和语言，再生成并试听。',
+      functions: ['角色声线选择', '多语种配音', '情绪与语速控制'],
+    },
+    {
+      id: 'audio-tools' as const,
+      title: '音频工具',
+      tag: '工作站',
+      icon: SlidersHorizontal,
+      accent: 'bg-cyan-50 text-cyan-700 border-cyan-100',
+      intro: '提供多轨音频工作站和常用处理工具，用来导入、剪辑、移调、导出和整理音频。',
+      usage: '进入音频工作站后，可拖拽音频进轨道，选中片段进行剪切、淡入淡出、移调和混音导出。',
+      functions: ['多轨编辑', '拖拽导入', '移调/剪切/导出'],
+    },
+    {
+      id: 'sfx-requirements' as const,
+      title: '音效需求表',
+      tag: '清单',
+      icon: ClipboardList,
+      accent: 'bg-teal-50 text-teal-700 border-teal-100',
+      intro: '用于整理项目里的音效条目，把每个镜头或段落需要的声音变成可跟踪清单。',
+      usage: '按场景、时间点、描述、优先级记录需求，方便后续生成、替换、确认和交付。',
+      functions: ['需求记录', '镜头/时间点管理', '制作进度跟踪'],
+    },
+    {
+      id: 'sfx-library' as const,
+      title: '音效库',
+      tag: '资产',
+      icon: Database,
+      accent: 'bg-slate-50 text-slate-700 border-slate-200',
+      intro: '集中管理已生成或导入的音效资产，方便按类型、用途和项目复用。',
+      usage: '把常用音效保存到库中，通过分类和关键词查找，再下载或放入后续项目。',
+      functions: ['资产归档', '分类检索', '项目复用'],
+    },
+  ];
+
   return (
     <div id="workbench-view" className="flex-1 p-8 space-y-8 max-w-6xl mx-auto w-full">
       {/* Welcome Banner */}
       <div id="workbench-hero" className="relative overflow-hidden rounded-3xl bg-white border border-emerald-100 p-6 md:p-7 shadow-md">
         <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-emerald-500/5 to-teal-500/5 blur-3xl pointer-events-none" />
-        <div className="relative z-10 grid w-full grid-cols-1 gap-6 lg:grid-cols-[minmax(280px,0.85fr)_minmax(0,1.45fr)] lg:items-center">
+        <div className="relative z-10">
           <div className="space-y-3 text-center md:text-left">
-            <div className="inline-flex items-center gap-2 px-3 py-1 bg-emerald-50 border border-emerald-100 rounded-full text-xs text-emerald-700 font-semibold">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              AI 多模态音频创作中心 已就绪
-            </div>
             <h2 className="text-2xl md:text-3xl font-extrabold text-slate-800 tracking-tight">
               欢迎回来，音频制作人
             </h2>
-          </div>
-
-          <div id="recent-work-summary" className="min-w-0">
-            <div className="flex items-center justify-between gap-3">
-              <h3 className="flex items-center gap-1.5 text-xs font-bold text-slate-700">
-                <Clock className="h-3.5 w-3.5 text-emerald-600" />
-                <span>最近工程与制作</span>
-              </h3>
-              <span className="text-[10px] font-medium text-slate-400">最近 {recentHistory.length} 条</span>
-            </div>
-
-            {recentHistory.length === 0 ? (
-              <div className="mt-2 rounded-xl border border-dashed border-slate-200 bg-white/60 px-4 py-5 text-center text-[11px] text-slate-400">
-                完成一次创作后，最近记录会显示在这里
-              </div>
-            ) : (
-              <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
-                {recentHistory.map((item) => {
-                  const meta = historyTypeMeta[item.type];
-                  return (
-                    <button
-                      key={item.id}
-                      id={`recent-work-${item.id}`}
-                      type="button"
-                      onClick={() => setCurrentTab(meta.tab)}
-                      className="group min-w-0 rounded-xl border border-slate-200 bg-white/85 p-2.5 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-emerald-200 hover:bg-white hover:shadow-md"
-                      aria-label={`打开${item.title}`}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className={`rounded-md border px-1.5 py-0.5 text-[9px] font-bold ${meta.badgeClass}`}>
-                          {meta.label}
-                        </span>
-                        <ArrowRight className="h-3 w-3 shrink-0 text-slate-300 transition-all group-hover:translate-x-0.5 group-hover:text-emerald-600" />
-                      </div>
-                      <p className="mt-1.5 line-clamp-2 min-h-8 text-[11px] font-semibold leading-4 text-slate-700 group-hover:text-emerald-800">
-                        {item.title}
-                      </p>
-                      <div className="mt-1.5 flex items-center justify-between gap-2 text-[9px] font-medium text-slate-400">
-                        <span className="truncate">{item.details || '制作记录'}</span>
-                        <span className="shrink-0">{item.timestamp.slice(5)}</span>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
           </div>
         </div>
       </div>
@@ -214,92 +195,71 @@ export default function Workbench({ setCurrentTab, historyList }: WorkbenchProps
         </div>
       </div>
 
-      {/* Recent History Workspace */}
-      <div className="space-y-4">
-        <div className="flex items-center justify-between">
-          <h3 className="text-base font-bold text-slate-800 flex items-center gap-2">
-            <Clock className="w-4 h-4 text-emerald-600" />
-            <span>最新创作历史</span>
-          </h3>
-          <span className="text-xs text-slate-500 font-medium">本会话已生成 {historyList.length} 项</span>
+      {/* Product Guide */}
+      <div id="tool-guide" className="space-y-4 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex flex-col gap-2 border-b border-slate-100 pb-4 md:flex-row md:items-end md:justify-between">
+          <div>
+            <p className="text-[10px] font-black uppercase tracking-[0.2em] text-emerald-600">AI Audio Guide</p>
+            <h3 className="mt-1 text-lg font-black text-slate-800">功能说明与使用方法</h3>
+          </div>
+          <p className="max-w-xl text-xs leading-relaxed text-slate-500">
+            从创意规划到生成、剪辑、资产管理，AI Audio 把音频制作拆成清晰模块；根据当前任务选择入口即可开始。
+          </p>
         </div>
 
-        {historyList.length === 0 ? (
-          <div className="bg-white border border-dashed border-slate-200 rounded-2xl p-12 text-center shadow-sm">
-            <p className="text-slate-400 text-sm">暂无生成记录。在左侧或上方选择任意工作室，开始您的声音创作吧！</p>
-          </div>
-        ) : (
-          <div id="history-items" className="space-y-3">
-            {historyList.map((item) => {
-              const isPlaying = playingId === item.id;
-              return (
-                <div 
-                  key={item.id}
-                  id={`history-item-${item.id}`}
-                  className="bg-white border border-slate-200 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 hover:border-emerald-200 transition-all shadow-sm"
-                >
-                  <div className="flex items-center gap-4 min-w-0 flex-1">
-                    {/* Audio Player Core Tag */}
-                    <audio 
-                      ref={el => { audioRefs.current[item.id] = el; }} 
-                      src={item.url} 
-                      onEnded={() => setPlayingId(null)}
-                    />
-                    
-                    {/* Play Button */}
-                    <button
-                      onClick={() => handlePlayPause(item.id, item.url)}
-                      className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 border transition-all ${
-                        isPlaying 
-                          ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm shadow-emerald-500/20' 
-                          : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100 hover:text-slate-950'
-                      }`}
-                    >
-                      {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
-                    </button>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {featureGuide.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setCurrentTab(item.id)}
+                className="group flex h-full flex-col rounded-2xl border border-slate-200 bg-slate-50/60 p-4 text-left transition-all hover:-translate-y-0.5 hover:border-emerald-200 hover:bg-white hover:shadow-md"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border ${item.accent}`}>
+                    <Icon className="h-5 w-5" />
+                  </div>
+                  <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[9px] font-black text-slate-500">
+                    {item.tag}
+                  </span>
+                </div>
 
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-xs font-bold text-slate-800 truncate">{item.title}</span>
-                        <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wider ${
-                          item.type === 'music' ? 'bg-indigo-50 text-indigo-700 border border-indigo-100' :
-                          item.type === 'sfx' ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' :
-                          item.type === 'voice' ? 'bg-sky-50 text-sky-700 border border-sky-100' :
-                          'bg-teal-50 text-teal-700 border border-teal-100'
-                        }`}>
-                          {item.type === 'music' ? '背景音乐' :
-                           item.type === 'sfx' ? '独立音效' :
-                           item.type === 'voice' ? '配音角色' : '排程方案'}
+                <div className="mt-3 space-y-3">
+                  <div>
+                    <h4 className="text-sm font-black text-slate-800 group-hover:text-emerald-700">{item.title}</h4>
+                    <p className="mt-1 text-[11px] leading-relaxed text-slate-500">{item.intro}</p>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 bg-white/70 p-3">
+                    <div className="text-[10px] font-black text-slate-700">怎么用</div>
+                    <p className="mt-1 text-[11px] leading-relaxed text-slate-500">{item.usage}</p>
+                  </div>
+
+                  <div>
+                    <div className="mb-1.5 text-[10px] font-black text-slate-700">主要功能</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {item.functions.map(feature => (
+                        <span
+                          key={feature}
+                          className="rounded-md border border-emerald-100 bg-emerald-50 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700"
+                        >
+                          {feature}
                         </span>
-                      </div>
-                      <p className="text-[11px] text-slate-500 truncate mt-1 leading-relaxed italic">"{item.prompt}"</p>
-                      <div className="flex items-center gap-3 text-[10px] text-slate-400 mt-1 flex-wrap font-medium">
-                        <span>{item.timestamp}</span>
-                        {item.details && (
-                          <>
-                            <span className="w-1 h-1 rounded-full bg-slate-300" />
-                            <span>{item.details}</span>
-                          </>
-                        )}
-                      </div>
+                      ))}
                     </div>
                   </div>
-
-                  <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
-                    <a
-                      href={item.url}
-                      download={`${item.type}_${item.id}.mp3`}
-                      className="flex items-center gap-1 text-[11px] text-slate-600 hover:text-emerald-700 bg-slate-50 hover:bg-emerald-50 border border-slate-200 hover:border-emerald-200 px-3 py-1.5 rounded-xl font-semibold transition-all"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      <span>下载 MP3</span>
-                    </a>
-                  </div>
                 </div>
-              );
-            })}
-          </div>
-        )}
+
+                <div className="mt-auto flex items-center gap-1.5 pt-4 text-[11px] font-black text-slate-400 group-hover:text-emerald-700">
+                  <span>进入功能</span>
+                  <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-1" />
+                </div>
+              </button>
+            );
+          })}
+        </div>
       </div>
     </div>
   );

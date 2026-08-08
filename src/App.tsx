@@ -93,7 +93,7 @@ export default function App() {
     {
       id: 'h-3',
       type: 'voice',
-      title: '角色配音 - Rachel (知性御姐)',
+      title: '角色配音',
       prompt: '欢迎来到AI多模态音频创作中心。在这里，我们将文字、画面与声音完美融合，创造前所未有的视听享受。',
       url: 'https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg',
       timestamp: '2026-07-08 00:28',
@@ -156,8 +156,8 @@ export default function App() {
 
   // Standalone Voiceover Generator States
   const [standaloneVoiceText, setStandaloneVoiceText] = useState('');
-  const [standaloneVoiceGender, setStandaloneVoiceGender] = useState<'male' | 'female'>('female');
-  const [standaloneVoiceRole, setStandaloneVoiceRole] = useState('21m00Tcm4TlvDq8ikWAM'); 
+  const [standaloneVoiceGender, setStandaloneVoiceGender] = useState<'male' | 'female'>('male');
+  const [standaloneVoiceRole, setStandaloneVoiceRole] = useState(''); 
   const [standaloneVoiceEmotion, setStandaloneVoiceEmotion] = useState('');
   const [standaloneVoiceLang, setStandaloneVoiceLang] = useState('zh');
   const [standaloneVoiceSpeed, setStandaloneVoiceSpeed] = useState<number>(1.0);
@@ -299,6 +299,10 @@ export default function App() {
       setStandaloneVoiceError('请输入要配音的角色台词文本');
       return;
     }
+    if (!standaloneVoiceRole.trim()) {
+      setStandaloneVoiceError('当前配音库暂无可用声线，请先在 ElevenLabs 添加或恢复声线');
+      return;
+    }
 
     setStandaloneVoiceLoading(true);
     setStandaloneVoiceError(null);
@@ -364,9 +368,9 @@ export default function App() {
       const selectedVoiceObj = ELEVENLABS_VOICES.find(v => v.id === standaloneVoiceRole);
       if (selectedVoiceObj) {
         detectedGender = selectedVoiceObj.gender;
-      } else if (/男|male|man|sir|boy|uncle|大叔|老头|绅士|爷爷|爸爸|Josh|Adam|Arnold/i.test(standaloneVoiceRole)) {
+      } else if (/男|male|man|sir|boy|uncle|大叔|老头|绅士|爷爷|爸爸/i.test(standaloneVoiceRole)) {
         detectedGender = 'male';
-      } else if (/女|female|woman|lady|girl|princess|公主|御姐|loli|萝莉|Rachel|Glinda|Domi/i.test(standaloneVoiceRole)) {
+      } else if (/女|female|woman|lady|girl|princess|公主|御姐|loli|萝莉|Glinda/i.test(standaloneVoiceRole)) {
         detectedGender = 'female';
       } else {
         detectedGender = standaloneVoiceGender || 'female';
@@ -383,7 +387,7 @@ export default function App() {
 
       // Intelligent fallback parsing for custom voice descriptions
       const voiceDesc = englishRole;
-      let voiceId = detectedGender === 'male' ? 'pNInz6obpg7IdgWAs6g8' : '21m00Tcm4TlvDq8ikWAM'; // Default Adam / Rachel
+      let voiceId = englishRole;
 
       // Check if voiceDesc matches any predefined ELEVENLABS_VOICES ID or is a direct 20-character ID
       const directVoiceMatch = ELEVENLABS_VOICES.find(v => v.id === voiceDesc);
@@ -394,19 +398,19 @@ export default function App() {
       } else {
         if (detectedGender === 'male') {
           if (/旁白|稳重|磁性|深沉|男声|默认|narrator|deep|mature|calm|voiceover|default/.test(voiceDesc)) {
-            voiceId = 'pNInz6obpg7IdgWAs6g8'; // Adam
+            voiceId = standaloneVoiceRole;
           } else if (/冒险|战士|热血|强壮|粗犷|活力|勇敢|青年|warrior|brave|adventure|excited|strong|young/.test(voiceDesc)) {
-            voiceId = 'VR6A4Yft7Sg8ulqRrrWh'; // Arnold
+            voiceId = standaloneVoiceRole;
           } else if (/智者|老人|长者|老头|沙哑|沧桑|sage|old|elder|wise|hoarse|raspy/.test(voiceDesc)) {
-            voiceId = 'TxGEqn7CgACfIwFn9zCc'; // Josh
+            voiceId = standaloneVoiceRole;
           }
         } else {
           if (/知性|温柔|御姐|老师|干练|女声|默认|intellectual|gentle|sweet|mature|default/.test(voiceDesc)) {
-            voiceId = '21m00Tcm4TlvDq8ikWAM'; // Rachel
+            voiceId = standaloneVoiceRole;
           } else if (/公主|优雅|甜美|高贵|唯美|少女|princess|elegant|noble|beautiful|young lady|girl/.test(voiceDesc)) {
             voiceId = 'z9fAnlkF97DxeAlidscJ'; // Glinda
           } else if (/二次元|动漫|可爱|萝莉|活泼|赛博|cyber|cute|anime|loli|lively|energetic/.test(voiceDesc)) {
-            voiceId = 'AZnzlk1XhkZOKCF79rt9'; // Domi
+            voiceId = standaloneVoiceRole;
           }
         }
       }

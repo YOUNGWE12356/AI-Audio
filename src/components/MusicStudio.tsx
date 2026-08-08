@@ -151,11 +151,7 @@ export default function MusicStudio({
       {/* Workspace Banner */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-6">
         <div>
-          <div className="flex items-center gap-2">
-            <Music className="w-4 h-4 text-emerald-600" />
-            <span className="text-xs font-bold text-emerald-600 uppercase tracking-widest">AI Composition Workshop</span>
-          </div>
-          <h2 className="text-xl font-black text-slate-800 mt-1">AI 音乐</h2>
+          <h2 className="text-xl font-black text-slate-800">AI 音乐</h2>
           <p className="text-xs text-slate-500 mt-1">输入情绪与配乐风格关键词，一键生成契合度极高的背景音乐 Demo。</p>
         </div>
       </div>

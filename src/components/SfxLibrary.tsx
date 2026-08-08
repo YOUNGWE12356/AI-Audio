@@ -598,6 +598,19 @@ export default function SfxLibrary() {
   const [newSubNameInput, setNewSubNameInput] = useState<string>('');
   const [isAddingGroup, setIsAddingGroup] = useState<boolean>(false);
   const [newGroupNameInput, setNewGroupNameInput] = useState<string>('');
+  const [isDirectoryManageMode, setIsDirectoryManageMode] = useState<boolean>(false);
+  const canManageDirectories = isAuthorized && isDirectoryManageMode;
+
+  useEffect(() => {
+    if (!isDirectoryManageMode || !isAuthorized) return;
+    setIsCompanySfxParentExpanded(true);
+    setIsMusicParentExpanded(true);
+    setIsStandardSfxParentExpanded(true);
+    setExpandedGroups(prev => ({
+      ...prev,
+      ...categories.reduce((acc, group) => ({ ...acc, [group.id]: true }), {}),
+    }));
+  }, [categories, isAuthorized, isDirectoryManageMode]);
 
   // Multidimensional Filters
   const [filterDuration, setFilterDuration] = useState<string>('全部'); // 全部, <1s, 1-3s, >3s
@@ -1122,6 +1135,7 @@ export default function SfxLibrary() {
 
   // --- Category / Directory Tree Management Functions ---
   const moveCategory = (catId: string, direction: 'up' | 'down') => {
+    if (!checkOwnerPermission()) return;
     const isSpecial = catId === 'music_all' || catId === 'company_sfx';
     if (isSpecial) return; // These are now standalone parent groups and cannot be reordered inside their sections
     const sectionCats = categories.filter(c => c.id !== 'music_all' && c.id !== 'company_sfx');
@@ -1144,6 +1158,7 @@ export default function SfxLibrary() {
   };
 
   const moveSubCategory = (groupId: string, subId: string, direction: 'up' | 'down') => {
+    if (!checkOwnerPermission()) return;
     setCategories(prev => {
       return prev.map(group => {
         if (group.id !== groupId) return group;
@@ -1290,7 +1305,7 @@ export default function SfxLibrary() {
         subCategories: group.subCategories.map(sub => sub.id === subId ? { ...sub, name: newName } : sub)
       };
     }));
-    setSounds(prev => prev.map(s => s.subcategory === oldName ? { ...s, subcategory: undefined } : s));
+    setSounds(prev => prev.map(s => s.subcategory === oldName ? { ...s, subcategory: newName } : s));
     if (selectedCategory === oldName) {
       setSelectedCategory(newName);
     }
@@ -2462,14 +2477,11 @@ export default function SfxLibrary() {
           <div className="p-4 space-y-6">
 
             {/* Audio Asset Index Status */}
-            <div className="rounded-2xl border border-emerald-100 bg-gradient-to-br from-emerald-50 via-white to-slate-50 p-3 shadow-sm">
-              <div className="flex items-start justify-between gap-2">
+            <div className="rounded-xl border border-emerald-100 bg-gradient-to-br from-emerald-50 via-white to-slate-50 p-2.5 shadow-sm">
+              <div className="flex items-center justify-between gap-2">
                 <div className="min-w-0">
-                  <p className="text-[10px] font-black uppercase tracking-[0.18em] text-emerald-700">Asset Index</p>
-                  <h3 className="mt-1 text-xs font-black text-slate-800">可调取音频素材库</h3>
-                  <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
-                    保留本地上传；上传成功的音效会自动进入索引，其他人可按分类、标签、文件名检索调用。
-                  </p>
+                  <p className="text-[9px] font-black uppercase tracking-[0.14em] text-emerald-700">Asset Index</p>
+                  <h3 className="text-xs font-black leading-tight text-slate-800">音频素材索引</h3>
                 </div>
                 <button
                   type="button"
@@ -2482,29 +2494,33 @@ export default function SfxLibrary() {
                 </button>
               </div>
 
-              <div className="mt-3 grid grid-cols-2 gap-2 text-[10px]">
-                <div className="rounded-xl border border-white/70 bg-white/80 p-2">
-                  <p className="font-mono text-base font-black text-slate-800">{assetStats.total}</p>
-                  <p className="font-bold text-slate-400">总素材</p>
+              <p className="mt-1.5 truncate text-[10px] text-slate-500">
+                上传自动入库，可按分类、标签、文件名检索。
+              </p>
+
+              <div className="mt-2 grid grid-cols-4 gap-1 text-center text-[9px]">
+                <div className="rounded-lg bg-white/80 px-1.5 py-1">
+                  <p className="font-mono text-xs font-black text-slate-800">{assetStats.total}</p>
+                  <p className="font-bold text-slate-400">总数</p>
                 </div>
-                <div className="rounded-xl border border-white/70 bg-white/80 p-2">
-                  <p className="font-mono text-base font-black text-emerald-700">{assetStats.uploaded}</p>
-                  <p className="font-bold text-slate-400">本地上传</p>
+                <div className="rounded-lg bg-white/80 px-1.5 py-1">
+                  <p className="font-mono text-xs font-black text-emerald-700">{assetStats.uploaded}</p>
+                  <p className="font-bold text-slate-400">上传</p>
                 </div>
-                <div className="rounded-xl border border-white/70 bg-white/80 p-2">
-                  <p className="font-mono text-sm font-black text-indigo-700">{assetStats.byKind.sfx || 0}</p>
+                <div className="rounded-lg bg-white/80 px-1.5 py-1">
+                  <p className="font-mono text-xs font-black text-indigo-700">{assetStats.byKind.sfx || 0}</p>
                   <p className="font-bold text-slate-400">音效</p>
                 </div>
-                <div className="rounded-xl border border-white/70 bg-white/80 p-2">
-                  <p className="font-mono text-sm font-black text-amber-700">{assetStats.byKind.music || 0}</p>
+                <div className="rounded-lg bg-white/80 px-1.5 py-1">
+                  <p className="font-mono text-xs font-black text-amber-700">{assetStats.byKind.music || 0}</p>
                   <p className="font-bold text-slate-400">音乐</p>
                 </div>
               </div>
 
               {assetStats.topTags.length > 0 && (
-                <div className="mt-3 flex flex-wrap gap-1">
-                  {assetStats.topTags.slice(0, 4).map(item => (
-                    <span key={item.tag} className="rounded-full bg-emerald-100 px-2 py-0.5 text-[9px] font-bold text-emerald-700">
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {assetStats.topTags.slice(0, 3).map(item => (
+                    <span key={item.tag} className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700">
                       #{item.tag}
                     </span>
                   ))}
@@ -2515,9 +2531,43 @@ export default function SfxLibrary() {
             {/* Standard Directory Tree */}
             <div className="space-y-3">
               <div className="flex items-center justify-between text-[11px] font-bold tracking-wider text-slate-400 uppercase px-1">
-                <span>标准目录树</span>
-                <span className="text-[10px] text-slate-400">Categories</span>
+                <div className="flex items-center gap-1.5">
+                  <span>标准目录树</span>
+                  {isAuthorized ? (
+                    <ShieldCheck className="h-3 w-3 text-emerald-500" />
+                  ) : (
+                    <Lock className="h-3 w-3 text-slate-300" />
+                  )}
+                </div>
+                {isAuthorized ? (
+                  <button
+                    type="button"
+                    onClick={() => setIsDirectoryManageMode(prev => !prev)}
+                    className={`rounded-full border px-2 py-0.5 text-[9px] font-black transition-all ${
+                      isDirectoryManageMode
+                        ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                        : 'border-slate-200 bg-white text-slate-400 hover:text-slate-700'
+                    }`}
+                    title="开启后可重命名、上下移动、删除和新增目录"
+                  >
+                    {isDirectoryManageMode ? '管理中' : '管理'}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={checkOwnerPermission}
+                    className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[9px] font-black text-slate-400 hover:text-slate-700"
+                    title="只有所有者和已授权成员可编辑目录"
+                  >
+                    只读
+                  </button>
+                )}
               </div>
+              {isDirectoryManageMode && isAuthorized && (
+                <div className="rounded-lg border border-emerald-100 bg-emerald-50/70 px-2 py-1 text-[10px] font-bold text-emerald-700">
+                  目录管理已开启：可改名、上下移动、新增、删除。
+                </div>
+              )}
               <nav className="space-y-2">
                 {/* 1. 全部 */}
                 <button
@@ -2546,7 +2596,7 @@ export default function SfxLibrary() {
                   >
                     <span className="flex items-center gap-1">
                       {isCompanySfxParentExpanded ? <ChevronDown className="w-3 h-3 text-slate-400" /> : <ChevronRight className="w-3 h-3 text-slate-400" />}
-                      公司游戏音效
+                      {categories.find(c => c.id === 'company_sfx')?.name || '公司游戏音效'}
                     </span>
                     <span className="text-[9px] bg-indigo-50 text-indigo-600 border border-indigo-100 px-1.5 py-0.2 rounded font-bold font-mono">
                       {categories.filter(c => c.id === 'company_sfx').reduce((acc, c) => acc + sounds.filter(s => s.category === c.name || c.subCategories.map(sub => sub.name).includes(s.category) || (s.subcategory && c.subCategories.map(sub => sub.name).includes(s.subcategory))).length, 0)}
@@ -2612,7 +2662,7 @@ export default function SfxLibrary() {
                                 {/* Edit tools overlay on hover */}
                                 <div className="flex items-center gap-0.5 shrink-0">
                                   {editingCategoryId !== group.id && (
-                                    <div className="hidden group-hover:flex items-center gap-0.5 bg-slate-50 border border-slate-150 p-0.5 rounded shadow-sm mr-1">
+                                    <div className={`${canManageDirectories ? 'flex' : 'hidden group-hover:flex'} items-center gap-0.5 bg-slate-50 border border-slate-150 p-0.5 rounded shadow-sm mr-1`}>
                                       {/* Download Folder */}
                                       <button
                                         onClick={(e) => {
@@ -2624,7 +2674,7 @@ export default function SfxLibrary() {
                                       >
                                         <Download className="w-2.5 h-2.5" />
                                       </button>
-                                      {isAuthorized && (
+                                      {canManageDirectories && (
                                         <>
                                           {/* Rename */}
                                           <button
@@ -2718,7 +2768,7 @@ export default function SfxLibrary() {
                                   {group.subCategories.length === 0 ? (
                                     <div className="text-[9.5px] text-slate-400 italic py-1 px-1 flex items-center gap-1">
                                       <span>空文件夹目录</span>
-                                      {isAuthorized && (
+                                      {canManageDirectories && (
                                         <span onClick={() => { setIsAddingSubToId(group.id); setNewSubNameInput(''); }} className="text-indigo-600 font-bold underline cursor-pointer">添加</span>
                                       )}
                                     </div>
@@ -2776,7 +2826,7 @@ export default function SfxLibrary() {
 
                                           {/* Hover tools for subfolders */}
                                           {editingSubCategoryId !== sub.id && (
-                                            <div className="hidden group-hover/sub:flex items-center gap-0.5 bg-slate-50 border border-slate-150 p-0.5 rounded shadow-sm mr-1">
+                                            <div className={`${canManageDirectories ? 'flex' : 'hidden group-hover/sub:flex'} items-center gap-0.5 bg-slate-50 border border-slate-150 p-0.5 rounded shadow-sm mr-1`}>
                                               {/* Download Subfolder */}
                                               <button
                                                 onClick={(e) => {
@@ -2788,7 +2838,7 @@ export default function SfxLibrary() {
                                               >
                                                 <Download className="w-2 h-2" />
                                               </button>
-                                              {isAuthorized && (
+                                              {canManageDirectories && (
                                                 <>
                                                   {/* Move Up */}
                                                   <button
@@ -2855,7 +2905,7 @@ export default function SfxLibrary() {
                   >
                     <span className="flex items-center gap-1">
                       {isMusicParentExpanded ? <ChevronDown className="w-3 h-3 text-slate-400" /> : <ChevronRight className="w-3 h-3 text-slate-400" />}
-                      全部音乐
+                      {categories.find(c => c.id === 'music_all')?.name || '全部音乐'}
                     </span>
                     <span className="text-[9px] bg-indigo-50 text-indigo-600 border border-indigo-100 px-1.5 py-0.2 rounded font-bold font-mono">
                       {categories.filter(c => c.id === 'music_all').reduce((acc, c) => acc + sounds.filter(s => s.category === c.name || c.subCategories.map(sub => sub.name).includes(s.category) || (s.subcategory && c.subCategories.map(sub => sub.name).includes(s.subcategory))).length, 0)}
@@ -2921,7 +2971,7 @@ export default function SfxLibrary() {
                                 {/* Edit tools overlay on hover */}
                                 <div className="flex items-center gap-0.5 shrink-0">
                                   {editingCategoryId !== group.id && (
-                                    <div className="hidden group-hover:flex items-center gap-0.5 bg-slate-50 border border-slate-150 p-0.5 rounded shadow-sm mr-1">
+                                    <div className={`${canManageDirectories ? 'flex' : 'hidden group-hover:flex'} items-center gap-0.5 bg-slate-50 border border-slate-150 p-0.5 rounded shadow-sm mr-1`}>
                                       {/* Download Folder */}
                                       <button
                                         onClick={(e) => {
@@ -2933,7 +2983,7 @@ export default function SfxLibrary() {
                                       >
                                         <Download className="w-2.5 h-2.5" />
                                       </button>
-                                      {isAuthorized && (
+                                      {canManageDirectories && (
                                         <>
                                           {/* Rename */}
                                           <button
@@ -3027,7 +3077,7 @@ export default function SfxLibrary() {
                                   {group.subCategories.length === 0 ? (
                                     <div className="text-[9.5px] text-slate-400 italic py-1 px-1 flex items-center gap-1">
                                       <span>空文件夹目录</span>
-                                      {isAuthorized && (
+                                      {canManageDirectories && (
                                         <span onClick={() => { setIsAddingSubToId(group.id); setNewSubNameInput(''); }} className="text-indigo-600 font-bold underline cursor-pointer">添加</span>
                                       )}
                                     </div>
@@ -3085,7 +3135,7 @@ export default function SfxLibrary() {
 
                                           {/* Hover tools for subfolders */}
                                           {editingSubCategoryId !== sub.id && (
-                                            <div className="hidden group-hover/sub:flex items-center gap-0.5 bg-slate-50 border border-slate-150 p-0.5 rounded shadow-sm mr-1">
+                                            <div className={`${canManageDirectories ? 'flex' : 'hidden group-hover/sub:flex'} items-center gap-0.5 bg-slate-50 border border-slate-150 p-0.5 rounded shadow-sm mr-1`}>
                                               {/* Download Subfolder */}
                                               <button
                                                 onClick={(e) => {
@@ -3097,7 +3147,7 @@ export default function SfxLibrary() {
                                               >
                                                 <Download className="w-2 h-2" />
                                               </button>
-                                              {isAuthorized && (
+                                              {canManageDirectories && (
                                                 <>
                                                   {/* Move Up */}
                                                   <button
@@ -3230,7 +3280,7 @@ export default function SfxLibrary() {
                                 {/* Edit tools overlay */}
                                 <div className="flex items-center gap-0.5 shrink-0">
                                   {editingCategoryId !== group.id && (
-                                    <div className="hidden group-hover:flex items-center gap-0.5 bg-slate-50 border border-slate-150 p-0.5 rounded shadow-sm mr-1">
+                                    <div className={`${canManageDirectories ? 'flex' : 'hidden group-hover:flex'} items-center gap-0.5 bg-slate-50 border border-slate-150 p-0.5 rounded shadow-sm mr-1`}>
                                       {/* Download Folder */}
                                       <button
                                         onClick={(e) => {
@@ -3242,7 +3292,7 @@ export default function SfxLibrary() {
                                       >
                                         <Download className="w-2.5 h-2.5" />
                                       </button>
-                                      {isAuthorized && (
+                                      {canManageDirectories && (
                                         <>
                                           {/* Move Up */}
                                           <button
@@ -3360,7 +3410,7 @@ export default function SfxLibrary() {
                                   {group.subCategories.length === 0 ? (
                                     <div className="text-[9.5px] text-slate-400 italic py-1 px-1 flex items-center gap-1">
                                       <span>空文件夹目录</span>
-                                      {isAuthorized && (
+                                      {canManageDirectories && (
                                         <span onClick={() => { setIsAddingSubToId(group.id); setNewSubNameInput(''); }} className="text-indigo-600 font-bold underline cursor-pointer">添加</span>
                                       )}
                                     </div>
@@ -3418,7 +3468,7 @@ export default function SfxLibrary() {
 
                                           {/* Hover tools for subfolders */}
                                           {editingSubCategoryId !== sub.id && (
-                                            <div className="hidden group-hover/sub:flex items-center gap-0.5 bg-slate-50 border border-slate-150 p-0.5 rounded shadow-sm mr-1">
+                                            <div className={`${canManageDirectories ? 'flex' : 'hidden group-hover/sub:flex'} items-center gap-0.5 bg-slate-50 border border-slate-150 p-0.5 rounded shadow-sm mr-1`}>
                                               {/* Download Subfolder */}
                                               <button
                                                 onClick={(e) => {
@@ -3430,7 +3480,7 @@ export default function SfxLibrary() {
                                               >
                                                 <Download className="w-2 h-2" />
                                               </button>
-                                              {isAuthorized && (
+                                              {canManageDirectories && (
                                                 <>
                                                   {/* Move Up */}
                                                   <button
@@ -3489,7 +3539,7 @@ export default function SfxLibrary() {
                   )}
 
                   {/* Add parent category input (only for designer) */}
-                  {isAuthorized && (
+                  {canManageDirectories && (
                     <div className="pt-2 px-1 border-t border-slate-100">
                       {isAddingGroup ? (
                         <div className="flex items-center gap-1.5 p-1 bg-slate-50 rounded-lg border border-slate-200">

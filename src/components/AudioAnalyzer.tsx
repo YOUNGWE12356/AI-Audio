@@ -5,7 +5,6 @@
 
 import React, { useRef, useState } from 'react';
 import {
-  Activity,
   AlertCircle,
   BarChart3,
   CheckCircle2,
@@ -526,10 +525,6 @@ export default function AudioAnalyzer() {
       <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
         <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-emerald-100 bg-emerald-50 px-3 py-1 text-[10px] font-black uppercase tracking-wider text-emerald-700">
-              <Activity className="h-3.5 w-3.5" />
-              Audio Insight Lab
-            </div>
             <h2 className="text-2xl font-black tracking-tight text-slate-900">音频测速 / 测调 / 乐器和弦分析</h2>
             <p className="mt-2 max-w-2xl text-sm leading-relaxed text-slate-500">
               上传一首音乐后，本地解析音频并估算 BPM、调性、主要和弦、乐器/音色倾向、响度、动态范围、底噪 RMS、SNR 信噪比、频段分布和立体声宽度。

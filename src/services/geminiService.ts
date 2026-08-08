@@ -1423,7 +1423,7 @@ export async function matchBestVoice(
   voices: Array<{ id: string; name: string; englishName: string; gender: string; description: string; tags: string[] }>
 ): Promise<string> {
   if (!description || !description.trim()) {
-    return gender === 'male' ? 'pNInz6obpg7IdgWAs6g8' : '21m00Tcm4TlvDq8ikWAM';
+    return voices[0]?.id || '';
   }
 
   if (isBrowser) {
@@ -1451,7 +1451,7 @@ export async function matchBestVoice(
 可选人声列表:
 ${JSON.stringify(simplifiedVoices, null, 2)}
 
-请仅返回最匹配的那个音色的 20 位 ElevenLabs ID（例如 "pNInz6obpg7IdgWAs6g8"），不要包含任何其他字符、标点、前缀、空格或解释。如果完全无法匹配，请返回默认的推荐 ID（男声返回 "pNInz6obpg7IdgWAs6g8"，女声返回 "21m00Tcm4TlvDq8ikWAM"）。`;
+请仅返回最匹配的那个音色的 20 位 ElevenLabs ID，不要包含任何其他字符、标点、前缀、空格或解释。如果完全无法匹配，请返回可选人声列表中的第一个 ID。`;
 
     const response = await generateGeminiContent(ai, {
       model: "gemini-3.5-flash",
@@ -1471,12 +1471,9 @@ ${JSON.stringify(simplifiedVoices, null, 2)}
       return cleanedId;
     }
     
-    return gender === 'male' ? 'pNInz6obpg7IdgWAs6g8' : '21m00Tcm4TlvDq8ikWAM';
+    return simplifiedVoices[0]?.id || '';
   } catch (err) {
     console.error("Gemini voice matching failed, falling back:", err);
-    return gender === 'male' ? 'pNInz6obpg7IdgWAs6g8' : '21m00Tcm4TlvDq8ikWAM';
+    return voices[0]?.id || '';
   }
 }
-
-
-

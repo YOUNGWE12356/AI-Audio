@@ -17,7 +17,6 @@ import {
   Upload, 
   Music, 
   Layers, 
-  Info, 
   Volume1,
   FileAudio,
   Radio,
@@ -25,9 +24,10 @@ import {
   Sparkles,
   MousePointer2,
   Eraser,
-  Magnet,
   Copy,
-  RotateCcw
+  Maximize2,
+  Minimize2,
+  Magnet
 } from 'lucide-react';
 import { encodeMp3, encodeWav, resampleAudioBuffer } from '../services/audioEncoderService';
 
@@ -37,17 +37,19 @@ interface AudioClip {
   startTime: number; // in seconds from track start
   duration: number;  // in seconds
   buffer: AudioBuffer;
+  sourceBuffer?: AudioBuffer; // original/current base buffer used for non-cascading transpose
   color: string;     // Tailwind classes for bg/border
   fadeIn?: number;   // fade in duration in seconds
   fadeOut?: number;  // fade out duration in seconds
   gain?: number;     // event gain, 0 to 200
   muted?: boolean;   // event mute
+  transposeSemitones?: number;
 }
 
 interface AudioTrack {
   id: string;
   name: string;
-  volume: number;    // 0 to 100
+  volume: number;    // channel fader in dB: 0.0 = unity gain
   pan: number;       // -100 left to 100 right
   muted: boolean;
   solo: boolean;
@@ -59,10 +61,16 @@ interface ClipClipboard {
   sourceTrackId: string;
 }
 
+interface WorkstationHistorySnapshot {
+  tracks: AudioTrack[];
+  selectedClip: { trackId: string; clipId: string } | null;
+}
+
 type ToolMode = 'select' | 'split' | 'erase' | 'mute';
 type ResizeEdge = 'left' | 'right';
 type WorkstationExportFormat = 'wav' | 'mp3';
 type WorkstationBitDepth = 16 | 24 | 32;
+type RulerMode = 'time' | 'bars';
 
 // Colors list for visual representation of clips
 const CLIP_COLORS = [
@@ -77,6 +85,31 @@ const CLIP_COLORS = [
 
 const WORKSTATION_SAMPLE_RATE = 48000;
 const WORKSTATION_BIT_DEPTH: WorkstationBitDepth = 24;
+const DEFAULT_TRACK_HEIGHT = 104;
+const MIN_TRACK_HEIGHT = 72;
+const MAX_TRACK_HEIGHT = 220;
+const DEFAULT_TRACK_HEADER_WIDTH = 248;
+const MIN_TRACK_HEADER_WIDTH = 180;
+const MAX_TRACK_HEADER_WIDTH = 420;
+const MIN_TRACK_VOLUME_DB = -60;
+const MAX_TRACK_VOLUME_DB = 6;
+const DEFAULT_TRACK_VOLUME_DB = 0;
+const DEFAULT_TEMPO_BPM = 120;
+const MIN_TEMPO_BPM = 40;
+const MAX_TEMPO_BPM = 240;
+const BEATS_PER_BAR = 4;
+
+const createToolCursor = (label: string, fallback: string) => {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28"><rect x="1" y="1" width="26" height="26" rx="7" fill="rgba(15,23,42,0.92)" stroke="rgba(56,189,248,0.95)" stroke-width="2"/><text x="14" y="18" text-anchor="middle" font-size="14" font-family="Arial, sans-serif" font-weight="700" fill="white">${label}</text></svg>`;
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}") 14 14, ${fallback}`;
+};
+
+const TOOL_CURSOR_BY_MODE: Record<ToolMode, string> = {
+  select: 'default',
+  split: createToolCursor('✂', 'crosshair'),
+  erase: createToolCursor('⌫', 'not-allowed'),
+  mute: createToolCursor('M', 'pointer'),
+};
 
 export default function AudioWorkstation() {
   // Web Audio Context reference
@@ -84,8 +117,8 @@ export default function AudioWorkstation() {
   
   // Tracks state
   const [tracks, setTracks] = useState<AudioTrack[]>([
-    { id: 'track-1', name: '人声主轨', volume: 80, pan: 0, muted: false, solo: false, clips: [] },
-    { id: 'track-2', name: '伴奏轨', volume: 60, pan: 0, muted: false, solo: false, clips: [] },
+    { id: 'track-1', name: '人声主轨', volume: DEFAULT_TRACK_VOLUME_DB, pan: 0, muted: false, solo: false, clips: [] },
+    { id: 'track-2', name: '伴奏轨', volume: DEFAULT_TRACK_VOLUME_DB, pan: 0, muted: false, solo: false, clips: [] },
   ]);
 
   // Global Transport States
@@ -98,19 +131,46 @@ export default function AudioWorkstation() {
   const [toolMode, setToolMode] = useState<ToolMode>('select');
   const [snapEnabled, setSnapEnabled] = useState<boolean>(true);
   const [snapStep, setSnapStep] = useState<number>(0.1);
+  const [rulerMode, setRulerMode] = useState<RulerMode>('time');
+  const [tempoBpm, setTempoBpm] = useState<number>(DEFAULT_TEMPO_BPM);
   const [exportFormat, setExportFormat] = useState<WorkstationExportFormat>('wav');
   const [exportSampleRate, setExportSampleRate] = useState<number>(WORKSTATION_SAMPLE_RATE);
   const [exportBitrate, setExportBitrate] = useState<number>(192);
   const [exportBitDepth, setExportBitDepth] = useState<WorkstationBitDepth>(WORKSTATION_BIT_DEPTH);
   const [showExportSetup, setShowExportSetup] = useState<boolean>(false);
   const [copiedClip, setCopiedClip] = useState<ClipClipboard | null>(null);
+  const [transposeSemitones, setTransposeSemitones] = useState<number>(0);
+  const [isPitchShifting, setIsPitchShifting] = useState<boolean>(false);
+  const [isFileDragActive, setIsFileDragActive] = useState<boolean>(false);
+  const [isWorkstationExpanded, setIsWorkstationExpanded] = useState<boolean>(false);
+  const [historyVersion, setHistoryVersion] = useState<number>(0);
+  const [trackHeaderWidth, setTrackHeaderWidth] = useState<number>(() => {
+    if (typeof window === 'undefined') return DEFAULT_TRACK_HEADER_WIDTH;
+    const saved = Number(window.localStorage.getItem('ai-audio-workstation-track-header-width'));
+    return Number.isFinite(saved)
+      ? Math.max(MIN_TRACK_HEADER_WIDTH, Math.min(MAX_TRACK_HEADER_WIDTH, saved))
+      : DEFAULT_TRACK_HEADER_WIDTH;
+  });
+  const [trackHeights, setTrackHeights] = useState<Record<string, number>>(() => {
+    if (typeof window === 'undefined') return {};
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem('ai-audio-workstation-track-heights') || '{}');
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  });
+  const [trackHeaderResizeDrag, setTrackHeaderResizeDrag] = useState<{ startX: number; initialWidth: number } | null>(null);
+  const [trackHeightResizeDrag, setTrackHeightResizeDrag] = useState<{ trackId: string; startY: number; initialHeight: number } | null>(null);
+  const [panKnobDrag, setPanKnobDrag] = useState<{ trackId: string; startX: number; initialPan: number } | null>(null);
 
   // Timeline configuration
   const ZOOM_PX_PER_SECOND = 20; // 1 second = 20 pixels
   const TIMELINE_MAX_SECONDS = 180; // default 3 minutes, expands dynamically
-  const trackLaneHeight = 104; // px for precise drag calculations
-  const TRACK_HEADER_WIDTH = 248;
   const TIMELINE_CONTENT_WIDTH = TIMELINE_MAX_SECONDS * ZOOM_PX_PER_SECOND;
+  const beatDurationSeconds = 60 / tempoBpm;
+  const barDurationSeconds = beatDurationSeconds * BEATS_PER_BAR;
+  const activeSnapStep = rulerMode === 'bars' ? beatDurationSeconds : snapStep;
   
   // Audio sources keeping track of what's playing in real time
   const activeSourcesRef = useRef<{ source: AudioBufferSourceNode; gainNode: GainNode }[]>([]);
@@ -118,10 +178,19 @@ export default function AudioWorkstation() {
   const playbackStartPlayheadRef = useRef<number>(0);
   const animationFrameRef = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const fileDragDepthRef = useRef<number>(0);
 
   // Synchronized refs for real-time playhead loop to avoid stale React closures
   const isPlayingRef = useRef<boolean>(false);
   const tracksRef = useRef<AudioTrack[]>(tracks);
+  const selectedClipRef = useRef<{ trackId: string; clipId: string } | null>(selectedClip);
+  const undoStackRef = useRef<WorkstationHistorySnapshot[]>([]);
+  const redoStackRef = useRef<WorkstationHistorySnapshot[]>([]);
+  const lastTracksSnapshotRef = useRef<AudioTrack[]>(tracks);
+  const lastSelectedClipSnapshotRef = useRef<{ trackId: string; clipId: string } | null>(selectedClip);
+  const isApplyingHistoryRef = useRef<boolean>(false);
+  const historyTransactionRef = useRef<WorkstationHistorySnapshot | null>(null);
+  const transposeJobIdRef = useRef<number>(0);
 
   useEffect(() => {
     isPlayingRef.current = isPlaying;
@@ -130,6 +199,217 @@ export default function AudioWorkstation() {
   useEffect(() => {
     tracksRef.current = tracks;
   }, [tracks]);
+
+  useEffect(() => {
+    selectedClipRef.current = selectedClip;
+    lastSelectedClipSnapshotRef.current = selectedClip;
+  }, [selectedClip]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('ai-audio-workstation-track-header-width', String(trackHeaderWidth));
+  }, [trackHeaderWidth]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('ai-audio-workstation-track-heights', JSON.stringify(trackHeights));
+  }, [trackHeights]);
+
+  useEffect(() => {
+    if (!isWorkstationExpanded) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsWorkstationExpanded(false);
+      }
+    };
+
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.body.style.overflow = '';
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isWorkstationExpanded]);
+
+  useEffect(() => {
+    if (!trackHeaderResizeDrag) return;
+
+    const handleMouseMove = (event: MouseEvent) => {
+      const nextWidth = trackHeaderResizeDrag.initialWidth + event.clientX - trackHeaderResizeDrag.startX;
+      setTrackHeaderWidth(Math.max(MIN_TRACK_HEADER_WIDTH, Math.min(MAX_TRACK_HEADER_WIDTH, nextWidth)));
+    };
+
+    const handleMouseUp = () => {
+      setTrackHeaderResizeDrag(null);
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [trackHeaderResizeDrag]);
+
+  useEffect(() => {
+    if (!trackHeightResizeDrag) return;
+
+    const handleMouseMove = (event: MouseEvent) => {
+      const nextHeight = trackHeightResizeDrag.initialHeight + event.clientY - trackHeightResizeDrag.startY;
+      setTrackHeights(prev => ({
+        ...prev,
+        [trackHeightResizeDrag.trackId]: Math.max(MIN_TRACK_HEIGHT, Math.min(MAX_TRACK_HEIGHT, nextHeight)),
+      }));
+    };
+
+    const handleMouseUp = () => {
+      setTrackHeightResizeDrag(null);
+    };
+
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [trackHeightResizeDrag]);
+
+  useEffect(() => {
+    if (!panKnobDrag) return;
+
+    const handleMouseMove = (event: MouseEvent) => {
+      const nextPan = clampPan(panKnobDrag.initialPan + event.clientX - panKnobDrag.startX);
+      updateTrackProp(panKnobDrag.trackId, 'pan', nextPan);
+    };
+
+    const handleMouseUp = () => {
+      setPanKnobDrag(null);
+    };
+
+    document.body.style.cursor = 'ew-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [panKnobDrag, tracks, isPlaying]);
+
+  const isSelectedClipStillValid = (
+    snapshotTracks: AudioTrack[],
+    snapshotSelectedClip: { trackId: string; clipId: string } | null,
+  ) => {
+    if (!snapshotSelectedClip) return false;
+    return snapshotTracks.some(track => (
+      track.id === snapshotSelectedClip.trackId &&
+      track.clips.some(clip => clip.id === snapshotSelectedClip.clipId)
+    ));
+  };
+
+  const pushUndoSnapshot = (snapshot: WorkstationHistorySnapshot) => {
+    undoStackRef.current = [...undoStackRef.current, snapshot].slice(-80);
+    redoStackRef.current = [];
+    setHistoryVersion(version => version + 1);
+  };
+
+  const beginHistoryTransaction = () => {
+    if (historyTransactionRef.current) return;
+    historyTransactionRef.current = {
+      tracks: tracksRef.current,
+      selectedClip: selectedClipRef.current,
+    };
+  };
+
+  const endHistoryTransaction = () => {
+    const snapshot = historyTransactionRef.current;
+    historyTransactionRef.current = null;
+    if (!snapshot || snapshot.tracks === tracksRef.current) return;
+    pushUndoSnapshot(snapshot);
+  };
+
+  useEffect(() => {
+    if (isApplyingHistoryRef.current) {
+      isApplyingHistoryRef.current = false;
+      lastTracksSnapshotRef.current = tracks;
+      tracksRef.current = tracks;
+      return;
+    }
+
+    if (historyTransactionRef.current) {
+      lastTracksSnapshotRef.current = tracks;
+      tracksRef.current = tracks;
+      return;
+    }
+
+    if (lastTracksSnapshotRef.current !== tracks) {
+      pushUndoSnapshot({
+        tracks: lastTracksSnapshotRef.current,
+        selectedClip: lastSelectedClipSnapshotRef.current,
+      });
+      lastTracksSnapshotRef.current = tracks;
+      tracksRef.current = tracks;
+    }
+  }, [tracks]);
+
+  const applyHistorySnapshot = (snapshot: WorkstationHistorySnapshot) => {
+    isApplyingHistoryRef.current = true;
+    if (isPlayingRef.current) {
+      handlePause();
+    }
+    setTracks(snapshot.tracks);
+    setSelectedClip(isSelectedClipStillValid(snapshot.tracks, snapshot.selectedClip) ? snapshot.selectedClip : null);
+  };
+
+  const handleUndo = () => {
+    const snapshot = undoStackRef.current.pop();
+    if (!snapshot) return false;
+    redoStackRef.current = [
+      ...redoStackRef.current,
+      { tracks: tracksRef.current, selectedClip: selectedClipRef.current },
+    ].slice(-80);
+    applyHistorySnapshot(snapshot);
+    setHistoryVersion(version => version + 1);
+    return true;
+  };
+
+  const handleRedo = () => {
+    const snapshot = redoStackRef.current.pop();
+    if (!snapshot) return false;
+    undoStackRef.current = [
+      ...undoStackRef.current,
+      { tracks: tracksRef.current, selectedClip: selectedClipRef.current },
+    ].slice(-80);
+    applyHistorySnapshot(snapshot);
+    setHistoryVersion(version => version + 1);
+    return true;
+  };
+
+  useEffect(() => {
+    if (!selectedClip) {
+      setTransposeSemitones(0);
+      return;
+    }
+
+    const track = tracksRef.current.find(t => t.id === selectedClip.trackId);
+    const clip = track?.clips.find(c => c.id === selectedClip.clipId);
+    setTransposeSemitones(clip?.transposeSemitones ?? 0);
+  }, [selectedClip?.trackId, selectedClip?.clipId]);
 
   // Drag and Drop clip states
   const [draggingClip, setDraggingClip] = useState<{
@@ -169,15 +449,71 @@ export default function AudioWorkstation() {
   );
 
   const snapTime = (time: number) => {
-    if (!snapEnabled || snapStep <= 0) return Math.max(0, time);
-    return Math.max(0, parseFloat((Math.round(time / snapStep) * snapStep).toFixed(3)));
+    if (!snapEnabled || activeSnapStep <= 0) return Math.max(0, time);
+    return Math.max(0, parseFloat((Math.round(time / activeSnapStep) * activeSnapStep).toFixed(3)));
   };
+
+  const clampTempoBpm = (value: number) => (
+    Number.isFinite(value) ? Math.max(MIN_TEMPO_BPM, Math.min(MAX_TEMPO_BPM, value)) : DEFAULT_TEMPO_BPM
+  );
 
   const clampClipGain = (value: number) => Math.max(0, Math.min(200, value));
 
   const formatPanLabel = (pan: number) => {
     if (pan === 0) return 'C';
     return pan < 0 ? `L${Math.abs(pan)}` : `R${pan}`;
+  };
+
+  const clampVolumeDb = (value: number) => (
+    Number.isFinite(value) ? Math.max(MIN_TRACK_VOLUME_DB, Math.min(MAX_TRACK_VOLUME_DB, value)) : DEFAULT_TRACK_VOLUME_DB
+  );
+
+  const trackVolumeDbToGain = (volumeDb: number) => (
+    volumeDb <= MIN_TRACK_VOLUME_DB ? 0 : Math.pow(10, volumeDb / 20)
+  );
+
+  const formatVolumeDbLabel = (volumeDb: number) => {
+    if (volumeDb <= MIN_TRACK_VOLUME_DB) return '-∞';
+    if (Math.abs(volumeDb) < 0.05) return '0.0';
+    return volumeDb > 0 ? `+${volumeDb.toFixed(1)}` : volumeDb.toFixed(1);
+  };
+
+  const clampPan = (value: number) => (
+    Number.isFinite(value) ? Math.max(-100, Math.min(100, Math.round(value))) : 0
+  );
+
+  const clampSemitoneValue = (value: number) => (
+    Number.isFinite(value) ? Math.max(-12, Math.min(12, Math.round(value))) : 0
+  );
+
+  const getTrackHeight = (trackId: string) => (
+    Math.max(MIN_TRACK_HEIGHT, Math.min(MAX_TRACK_HEIGHT, trackHeights[trackId] ?? DEFAULT_TRACK_HEIGHT))
+  );
+
+  const getTrackIndexOffsetFromDelta = (sourceTrackId: string, deltaY: number) => {
+    const sourceIndex = tracksRef.current.findIndex(track => track.id === sourceTrackId);
+    if (sourceIndex < 0) return 0;
+    if (deltaY === 0) return 0;
+
+    let remaining = Math.abs(deltaY);
+    let offset = 0;
+    const direction = deltaY > 0 ? 1 : -1;
+    let index = sourceIndex;
+
+    while (remaining > getTrackHeight(tracksRef.current[index]?.id || sourceTrackId) / 2) {
+      const nextIndex = index + direction;
+      if (nextIndex < 0 || nextIndex >= tracksRef.current.length) break;
+      remaining -= getTrackHeight(tracksRef.current[index].id);
+      offset += direction;
+      index = nextIndex;
+    }
+
+    return offset;
+  };
+
+  const nudgeTransposeSemitones = (delta: number) => {
+    if (!selectedClip || isPitchShifting) return;
+    void handleTransposeValueChange(transposeSemitones + delta);
   };
 
   const isEditableKeyboardTarget = (target: EventTarget | null) => {
@@ -345,7 +681,7 @@ export default function AudioWorkstation() {
       // Track Gain + Pan nodes for Cubase-style channel control
       const trackGain = ctx.createGain();
       const trackPan = ctx.createStereoPanner();
-      trackGain.gain.value = track.volume / 100;
+      trackGain.gain.value = trackVolumeDbToGain(track.volume);
       trackPan.pan.value = track.pan / 100;
       trackGain.connect(trackPan);
       trackPan.connect(ctx.destination);
@@ -426,7 +762,7 @@ export default function AudioWorkstation() {
     const nextNum = tracks.length + 1;
     setTracks([
       ...tracks,
-      { id: nextId, name: `音频轨 ${nextNum}`, volume: 80, pan: 0, muted: false, solo: false, clips: [] }
+      { id: nextId, name: `音频轨 ${nextNum}`, volume: DEFAULT_TRACK_VOLUME_DB, pan: 0, muted: false, solo: false, clips: [] }
     ]);
   };
 
@@ -510,11 +846,13 @@ export default function AudioWorkstation() {
           startTime: clip.startTime,
           duration: splitOffset,
           buffer: buffer1,
+          sourceBuffer: buffer1,
           color: clip.color,
           fadeIn: clip.fadeIn ? Math.min(clip.fadeIn, splitOffset) : 0,
           fadeOut: 0,
           gain: clip.gain ?? 100,
-          muted: clip.muted
+          muted: clip.muted,
+          transposeSemitones: 0
         };
 
         const clip2: AudioClip = {
@@ -523,11 +861,13 @@ export default function AudioWorkstation() {
           startTime: splitTime,
           duration: clip.duration - splitOffset,
           buffer: buffer2,
+          sourceBuffer: buffer2,
           color: clip.color,
           fadeIn: 0,
           fadeOut: clip.fadeOut ? Math.min(clip.fadeOut, clip.duration - splitOffset) : 0,
           gain: clip.gain ?? 100,
-          muted: clip.muted
+          muted: clip.muted,
+          transposeSemitones: 0
         };
 
         const updatedTracks = tracks.map(t => {
@@ -685,13 +1025,82 @@ export default function AudioWorkstation() {
         return;
       }
 
-      const isCopyOrPaste = event.ctrlKey || event.metaKey;
-      if (!isCopyOrPaste || event.altKey || event.repeat) return;
+      if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.repeat) {
+        const plainKey = event.key.toLowerCase();
+        if (event.key === 'Delete' || event.key === 'Backspace') {
+          if (selectedClipRef.current) {
+            event.preventDefault();
+            handleDeleteClip();
+          }
+          return;
+        }
+        if (plainKey === 's') {
+          if (selectedClipRef.current) {
+            event.preventDefault();
+            handleSplitClip();
+          }
+          return;
+        }
+        if (plainKey === 'm') {
+          if (selectedClipRef.current) {
+            event.preventDefault();
+            handleToggleSelectedClipMute();
+          }
+          return;
+        }
+        if (plainKey === '1') {
+          event.preventDefault();
+          setToolMode('select');
+          return;
+        }
+        if (plainKey === '2') {
+          event.preventDefault();
+          setToolMode('split');
+          return;
+        }
+        if (plainKey === '3') {
+          event.preventDefault();
+          setToolMode('erase');
+          return;
+        }
+        if (plainKey === '4') {
+          event.preventDefault();
+          setToolMode('mute');
+          return;
+        }
+      }
+
+      const isCommandShortcut = event.ctrlKey || event.metaKey;
+      if (!isCommandShortcut || event.altKey || event.repeat) return;
 
       const key = event.key.toLowerCase();
+      if (key === 'z') {
+        event.preventDefault();
+        if (event.shiftKey) {
+          handleRedo();
+        } else {
+          handleUndo();
+        }
+        return;
+      }
+
+      if (key === 'y') {
+        event.preventDefault();
+        handleRedo();
+        return;
+      }
+
       if (key === 'c') {
         if (handleCopySelectedClip()) {
           event.preventDefault();
+        }
+        return;
+      }
+
+      if (key === 'x') {
+        if (handleCopySelectedClip()) {
+          event.preventDefault();
+          handleDeleteClip();
         }
         return;
       }
@@ -700,12 +1109,20 @@ export default function AudioWorkstation() {
         if (handlePasteCopiedClip()) {
           event.preventDefault();
         }
+        return;
+      }
+
+      if (key === 'd') {
+        if (selectedClipRef.current) {
+          event.preventDefault();
+          handleDuplicateClip();
+        }
       }
     };
 
     window.addEventListener('keydown', handleKeyboardShortcuts);
     return () => window.removeEventListener('keydown', handleKeyboardShortcuts);
-  }, [showExportSetup, selectedClip, tracks, copiedClip, currentTime, isPlaying]);
+  }, [showExportSetup, selectedClip, tracks, copiedClip, currentTime, isPlaying, historyVersion]);
 
   const createNormalizedBuffer = (buffer: AudioBuffer): AudioBuffer => {
     const ctx = getAudioContext();
@@ -742,34 +1159,147 @@ export default function AudioWorkstation() {
     return nextBuffer;
   };
 
+  const createTransposedBuffer = (
+    buffer: AudioBuffer,
+    semitones: number,
+  ): AudioBuffer => {
+    const ctx = getAudioContext();
+    const pitchRatio = Math.pow(2, semitones / 12);
+    const grainSize = Math.max(1024, Math.round(buffer.sampleRate * 0.08));
+    const hopSize = Math.max(128, Math.floor(grainSize / 4));
+    const nextBuffer = ctx.createBuffer(buffer.numberOfChannels, buffer.length, buffer.sampleRate);
+
+    for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+      const source = buffer.getChannelData(channel);
+      const target = nextBuffer.getChannelData(channel);
+      const weights = new Float32Array(buffer.length);
+      const maxInputStart = Math.max(0, buffer.length - grainSize);
+
+      for (let outputStart = 0; outputStart < buffer.length; outputStart += hopSize) {
+        const inputStart = Math.min(maxInputStart, Math.max(0, Math.round(outputStart * pitchRatio)));
+
+        for (let frame = 0; frame < grainSize; frame++) {
+          const outputIndex = outputStart + frame;
+          const inputIndex = inputStart + frame;
+          if (outputIndex >= buffer.length || inputIndex >= buffer.length) break;
+
+          const windowValue = 0.5 - 0.5 * Math.cos((2 * Math.PI * frame) / Math.max(1, grainSize - 1));
+          target[outputIndex] += source[inputIndex] * windowValue;
+          weights[outputIndex] += windowValue;
+        }
+      }
+
+      for (let index = 0; index < buffer.length; index++) {
+        target[index] = weights[index] > 0
+          ? Math.max(-1, Math.min(1, target[index] / weights[index]))
+          : 0;
+      }
+    }
+
+    return nextBuffer;
+  };
+
   const handleNormalizeSelectedClip = () => {
-    updateSelectedClip(clip => ({
-      ...clip,
-      buffer: createNormalizedBuffer(clip.buffer),
-      gain: 100,
-      name: `${clip.name} · Norm`
-    }));
+    updateSelectedClip(clip => {
+      const normalizedBuffer = createNormalizedBuffer(clip.buffer);
+      setTransposeSemitones(0);
+      return {
+        ...clip,
+        buffer: normalizedBuffer,
+        sourceBuffer: normalizedBuffer,
+        transposeSemitones: 0,
+        gain: 100,
+        name: `${clip.name} · Norm`
+      };
+    });
   };
 
   const handleReverseSelectedClip = () => {
-    updateSelectedClip(clip => ({
-      ...clip,
-      buffer: createReversedBuffer(clip.buffer),
-      name: `${clip.name} · Rev`
-    }));
+    updateSelectedClip(clip => {
+      const reversedBuffer = createReversedBuffer(clip.buffer);
+      setTransposeSemitones(0);
+      return {
+        ...clip,
+        buffer: reversedBuffer,
+        sourceBuffer: reversedBuffer,
+        transposeSemitones: 0,
+        name: `${clip.name} · Rev`
+      };
+    });
   };
 
-  // Handle local audio file selection/upload
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-    
+  const handleTransposeValueChange = async (value: number) => {
+    if (!selectedClip) return;
+    const nextSemitones = clampSemitoneValue(value);
+    const track = tracks.find(t => t.id === selectedClip.trackId);
+    const clip = track?.clips.find(c => c.id === selectedClip.clipId);
+    if (!track || !clip) return;
+
+    setTransposeSemitones(nextSemitones);
+    if ((clip.transposeSemitones ?? 0) === nextSemitones) return;
+
+    const jobId = transposeJobIdRef.current + 1;
+    transposeJobIdRef.current = jobId;
+    setIsPitchShifting(true);
+    if (isPlaying) handlePause();
+
+    try {
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      if (transposeJobIdRef.current !== jobId) return;
+      const sourceBuffer = clip.sourceBuffer ?? clip.buffer;
+      const transposedBuffer = nextSemitones === 0
+        ? sourceBuffer
+        : createTransposedBuffer(sourceBuffer, nextSemitones);
+      if (transposeJobIdRef.current !== jobId) return;
+      setTracks(prev => prev.map(t => (
+        t.id !== track.id
+          ? t
+          : {
+              ...t,
+              clips: t.clips.map(c => (
+                c.id === clip.id
+                  ? {
+                      ...c,
+                      buffer: transposedBuffer,
+                      sourceBuffer,
+                      duration: transposedBuffer.duration,
+                      fadeIn: clampFade(c.fadeIn || 0, transposedBuffer.duration),
+                      fadeOut: clampFade(c.fadeOut || 0, transposedBuffer.duration),
+                      transposeSemitones: nextSemitones
+                    }
+                  : c
+              ))
+            }
+      )));
+    } catch (error) {
+      console.error('Failed to transpose clip:', error);
+      alert('移调处理失败，请换一个较短的片段或稍后再试。');
+    } finally {
+      if (transposeJobIdRef.current === jobId) {
+        setIsPitchShifting(false);
+      }
+    }
+  };
+
+  const importAudioFiles = async (
+    files: File[],
+    placement?: { trackId?: string; startTime?: number },
+  ) => {
+    const audioFiles = files.filter(file => (
+      file.type.startsWith('audio/') || /\.(aac|aif|aiff|flac|m4a|mp3|ogg|opus|wav|webm)$/i.test(file.name)
+    ));
+
+    if (audioFiles.length === 0) {
+      alert('请拖入音频文件，例如 WAV、MP3、AIFF、FLAC 或 M4A。');
+      return;
+    }
+
     setIsDecoding(true);
     const ctx = getAudioContext();
     const newClips: { file: File; buffer: AudioBuffer }[] = [];
 
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
+    for (let i = 0; i < audioFiles.length; i++) {
+      const file = audioFiles[i];
       try {
         const arrayBuffer = await file.arrayBuffer();
         const decodedBuffer = await ctx.decodeAudioData(arrayBuffer);
@@ -787,32 +1317,101 @@ export default function AudioWorkstation() {
       setExportFormat('wav');
       setExportSampleRate(WORKSTATION_SAMPLE_RATE);
       setExportBitDepth(WORKSTATION_BIT_DEPTH);
-      // Distribute imported clips to the first track or spread them
       const updatedTracks = [...tracks];
-      const targetTrack = updatedTracks[0];
+      const targetTrack = updatedTracks.find(track => track.id === placement?.trackId) || updatedTracks[0];
+      let nextStartTime = snapTime(placement?.startTime ?? currentTime);
 
       newClips.forEach((item, index) => {
         const randomColor = CLIP_COLORS[(targetTrack.clips.length + index) % CLIP_COLORS.length].bg;
         const newClip: AudioClip = {
           id: `clip-${Date.now()}-${index}`,
           name: item.file.name.replace(/\.[^/.]+$/, ""), // remove extension
-          startTime: currentTime, // place right at playhead
+          startTime: parseFloat(nextStartTime.toFixed(3)),
           duration: item.buffer.duration,
           buffer: item.buffer,
+          sourceBuffer: item.buffer,
           color: randomColor,
           fadeIn: 0,
           fadeOut: 0,
           gain: 100,
-          muted: false
+          muted: false,
+          transposeSemitones: 0
         };
         targetTrack.clips.push(newClip);
+        nextStartTime += item.buffer.duration;
       });
 
       setTracks(updatedTracks);
     }
 
     setIsDecoding(false);
+  };
+
+  // Handle local audio file selection/upload
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    await importAudioFiles(Array.from(files));
     if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const hasAudioFilesInDrag = (event: React.DragEvent) => {
+    const { items } = event.dataTransfer;
+    for (let index = 0; index < items.length; index++) {
+      const item = items[index];
+      if (item.kind === 'file' && (item.type.startsWith('audio/') || item.type === '')) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const getDropPlacement = (event: React.DragEvent): { trackId?: string; startTime?: number } => {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const lane = target?.closest<HTMLElement>('[data-workstation-track-id]');
+    if (!lane) return { trackId: tracks[0]?.id, startTime: currentTime };
+
+    const rect = lane.getBoundingClientRect();
+    const dropX = Math.max(0, event.clientX - rect.left);
+    return {
+      trackId: lane.dataset.workstationTrackId,
+      startTime: snapTime(dropX / ZOOM_PX_PER_SECOND),
+    };
+  };
+
+  const handleWorkstationDragEnter = (event: React.DragEvent) => {
+    if (!hasAudioFilesInDrag(event)) return;
+    event.preventDefault();
+    fileDragDepthRef.current += 1;
+    setIsFileDragActive(true);
+  };
+
+  const handleWorkstationDragOver = (event: React.DragEvent) => {
+    if (!hasAudioFilesInDrag(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+  };
+
+  const handleWorkstationDragLeave = (event: React.DragEvent) => {
+    if (!hasAudioFilesInDrag(event)) return;
+    fileDragDepthRef.current = Math.max(0, fileDragDepthRef.current - 1);
+    if (fileDragDepthRef.current === 0) {
+      setIsFileDragActive(false);
+    }
+  };
+
+  const handleWorkstationDrop = async (event: React.DragEvent) => {
+    const files: File[] = [];
+    for (let index = 0; index < event.dataTransfer.files.length; index++) {
+      files.push(event.dataTransfer.files[index]);
+    }
+    if (files.length === 0) return;
+
+    event.preventDefault();
+    fileDragDepthRef.current = 0;
+    setIsFileDragActive(false);
+    await importAudioFiles(files, getDropPlacement(event));
   };
 
   // Custom visual waveform SVG representation
@@ -914,6 +1513,7 @@ export default function AudioWorkstation() {
     if (!clip) return;
 
     setSelectedClip({ trackId, clipId });
+    beginHistoryTransaction();
     setFadeDrag({
       trackId,
       clipId,
@@ -937,6 +1537,7 @@ export default function AudioWorkstation() {
     if (!clip) return;
 
     setSelectedClip({ trackId, clipId });
+    beginHistoryTransaction();
     setResizeDrag({
       trackId,
       clipId,
@@ -982,6 +1583,7 @@ export default function AudioWorkstation() {
         handlePause();
         setTimeout(() => handlePlay(), 50);
       }
+      endHistoryTransaction();
       setFadeDrag(null);
     };
 
@@ -1044,6 +1646,7 @@ export default function AudioWorkstation() {
         handlePause();
         setTimeout(() => handlePlay(), 50);
       }
+      endHistoryTransaction();
       setResizeDrag(null);
     };
 
@@ -1071,7 +1674,7 @@ export default function AudioWorkstation() {
 
       // Vertical track index search based on relative page coordinates
       const dy = e.clientY - draggingClip.startY;
-      const trackIndexOffset = Math.round(dy / trackLaneHeight);
+      const trackIndexOffset = getTrackIndexOffsetFromDelta(draggingClip.trackId, dy);
       
       const currentTrackIndex = tracks.findIndex(t => t.id === draggingClip.trackId);
       let targetTrackIndex = currentTrackIndex + trackIndexOffset;
@@ -1175,7 +1778,7 @@ export default function AudioWorkstation() {
 
       const trackGain = offlineCtx.createGain();
       const trackPan = offlineCtx.createStereoPanner();
-      trackGain.gain.value = track.volume / 100;
+      trackGain.gain.value = trackVolumeDbToGain(track.volume);
       trackPan.pan.value = track.pan / 100;
       trackGain.connect(trackPan);
       trackPan.connect(offlineCtx.destination);
@@ -1240,20 +1843,74 @@ export default function AudioWorkstation() {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${cents.toString().padStart(2, '0')}`;
   };
 
+  const formatBarsBeatsStr = (sec: number): string => {
+    const totalBeats = Math.max(0, sec) / beatDurationSeconds;
+    const wholeBeats = Math.floor(totalBeats);
+    const bar = Math.floor(wholeBeats / BEATS_PER_BAR) + 1;
+    const beat = (wholeBeats % BEATS_PER_BAR) + 1;
+    const subBeat = Math.round((totalBeats - wholeBeats) * 100);
+    return `${bar}.${beat}.${subBeat.toString().padStart(2, '0')}`;
+  };
+
+  const formatTimelinePosition = (sec: number): string => (
+    rulerMode === 'bars' ? formatBarsBeatsStr(sec) : `${sec.toFixed(2)}s`
+  );
+
+  const formatTimelineDuration = (sec: number): string => (
+    rulerMode === 'bars' ? `${(sec / barDurationSeconds).toFixed(2)}bar` : `${sec.toFixed(1)}s`
+  );
+
   // Generate ruler grid markings
-  const rulerTicks = [];
-  for (let i = 0; i <= TIMELINE_MAX_SECONDS; i += 5) {
-    rulerTicks.push(i);
+  const rulerTicks: Array<{ id: string; time: number; label: string; major: boolean }> = [];
+  if (rulerMode === 'bars') {
+    const totalBeats = Math.ceil(TIMELINE_MAX_SECONDS / beatDurationSeconds);
+    for (let beatIndex = 0; beatIndex <= totalBeats; beatIndex += 1) {
+      const major = beatIndex % BEATS_PER_BAR === 0;
+      const barNumber = Math.floor(beatIndex / BEATS_PER_BAR) + 1;
+      rulerTicks.push({
+        id: `bar-${beatIndex}`,
+        time: beatIndex * beatDurationSeconds,
+        label: major ? String(barNumber) : '',
+        major,
+      });
+    }
+  } else {
+    for (let i = 0; i <= TIMELINE_MAX_SECONDS; i += 1) {
+      rulerTicks.push({
+        id: `time-${i}`,
+        time: i,
+        label: i % 5 === 0 ? `${i}s` : '',
+        major: i % 5 === 0,
+      });
+    }
   }
 
   // Count total clips loaded
   const totalClipsCount = tracks.reduce((sum, t) => sum + t.clips.length, 0);
+  const workstationCursor = TOOL_CURSOR_BY_MODE[toolMode];
 
   return (
     <div
       id="audio-workstation"
-      className="overflow-hidden rounded-2xl border border-slate-800 bg-[#11161d] text-slate-200 shadow-2xl"
+      onDragEnter={handleWorkstationDragEnter}
+      onDragOver={handleWorkstationDragOver}
+      onDragLeave={handleWorkstationDragLeave}
+      onDrop={handleWorkstationDrop}
+      className={`overflow-hidden rounded-2xl border bg-[#11161d] text-slate-200 shadow-2xl transition-colors ${
+        isWorkstationExpanded ? 'fixed inset-4 z-[9997] flex flex-col' : 'relative'
+      } ${
+        isFileDragActive ? 'border-emerald-400 ring-2 ring-emerald-400/40' : 'border-slate-800'
+      }`}
     >
+      {isFileDragActive && (
+        <div className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center bg-emerald-950/35 backdrop-blur-[1px]">
+          <div className="flex items-center gap-3 rounded-xl border border-emerald-400/50 bg-slate-950/90 px-5 py-3 text-sm font-black text-emerald-200 shadow-2xl shadow-emerald-950/40">
+            <Upload className="h-5 w-5" />
+            <span>松开鼠标导入音频到工作站</span>
+          </div>
+        </div>
+      )}
+
       {/* Cubase-like application chrome */}
       <div className="border-b border-slate-800 bg-[#242a33]">
         <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-2">
@@ -1263,14 +1920,8 @@ export default function AudioWorkstation() {
             </span>
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <h2 className="truncate text-sm font-black tracking-tight text-slate-100">多轨音频工作站</h2>
-                <span className="rounded border border-sky-500/30 bg-sky-500/10 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider text-sky-300">
-                  Cubase Style
-                </span>
+                <h2 className="truncate text-sm font-black tracking-tight text-slate-100">DAW</h2>
               </div>
-              <p className="mt-0.5 truncate text-[10px] text-slate-500">
-                Project · Edit · Audio · Transport · Studio · MixConsole
-              </p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -1287,7 +1938,7 @@ export default function AudioWorkstation() {
               ) : (
                 <>
                   <Upload className="h-4 w-4" />
-                  <span>导入音频</span>
+                  <span>导入</span>
                 </>
               )}
             </button>
@@ -1304,8 +1955,21 @@ export default function AudioWorkstation() {
               ) : (
                 <>
                   <Download className="h-4 w-4" />
-                  <span>导出音频</span>
+                  <span>导出</span>
                 </>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsWorkstationExpanded(prev => !prev)}
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-slate-700 bg-[#151a21] text-slate-300 shadow-sm transition-all hover:border-sky-400 hover:text-sky-300 cursor-pointer"
+              title={isWorkstationExpanded ? '退出放大视图 Esc' : '放大 DAW 视图'}
+              aria-label={isWorkstationExpanded ? '退出放大视图' : '放大 DAW 视图'}
+            >
+              {isWorkstationExpanded ? (
+                <Minimize2 className="h-3.5 w-3.5" />
+              ) : (
+                <Maximize2 className="h-3.5 w-3.5" />
               )}
             </button>
           </div>
@@ -1313,7 +1977,7 @@ export default function AudioWorkstation() {
       </div>
 
       {/* Main DAW Viewport */}
-      <div className="bg-[#111827] overflow-hidden text-slate-200">
+      <div className={`bg-[#111827] overflow-hidden text-slate-200 ${isWorkstationExpanded ? 'flex min-h-0 flex-1 flex-col' : ''}`}>
         
         {/* Top Control Panel Toolbar */}
         <div className="bg-[#171c23] px-4 py-2 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
@@ -1366,7 +2030,7 @@ export default function AudioWorkstation() {
                     key={tool.id}
                     type="button"
                     onClick={() => setToolMode(tool.id)}
-                    title={tool.label}
+                    title={`${tool.label} (${tool.id === 'select' ? '1' : tool.id === 'split' ? '2 / S' : tool.id === 'erase' ? '3' : '4 / M'})`}
                     className={`flex h-7 w-7 items-center justify-center rounded transition-all ${
                       toolMode === tool.id
                         ? 'bg-sky-500 text-slate-950'
@@ -1379,270 +2043,113 @@ export default function AudioWorkstation() {
               })}
             </div>
 
-            <div className="flex items-center gap-2 rounded-md border border-slate-800 bg-[#10151c] px-2 py-1">
-              <button
-                type="button"
-                onClick={() => setSnapEnabled(value => !value)}
-                className={`flex items-center gap-1 text-[10px] font-bold ${
-                  snapEnabled ? 'text-sky-300' : 'text-slate-500'
+            <div className="flex h-8 items-center gap-1 rounded-md border border-slate-800 bg-[#10151c] px-1.5">
+              <span className="text-[9px] font-black leading-none text-violet-300">移调</span>
+              <div
+                className={`flex h-6 items-center overflow-hidden rounded border ${
+                  selectedClip && !isPitchShifting
+                    ? 'border-violet-500/40 bg-[#171c23]'
+                    : 'border-slate-800 bg-slate-900 opacity-55'
                 }`}
-                title="Snap / 吸附网格"
+                onWheel={(e) => {
+                  if (!selectedClip || isPitchShifting) return;
+                  e.preventDefault();
+                  nudgeTransposeSemitones(e.deltaY < 0 ? 1 : -1);
+                }}
+                title="鼠标滚轮或键盘上下键调整半音"
               >
-                <Magnet className="h-3.5 w-3.5" />
-                <span>SNAP</span>
-              </button>
-              <select
-                value={snapStep}
-                onChange={(e) => setSnapStep(Number(e.target.value))}
-                disabled={!snapEnabled}
-                className="rounded border border-slate-800 bg-[#171c23] px-1.5 py-0.5 font-mono text-[10px] text-slate-300 outline-none disabled:opacity-40"
-                title="Snap step"
-              >
-                <option value={0.05}>0.05s</option>
-                <option value={0.1}>0.1s</option>
-                <option value={0.25}>0.25s</option>
-                <option value={0.5}>0.5s</option>
-                <option value={1}>1s</option>
-              </select>
-            </div>
-          </div>
-
-          {/* Context Tools (Scissors / Split & Delete Clip) */}
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            {selectedClip ? (
-              <>
-                <div className="text-xs text-slate-400 mr-2 max-w-44 truncate">
-                  已选片段: <span className="text-emerald-400 font-bold">{
-                    (() => {
-                      const tr = tracks.find(t => t.id === selectedClip.trackId);
-                      const cl = tr?.clips.find(c => c.id === selectedClip.clipId);
-                      return cl ? cl.name : "未知";
-                    })()
-                  }</span>
-                </div>
-
-                <button
-                  onClick={handleSplitClip}
-                  title="在当前红线播放轴处将片段切断"
-                  className="flex items-center gap-1.5 rounded-md border border-slate-700 bg-[#222832] px-3 py-2 text-xs font-bold text-slate-300 transition-all hover:bg-emerald-600 hover:text-white cursor-pointer"
-                >
-                  <Scissors className="w-3.5 h-3.5" />
-                  <span>剪切拆分</span>
-                </button>
-
-                <button
-                  onClick={handleDeleteClip}
-                  title="删除选中的音频片段"
-                  className="flex items-center gap-1.5 rounded-md border border-slate-700 bg-[#222832] px-3 py-2 text-xs font-bold text-slate-300 transition-all hover:bg-rose-600 hover:text-white cursor-pointer"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  <span>删除片段</span>
-                </button>
-
-                <button
-                  onClick={handleDuplicateClip}
-                  title="Duplicate Event / 复制事件"
-                  className="flex items-center gap-1.5 rounded-md border border-slate-700 bg-[#222832] px-3 py-2 text-xs font-bold text-slate-300 transition-all hover:bg-sky-600 hover:text-white cursor-pointer"
-                >
-                  <Copy className="w-3.5 h-3.5" />
-                  <span>复制</span>
-                </button>
-
-                <button
-                  onClick={handleToggleSelectedClipMute}
-                  title="Mute Event / 静音事件"
-                  className="flex items-center gap-1.5 rounded-md border border-slate-700 bg-[#222832] px-3 py-2 text-xs font-bold text-slate-300 transition-all hover:bg-yellow-500 hover:text-slate-950 cursor-pointer"
-                >
-                  <VolumeX className="w-3.5 h-3.5" />
-                  <span>事件静音</span>
-                </button>
-
-                <button
-                  onClick={handleNormalizeSelectedClip}
-                  title="Normalize Event / 标准化"
-                  className="flex items-center gap-1.5 rounded-md border border-slate-700 bg-[#222832] px-3 py-2 text-xs font-bold text-slate-300 transition-all hover:bg-emerald-600 hover:text-white cursor-pointer"
-                >
-                  <ArrowRight className="w-3.5 h-3.5" />
-                  <span>Normalize</span>
-                </button>
-
-                <button
-                  onClick={handleReverseSelectedClip}
-                  title="Reverse Event / 反向"
-                  className="flex items-center gap-1.5 rounded-md border border-slate-700 bg-[#222832] px-3 py-2 text-xs font-bold text-slate-300 transition-all hover:bg-indigo-600 hover:text-white cursor-pointer"
-                >
-                  <RotateCcw className="w-3.5 h-3.5" />
-                  <span>Reverse</span>
-                </button>
-              </>
-            ) : (
-              <div className="text-xs text-slate-500 italic flex items-center gap-1">
-                <Info className="w-3.5 h-3.5" />
-                <span>提示: 点击轨道上的彩色音频块可激活剪切、删除或进行左右拖移。</span>
+                <input
+                  type="number"
+                  min="-12"
+                  max="12"
+                  step="1"
+                  value={transposeSemitones}
+                  disabled={!selectedClip || isPitchShifting}
+                  onChange={(e) => void handleTransposeValueChange(parseInt(e.target.value, 10))}
+                  onKeyDown={(e) => {
+                    if (e.key === 'ArrowUp') {
+                      e.preventDefault();
+                      nudgeTransposeSemitones(1);
+                    }
+                    if (e.key === 'ArrowDown') {
+                      e.preventDefault();
+                      nudgeTransposeSemitones(-1);
+                    }
+                  }}
+                  aria-label="移调半音数"
+                  className="h-full w-8 border-0 bg-transparent px-0 text-center font-mono text-[11px] font-black text-violet-100 outline-none disabled:text-slate-500"
+                />
               </div>
-            )}
+              <span className="font-mono text-[9px] font-bold text-violet-300">st</span>
+            </div>
+
+            <div className="flex h-8 items-center gap-1 rounded-md border border-slate-800 bg-[#10151c] px-1.5" title="工程速度 BPM，默认 120">
+              <Music className="h-3.5 w-3.5 text-amber-300" />
+              <input
+                type="number"
+                min={MIN_TEMPO_BPM}
+                max={MAX_TEMPO_BPM}
+                step="1"
+                value={tempoBpm}
+                onChange={(e) => setTempoBpm(clampTempoBpm(parseFloat(e.target.value)))}
+                aria-label="工程速度 BPM"
+                className="h-6 w-11 border-0 bg-transparent text-center font-mono text-[11px] font-black text-amber-100 outline-none"
+              />
+              <span className="text-[9px] font-black text-amber-300">BPM</span>
+            </div>
+
+            <div className="flex h-8 items-center overflow-hidden rounded-md border border-slate-800 bg-[#10151c] p-0.5">
+              {([
+                { id: 'time', label: '时间' },
+                { id: 'bars', label: '小节' },
+              ] as const).map(mode => (
+                <button
+                  key={mode.id}
+                  type="button"
+                  onClick={() => setRulerMode(mode.id)}
+                  title={mode.id === 'time' ? '时间线：按秒显示和吸附' : '小节线：按 4/4 小节与拍显示和吸附'}
+                  className={`h-6 rounded px-2 text-[10px] font-black transition-all ${
+                    rulerMode === mode.id
+                      ? 'bg-emerald-500 text-slate-950'
+                      : 'text-slate-500 hover:bg-slate-800 hover:text-slate-200'
+                  }`}
+                >
+                  {mode.label}
+                </button>
+              ))}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setSnapEnabled(prev => !prev)}
+              className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md border shadow-sm transition-all cursor-pointer ${
+                snapEnabled
+                  ? 'border-sky-400 bg-sky-500 text-slate-950 shadow-sky-950/30'
+                  : 'border-slate-800 bg-[#10151c] text-slate-500 hover:border-slate-600 hover:text-slate-300'
+              }`}
+              title={snapEnabled ? '网格吸附已开启' : '网格吸附已关闭'}
+              aria-label={snapEnabled ? '关闭网格吸附' : '开启网格吸附'}
+              aria-pressed={snapEnabled}
+            >
+              <Magnet className="h-3.5 w-3.5" />
+            </button>
 
           </div>
         </div>
 
-        {/* Selected Clip Properties Row: Fade-in / Fade-out duration slider */}
-        {selectedClip && (() => {
-          const track = tracks.find(t => t.id === selectedClip.trackId);
-          const clip = track?.clips.find(c => c.id === selectedClip.clipId);
-          if (!clip) return null;
-          
-          return (
-            <div className="bg-[#1d232c] border-b border-slate-800 px-4 py-2 flex flex-wrap items-center justify-between gap-4">
-              <div className="flex items-center gap-2.5">
-                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-emerald-500/20 bg-emerald-500/10 text-emerald-300">
-                  <Sparkles className="w-3.5 h-3.5" />
-                </span>
-                <div>
-                  <div className="font-mono text-[9px] font-bold uppercase tracking-wider text-slate-500">Info Line / Selected Audio Event</div>
-                  <input
-                    type="text"
-                    value={clip.name}
-                    onChange={(e) => {
-                      const updated = tracks.map(t => {
-                        if (t.id === selectedClip.trackId) {
-                          return {
-                            ...t,
-                            clips: t.clips.map(c => c.id === selectedClip.clipId ? { ...c, name: e.target.value } : c)
-                          };
-                        }
-                        return t;
-                      });
-                      setTracks(updated);
-                    }}
-                    className="mt-1 w-56 rounded border border-slate-700 bg-[#11161d] px-2.5 py-1 text-xs font-bold text-slate-200 outline-none transition-all focus:border-emerald-500"
-                  />
-                </div>
-              </div>
-
-              {/* Envelope Adjusters: Fade In & Fade Out */}
-              <div className="flex flex-wrap items-center gap-3 flex-1 justify-end">
-                <div className="flex min-w-[160px] flex-col gap-1 rounded border border-slate-800 bg-[#151a21] p-2">
-                  <div className="flex items-center justify-between text-[11px] font-semibold text-slate-400">
-                    <span>Event Gain</span>
-                    <span className="font-mono font-bold text-sky-300">{clip.muted ? 'Muted' : `${clip.gain ?? 100}%`}</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="200"
-                    step="1"
-                    value={clip.gain ?? 100}
-                    disabled={clip.muted}
-                    onChange={(e) => {
-                      const val = clampClipGain(parseInt(e.target.value, 10));
-                      updateSelectedClip(c => ({ ...c, gain: val }));
-                    }}
-                    className="h-1 rounded-lg bg-slate-800 accent-sky-400 cursor-pointer disabled:opacity-40"
-                  />
-                </div>
-
-                {/* Fade In slider */}
-                <div className="flex min-w-[170px] flex-col gap-1 rounded border border-slate-800 bg-[#151a21] p-2">
-                  <div className="flex items-center justify-between text-[11px] font-semibold text-slate-400">
-                    <span className="flex items-center gap-1">Fade In</span>
-                    <span className="text-emerald-400 font-bold font-mono">{(clip.fadeIn || 0).toFixed(1)} 秒</span>
-                  </div>
-                  <div className="flex items-center gap-2 mt-1">
-                    <span className="text-[9px] text-slate-600 font-mono">0s</span>
-                    <input
-                      type="range"
-                      min="0"
-                      max={(clip.duration / 2).toFixed(1)} // safe limit: max half duration of clip
-                      step="0.1"
-                      value={clip.fadeIn || 0}
-                      onChange={(e) => {
-                        const val = parseFloat(parseFloat(e.target.value).toFixed(1));
-                        const updated = tracks.map(t => {
-                          if (t.id === selectedClip.trackId) {
-                            return {
-                              ...t,
-                              clips: t.clips.map(c => c.id === selectedClip.clipId ? { ...c, fadeIn: val } : c)
-                            };
-                          }
-                          return t;
-                        });
-                        setTracks(updated);
-                      }}
-                      className="flex-1 h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-emerald-500"
-                    />
-                    <span className="text-[9px] text-slate-600 font-mono">{(clip.duration / 2).toFixed(1)}s</span>
-                  </div>
-                </div>
-
-                {/* Fade Out slider */}
-                <div className="flex min-w-[170px] flex-col gap-1 rounded border border-slate-800 bg-[#151a21] p-2">
-                  <div className="flex items-center justify-between text-[11px] font-semibold text-slate-400">
-                    <span className="flex items-center gap-1">Fade Out</span>
-                    <span className="text-rose-400 font-bold font-mono">{(clip.fadeOut || 0).toFixed(1)} 秒</span>
-                  </div>
-                  <div className="flex items-center gap-2 mt-1">
-                    <span className="text-[9px] text-slate-600 font-mono">0s</span>
-                    <input
-                      type="range"
-                      min="0"
-                      max={(clip.duration / 2).toFixed(1)} // safe limit: max half duration of clip
-                      step="0.1"
-                      value={clip.fadeOut || 0}
-                      onChange={(e) => {
-                        const val = parseFloat(parseFloat(e.target.value).toFixed(1));
-                        const updated = tracks.map(t => {
-                          if (t.id === selectedClip.trackId) {
-                            return {
-                              ...t,
-                              clips: t.clips.map(c => c.id === selectedClip.clipId ? { ...c, fadeOut: val } : c)
-                            };
-                          }
-                          return t;
-                        });
-                        setTracks(updated);
-                      }}
-                      className="flex-1 h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-rose-500"
-                    />
-                    <span className="text-[9px] text-slate-600 font-mono">{(clip.duration / 2).toFixed(1)}s</span>
-                  </div>
-                </div>
-
-                {/* Graphic Visual Envelope representation */}
-                <div className="hidden sm:flex flex-col items-center justify-center p-2 bg-[#11161d] border border-slate-800 rounded w-32 h-14 relative overflow-hidden shrink-0">
-                  <svg className="w-full h-full text-emerald-500/20" viewBox="0 0 100 40" preserveAspectRatio="none">
-                    {/* Background guideline */}
-                    <path d="M 0 35 L 100 35" stroke="#1e293b" strokeWidth="1.5" strokeDasharray="3,3" />
-                    {/* Fade envelope visual line */}
-                    <path 
-                      d={`
-                        M 0 35 
-                        L ${(clip.fadeIn || 0) / clip.duration * 100} 5 
-                        L ${100 - (clip.fadeOut || 0) / clip.duration * 100} 5 
-                        L 100 35
-                      `} 
-                      fill="none" 
-                      stroke={clip.fadeIn || clip.fadeOut ? "#10b981" : "#475569"} 
-                      strokeWidth="2.5" 
-                      strokeLinecap="round"
-                    />
-                  </svg>
-                  <div className="absolute bottom-1 text-[8px] font-bold font-sans text-slate-500 leading-none select-none uppercase tracking-wider">
-                    Envelope / 曲线
-                  </div>
-                </div>
-              </div>
-            </div>
-          );
-        })()}
-
         {/* Scrollable Tracks Area */}
-        <div className="relative flex min-h-[460px] flex-col overflow-x-auto select-none bg-[#0f141b]">
+        <div
+          className={`relative flex flex-col overflow-x-auto select-none bg-[#0f141b] ${
+            isWorkstationExpanded ? 'min-h-0 flex-1' : 'min-h-[560px]'
+          }`}
+          style={{ cursor: workstationCursor }}
+        >
           
           {/* Absolute Playhead indicator */}
           <div 
             className="absolute top-8 bottom-0 w-0.5 bg-red-500 z-30 pointer-events-none transition-transform duration-75"
             style={{ 
-              left: `${TRACK_HEADER_WIDTH + currentTime * ZOOM_PX_PER_SECOND}px`,
+              left: `${trackHeaderWidth + currentTime * ZOOM_PX_PER_SECOND}px`,
               boxShadow: '0 0 8px #ef4444'
             }}
           />
@@ -1651,10 +2158,12 @@ export default function AudioWorkstation() {
           <div className="flex bg-[#151a21] border-b border-slate-800 shrink-0 h-8">
             {/* Header placeholder spacer */}
             <div
-              className="border-r border-slate-800 shrink-0 bg-[#151a21] h-full flex items-center px-4"
-              style={{ width: `${TRACK_HEADER_WIDTH}px` }}
+              className="shrink-0 bg-[#151a21] h-full flex items-center px-4"
+              style={{ width: `${trackHeaderWidth}px` }}
             >
-              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest font-mono">timeline</span>
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest font-mono">
+                {rulerMode === 'bars' ? 'bars · beats' : 'timeline'}
+              </span>
             </div>
 
             {/* Scale markings container */}
@@ -1665,16 +2174,18 @@ export default function AudioWorkstation() {
             >
               {rulerTicks.map((tick) => (
                 <div 
-                  key={tick}
-                  className="absolute bottom-0 text-[10px] font-mono text-slate-500 flex flex-col items-center justify-end"
+                  key={tick.id}
+                  className={`absolute bottom-0 flex h-full flex-col items-center justify-end font-mono text-[10px] ${
+                    tick.major ? 'text-slate-400' : 'text-slate-600'
+                  }`}
                   style={{ 
-                    left: `${tick * ZOOM_PX_PER_SECOND}px`, 
+                    left: `${tick.time * ZOOM_PX_PER_SECOND}px`, 
                     transform: 'translateX(-50%)',
                     height: '100%'
                   }}
                 >
-                  <span className="mb-1">{tick}s</span>
-                  <div className="w-px h-1.5 bg-slate-700" />
+                  {tick.label && <span className="mb-1">{tick.label}</span>}
+                  <div className={`${tick.major ? 'h-2 bg-emerald-500/55' : 'h-1 bg-slate-700/70'} w-px`} />
                 </div>
               ))}
             </div>
@@ -1690,135 +2201,158 @@ export default function AudioWorkstation() {
             <div className="flex flex-col flex-1 divide-y divide-slate-800 bg-[#101720]">
               {tracks.map((track, trackIndex) => {
                 const isDragOverTrack = dragOverInfo?.trackId === track.id;
+                const trackHeight = getTrackHeight(track.id);
+                const showTrackName = trackHeight >= 84;
+                const showTrackPan = trackHeight >= 104;
+                const panKnobRotation = (track.pan / 100) * 135;
 
                 return (
                   <div 
                     key={track.id} 
                     className="flex shrink-0 relative duration-100 transition-colors"
-                    style={{ height: `${trackLaneHeight}px` }}
+                    style={{ height: `${trackHeight}px` }}
                   >
                     {/* Cubase-inspired Track Controller Header */}
                     <div
-                      className="bg-[#20252d] border-r border-slate-800 shrink-0 z-10 shadow-md"
-                      style={{ width: `${TRACK_HEADER_WIDTH}px` }}
+                      className="relative bg-[#20252d] shrink-0 z-10 shadow-md"
+                      style={{ width: `${trackHeaderWidth}px` }}
                     >
+                      <button
+                        type="button"
+                        aria-label="左右调整轨道控制区宽度"
+                        title="左右拖拽调整轨道控制区宽度"
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          setTrackHeaderResizeDrag({ startX: event.clientX, initialWidth: trackHeaderWidth });
+                        }}
+                        className="absolute right-[-4px] top-0 z-30 h-full w-2 cursor-col-resize bg-transparent"
+                      />
                       <div className="flex h-full">
                         <div className="flex w-8 shrink-0 flex-col items-center justify-between border-r border-slate-800 bg-[#171b21] py-2">
                           <span className="font-mono text-[10px] font-bold text-slate-500">{trackIndex + 1}</span>
                           <Layers className="h-3.5 w-3.5 text-slate-500" />
                         </div>
-                        <div className="grid min-w-0 flex-1 grid-rows-[22px_24px_18px_18px] gap-1 p-1">
-                          <div className="flex items-center gap-1.5">
-                            <input
-                              type="text"
-                              value={track.name}
-                              onChange={(e) => updateTrackProp(track.id, 'name', e.target.value)}
-                              className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1.5 py-0.5 text-xs font-bold text-slate-200 outline-none hover:border-slate-700 hover:bg-slate-900 focus:border-emerald-500 focus:bg-slate-950"
-                            />
-                            <button
-                              onClick={() => handleDeleteTrack(track.id)}
-                              title="删除此轨道"
-                              className="rounded p-0.5 text-slate-500 transition-all hover:bg-rose-500/10 hover:text-rose-400 cursor-pointer"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-
-                          <div className="grid grid-cols-4 gap-1">
-                            <button
-                              onClick={() => updateTrackProp(track.id, 'muted', !track.muted)}
-                              className={`h-6 rounded-sm border text-[10px] font-black transition-all cursor-pointer ${
-                                track.muted
-                                  ? 'border-yellow-400 bg-yellow-400 text-slate-950 shadow-[0_0_10px_rgba(250,204,21,0.35)]'
-                                  : 'border-slate-700 bg-slate-900 text-slate-400 hover:text-slate-200'
-                              }`}
-                              title="Mute / 静音"
-                            >
-                              M
-                            </button>
-                            <button
-                              onClick={() => updateTrackProp(track.id, 'solo', !track.solo)}
-                              className={`h-6 rounded-sm border text-[10px] font-black transition-all cursor-pointer ${
-                                track.solo
-                                  ? 'border-emerald-400 bg-emerald-400 text-slate-950 shadow-[0_0_10px_rgba(52,211,153,0.35)]'
-                                  : 'border-slate-700 bg-slate-900 text-slate-400 hover:text-slate-200'
-                              }`}
-                              title="Solo / 独奏"
-                            >
-                              S
-                            </button>
-                            <button
-                              type="button"
-                              className="h-6 rounded-sm border border-red-900/60 bg-red-950/20 text-[10px] font-black text-red-400/70"
-                              title="Record Enable / 录音预备（UI占位）"
-                            >
-                              R
-                            </button>
-                            <button
-                              type="button"
-                              className="h-6 rounded-sm border border-slate-700 bg-slate-900 text-[10px] font-black text-slate-500"
-                              title="Automation Write / 自动化写入（UI占位）"
-                            >
-                              W
-                            </button>
-                          </div>
+                        <div className="flex min-w-0 flex-1 flex-col justify-center gap-1 p-1">
+                          {showTrackName && (
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="text"
+                                value={track.name}
+                                onChange={(e) => updateTrackProp(track.id, 'name', e.target.value)}
+                                className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1.5 py-0.5 text-xs font-bold text-slate-200 outline-none hover:border-slate-700 hover:bg-slate-900 focus:border-emerald-500 focus:bg-slate-950"
+                              />
+                              <button
+                                onClick={() => handleDeleteTrack(track.id)}
+                                title="删除此轨道"
+                                className="rounded p-0.5 text-slate-500 transition-all hover:bg-rose-500/10 hover:text-rose-400 cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          )}
 
                           <div className="grid grid-cols-[16px_1fr_28px] items-center gap-1.5">
-                            {track.muted || track.volume === 0 ? (
+                            {track.muted || track.volume <= MIN_TRACK_VOLUME_DB ? (
                               <VolumeX className="w-3.5 h-3.5 text-slate-600 shrink-0" />
-                            ) : track.volume < 40 ? (
+                            ) : track.volume < -18 ? (
                               <Volume1 className="w-3.5 h-3.5 text-emerald-500/70 shrink-0" />
                             ) : (
                               <Volume2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
                             )}
                             <input
                               type="range"
-                              min="0"
-                              max="100"
+                              min={MIN_TRACK_VOLUME_DB}
+                              max={MAX_TRACK_VOLUME_DB}
+                              step="0.1"
                               value={track.volume}
-                              onChange={(e) => updateTrackProp(track.id, 'volume', parseInt(e.target.value))}
+                              onChange={(e) => updateTrackProp(track.id, 'volume', clampVolumeDb(parseFloat(e.target.value)))}
                               className="min-w-0 h-1 rounded-lg bg-slate-800 accent-emerald-500 cursor-pointer"
-                              title={`Volume ${track.volume}%`}
+                              title={`音量 ${formatVolumeDbLabel(track.volume)} dB`}
                             />
                             <span className="rounded bg-slate-950 px-1 py-0.5 text-right font-mono text-[9px] text-slate-400">
-                              {track.volume}
+                              {formatVolumeDbLabel(track.volume)}
                             </span>
                           </div>
 
-                          <div className="grid grid-cols-[22px_1fr_28px] items-center gap-1.5">
-                            <span className="font-mono text-[9px] font-bold text-slate-500">PAN</span>
-                            <input
-                              type="range"
-                              min="-100"
-                              max="100"
-                              step="1"
-                              value={track.pan}
-                              onChange={(e) => updateTrackProp(track.id, 'pan', parseInt(e.target.value))}
-                              className="min-w-0 h-1 rounded-lg bg-slate-800 accent-sky-400 cursor-pointer"
-                              title={`Pan ${formatPanLabel(track.pan)}`}
-                            />
-                            <span className="rounded bg-slate-950 px-1 py-0.5 text-center font-mono text-[9px] text-sky-300">
-                              {formatPanLabel(track.pan)}
-                            </span>
-                          </div>
+                          {showTrackPan && (
+                            <div className="ml-[17.5px] flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                aria-label={`声像 ${formatPanLabel(track.pan)}`}
+                                title={`声像 ${formatPanLabel(track.pan)} · 左右拖动或滚轮调整`}
+                                onMouseDown={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  setPanKnobDrag({ trackId: track.id, startX: event.clientX, initialPan: track.pan });
+                                }}
+                                onWheel={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  updateTrackProp(track.id, 'pan', clampPan(track.pan + (event.deltaY > 0 ? -5 : 5)));
+                                }}
+                                className="relative h-5 w-5 cursor-ew-resize rounded-full border border-sky-500/50 bg-slate-950 shadow-inner transition-all hover:border-sky-300 hover:bg-sky-950/50"
+                              >
+                                <span className="absolute left-1/2 top-0.5 h-1 w-px -translate-x-1/2 rounded-full bg-sky-500/60" />
+                                <span className="absolute left-1 top-1/2 h-px w-1 -translate-y-1/2 rounded-full bg-sky-700/60" />
+                                <span className="absolute right-1 top-1/2 h-px w-1 -translate-y-1/2 rounded-full bg-sky-700/60" />
+                                <span
+                                  className="absolute left-1/2 top-1/2 h-2 w-0.5 origin-[50%_8px] rounded-full bg-sky-300 shadow-[0_0_6px_rgba(56,189,248,0.65)]"
+                                  style={{ transform: `translate(-50%, -100%) rotate(${panKnobRotation}deg)` }}
+                                />
+                                <span className="absolute left-1/2 top-1/2 h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-sky-500" />
+                              </button>
+                              <span
+                                className="min-w-8 rounded bg-slate-950 px-1 py-0.5 text-center font-mono text-[9px] text-sky-300"
+                                title={`声像 ${formatPanLabel(track.pan)}`}
+                              >
+                                {formatPanLabel(track.pan)}
+                              </span>
+                            </div>
+                          )}
                         </div>
                       </div>
+                      <button
+                        type="button"
+                        aria-label="上下调整轨道高度"
+                        title="上下拖拽调整当前音轨高度"
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          setTrackHeightResizeDrag({ trackId: track.id, startY: event.clientY, initialHeight: trackHeight });
+                        }}
+                        className="absolute bottom-[-4px] left-0 right-0 z-30 h-2 cursor-row-resize bg-transparent transition-colors hover:bg-emerald-400/25"
+                      />
                     </div>
 
                     {/* Track Wave Lane content */}
                     <div 
+                      data-workstation-track-id={track.id}
                       className={`relative shrink-0 bg-[#101722] duration-200 overflow-hidden ${
                         isDragOverTrack ? 'bg-slate-800/45 border-y border-emerald-500/20' : ''
                       }`}
-                      style={{ width: `${TIMELINE_CONTENT_WIDTH}px` }}
+                      style={{ width: `${TIMELINE_CONTENT_WIDTH}px`, cursor: workstationCursor }}
                     >
+                      <button
+                        type="button"
+                        aria-label="上下调整轨道高度"
+                        title="上下拖拽调整当前音轨高度"
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          setTrackHeightResizeDrag({ trackId: track.id, startY: event.clientY, initialHeight: trackHeight });
+                        }}
+                        className="absolute bottom-[-4px] left-0 right-0 z-30 h-2 cursor-row-resize bg-transparent transition-colors hover:bg-emerald-400/20"
+                      />
                       {/* Grid background ticks lines */}
                       <div className="absolute inset-0 pointer-events-none flex">
                         {rulerTicks.map(tick => (
                           <div 
-                            key={tick}
-                            className="absolute top-0 bottom-0 w-px border-l border-slate-700/25"
-                            style={{ left: `${tick * ZOOM_PX_PER_SECOND}px` }}
+                            key={tick.id}
+                            className={`absolute top-0 bottom-0 w-px border-l ${
+                              tick.major ? 'border-emerald-400/18' : 'border-slate-700/18'
+                            }`}
+                            style={{ left: `${tick.time * ZOOM_PX_PER_SECOND}px` }}
                           />
                         ))}
                       </div>
@@ -1844,7 +2378,7 @@ export default function AudioWorkstation() {
                           <div
                             key={clip.id}
                             onMouseDown={(e) => onClipMouseDown(e, track.id, clip.id, clip.startTime)}
-                            className={`absolute top-2 bottom-2 rounded-lg border px-3 py-1.5 flex flex-col justify-between cursor-grab active:cursor-grabbing transition-shadow overflow-hidden group select-none ${
+                            className={`absolute top-2 bottom-2 rounded-lg border px-3 py-1.5 flex flex-col justify-between transition-shadow overflow-hidden group select-none ${
                               clip.color
                             } ${
                               isSelected ? 'ring-2 ring-emerald-500 shadow-md border-transparent' : 'shadow-sm'
@@ -1854,7 +2388,8 @@ export default function AudioWorkstation() {
                             style={{ 
                               left: `${startPos}px`, 
                               width: `${widthPos}px`,
-                              minWidth: '24px'
+                              minWidth: '24px',
+                              cursor: toolMode === 'select' ? (isThisClipDragging ? 'grabbing' : 'grab') : workstationCursor
                             }}
                           >
                             {/* Waveform graphic inside clip block */}
@@ -1966,13 +2501,13 @@ export default function AudioWorkstation() {
                                 {clip.name}
                               </span>
                               <span className="text-[9px] font-mono font-medium shrink-0 bg-slate-900/10 px-1 rounded">
-                                {clip.duration.toFixed(1)}s
+                                {formatTimelineDuration(clip.duration)}
                               </span>
                             </div>
 
                             {/* Position hint */}
                             <div className="relative z-10 text-[8px] font-mono text-slate-700/80">
-                              起: {clip.startTime.toFixed(2)}s
+                              起: {formatTimelinePosition(clip.startTime)}
                             </div>
                           </div>
                         );
@@ -1983,8 +2518,8 @@ export default function AudioWorkstation() {
               })}
               <div className="flex h-12 shrink-0 bg-[#0f141b]">
                 <div
-                  className="shrink-0 border-r border-slate-800 bg-[#171c23] px-3 py-2"
-                  style={{ width: `${TRACK_HEADER_WIDTH}px` }}
+                  className="shrink-0 bg-[#171c23] px-3 py-2"
+                  style={{ width: `${trackHeaderWidth}px` }}
                 >
                   <button
                     type="button"
@@ -2006,24 +2541,6 @@ export default function AudioWorkstation() {
               </div>
             </div>
           )}
-        </div>
-      </div>
-
-      {/* DAW Status Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800 bg-[#171c23] px-4 py-2 font-mono text-[10px] text-slate-500">
-        <div className="flex flex-wrap items-center gap-3">
-          <span>READY</span>
-          <span>Snap: 0.1s</span>
-          <span>Space: Play/Pause</span>
-          <span>Ctrl/Cmd+C/V: Copy/Paste Event</span>
-          <span>Drag events to move across tracks</span>
-          <span>Top corner handles = Fade In / Fade Out</span>
-        </div>
-        <div className="flex items-center gap-3">
-          <span>Mix: Stereo</span>
-          <span>
-            Render: Offline {exportFormat.toUpperCase()} · {exportSampleRate}Hz · {exportFormat === 'mp3' ? `${exportBitrate}kbps` : `${exportBitDepth}bit`}
-          </span>
         </div>
       </div>
 

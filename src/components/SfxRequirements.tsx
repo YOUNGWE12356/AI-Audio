@@ -639,7 +639,7 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div className="flex items-center gap-2">
                 <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-50 text-emerald-600 text-xs font-bold font-mono border border-emerald-200/50">2</span>
-                <span className="text-sm font-semibold text-slate-750">填写或应用描述要求（可选）</span>
+                <span className="text-sm font-semibold text-slate-750">填写需求描述</span>
               </div>
               <HelpCircle className="w-4 h-4 text-slate-400" title="可输入您对音效库的需求想法，AI 将自动融合至表格中" />
             </div>

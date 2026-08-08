@@ -2510,7 +2510,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       
       if (resolvedType === 'dubbing') {
         // Text to Speech
-        const targetVoice = validateVoiceId(voiceId || "21m00Tcm4TlvDq8ikWAM"); // Rachel fallback
+        const targetVoice = validateVoiceId(voiceId);
         console.log(`ElevenLabs server TTS: text="${text}" voiceId=${targetVoice}`);
         const apiResponse = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${targetVoice}`, {
           method: "POST",
@@ -2520,7 +2520,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
           },
           body: JSON.stringify({
             text: text,
-            model_id: "eleven_multilingual_v2",
+            model_id: "eleven_v3",
             voice_settings: {
               stability: 0.5,
               similarity_boost: 0.75,
