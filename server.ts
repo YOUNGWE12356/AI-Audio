@@ -19,6 +19,7 @@ import {
   matchBestVoice,
   optimizeImportMetadata,
   regenerateLyrics,
+  translateTextToLanguage,
   translateToEnglish,
 } from './src/services/geminiService';
 import { generateGeminiContent } from './src/services/geminiRetry';
@@ -31,6 +32,7 @@ import {
   isolateAudio,
   transcribeSpeech,
 } from './src/services/elevenLabsService';
+import { normalizeElevenLabsQualityMode } from './src/utils/elevenLabsQuality';
 
 async function startServer() {
   const app = express();
@@ -45,8 +47,8 @@ async function startServer() {
     Promise.resolve(handler(req, res)).catch(next);
   };
 
-  // Use JSON middleware with large payload support for categories/sounds state
-  app.use(express.json({ limit: '50mb' }));
+  // Use JSON middleware with large payload support for categories/sounds state and inline media references.
+  app.use(express.json({ limit: '120mb' }));
 
   // Directories paths
   const dataDir = path.join(process.cwd(), 'data');
@@ -455,7 +457,7 @@ async function startServer() {
         const content = fs.readFileSync(categoriesFile, 'utf-8');
         return res.json(JSON.parse(content));
       }
-      return res.json(DEFAULT_CATEGORIES);
+      return res.json([]);
     } catch (err: any) {
       console.error('Error reading categories:', err);
       return res.status(500).json({ error: err.message });
@@ -644,13 +646,231 @@ async function startServer() {
     return res.send(Buffer.from(await blob.arrayBuffer()));
   };
 
+  const voiceGenerationQueues = new Map<string, Promise<unknown>>();
+  const runVoiceGenerationQueued = async <T,>(voiceId: string, task: () => Promise<T>): Promise<T> => {
+    const previous = voiceGenerationQueues.get(voiceId) || Promise.resolve();
+    const run = previous.catch(() => undefined).then(task);
+    voiceGenerationQueues.set(voiceId, run.finally(() => {
+      if (voiceGenerationQueues.get(voiceId) === run) {
+        voiceGenerationQueues.delete(voiceId);
+      }
+    }));
+    return run;
+  };
+
+  const sharedVoiceAvailabilityCache = new Set<string>();
+  const ensureSharedVoiceAvailable = async (
+    voiceId: string,
+    publicOwnerId?: string,
+    voiceName?: string,
+  ) => {
+    const ownerId = String(publicOwnerId || '').trim();
+    if (!ownerId || sharedVoiceAvailabilityCache.has(voiceId)) return;
+
+    const apiKey = process.env.ELEVENLABS_API_KEY || process.env.VITE_ELEVENLABS_API_KEY || '';
+    if (!apiKey) return;
+
+    const response = await fetch(
+      `https://api.elevenlabs.io/v1/voices/add/${encodeURIComponent(ownerId)}/${encodeURIComponent(voiceId)}`,
+      {
+        method: 'POST',
+        headers: {
+          'xi-api-key': apiKey,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          new_name: String(voiceName || `Voice Library ${voiceId}`).slice(0, 80),
+        }),
+      },
+    );
+
+    if (response.ok) {
+      sharedVoiceAvailabilityCache.add(voiceId);
+      return;
+    }
+
+    const body = await response.json().catch(() => ({}));
+    const message = String(body?.detail?.message || body?.message || response.statusText || '');
+    if (
+      response.status === 409 ||
+      /already|exists|added|Multiple voice additions\/deletions/i.test(message)
+    ) {
+      sharedVoiceAvailabilityCache.add(voiceId);
+      return;
+    }
+
+    throw new Error(`ElevenLabs 声音库同步失败：${message || response.status}`);
+  };
+
   const parseNumber = (value: unknown, fallback: number, min: number, max: number) => {
     const parsed = typeof value === 'number' ? value : Number.parseFloat(String(value));
     if (!Number.isFinite(parsed)) return fallback;
     return Math.min(max, Math.max(min, parsed));
   };
 
+  const getMediaDurationSeconds = (filePath: string) => new Promise<number>((resolve, reject) => {
+    execFile(
+      'ffprobe',
+      ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', filePath],
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(stderr || error.message));
+          return;
+        }
+        const duration = Number.parseFloat(stdout.trim());
+        if (!Number.isFinite(duration) || duration <= 0) {
+          reject(new Error('Unable to read media duration'));
+          return;
+        }
+        resolve(duration);
+      },
+    );
+  });
+
+  const buildTranslatedDubbingAtempoFilter = (tempo: number) => {
+    const parts: number[] = [];
+    let remaining = Math.min(2, Math.max(0.5, tempo));
+    while (remaining > 2) {
+      parts.push(2);
+      remaining /= 2;
+    }
+    while (remaining < 0.5) {
+      parts.push(0.5);
+      remaining /= 0.5;
+    }
+    parts.push(Math.min(2, Math.max(0.5, remaining)));
+    return parts.map(part => `atempo=${part.toFixed(4)}`).join(',');
+  };
+
+  const normalizeTextForLanguageCheck = (value: string) => value
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+
+  const validateTranslatedDubbingText = (
+    sourceText: string,
+    translatedText: string,
+    targetLanguage: string,
+  ) => {
+    const normalizedTarget = targetLanguage.trim().toLowerCase();
+    const normalizedSource = normalizeTextForLanguageCheck(sourceText);
+    const normalizedTranslation = normalizeTextForLanguageCheck(translatedText);
+
+    if (!normalizedTranslation) {
+      throw Object.assign(new Error('翻译结果为空，已停止生成目标语音。'), { status: 502 });
+    }
+
+    if (normalizedSource && normalizedSource === normalizedTranslation) {
+      throw Object.assign(new Error('翻译结果仍然是原文，已停止生成目标语音，请重试。'), { status: 502 });
+    }
+
+    if (/english|en\b|英文|英语/.test(normalizedTarget) && !/[a-zA-Z]{2,}/.test(translatedText)) {
+      throw Object.assign(new Error('目标语言选择为英文，但翻译结果不是英文，已停止生成。'), { status: 502 });
+    }
+  };
+
+  const stretchAudioToDuration = (
+    inputPath: string,
+    outputPath: string,
+    sourceDuration: number,
+    generatedDuration: number,
+    mode: 'natural' | 'match' | 'strict',
+  ) => new Promise<{ stretched: boolean; speedRatio: number }>((resolve) => {
+    if (mode === 'natural' || sourceDuration <= 0 || generatedDuration <= 0) {
+      resolve({ stretched: false, speedRatio: 1 });
+      return;
+    }
+
+    const rawTempo = generatedDuration / sourceDuration;
+    const maxTempo = mode === 'strict' ? 1.75 : 1.35;
+    const minTempo = mode === 'strict' ? 0.6 : 0.75;
+    const tempo = Math.min(maxTempo, Math.max(minTempo, rawTempo));
+    if (Math.abs(tempo - 1) < 0.03) {
+      resolve({ stretched: false, speedRatio: 1 });
+      return;
+    }
+
+    execFile(
+      FFMPEG_BINARY,
+      ['-y', '-i', inputPath, '-filter:a', buildTranslatedDubbingAtempoFilter(tempo), '-vn', '-codec:a', 'libmp3lame', '-b:a', '192k', outputPath],
+      (error) => {
+        if (error) {
+          console.warn('Failed to time-stretch translated dubbing audio; using natural timing:', error);
+          resolve({ stretched: false, speedRatio: 1 });
+          return;
+        }
+        resolve({ stretched: true, speedRatio: tempo });
+      },
+    );
+  });
+
+  const recoverClipsFromPossiblyTruncatedJson = (raw: string) => {
+    const clipsKeyMatch = raw.match(/"clips"\s*:/);
+    if (!clipsKeyMatch || clipsKeyMatch.index === undefined) return [];
+
+    const arrayStart = raw.indexOf('[', clipsKeyMatch.index + clipsKeyMatch[0].length);
+    if (arrayStart === -1) return [];
+
+    const recoveredClips: any[] = [];
+    let inString = false;
+    let escaped = false;
+    let objectDepth = 0;
+    let objectStart = -1;
+
+    for (let index = arrayStart + 1; index < raw.length; index += 1) {
+      const char = raw[index];
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (char === '\\') {
+          escaped = true;
+        } else if (char === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (char === '"') {
+        inString = true;
+        continue;
+      }
+
+      if (char === '{') {
+        if (objectDepth === 0) objectStart = index;
+        objectDepth += 1;
+        continue;
+      }
+
+      if (char === '}') {
+        if (objectDepth <= 0) continue;
+        objectDepth -= 1;
+        if (objectDepth === 0 && objectStart >= 0) {
+          const objectText = raw.slice(objectStart, index + 1);
+          try {
+            const clip = JSON.parse(objectText);
+            if (clip && typeof clip === 'object') {
+              recoveredClips.push(clip);
+            }
+          } catch (clipParseError) {
+            console.warn('Skipping one malformed recovered video-analysis clip:', clipParseError);
+          }
+          objectStart = -1;
+        }
+        continue;
+      }
+
+      if (char === ']' && objectDepth === 0) {
+        break;
+      }
+    }
+
+    return recoveredClips;
+  };
+
   type AudioExportFormat = 'mp3' | 'wav' | 'aac';
+  type AudioExportChannelMode = 'mono' | 'stereo';
 
   const normalizeAudioExportFormat = (value: unknown): AudioExportFormat => {
     const normalized = String(value || '').trim().toLowerCase();
@@ -673,6 +893,14 @@ async function startServer() {
     return [16, 24, 32].includes(parsed) ? parsed : 24;
   };
 
+  const normalizeAudioChannelMode = (value: unknown): AudioExportChannelMode => (
+    String(value || '').trim().toLowerCase() === 'mono' ? 'mono' : 'stereo'
+  );
+
+  const getAudioChannelArgs = (channelMode: AudioExportChannelMode) => (
+    ['-ac', channelMode === 'mono' ? '1' : '2']
+  );
+
   const getPcmCodec = (bitDepth: number) => {
     if (bitDepth === 32) return 'pcm_s32le';
     if (bitDepth === 24) return 'pcm_s24le';
@@ -684,8 +912,9 @@ async function startServer() {
     sampleRate: number,
     bitrate: string,
     bitDepth = 24,
+    channelMode: AudioExportChannelMode = 'stereo',
   ) => {
-    const args = ['-ar', String(sampleRate)];
+    const args = ['-ar', String(sampleRate), ...getAudioChannelArgs(channelMode)];
     if (format === 'wav') {
       return [...args, '-c:a', getPcmCodec(bitDepth)];
     }
@@ -700,22 +929,24 @@ async function startServer() {
     sampleRate: number,
     bitrate: string,
     bitDepth = 24,
+    channelMode: AudioExportChannelMode = 'stereo',
   ) => {
+    const channelArgs = getAudioChannelArgs(channelMode);
     if (format === 'wav') {
       return {
         extension: '.mov',
-        args: ['-ar', String(sampleRate), '-c:a', getPcmCodec(bitDepth)],
+        args: ['-ar', String(sampleRate), ...channelArgs, '-c:a', getPcmCodec(bitDepth)],
       };
     }
     if (format === 'mp3') {
       return {
         extension: '.mp4',
-        args: ['-ar', String(sampleRate), '-c:a', 'libmp3lame', '-b:a', bitrate],
+        args: ['-ar', String(sampleRate), ...channelArgs, '-c:a', 'libmp3lame', '-b:a', bitrate],
       };
     }
     return {
       extension: '.mp4',
-      args: ['-ar', String(sampleRate), '-c:a', 'aac', '-b:a', bitrate],
+      args: ['-ar', String(sampleRate), ...channelArgs, '-c:a', 'aac', '-b:a', bitrate],
     };
   };
 
@@ -1259,25 +1490,86 @@ async function startServer() {
     return { filePath, mimeType };
   };
 
+  const resolveUploadedMediaUrlPath = (value: unknown) => {
+    const mediaUrl = String(value || '').trim();
+    if (!mediaUrl.startsWith('/uploads/')) {
+      throw Object.assign(new Error('请选择已上传到工程里的音频片段。'), { status: 400 });
+    }
+
+    const fileName = path.basename(mediaUrl.split(/[?#]/)[0]);
+    if (!fileName || fileName !== mediaUrl.split(/[?#]/)[0].replace(/^\/uploads\//, '')) {
+      throw Object.assign(new Error('片段音频路径无效，无法读取。'), { status: 400 });
+    }
+
+    const extension = path.extname(fileName).toLowerCase();
+    if (![
+      '.wav',
+      '.mp3',
+      '.m4a',
+      '.aac',
+      '.ogg',
+      '.webm',
+      '.mp4',
+      '.mov',
+      '.m4v',
+    ].includes(extension)) {
+      throw Object.assign(new Error('仅支持从音频/视频素材中抽取片段。'), { status: 415 });
+    }
+
+    const filePath = path.resolve(uploadsDir, fileName);
+    if (!isPathInside(uploadsDir, filePath) || !fs.existsSync(filePath)) {
+      throw Object.assign(new Error('找不到片段源文件，请重新上传或重新拆分后再试。'), { status: 404 });
+    }
+    const stat = fs.statSync(filePath);
+    if (stat.size <= 0) {
+      throw Object.assign(new Error('片段源文件为空，无法读取。'), { status: 422 });
+    }
+    return { filePath, fileName, extension };
+  };
+
   const normalizeVoiceForMatching = (voice: any) => {
     const id = String(voice?.id || voice?.voice_id || '').trim();
     if (!/^[a-zA-Z0-9_-]{10,64}$/.test(id)) return null;
     const labels = voice?.labels && typeof voice.labels === 'object' ? voice.labels : {};
     const tags = Array.isArray(voice?.tags) ? voice.tags : Object.values(labels).filter(Boolean);
+    const rawGender = String(voice?.gender || labels.gender || '').toLowerCase();
+    const normalizedGender = rawGender.includes('female')
+      ? 'female'
+      : rawGender.includes('male')
+        ? 'male'
+        : '';
     return {
       id,
       name: String(voice?.name || voice?.englishName || id).slice(0, 120),
       englishName: String(voice?.englishName || voice?.name || id).slice(0, 120),
-      gender: voice?.gender === 'male' ? 'male' : voice?.gender === 'female' ? 'female' : String(labels.gender || ''),
+      gender: normalizedGender,
       category: String(voice?.category || voice?.category_name || '').slice(0, 80),
       description: String(voice?.description || labels.description || '').slice(0, 300),
       tags: tags.map((tag: any) => String(tag).slice(0, 60)).filter(Boolean).slice(0, 12),
     };
   };
 
-  const localVoiceMatchFallback = (voices: any[], preferredGender?: string) => {
+  const getVoiceKeywordScore = (voiceText: string, matchingKeywords?: string) => {
+    const rawKeywords = String(matchingKeywords || '').trim().toLowerCase();
+    if (!rawKeywords) return 0;
+    const tokens = rawKeywords
+      .split(/[\s,，、;；|/]+/)
+      .map(token => token.trim())
+      .filter(token => token.length >= 2)
+      .slice(0, 12);
+    const searchableTokens = tokens.length > 0 ? tokens : [rawKeywords];
+    return searchableTokens.reduce((score, token) => (
+      voiceText.includes(token) ? score + 7 : score
+    ), voiceText.includes(rawKeywords) ? 6 : 0);
+  };
+
+  const localVoiceMatchFallback = (voices: any[], preferredGender?: string, matchingKeywords?: string) => {
     const gender = preferredGender === 'male' || preferredGender === 'female' ? preferredGender : '';
-    return voices
+    const genderMatchedVoices = gender
+      ? voices.filter(voice => String(voice.gender).toLowerCase() === gender)
+      : [];
+    const candidateVoices = genderMatchedVoices.length > 0 ? genderMatchedVoices : voices;
+    return candidateVoices
       .map((voice, index) => {
         const voiceText = [
           voice.name,
@@ -1287,17 +1579,120 @@ async function startServer() {
           ...(voice.tags || []),
         ].join(' ').toLowerCase();
         let score = 68 - index;
-        if (gender && String(voice.gender).toLowerCase().includes(gender)) score += 16;
+        if (gender && String(voice.gender).toLowerCase() === gender) score += 16;
         if (/natural|真实|自然|conversation|口语|dialogue|对话/i.test(voiceText)) score += 8;
         if (/young|adult|middle|warm|calm|serious|energetic|温暖|沉稳|活泼|叙事/i.test(voiceText)) score += 4;
+        const keywordScore = getVoiceKeywordScore(voiceText, matchingKeywords);
+        score += Math.min(18, keywordScore);
         return {
           voiceId: voice.id,
           score: Math.max(45, Math.min(92, score)),
-          reason: '基于声音库标签与可用元数据的近似推荐。',
+          reason: keywordScore > 0
+            ? '基于参考音频、关键词和声音库标签的近似推荐。'
+            : '基于声音库标签与可用元数据的近似推荐。',
         };
       })
       .sort((left, right) => right.score - left.score)
       .slice(0, 6);
+  };
+
+  const readAudioAsRawPcm16 = (filePath: string, seconds = 8) => new Promise<Buffer>((resolve, reject) => {
+    execFile(
+      FFMPEG_BINARY,
+      [
+        '-v', 'error',
+        '-i', filePath,
+        '-t', String(seconds),
+        '-vn',
+        '-ac', '1',
+        '-ar', '16000',
+        '-f', 's16le',
+        'pipe:1',
+      ],
+      {
+        encoding: 'buffer',
+        windowsHide: true,
+        timeout: 45_000,
+        maxBuffer: 4 * 1024 * 1024,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(String(stderr || error.message)));
+          return;
+        }
+        resolve(Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout));
+      },
+    );
+  });
+
+  const estimateReferenceVoiceGender = async (filePath: string) => {
+    try {
+      const sampleRate = 16_000;
+      const pcm = await readAudioAsRawPcm16(filePath, 8);
+      const sampleCount = Math.floor(pcm.length / 2);
+      if (sampleCount < sampleRate * 0.4) return { gender: 'unknown' as const, confidence: 0, medianF0: 0 };
+
+      const samples = new Float32Array(sampleCount);
+      for (let index = 0; index < sampleCount; index += 1) {
+        samples[index] = pcm.readInt16LE(index * 2) / 32768;
+      }
+
+      const frameSize = 1024;
+      const hopSize = 512;
+      const minLag = Math.floor(sampleRate / 360);
+      const maxLag = Math.floor(sampleRate / 75);
+      const f0Values: number[] = [];
+
+      for (let start = 0; start + frameSize < samples.length; start += hopSize) {
+        let energy = 0;
+        for (let i = 0; i < frameSize; i += 1) {
+          const sample = samples[start + i];
+          energy += sample * sample;
+        }
+        const rms = Math.sqrt(energy / frameSize);
+        if (rms < 0.012) continue;
+
+        let bestLag = 0;
+        let bestCorrelation = 0;
+        for (let lag = minLag; lag <= maxLag; lag += 1) {
+          let correlation = 0;
+          let leftEnergy = 0;
+          let rightEnergy = 0;
+          const limit = frameSize - lag;
+          for (let i = 0; i < limit; i += 1) {
+            const left = samples[start + i];
+            const right = samples[start + i + lag];
+            correlation += left * right;
+            leftEnergy += left * left;
+            rightEnergy += right * right;
+          }
+          const normalizedCorrelation = correlation / Math.sqrt(Math.max(leftEnergy * rightEnergy, 1e-9));
+          if (normalizedCorrelation > bestCorrelation) {
+            bestCorrelation = normalizedCorrelation;
+            bestLag = lag;
+          }
+        }
+
+        if (bestLag > 0 && bestCorrelation >= 0.45) {
+          const f0 = sampleRate / bestLag;
+          if (f0 >= 75 && f0 <= 360) f0Values.push(f0);
+        }
+      }
+
+      if (f0Values.length < 4) return { gender: 'unknown' as const, confidence: 0, medianF0: 0 };
+      const sortedF0 = f0Values.sort((left, right) => left - right);
+      const medianF0 = sortedF0[Math.floor(sortedF0.length / 2)];
+      if (medianF0 >= 170) {
+        return { gender: 'female' as const, confidence: Math.min(0.95, 0.62 + ((medianF0 - 170) / 120)), medianF0 };
+      }
+      if (medianF0 <= 150) {
+        return { gender: 'male' as const, confidence: Math.min(0.95, 0.62 + ((150 - medianF0) / 90)), medianF0 };
+      }
+      return { gender: 'unknown' as const, confidence: 0.35, medianF0 };
+    } catch (error) {
+      console.warn('Acoustic gender estimation failed:', error);
+      return { gender: 'unknown' as const, confidence: 0, medianF0: 0 };
+    }
   };
 
   // --- Server-side AI gateway for the HTML5 client ---
@@ -1561,6 +1956,15 @@ async function startServer() {
     return res.json({ text });
   }));
 
+  app.post('/api/ai/gemini/translate-language', asyncRoute(async (req, res) => {
+    const text = await translateTextToLanguage(
+      String(req.body?.text || ''),
+      String(req.body?.targetLanguage || 'English'),
+      { preserveTone: req.body?.preserveTone !== false },
+    );
+    return res.json({ text });
+  }));
+
   app.post('/api/ai/gemini/match-voice', asyncRoute(async (req, res) => {
     const { description = '', gender, voices } = req.body || {};
     if ((gender !== 'male' && gender !== 'female') || !Array.isArray(voices)) {
@@ -1571,7 +1975,8 @@ async function startServer() {
   }));
 
   app.post('/api/video/match-similar-voices', asyncRoute(async (req, res) => {
-    const { audioUrl, voices } = req.body || {};
+    const { audioUrl, voices, preferredGender } = req.body || {};
+    const matchingKeywords = String(req.body?.matchingKeywords || '').trim().slice(0, 200);
     if (!Array.isArray(voices) || voices.length === 0) {
       return res.status(400).json({ error: '声音库为空，请先刷新 ElevenLabs 声音库。' });
     }
@@ -1584,18 +1989,81 @@ async function startServer() {
       return res.status(400).json({ error: '没有可用于匹配的 ElevenLabs 声音。' });
     }
 
-    const { filePath, mimeType } = resolveUploadedAudioUrlPath(audioUrl);
-    const audioBase64 = await fs.promises.readFile(filePath, { encoding: 'base64' });
+    const fallbackGender = preferredGender === 'male' || preferredGender === 'female' ? preferredGender : 'unknown';
+    let filePath = '';
+    let mimeType = 'audio/wav';
+    let acousticGender: Awaited<ReturnType<typeof estimateReferenceVoiceGender>> = { gender: 'unknown', confidence: 0, medianF0: 0 };
+    let audioBase64 = '';
+    try {
+      const resolvedAudio = resolveUploadedAudioUrlPath(audioUrl);
+      filePath = resolvedAudio.filePath;
+      mimeType = resolvedAudio.mimeType;
+      const referenceStat = await fs.promises.stat(filePath);
+      console.info('[similar-voice-match] reference audio accepted', {
+        fileName: path.basename(filePath),
+        bytes: referenceStat.size,
+        mimeType,
+        preferredGender: preferredGender === 'male' || preferredGender === 'female' ? preferredGender : 'auto',
+        hasMatchingKeywords: Boolean(matchingKeywords),
+        candidateVoices: normalizedVoices.length,
+      });
+      acousticGender = await estimateReferenceVoiceGender(filePath);
+      audioBase64 = await fs.promises.readFile(filePath, { encoding: 'base64' });
+    } catch (inputError) {
+      console.warn('Similar voice matching input/audio analysis failed; using metadata fallback:', inputError);
+      const fallbackRecommendations = localVoiceMatchFallback(normalizedVoices, fallbackGender, matchingKeywords);
+      return res.json({
+        sourceDescription: '参考音频暂时无法完整解析，已先根据声音库标签和关键词给出保守推荐。',
+        performancePrompt: '参考原始配音的语气、语速、停顿和情绪自然演绎。',
+        gender: fallbackGender,
+        recommendations: fallbackRecommendations,
+      });
+    }
+
+    const stableDetectedGender = preferredGender === 'male' || preferredGender === 'female'
+      ? preferredGender
+      : acousticGender.confidence >= 0.6 && (acousticGender.gender === 'male' || acousticGender.gender === 'female')
+        ? acousticGender.gender
+        : 'unknown';
+    if (process.env.ENABLE_GEMINI_VOICE_MATCH !== 'true') {
+      const recommendations = localVoiceMatchFallback(normalizedVoices, stableDetectedGender, matchingKeywords);
+      return res.json({
+        sourceDescription: stableDetectedGender === 'unknown'
+          ? '已根据参考音频和声音库标签给出相近声音推荐。'
+          : `已根据参考音频的${stableDetectedGender === 'male' ? '男声' : '女声'}倾向、声音库标签和关键词给出相近声音推荐。`,
+        performancePrompt: '参考原始配音的语气、语速、停顿和情绪自然演绎。',
+        gender: stableDetectedGender,
+        recommendations,
+      });
+    }
+
     const ai = getGoogleAI();
+    const preferredGenderInstruction = preferredGender === 'male'
+      ? '用户已指定参考音频为男声，请只推荐候选库中的 male 声音。'
+      : preferredGender === 'female'
+        ? '用户已指定参考音频为女声，请只推荐候选库中的 female 声音。'
+        : acousticGender.gender === 'female' && acousticGender.confidence >= 0.6
+          ? `系统基于参考音频基频估算为女声，置信度 ${Math.round(acousticGender.confidence * 100)}%，请优先按 female 推荐。`
+          : acousticGender.gender === 'male' && acousticGender.confidence >= 0.6
+            ? `系统基于参考音频基频估算为男声，置信度 ${Math.round(acousticGender.confidence * 100)}%，请优先按 male 推荐。`
+            : '用户未手动指定参考性别，请根据音频自动判断。';
+    const matchingKeywordsInstruction = matchingKeywords
+      ? `用户补充匹配关键词：${matchingKeywords}
+这些关键词表示希望匹配的角色气质、音色风格、年龄感、用途或表演方向。请在性别一致和参考音频相似的基础上优先考虑这些关键词；不要为了关键词忽略参考音频本身。`
+      : '用户没有补充匹配关键词，请主要根据参考音频本身匹配。';
     const prompt = `
-你是专业配音导演。请先聆听用户提供的人声音频，判断它的性别倾向、年龄感、音色、能量、语速、情绪、口音/语言特征和适合的配音用途。
+你是专业配音导演。请先聆听用户提供的人声音频，判断它的性别倾向、年龄感、音色、能量、语速、停顿、情绪、语气、口音/语言特征和适合的配音用途。
 然后在给定 ElevenLabs 声音库中选择最相似、最适合替代该人声的 3-6 个声音。
 
 重要约束：
+${preferredGenderInstruction}
+${matchingKeywordsInstruction}
 - 只从候选声音库中选择，不要编造 voiceId。
 - 如果音频中有人声不清晰，也要基于可听到的部分给出保守推荐。
+- 性别一致是硬约束：如果参考音频明显是男声，只能推荐候选库里的 male 声音；如果明显是女声，只能推荐 female 声音；只有无法判断时才返回 unknown 并允许混合推荐。
 - score 为 0-100，表示相似程度和可替代程度。
-- reason 用中文，简短说明为什么推荐。
+- reason 用中文，简短说明为什么推荐；如果使用了用户关键词，请说明与关键词的对应关系。
+- performancePrompt 用中文写给 AI 配音合成使用，只描述这段台词的表演方式，不要重复台词正文；重点包含语气、情绪、语速、停顿、口吻和能量，不超过 120 个中文字符。
 
 候选声音库 JSON：
 ${JSON.stringify(normalizedVoices)}
@@ -1603,6 +2071,7 @@ ${JSON.stringify(normalizedVoices)}
 请只返回 JSON：
 {
   "sourceDescription": "中文描述",
+  "performancePrompt": "中文配音表演提示词",
   "gender": "male" | "female" | "unknown",
   "recommendations": [
     { "voiceId": "候选声音ID", "score": 88, "reason": "中文原因" }
@@ -1623,9 +2092,10 @@ ${JSON.stringify(normalizedVoices)}
           maxOutputTokens: 4096,
           responseSchema: {
             type: Type.OBJECT,
-            required: ['sourceDescription', 'gender', 'recommendations'],
+            required: ['sourceDescription', 'performancePrompt', 'gender', 'recommendations'],
             properties: {
               sourceDescription: { type: Type.STRING },
+              performancePrompt: { type: Type.STRING },
               gender: { type: Type.STRING },
               recommendations: {
                 type: Type.ARRAY,
@@ -1645,7 +2115,15 @@ ${JSON.stringify(normalizedVoices)}
       });
 
       const parsed = JSON.parse(String(response.text || '{}'));
+      const forcedGender = preferredGender === 'male' || preferredGender === 'female' ? preferredGender : '';
+      const acousticDetectedGender = acousticGender.confidence >= 0.6
+        && (acousticGender.gender === 'male' || acousticGender.gender === 'female')
+        ? acousticGender.gender
+        : '';
+      const aiDetectedGender = parsed.gender === 'male' || parsed.gender === 'female' ? parsed.gender : 'unknown';
+      const detectedGender = forcedGender || acousticDetectedGender || aiDetectedGender;
       const validVoiceIds = new Set(normalizedVoices.map(voice => voice.id));
+      const voiceById = new Map(normalizedVoices.map(voice => [voice.id, voice]));
       const seenVoiceIds = new Set<string>();
       let recommendations = Array.isArray(parsed.recommendations)
         ? parsed.recommendations
@@ -1663,55 +2141,163 @@ ${JSON.stringify(normalizedVoices)}
           .slice(0, 6)
         : [];
 
-      if (recommendations.length === 0) {
-        recommendations = localVoiceMatchFallback(normalizedVoices, parsed.gender);
+      if (detectedGender !== 'unknown') {
+        const genderMatchedRecommendations = recommendations.filter((item: any) => (
+          voiceById.get(item.voiceId)?.gender === detectedGender
+        ));
+        const genderMatchedCandidateCount = normalizedVoices.filter(voice => voice.gender === detectedGender).length;
+        if (genderMatchedRecommendations.length > 0) {
+          recommendations = genderMatchedRecommendations.slice(0, 6);
+        } else if (genderMatchedCandidateCount > 0) {
+          recommendations = localVoiceMatchFallback(normalizedVoices, detectedGender, matchingKeywords);
+        }
       }
+
+      if (recommendations.length === 0) {
+        recommendations = localVoiceMatchFallback(normalizedVoices, detectedGender, matchingKeywords);
+      }
+
+      console.info('[similar-voice-match] recommendations ready', {
+        preferredGender: forcedGender || 'auto',
+        acousticGender,
+        aiGender: aiDetectedGender,
+        finalGender: detectedGender,
+        recommendations: recommendations.map((item: any) => ({
+          voiceId: item.voiceId,
+          score: item.score,
+          gender: voiceById.get(item.voiceId)?.gender || 'unknown',
+        })),
+      });
 
       return res.json({
         sourceDescription: String(parsed.sourceDescription || '已根据拆分人声音频提取音色特征。').slice(0, 300),
-        gender: parsed.gender === 'male' || parsed.gender === 'female' ? parsed.gender : 'unknown',
+        performancePrompt: String(parsed.performancePrompt || parsed.sourceDescription || '匹配当前选中音频片段的原始语气、语速、停顿和情绪。').slice(0, 180),
+        gender: detectedGender,
         recommendations,
       });
     } catch (error) {
       console.warn('Gemini similar voice matching failed; using local metadata fallback:', error);
+      const fallbackGender = preferredGender === 'male' || preferredGender === 'female' ? preferredGender : 'unknown';
+      const fallbackRecommendations = localVoiceMatchFallback(normalizedVoices, fallbackGender, matchingKeywords);
+      console.info('[similar-voice-match] fallback recommendations ready', {
+        preferredGender: fallbackGender,
+        recommendations: fallbackRecommendations.map((item: any) => ({
+          voiceId: item.voiceId,
+          score: item.score,
+          gender: normalizedVoices.find(voice => voice.id === item.voiceId)?.gender || 'unknown',
+        })),
+      });
       return res.json({
         sourceDescription: 'AI听辨暂时不可用，已根据声音库标签给出保守推荐。',
-        gender: 'unknown',
-        recommendations: localVoiceMatchFallback(normalizedVoices),
+        performancePrompt: '参考当前选中音频片段的原始语气、语速、停顿和情绪自然演绎。',
+        gender: fallbackGender,
+        recommendations: fallbackRecommendations,
       });
     }
+  }));
+
+  app.post('/api/video/extract-audio-clip', asyncRoute(async (req, res) => {
+    const { audioUrl } = req.body || {};
+    const { filePath } = resolveUploadedMediaUrlPath(audioUrl);
+    const sourceOffset = parseNumber(req.body?.sourceOffset, 0, 0, 3_600);
+    const duration = parseNumber(req.body?.duration, 1, 0.05, 600);
+    const speed = parseNumber(req.body?.speed, 1, 0.25, 4);
+    const readDuration = Number(Math.max(0.05, duration * speed).toFixed(3));
+    const outputFileName = `clip_extract_${randomUUID()}.wav`;
+    const outputPath = path.resolve(uploadsDir, outputFileName);
+    if (!isPathInside(uploadsDir, outputPath)) {
+      throw Object.assign(new Error('片段输出路径无效。'), { status: 500 });
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const args = [
+        '-y',
+        '-ss', String(Number(sourceOffset.toFixed(3))),
+        '-t', String(readDuration),
+        '-i', filePath,
+        '-vn',
+        '-ac', '1',
+        '-ar', '44100',
+        '-c:a', 'pcm_s16le',
+        outputPath,
+      ];
+      execFile(FFMPEG_BINARY, args, (error, _stdout, stderr) => {
+        if (error) {
+          try { fs.unlinkSync(outputPath); } catch {}
+          const ffmpegUnavailable = /ffmpeg.*(?:not recognized|not found)|ENOENT/i.test(`${error.message}\n${stderr}`);
+          reject(Object.assign(
+            new Error(ffmpegUnavailable
+              ? '本地 FFmpeg 不可用，无法抽取选中音频片段。'
+              : `抽取选中音频片段失败：${String(stderr || error.message).trim().split(/\r?\n/).slice(-1)[0] || error.message}`),
+            { status: ffmpegUnavailable ? 503 : 422 },
+          ));
+          return;
+        }
+        resolve();
+      });
+    });
+
+    const extractedDuration = await getMediaDurationSeconds(outputPath).catch(() => readDuration);
+    return res.json({
+      audioUrl: `/uploads/${outputFileName}`,
+      sourceOffset,
+      requestedDuration: duration,
+      extractedDuration,
+    });
   }));
 
   app.post('/api/ai/elevenlabs/sound-effect', asyncRoute(async (req, res) => {
     const text = String(req.body?.text || '').trim();
     if (!text) return res.status(400).json({ error: 'text is required' });
     const duration = parseNumber(req.body?.duration, 10, 0.5, 60);
-    return sendAudioBlob(res, await generateSoundEffect(text, duration));
+    const qualityMode = normalizeElevenLabsQualityMode(req.body?.qualityMode);
+    const englishText = /[^\x00-\x7F]/.test(text)
+      ? await translateToEnglish(text)
+      : text;
+    return sendAudioBlob(res, await generateSoundEffect(englishText || text, duration, { qualityMode }));
   }));
 
   app.post('/api/ai/elevenlabs/music', asyncRoute(async (req, res) => {
     const text = String(req.body?.text || '').trim();
     if (!text) return res.status(400).json({ error: 'text is required' });
+    const qualityMode = normalizeElevenLabsQualityMode(req.body?.qualityMode);
     const duration = parseNumber(req.body?.duration, 30, 1, 60);
     return sendAudioBlob(res, await generateMusic(
       text,
       duration,
       req.body?.isInstrumental !== false,
       typeof req.body?.lyrics === 'string' ? req.body.lyrics : undefined,
+      { qualityMode },
     ));
   }));
 
   app.post('/api/ai/elevenlabs/voice', asyncRoute(async (req, res) => {
     const text = String(req.body?.text || '').trim();
     if (!text) return res.status(400).json({ error: 'text is required' });
+    const fallbackText = String(req.body?.fallbackText || text).trim();
     const voiceId = validateVoiceId(req.body?.voiceId);
-    return sendAudioBlob(res, await generateVoice(
-      text,
-      voiceId,
-      parseNumber(req.body?.stability, 0.5, 0, 1),
-      parseNumber(req.body?.similarity, 0.75, 0, 1),
-      parseNumber(req.body?.style, 0.05, 0, 1),
-    ));
+    const qualityMode = normalizeElevenLabsQualityMode(req.body?.qualityMode);
+    const voiceSource = String(req.body?.voiceSource || '').trim();
+    const publicOwnerId = String(req.body?.publicOwnerId || '').trim();
+    const voiceName = String(req.body?.voiceName || '').trim();
+    const seed = Number.parseInt(String(req.body?.seed || ''), 10);
+    return sendAudioBlob(res, await runVoiceGenerationQueued(voiceId, async () => {
+      if (voiceSource === 'voice_library') {
+        await ensureSharedVoiceAvailable(voiceId, publicOwnerId, voiceName);
+      }
+      return generateVoice(
+        text,
+        voiceId,
+        parseNumber(req.body?.stability, 0.5, 0, 1),
+        parseNumber(req.body?.similarity, 0.75, 0, 1),
+        parseNumber(req.body?.style, 0.05, 0, 1),
+        {
+          qualityMode,
+          fallbackText,
+          ...(Number.isFinite(seed) ? { seed } : {}),
+        },
+      );
+    }));
   }));
 
   app.get('/api/ai/elevenlabs/voices', asyncRoute(async (req, res) => {
@@ -1745,6 +2331,89 @@ ${JSON.stringify(normalizedVoices)}
       req.body?.tagAudioEvents !== 'false',
     );
     return res.json(result);
+  }));
+
+  app.post('/api/ai/elevenlabs/translate-dubbing', aiUpload.single('audio'), asyncRoute(async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'audio is required' });
+
+    const voiceId = validateVoiceId(req.body?.voiceId);
+    const sourceLanguage = typeof req.body?.sourceLanguage === 'string' ? req.body.sourceLanguage : 'auto';
+    const targetLanguage = String(req.body?.targetLanguage || 'English');
+    const timingMode = ['natural', 'match', 'strict'].includes(String(req.body?.timingMode))
+      ? String(req.body?.timingMode) as 'natural' | 'match' | 'strict'
+      : 'match';
+    const qualityMode = normalizeElevenLabsQualityMode(req.body?.qualityMode);
+    const isProQuality = qualityMode === 'pro';
+
+    const sourceExt = getSafeUploadExtension(req.file.originalname, req.file.mimetype, '.wav');
+    const sourceFileName = `translate_source_${randomUUID()}${sourceExt}`;
+    const sourcePath = path.join(uploadsDir, sourceFileName);
+    fs.writeFileSync(sourcePath, req.file.buffer);
+
+    const generatedFileName = `translated_dubbing_raw_${randomUUID()}.mp3`;
+    const generatedPath = path.join(uploadsDir, generatedFileName);
+    const outputFileName = `translated_dubbing_${randomUUID()}.mp3`;
+    const outputPath = path.join(uploadsDir, outputFileName);
+
+    try {
+      const audio = new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype });
+      const [transcription, sourceDurationResult] = await Promise.all([
+        transcribeSpeech(
+          audio,
+          sourceLanguage && sourceLanguage !== 'auto' ? sourceLanguage : undefined,
+          false,
+        ),
+        getMediaDurationSeconds(sourcePath).catch(() => 0),
+      ]);
+
+      const sourceText = String(transcription.text || '').trim();
+      if (!sourceText) {
+        return res.status(422).json({ error: '没有识别到可翻译的台词，请换一段更清晰的人声音频。' });
+      }
+
+      const translatedText = await translateTextToLanguage(sourceText, targetLanguage, { preserveTone: true });
+      validateTranslatedDubbingText(sourceText, translatedText, targetLanguage);
+      const ttsBlob = await runVoiceGenerationQueued(voiceId, () => generateVoice(
+        translatedText,
+        voiceId,
+        isProQuality ? 0.45 : 0.5,
+        isProQuality ? 0.82 : 0.75,
+        isProQuality ? 0.14 : 0.05,
+        { qualityMode },
+      ));
+      fs.writeFileSync(generatedPath, Buffer.from(await ttsBlob.arrayBuffer()));
+
+      const generatedDuration = await getMediaDurationSeconds(generatedPath).catch(() => 0);
+      const stretchResult = await stretchAudioToDuration(
+        generatedPath,
+        outputPath,
+        sourceDurationResult,
+        generatedDuration,
+        timingMode,
+      );
+
+      if (!stretchResult.stretched) {
+        fs.copyFileSync(generatedPath, outputPath);
+      }
+
+      const outputDuration = await getMediaDurationSeconds(outputPath).catch(() => generatedDuration);
+
+      return res.json({
+        audioUrl: `/uploads/${outputFileName}`,
+        sourceText,
+        translatedText,
+        detectedLanguage: transcription.language_code,
+        sourceDuration: sourceDurationResult || undefined,
+        generatedDuration: generatedDuration || undefined,
+        outputDuration: outputDuration || undefined,
+        timingMode,
+        speedRatio: stretchResult.speedRatio,
+        qualityMode,
+      });
+    } finally {
+      try { fs.unlinkSync(sourcePath); } catch {}
+      try { fs.unlinkSync(generatedPath); } catch {}
+    }
   }));
 
   // 5. File Upload Endpoint (Supports both raw binary stream and multipart/form-data)
@@ -2235,7 +2904,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
         contents,
         config: {
           responseMimeType: "application/json",
-          maxOutputTokens: dubbingEnabled ? 32_768 : 8_192,
+          maxOutputTokens: dubbingEnabled ? 65_536 : 8_192,
           responseSchema: {
             type: Type.OBJECT,
             required: ["clips"],
@@ -2273,7 +2942,29 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
         throw new Error("AI did not return text");
       }
       
-      const parsed = JSON.parse(response.text.trim());
+      let parsed: any;
+      let analysisPartial = false;
+      try {
+        parsed = JSON.parse(response.text.trim());
+      } catch (parseError) {
+        const recoveredClips = recoverClipsFromPossiblyTruncatedJson(response.text);
+        console.error('Video analysis JSON parse failed:', {
+          length: response.text.length,
+          preview: response.text.slice(0, 500),
+          tail: response.text.slice(-500),
+          recoveredClipCount: recoveredClips.length,
+          parseError,
+        });
+        if (recoveredClips.length > 0) {
+          analysisPartial = true;
+          parsed = { clips: recoveredClips };
+        } else {
+          throw Object.assign(
+            new Error('AI 返回的视频分析结果过长或被截断，请缩短视频、减少字幕密度，或分段上传后重试。'),
+            { status: 502 },
+          );
+        }
+      }
       if (!Array.isArray(parsed.clips)) {
         throw new Error('AI 未返回有效的时间轴片段。');
       }
@@ -2473,6 +3164,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       return res.json({
         clips: normalizedClips,
         analysisSource,
+        analysisPartial,
         dubbingCueCount,
         dubbingStatus: dubbingEnabled
           ? dubbingAnalysisUnavailable ? 'unavailable' : dubbingCueCount > 0 ? 'detected' : 'none-detected'
@@ -2497,6 +3189,8 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
   app.post('/api/video/generate-clip', async (req, res) => {
     try {
       const { prompt, trackId, trackType, text, voiceId, duration } = req.body;
+      const qualityMode = normalizeElevenLabsQualityMode(req.body?.qualityMode);
+      const isProQuality = qualityMode === 'pro';
       
       const apiKey = process.env.ELEVENLABS_API_KEY || process.env.VITE_ELEVENLABS_API_KEY;
       if (!apiKey) {
@@ -2522,9 +3216,9 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
             text: text,
             model_id: "eleven_v3",
             voice_settings: {
-              stability: 0.5,
-              similarity_boost: 0.75,
-              style: 0.05,
+              stability: isProQuality ? 0.45 : 0.5,
+              similarity_boost: isProQuality ? 0.82 : 0.75,
+              style: isProQuality ? 0.14 : 0.05,
               use_speaker_boost: true,
             },
           }),
@@ -2540,7 +3234,9 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
         
       } else if (resolvedType === 'bgm') {
         // Background music (Sound generation)
-        const sfxPrompt = `AI Music, full background instrumental track, no vocals, no speech: ${prompt}`;
+        const sfxPrompt = isProQuality
+          ? `Broadcast-ready professional background instrumental music, high fidelity, polished mix, wide stereo image, no vocals, no speech: ${prompt}`
+          : `AI Music, full background instrumental track, no vocals, no speech: ${prompt}`;
         const elevenLabsDuration = Math.min(22, duration || 20);
         console.log(`ElevenLabs server Music Gen: prompt="${sfxPrompt}" elevenLabsDuration=${elevenLabsDuration}, targetDuration=${duration}`);
         
@@ -2551,9 +3247,10 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
+            model_id: "eleven_text_to_sound_v2",
             text: sfxPrompt,
             duration_seconds: elevenLabsDuration,
-            prompt_influence: 0.4,
+            prompt_influence: isProQuality ? 0.5 : 0.4,
           }),
         });
         
@@ -2592,7 +3289,9 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
         
       } else {
         // Sound effect (Sound generation)
-        const sfxPrompt = `Pure sound effect, instrumental, no vocals, no speech: ${prompt}`;
+        const sfxPrompt = isProQuality
+          ? `Studio-quality sound effect, realistic texture, clear spatial depth: ${prompt}`
+          : `Sound effect, realistic texture: ${prompt}`;
         console.log(`ElevenLabs server SFX Gen: prompt="${sfxPrompt}" duration=${duration}`);
         
         const apiResponse = await fetch("https://api.elevenlabs.io/v1/sound-generation", {
@@ -2602,9 +3301,10 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
+            model_id: "eleven_text_to_sound_v2",
             text: sfxPrompt,
             duration_seconds: duration || 4,
-            prompt_influence: 0.3,
+            prompt_influence: isProQuality ? 0.45 : 0.3,
           }),
         });
         
@@ -2818,6 +3518,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
         sampleRate,
         bitrate,
         bitDepth,
+        channelMode,
       } = req.body;
       if (!videoFileName) {
         return res.status(400).json({ error: 'videoFileName is required' });
@@ -2830,12 +3531,13 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       }
 
       const requestedClips = Array.isArray(clips) ? clips : [];
-      const validClips = requestedClips.filter((clip: any) => {
+      const targetClips = requestedClips.filter((clip: any) => !clip?.muted);
+      const validClips = targetClips.filter((clip: any) => {
         if (!clip.audioUrl || typeof clip.audioUrl !== 'string') return false;
         const clipPath = path.join(uploadsDir, path.basename(clip.audioUrl));
         return fs.existsSync(clipPath);
       });
-      if (validClips.length !== requestedClips.length) {
+      if (validClips.length !== targetClips.length) {
         return res.status(422).json({
           code: 'CLIP_AUDIO_MISSING',
           error: '部分音频片段已失效或尚未上传，请重新合成缺失片段后再导出。',
@@ -2847,11 +3549,13 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       const normalizedSampleRate = normalizeSampleRate(sampleRate);
       const normalizedBitrate = normalizeAudioBitrate(bitrate);
       const normalizedBitDepth = normalizeBitDepth(bitDepth);
+      const normalizedChannelMode = normalizeAudioChannelMode(channelMode);
       const videoAudioOutput = getVideoAudioOutputArgs(
         normalizedAudioFormat,
         normalizedSampleRate,
         normalizedBitrate,
         normalizedBitDepth,
+        normalizedChannelMode,
       );
 
       // Keeping the untouched source does not require FFmpeg/FFprobe. This also
@@ -3014,7 +3718,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       }
       const requestedClips = Array.isArray(clips) ? clips : [];
       const targetClips = requestedClips.filter((clip: any) => (
-        !normalizedTrackId || clip.trackId === normalizedTrackId
+        !clip?.muted && (!normalizedTrackId || clip.trackId === normalizedTrackId)
       ));
       const validClips = targetClips.filter((c: any) => {
         if (!c.audioUrl || typeof c.audioUrl !== 'string') return false;
@@ -3087,7 +3791,13 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
   const mixClipsToAudioFileV2 = (
     targetClips: any[],
     outputFilePath: string,
-    options: { audioFormat: AudioExportFormat; sampleRate: number; bitrate: string; bitDepth: number },
+    options: {
+      audioFormat: AudioExportFormat;
+      sampleRate: number;
+      bitrate: string;
+      bitDepth: number;
+      channelMode: AudioExportChannelMode;
+    },
   ) => new Promise<void>((resolve, reject) => {
     const inputArgs: string[] = [];
     targetClips.forEach((clip: any) => {
@@ -3109,7 +3819,13 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       ...inputArgs,
       '-filter_complex', filterParts.join('; '),
       '-map', '[aout]',
-      ...getAudioOutputArgs(options.audioFormat, options.sampleRate, options.bitrate, options.bitDepth),
+      ...getAudioOutputArgs(
+        options.audioFormat,
+        options.sampleRate,
+        options.bitrate,
+        options.bitDepth,
+        options.channelMode,
+      ),
       outputFilePath,
     ];
 
@@ -3131,6 +3847,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       sampleRate,
       bitrate,
       bitDepth,
+      channelMode,
     } = req.body;
     const normalizedTrackId = typeof trackId === 'string' && trackId.length > 0
       ? trackId
@@ -3143,9 +3860,10 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
     const normalizedSampleRate = normalizeSampleRate(sampleRate);
     const normalizedBitrate = normalizeAudioBitrate(bitrate);
     const normalizedBitDepth = normalizeBitDepth(bitDepth);
+    const normalizedChannelMode = normalizeAudioChannelMode(channelMode);
     const requestedClips = Array.isArray(clips) ? clips : [];
     const targetClips = requestedClips.filter((clip: any) => (
-      !normalizedTrackId || clip.trackId === normalizedTrackId
+      !clip?.muted && (!normalizedTrackId || clip.trackId === normalizedTrackId)
     ));
     const validClips = targetClips.filter((clip: any) => {
       const clipFileName = path.basename(String(clip.audioUrl || ''));
@@ -3170,6 +3888,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       sampleRate: normalizedSampleRate,
       bitrate: normalizedBitrate,
       bitDepth: normalizedBitDepth,
+      channelMode: normalizedChannelMode,
     });
     return res.json({ audioUrl: `/uploads/${outputFileName}` });
   }));
@@ -3182,12 +3901,14 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       sampleRate,
       bitrate,
       bitDepth,
+      channelMode,
     } = req.body;
 
     const normalizedAudioFormat = normalizeAudioExportFormat(audioFormat);
     const normalizedSampleRate = normalizeSampleRate(sampleRate);
     const normalizedBitrate = normalizeAudioBitrate(bitrate);
     const normalizedBitDepth = normalizeBitDepth(bitDepth);
+    const normalizedChannelMode = normalizeAudioChannelMode(channelMode);
     const requestedTracks = Array.isArray(tracks) ? tracks : [];
     const requestedClips = Array.isArray(clips) ? clips : [];
     const zip = new JSZip();
@@ -3197,7 +3918,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
     for (const track of requestedTracks) {
       const trackId = typeof track?.id === 'string' ? track.id : '';
       if (!/^[\w-]+$/.test(trackId) || track?.isMuted) continue;
-      const trackClips = requestedClips.filter((clip: any) => clip.trackId === trackId && clip.audioUrl);
+      const trackClips = requestedClips.filter((clip: any) => !clip?.muted && clip.trackId === trackId && clip.audioUrl);
       if (trackClips.length === 0) continue;
 
       const validTrackClips = trackClips.filter((clip: any) => {
@@ -3220,6 +3941,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
         sampleRate: normalizedSampleRate,
         bitrate: normalizedBitrate,
         bitDepth: normalizedBitDepth,
+        channelMode: normalizedChannelMode,
       });
       tempStemPaths.push(stemPath);
       zip.file(stemFileName, fs.readFileSync(stemPath));
@@ -3249,9 +3971,13 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       || err?.status === 413
       || err?.statusCode === 413;
     const status = isPayloadTooLarge ? 413 : err?.status || err?.statusCode || 500;
+    const rawMessage = String(err?.message || '');
+    const isJsonTruncationError = /Unterminated string in JSON|Unexpected end of JSON input|JSON at position/i.test(rawMessage);
     return res.status(status).json({
       error: isPayloadTooLarge
         ? '上传内容超过 100MB 限制。'
+        : isJsonTruncationError
+          ? 'AI 返回结果过长或被截断，请缩短素材、减少字幕密度，或分段生成后重试。'
         : err?.message || 'Internal Server Error'
     });
   });

@@ -18,6 +18,7 @@ import {
   Film, 
   Sparkles, 
   RotateCcw, 
+  RotateCw,
   Check, 
   Loader2, 
   Sliders,
@@ -40,13 +41,16 @@ import {
   Scissors,
   Combine,
   AudioLines,
-  ShieldCheck
+  ShieldCheck,
+  VolumeX,
+  MousePointer2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { TimelineClip } from '../types';
 import { ELEVENLABS_VOICES, VoiceItem } from '../data/voices';
-import { fetchAvailableVoices } from '../services/elevenLabsService';
+import { fetchAvailableVoices, transcribeSpeech } from '../services/elevenLabsService';
 import { extractVideoKeyframes } from '../utils/mediaPreparation';
+import { getElevenLabsQualityMode } from '../utils/elevenLabsQuality';
 
 const MAX_VIDEO_UPLOAD_BYTES = 100 * 1024 * 1024;
 const DEFAULT_DUBBING_VOICE_ID = '';
@@ -62,8 +66,30 @@ const SPLIT_VOCAL_CLIP_ID = 'clip-split-vocal';
 const SPLIT_MUSIC_CLIP_ID = 'clip-split-music';
 const DEFAULT_VOLUME_FADER = 0.8;
 const MAX_VOLUME_FADER = 1;
+const DEFAULT_TRACK_HEIGHT = 48;
+const MIN_TRACK_HEIGHT = 40;
+const MAX_TRACK_HEIGHT = 160;
+
+const createToolCursor = (label: string, fallback: string) => {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28"><rect x="1" y="1" width="26" height="26" rx="7" fill="rgba(15,23,42,0.92)" stroke="rgba(56,189,248,0.95)" stroke-width="2"/><text x="14" y="18" text-anchor="middle" font-size="14" font-family="Arial, sans-serif" font-weight="700" fill="white">${label}</text></svg>`;
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}") 14 14, ${fallback}`;
+};
+
+const createSplitToolCursor = () => {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="34" height="34" viewBox="0 0 34 34"><line x1="8" y1="2" x2="8" y2="32" stroke="rgba(103,232,249,0.98)" stroke-width="2.2" stroke-linecap="round"/><line x1="6" y1="2" x2="6" y2="32" stroke="rgba(15,23,42,0.95)" stroke-width="1" stroke-linecap="round"/><rect x="13" y="5" width="18" height="18" rx="5" fill="rgba(15,23,42,0.92)" stroke="rgba(103,232,249,0.9)" stroke-width="1.5"/><text x="22" y="19" text-anchor="middle" font-size="14" font-family="Arial, sans-serif" font-weight="700" fill="white">✂</text></svg>`;
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}") 8 17, crosshair`;
+};
+
+type TimelineToolMode = 'select' | 'split' | 'mute';
+
+const TIMELINE_TOOL_CURSOR_BY_MODE: Record<TimelineToolMode, string> = {
+  select: 'default',
+  split: createSplitToolCursor(),
+  mute: createToolCursor('M', 'pointer'),
+};
 
 type SoundtrackTrackType = 'bgm' | 'sfx' | 'dubbing' | 'original';
+type CreatableTrackType = Exclude<SoundtrackTrackType, 'original'>;
 
 type ExportJobKind = 'video' | 'mixed' | 'stems' | 'bgm' | 'sfx' | 'dubbing';
 
@@ -71,6 +97,7 @@ const EXPORT_JOB_KINDS: ExportJobKind[] = ['video', 'mixed', 'stems', 'bgm', 'sf
 
 type ExportAudioFormat = 'mp3' | 'wav' | 'aac';
 type ExportBitDepth = 16 | 24 | 32;
+type ExportChannelMode = 'stereo' | 'mono';
 type OriginalAudioSplitStatus = 'idle' | 'running' | 'completed' | 'error';
 type OriginalAudioSplitSegmentRequest = {
   id: string;
@@ -95,11 +122,16 @@ type SimilarVoiceRecommendation = {
   score: number;
   reason: string;
 };
+type TrackSimilarVoiceRecommendations = Record<string, {
+  recommendations: SimilarVoiceRecommendation[];
+  sourceDescription: string;
+}>;
 
 type TimelineUndoSnapshot = {
   label: string;
   tracks: SoundtrackTrack[];
   clips: TimelineClip[];
+  showVideoPreviewTrack: boolean;
   selectedClipId: string | null;
   selectedClipIds: string[];
   selectedTrackId: string | null;
@@ -111,6 +143,32 @@ type ClipAlignmentGuide = {
   target: 'start' | 'end';
 };
 
+type SplitToolGuide = {
+  time: number;
+  canCut: boolean;
+};
+
+type ClipWaveformCacheEntry = {
+  status: 'loading' | 'ready' | 'error';
+  peaks?: number[];
+  channelPeaks: number[][];
+  channelPeakRanges?: WaveformPeakRange[][];
+  channelCount: number;
+  duration: number;
+};
+
+type WaveformPeakRange = {
+  min: number;
+  max: number;
+};
+
+type TrackContextMenuState = {
+  trackId?: string;
+  x: number;
+  y: number;
+  source: 'track' | 'blank';
+};
+
 export interface SoundtrackTrack {
   id: string;
   name: string;
@@ -118,12 +176,18 @@ export interface SoundtrackTrack {
   volume: number;
   isMuted: boolean;
   isSoloed: boolean;
+  height?: number;
   defaultVoiceId?: string;
 }
 
 const normalizeUnitVolume = (value: unknown, fallback = 1) => {
   if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
   return Math.min(MAX_VOLUME_FADER, Math.max(0, value));
+};
+
+const normalizeTrackHeight = (value: unknown) => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_TRACK_HEIGHT;
+  return Math.min(MAX_TRACK_HEIGHT, Math.max(MIN_TRACK_HEIGHT, value));
 };
 
 const getTrackVolume = (trackId: string, tracks: SoundtrackTrack[]) => (
@@ -135,7 +199,7 @@ const faderToGain = (value: unknown, fallback = DEFAULT_VOLUME_FADER) => (
 );
 
 const getEffectiveClipVolume = (clip: TimelineClip, tracks: SoundtrackTrack[]) => (
-  faderToGain(clip.volume) * faderToGain(getTrackVolume(clip.trackId, tracks))
+  clip.muted ? 0 : faderToGain(clip.volume) * faderToGain(getTrackVolume(clip.trackId, tracks))
 );
 
 const normalizePositiveNumber = (value: unknown, fallback: number) => (
@@ -147,6 +211,19 @@ const normalizeOptionalTime = (value: unknown) => (
 );
 
 const getClipSourceOffset = (clip: TimelineClip) => normalizeOptionalTime(clip.sourceOffset) ?? 0;
+
+const clampNumber = (value: number, min: number, max: number) => (
+  Math.max(min, Math.min(max, value))
+);
+
+const normalizeSourceAudioDuration = (
+  clip: TimelineClip,
+  audioDuration?: number,
+) => Math.max(
+  normalizePositiveNumber(clip.sourceAudioDuration, 0),
+  normalizePositiveNumber(audioDuration, 0),
+  getClipSourceOffset(clip) + clip.duration * getEffectiveClipSpeed(clip),
+);
 
 const normalizeClipFade = (value: unknown, clipDuration = 0) => {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return 0;
@@ -278,19 +355,49 @@ const formatSyncTime = (value: number | undefined) => {
   return `${String(minutes).padStart(2, '0')}:${seconds.toFixed(2).padStart(5, '0')}`;
 };
 
-const createDefaultTracks = (): SoundtrackTrack[] => [
-  { id: 'bgm', name: '配乐 BGM', type: 'bgm', volume: DEFAULT_VOLUME_FADER, isMuted: false, isSoloed: false },
-  { id: 'sfx', name: '音效 SFX', type: 'sfx', volume: DEFAULT_VOLUME_FADER, isMuted: false, isSoloed: false },
-  {
-    id: 'dubbing',
-    name: '配音旁白',
-    type: 'dubbing',
-    volume: DEFAULT_VOLUME_FADER,
-    isMuted: false,
-    isSoloed: false,
-    defaultVoiceId: DEFAULT_DUBBING_VOICE_ID,
-  },
-];
+const createDefaultTracks = (): SoundtrackTrack[] => [];
+
+const createStandardAudioTrack = (type: CreatableTrackType): SoundtrackTrack => {
+  if (type === 'bgm') {
+    return { id: 'bgm', name: '配乐 BGM', type: 'bgm', volume: DEFAULT_VOLUME_FADER, isMuted: false, isSoloed: false };
+  }
+
+  if (type === 'dubbing') {
+    return {
+      id: 'dubbing',
+      name: '配音旁白',
+      type: 'dubbing',
+      volume: DEFAULT_VOLUME_FADER,
+      isMuted: false,
+      isSoloed: false,
+      defaultVoiceId: DEFAULT_DUBBING_VOICE_ID,
+    };
+  }
+
+  return { id: 'sfx', name: '音效 SFX', type: 'sfx', volume: DEFAULT_VOLUME_FADER, isMuted: false, isSoloed: false };
+};
+
+const createLegacyTracksForClips = (clips: TimelineClip[] = []): SoundtrackTrack[] => {
+  const clipTrackIds = new Set(clips.map(clip => clip.trackId));
+  const restoredTracks: SoundtrackTrack[] = [];
+
+  if (clipTrackIds.has(ORIGINAL_AUDIO_TRACK_ID)) {
+    restoredTracks.push(createOriginalAudioTrack());
+  }
+  if (clipTrackIds.has('bgm')) {
+    restoredTracks.push(createStandardAudioTrack('bgm'));
+  }
+  if (clipTrackIds.has('sfx')) {
+    restoredTracks.push(createStandardAudioTrack('sfx'));
+  }
+  if (clipTrackIds.has('dubbing')) {
+    restoredTracks.push(createStandardAudioTrack('dubbing'));
+  }
+
+  return restoredTracks;
+};
+
+const DEFAULT_DELETABLE_TRACK_IDS = ['bgm', 'sfx', 'dubbing', ORIGINAL_AUDIO_TRACK_ID];
 
 const createOriginalAudioTrack = (): SoundtrackTrack => ({
   id: ORIGINAL_AUDIO_TRACK_ID,
@@ -346,6 +453,7 @@ export interface SoundtrackProject {
   videoDuration: number;
   clips: TimelineClip[];
   tracks?: SoundtrackTrack[];
+  showVideoPreviewTrack?: boolean;
   bgmEnabled: boolean;
   sfxEnabled: boolean;
   dubbingEnabled: boolean;
@@ -365,6 +473,118 @@ const getUrlFileExtension = (url: string | null | undefined, fallback: string) =
   return match?.[1]?.toLowerCase() || fallback;
 };
 
+const buildWaveformChannelPeakRanges = (buffer: AudioBuffer, steps = 1200) => {
+  const channelCount = Math.max(1, buffer.numberOfChannels);
+  const blockSize = Math.max(1, Math.floor(buffer.length / steps));
+
+  return Array.from({ length: Math.min(channelCount, 2) }, (_, channel) => {
+    const data = buffer.getChannelData(channel);
+    return Array.from({ length: steps }, (_, index) => {
+      const start = index * blockSize;
+      const end = Math.min(buffer.length, start + blockSize);
+      let min = 0;
+      let max = 0;
+      for (let sampleIndex = start; sampleIndex < end; sampleIndex += 1) {
+        const sample = data[sampleIndex] || 0;
+        min = Math.min(min, sample);
+        max = Math.max(max, sample);
+      }
+      return {
+        min: Math.max(-1, min),
+        max: Math.min(1, max),
+      };
+    });
+  });
+};
+
+const getPeakRangeLevel = (range: WaveformPeakRange) => (
+  Math.min(1, Math.max(Math.abs(range.min), Math.abs(range.max)))
+);
+
+const renderWaveformEnvelopePath = (
+  peakRanges: WaveformPeakRange[],
+  centerY: number,
+  maxHeight: number,
+) => {
+  if (peakRanges.length === 0) return '';
+  const halfHeight = maxHeight / 2;
+  const topPoints = peakRanges.map((range, index) => {
+    const x = peakRanges.length === 1 ? 100 : (index / (peakRanges.length - 1)) * 100;
+    const level = getPeakRangeLevel(range);
+    const boostedMax = level > 0.002 ? Math.max(range.max, 0.035) : 0;
+    const y = centerY - Math.min(1, boostedMax) * halfHeight;
+    return `${x.toFixed(2)} ${y.toFixed(2)}`;
+  });
+  const bottomPoints = peakRanges.map((range, index) => {
+    const x = peakRanges.length === 1 ? 100 : (index / (peakRanges.length - 1)) * 100;
+    const level = getPeakRangeLevel(range);
+    const boostedMin = level > 0.002 ? Math.min(range.min, -0.035) : 0;
+    const y = centerY - Math.max(-1, boostedMin) * halfHeight;
+    return `${x.toFixed(2)} ${y.toFixed(2)}`;
+  }).reverse();
+
+  const topPath = topPoints.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point}`).join(' ');
+  return `${topPath} L ${bottomPoints.join(' L ')} Z`;
+};
+
+const getEntryChannelPeakRanges = (entry: ClipWaveformCacheEntry): WaveformPeakRange[][] => (
+  entry.channelPeakRanges && entry.channelPeakRanges.length > 0
+    ? entry.channelPeakRanges
+    : entry.channelPeaks?.length > 0
+      ? entry.channelPeaks.map(peaks => peaks.map(peak => ({ min: -peak, max: peak })))
+    : entry.peaks?.length
+      ? [entry.peaks.map(peak => ({ min: -peak, max: peak }))]
+      : []
+);
+
+const getVisibleWaveformChannelPeakRanges = (
+  entry: ClipWaveformCacheEntry,
+  clip: TimelineClip,
+) => {
+  const channelPeakRanges = getEntryChannelPeakRanges(entry);
+  const peakCount = channelPeakRanges[0]?.length || 0;
+  if (peakCount === 0) return [];
+
+  const fullDuration = normalizeSourceAudioDuration(clip, entry.duration);
+  const clipSpeed = getEffectiveClipSpeed(clip);
+  const visibleSourceStart = clampNumber(getClipSourceOffset(clip), 0, fullDuration);
+  const visibleSourceEnd = clampNumber(
+    visibleSourceStart + clip.duration * clipSpeed,
+    visibleSourceStart,
+    fullDuration,
+  );
+  const startIndex = Math.floor((visibleSourceStart / Math.max(fullDuration, 0.001)) * peakCount);
+  const endIndex = Math.ceil((visibleSourceEnd / Math.max(fullDuration, 0.001)) * peakCount);
+  const boundedStartIndex = Math.max(0, Math.min(startIndex, peakCount - 1));
+  const boundedEndIndex = Math.max(boundedStartIndex + 1, Math.min(endIndex, peakCount));
+
+  return channelPeakRanges.map(peaks => peaks.slice(
+    boundedStartIndex,
+    boundedEndIndex,
+  ));
+};
+
+const renderWaveformChannelPaths = (channelPeakRanges: WaveformPeakRange[][]) => {
+  if (channelPeakRanges.length === 0) return [];
+  if (channelPeakRanges.length === 1) {
+    return [{
+      d: renderWaveformEnvelopePath(channelPeakRanges[0], 50, 86),
+      label: 'mono',
+    }];
+  }
+
+  return channelPeakRanges.slice(0, 2).map((peaks, channelIndex) => ({
+    d: renderWaveformEnvelopePath(peaks, channelIndex === 0 ? 28 : 72, 36),
+    label: channelIndex === 0 ? 'left' : 'right',
+  })).filter(path => Boolean(path.d));
+};
+
+const isStereoWaveform = (channelPeakRanges: WaveformPeakRange[][]) => (
+  channelPeakRanges.length >= 2
+  && channelPeakRanges[0]?.length > 0
+  && channelPeakRanges[1]?.length > 0
+);
+
 export default function VideoSoundtrack() {
   // Project saving and loading states
   const [isProjectActive, setIsProjectActive] = useState<boolean>(false);
@@ -379,15 +599,21 @@ export default function VideoSoundtrack() {
   // Layout resizing and Copy/Paste states
   const [copiedClip, setCopiedClip] = useState<TimelineClip | null>(null);
   const [undoStack, setUndoStack] = useState<TimelineUndoSnapshot[]>([]);
+  const [redoStack, setRedoStack] = useState<TimelineUndoSnapshot[]>([]);
+  const [timeStretchEnabled, setTimeStretchEnabled] = useState<boolean>(false);
+  const [timelineToolMode, setTimelineToolMode] = useState<TimelineToolMode>('select');
+  const [waveformByUrl, setWaveformByUrl] = useState<Record<string, ClipWaveformCacheEntry>>({});
+  const waveformRequestUrlsRef = useRef<Set<string>>(new Set());
   const [showSyncSuccess, setShowSyncSuccess] = useState<boolean>(false);
-  const [timelineHeight, setTimelineHeight] = useState<number>(300);
-  const [propertyWidth, setPropertyWidth] = useState<number>(320);
+  const [timelineHeight, setTimelineHeight] = useState<number>(320);
+  const [propertyWidth, setPropertyWidth] = useState<number>(300);
   const [propertyHeight, setPropertyHeight] = useState<number>(260);
 
   const [isResizingTimeline, setIsResizingTimeline] = useState<boolean>(false);
   const [propertyResizeAxis, setPropertyResizeAxis] = useState<'width' | 'height' | 'both' | null>(null);
 
-  const timelineResizeStartRef = useRef<{ clientY: number; initialHeight: number; maxHeight: number }>({ clientY: 0, initialHeight: 300, maxHeight: 600 });
+  const timelineResizeStartRef = useRef<{ clientY: number; initialHeight: number; maxHeight: number }>({ clientY: 0, initialHeight: 320, maxHeight: 600 });
+  const trackResizeStartRef = useRef<{ trackId: string; clientY: number; initialHeight: number } | null>(null);
   const propertyResizeStartRef = useRef<{
     active: boolean;
     axis: 'width' | 'height' | 'both';
@@ -407,8 +633,8 @@ export default function VideoSoundtrack() {
     pointerId: -1,
     clientX: 0,
     clientY: 0,
-    initialWidth: 320,
-    initialTimelineHeight: 300,
+    initialWidth: 300,
+    initialTimelineHeight: 320,
     initialMobileHeight: 260,
     maxWidth: 600,
     maxTimelineHeight: 600,
@@ -469,6 +695,7 @@ export default function VideoSoundtrack() {
   const [exportSampleRate, setExportSampleRate] = useState<number>(48000);
   const [exportBitrate, setExportBitrate] = useState<string>('192k');
   const [exportBitDepth, setExportBitDepth] = useState<ExportBitDepth>(24);
+  const [exportChannelMode, setExportChannelMode] = useState<ExportChannelMode>('stereo');
 
   const exportControllersRef = useRef<Partial<Record<ExportJobKind, AbortController>>>({});
   const exportVersionsRef = useRef<Record<ExportJobKind, number>>({
@@ -541,6 +768,7 @@ export default function VideoSoundtrack() {
   const [isMatchingSimilarVoices, setIsMatchingSimilarVoices] = useState<boolean>(false);
   const [similarVoiceRecommendations, setSimilarVoiceRecommendations] = useState<SimilarVoiceRecommendation[]>([]);
   const [similarVoiceSourceDescription, setSimilarVoiceSourceDescription] = useState<string>('');
+  const [similarVoiceRecommendationsByTrackId, setSimilarVoiceRecommendationsByTrackId] = useState<TrackSimilarVoiceRecommendations>({});
   const [playingVoiceId, setPlayingVoiceId] = useState<string | null>(null);
 
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -725,11 +953,13 @@ export default function VideoSoundtrack() {
     setVideoDuration(30);
     setClips([]);
     const defaultTracks = createDefaultTracks();
+    manuallyDeletedTrackIdsRef.current = new Set();
     tracksRef.current = defaultTracks;
     setTracks(defaultTracks);
     setSelectedClipId(null);
     setSelectedClipIds([]);
     setSelectedTrackId(null);
+    setShowVideoPreviewTrack(true);
     setBgmEnabled(true);
     setSfxEnabled(true);
     setDubbingEnabled(true);
@@ -788,6 +1018,7 @@ export default function VideoSoundtrack() {
             videoDuration,
             clips,
             tracks,
+            showVideoPreviewTrack,
             bgmEnabled,
             sfxEnabled,
             dubbingEnabled,
@@ -833,6 +1064,7 @@ export default function VideoSoundtrack() {
       videoDuration,
       clips,
       tracks,
+      showVideoPreviewTrack,
       bgmEnabled,
       sfxEnabled,
       dubbingEnabled,
@@ -885,13 +1117,14 @@ export default function VideoSoundtrack() {
         ...clip,
         isGenerating: false
       }));
-      const storedTracks = project.tracks && project.tracks.length > 0
+      const storedTracks = Array.isArray(project.tracks)
         ? project.tracks
-        : createDefaultTracks();
+        : createLegacyTracksForClips(cleanedClips);
       const normalizedTracks = storedTracks.map(track => {
         const normalizedTrack = {
           ...track,
           volume: normalizeUnitVolume(track.volume, DEFAULT_VOLUME_FADER),
+          height: normalizeTrackHeight(track.height),
         };
         if (track.type !== 'dubbing') return normalizedTrack;
         const legacyVoiceId = (project.clips || []).find(
@@ -967,12 +1200,18 @@ export default function VideoSoundtrack() {
       const hasStaleDubbingAudio = normalizedClips.some(
         clip => clip.voiceDirty || clip.timingDirty,
       );
+      manuallyDeletedTrackIdsRef.current = new Set(
+        DEFAULT_DELETABLE_TRACK_IDS.filter(
+          trackId => !normalizedTracks.some(track => track.id === trackId),
+        ),
+      );
       tracksRef.current = normalizedTracks;
       setTracks(normalizedTracks);
       setClips(normalizedClips);
       setSelectedClipId(null);
       setSelectedClipIds([]);
       setSelectedTrackId(null);
+      setShowVideoPreviewTrack(project.showVideoPreviewTrack ?? true);
       setBgmEnabled(project.bgmEnabled);
       setSfxEnabled(project.sfxEnabled);
       setDubbingEnabled(project.dubbingEnabled);
@@ -1238,22 +1477,48 @@ export default function VideoSoundtrack() {
 
   // Safe duration variable to prevent any division by zero, NaN or Infinity layout errors
   const safeDuration = (typeof videoDuration === 'number' && !isNaN(videoDuration) && isFinite(videoDuration) && videoDuration > 0) ? videoDuration : 30;
+  const timelineToolCursor = TIMELINE_TOOL_CURSOR_BY_MODE[timelineToolMode];
 
   // Timeline tracks & clips
   const [tracks, setTracks] = useState<SoundtrackTrack[]>(createDefaultTracks);
   const tracksRef = useRef<SoundtrackTrack[]>(tracks);
+  const manuallyDeletedTrackIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     tracksRef.current = tracks;
   }, [tracks]);
+  const [showVideoPreviewTrack, setShowVideoPreviewTrack] = useState<boolean>(true);
   const [showAddTrackModal, setShowAddTrackModal] = useState<boolean>(false);
   const [newTrackName, setNewTrackName] = useState<string>('');
-  const [newTrackType, setNewTrackType] = useState<'bgm' | 'sfx' | 'dubbing'>('sfx');
+  const [newTrackType, setNewTrackType] = useState<CreatableTrackType>('sfx');
+  const [trackContextMenu, setTrackContextMenu] = useState<TrackContextMenuState | null>(null);
+  const [editingTrackId, setEditingTrackId] = useState<string | null>(null);
+  const [editingTrackName, setEditingTrackName] = useState<string>('');
+  const skipTrackRenameCommitRef = useRef(false);
 
   const [clips, setClips] = useState<TimelineClip[]>([]);
   const clipsRef = useRef<TimelineClip[]>(clips);
   useEffect(() => {
     clipsRef.current = clips;
   }, [clips]);
+
+  useEffect(() => {
+    if (!trackContextMenu) return;
+
+    const closeMenu = () => setTrackContextMenu(null);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeMenu();
+    };
+
+    window.addEventListener('click', closeMenu);
+    window.addEventListener('scroll', closeMenu, true);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('click', closeMenu);
+      window.removeEventListener('scroll', closeMenu, true);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [trackContextMenu]);
+
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
   const [selectedTrackId, setSelectedTrackId] = useState<string | null>(null);
@@ -1267,10 +1532,26 @@ export default function VideoSoundtrack() {
   // Mouse interaction state for dragging and stretching clips
   const [activeClipId, setActiveClipId] = useState<string | null>(null);
   const [interactionType, setInteractionType] = useState<'drag' | 'resize-left' | 'resize-right' | 'fade-in' | 'fade-out' | null>(null);
+  const [isPlayheadDragging, setIsPlayheadDragging] = useState<boolean>(false);
   const [dragStartX, setDragStartX] = useState<number>(0);
-  const [initialClipState, setInitialClipState] = useState<{ startTime: number; duration: number; trackId: string; fadeIn: number; fadeOut: number } | null>(null);
+  const [initialClipState, setInitialClipState] = useState<{
+    startTime: number;
+    duration: number;
+    trackId: string;
+    fadeIn: number;
+    fadeOut: number;
+    sourceOffset: number;
+    sourceAudioDuration: number;
+  } | null>(null);
   const [dragOverTrackId, setDragOverTrackId] = useState<string | null>(null);
   const [clipAlignmentGuide, setClipAlignmentGuide] = useState<ClipAlignmentGuide | null>(null);
+  const [splitToolGuide, setSplitToolGuide] = useState<SplitToolGuide | null>(null);
+
+  useEffect(() => {
+    if (timelineToolMode !== 'split') {
+      setSplitToolGuide(null);
+    }
+  }, [timelineToolMode]);
 
   // Auto-initialize project ID and default name if a video is uploaded and we are in active project workspace but have no ID yet
   useEffect(() => {
@@ -1287,6 +1568,7 @@ export default function VideoSoundtrack() {
         videoDuration,
         clips,
         tracks,
+        showVideoPreviewTrack,
         bgmEnabled,
         sfxEnabled,
         dubbingEnabled,
@@ -1311,7 +1593,7 @@ export default function VideoSoundtrack() {
         console.error('Failed to auto-initialize project:', err);
       }
     }
-  }, [isProjectActive, videoFile, currentProjectId]);
+  }, [isProjectActive, videoFile, currentProjectId, showVideoPreviewTrack]);
 
   // Auto-Save Effect
   useEffect(() => {
@@ -1340,6 +1622,7 @@ export default function VideoSoundtrack() {
           videoDuration,
           clips: cleanClips,
           tracks,
+          showVideoPreviewTrack,
           bgmEnabled,
           sfxEnabled,
           dubbingEnabled,
@@ -1370,6 +1653,7 @@ export default function VideoSoundtrack() {
     videoDuration,
     clips,
     tracks,
+    showVideoPreviewTrack,
     bgmEnabled,
     sfxEnabled,
     dubbingEnabled,
@@ -1393,25 +1677,36 @@ export default function VideoSoundtrack() {
     }
   }, [videoFile?.isUploaded, videoFile?.name]);
 
-  // 2. Timeline height resize mouse events
+  // 2. Timeline height resize pointer events
   useEffect(() => {
     if (!isResizingTimeline) return;
 
-    const handleMouseMove = (e: MouseEvent) => {
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'ns-resize';
+    document.body.style.userSelect = 'none';
+
+    const handlePointerMove = (e: PointerEvent) => {
       const deltaY = e.clientY - timelineResizeStartRef.current.clientY;
       const newHeight = Math.max(160, Math.min(timelineResizeStartRef.current.maxHeight, timelineResizeStartRef.current.initialHeight - deltaY));
       setTimelineHeight(newHeight);
     };
 
-    const handleMouseUp = () => {
+    const finishResize = () => {
       setIsResizingTimeline(false);
     };
 
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', finishResize);
+    window.addEventListener('pointercancel', finishResize);
+    window.addEventListener('blur', finishResize);
     return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', finishResize);
+      window.removeEventListener('pointercancel', finishResize);
+      window.removeEventListener('blur', finishResize);
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
     };
   }, [isResizingTimeline]);
 
@@ -1471,8 +1766,10 @@ export default function VideoSoundtrack() {
   };
 
   // Drag start trigger functions
-  const startTimelineResize = (e: React.MouseEvent) => {
+  const startTimelineResize = (e: React.PointerEvent) => {
     e.preventDefault();
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture?.(e.pointerId);
     const bounds = getPropertyResizeBounds();
     setIsResizingTimeline(true);
     timelineResizeStartRef.current = {
@@ -1480,6 +1777,55 @@ export default function VideoSoundtrack() {
       initialHeight: bounds.currentTimelineHeight,
       maxHeight: bounds.maxTimelineHeight
     };
+  };
+
+  const startTrackHeightResize = (e: React.MouseEvent, trackId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const targetTrack = tracksRef.current.find(track => track.id === trackId);
+    if (!targetTrack) return;
+
+    setSelectedTrackId(trackId);
+    trackResizeStartRef.current = {
+      trackId,
+      clientY: e.clientY,
+      initialHeight: normalizeTrackHeight(targetTrack.height),
+    };
+
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const resizeStart = trackResizeStartRef.current;
+      if (!resizeStart) return;
+
+      const nextHeight = normalizeTrackHeight(
+        resizeStart.initialHeight + moveEvent.clientY - resizeStart.clientY,
+      );
+
+      setTracks(prevTracks => {
+        const nextTracks = prevTracks.map(track => (
+          track.id === resizeStart.trackId
+            ? { ...track, height: nextHeight }
+            : track
+        ));
+        tracksRef.current = nextTracks;
+        return nextTracks;
+      });
+    };
+
+    const finishResize = () => {
+      trackResizeStartRef.current = null;
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', finishResize);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', finishResize);
   };
 
   const startPropertyResize = (
@@ -1583,9 +1929,9 @@ export default function VideoSoundtrack() {
 
   const resetPropertyPanelSize = () => {
     const bounds = getPropertyResizeBounds();
-    setPropertyWidth(Math.max(280, Math.min(bounds.maxWidth, 320)));
+    setPropertyWidth(Math.max(280, Math.min(bounds.maxWidth, 300)));
     if (window.matchMedia('(min-width: 768px)').matches) {
-      setTimelineHeight(Math.max(160, Math.min(bounds.maxTimelineHeight, 300)));
+      setTimelineHeight(Math.max(160, Math.min(bounds.maxTimelineHeight, 320)));
     } else {
       setPropertyHeight(Math.max(180, Math.min(bounds.maxMobileHeight, 260)));
     }
@@ -1798,17 +2144,23 @@ export default function VideoSoundtrack() {
         ? '移动音频片段'
         : type === 'fade-in' || type === 'fade-out'
           ? '调整音频淡入淡出'
-          : '调整音频片段长度',
+          : timeStretchEnabled
+            ? '时间拉伸音频片段'
+            : '调整音频片段长度',
     );
     setActiveClipId(clipId);
     setInteractionType(type);
     setDragStartX(e.clientX);
+    const cachedAudioDuration = audioInstancesRef.current[clipId]?.duration;
+    const sourceAudioDuration = normalizeSourceAudioDuration(targetClip, cachedAudioDuration);
     setInitialClipState({
       startTime: targetClip.startTime,
       duration: targetClip.duration,
       trackId: targetClip.trackId,
       fadeIn: normalizeClipFade(targetClip.fadeIn, targetClip.duration),
       fadeOut: normalizeClipFade(targetClip.fadeOut, targetClip.duration),
+      sourceOffset: getClipSourceOffset(targetClip),
+      sourceAudioDuration,
     });
     setDragOverTrackId(type === 'drag' ? targetClip.trackId : null);
     const pastedTrack = tracksRef.current.find(track => track.id === targetClip.trackId);
@@ -1883,31 +2235,59 @@ export default function VideoSoundtrack() {
         let nextTrackId = clip.trackId;
         let nextFadeIn = normalizeClipFade(clip.fadeIn, clip.duration);
         let nextFadeOut = normalizeClipFade(clip.fadeOut, clip.duration);
+        let nextSourceOffset = getClipSourceOffset(clip);
+        const clipSpeedForTrim = getEffectiveClipSpeed(clip);
+        const sourceDurationForTrim = normalizePositiveNumber(
+          initialClipState.sourceAudioDuration,
+          initialClipState.sourceOffset + initialClipState.duration * clipSpeedForTrim,
+        );
+        const minClipDuration = 0.5;
 
         if (interactionType === 'drag') {
           newStartTime = computedDragStartTime;
           nextTrackId = computedDragTrackId;
         } else if (interactionType === 'resize-right') {
           newDuration = initialClipState.duration + deltaTime;
-          newDuration = Math.max(0.5, Math.min(newDuration, safeDuration - clip.startTime));
+          const maxDurationByTimeline = safeDuration - clip.startTime;
+          const maxDurationBySource = timeStretchEnabled
+            ? maxDurationByTimeline
+            : Math.max(minClipDuration, (sourceDurationForTrim - initialClipState.sourceOffset) / clipSpeedForTrim);
+          newDuration = clampNumber(
+            newDuration,
+            minClipDuration,
+            Math.max(minClipDuration, Math.min(maxDurationByTimeline, maxDurationBySource)),
+          );
           newDuration = parseFloat(newDuration.toFixed(2));
           nextFadeIn = normalizeClipFade(nextFadeIn, newDuration);
           nextFadeOut = normalizeClipFade(nextFadeOut, newDuration);
         } else if (interactionType === 'resize-left') {
-          newStartTime = initialClipState.startTime + deltaTime;
-          newDuration = initialClipState.duration - deltaTime;
+          if (timeStretchEnabled) {
+            newStartTime = initialClipState.startTime + deltaTime;
+            newDuration = initialClipState.duration - deltaTime;
 
-          if (newStartTime < 0) {
-            newStartTime = 0;
-            newDuration = initialClipState.startTime + initialClipState.duration;
-          }
-          if (newDuration < 0.5) {
-            newDuration = 0.5;
-            newStartTime = initialClipState.startTime + initialClipState.duration - 0.5;
+            if (newStartTime < 0) {
+              newStartTime = 0;
+              newDuration = initialClipState.startTime + initialClipState.duration;
+            }
+            if (newDuration < minClipDuration) {
+              newDuration = minClipDuration;
+              newStartTime = initialClipState.startTime + initialClipState.duration - minClipDuration;
+            }
+          } else {
+            const maxRevealEarlier = initialClipState.sourceOffset / clipSpeedForTrim;
+            const maxMoveEarlier = Math.min(initialClipState.startTime, maxRevealEarlier);
+            const maxTrimLater = Math.max(0, initialClipState.duration - minClipDuration);
+            const effectiveDeltaTime = clampNumber(deltaTime, -maxMoveEarlier, maxTrimLater);
+
+            newStartTime = initialClipState.startTime + effectiveDeltaTime;
+            newDuration = initialClipState.duration - effectiveDeltaTime;
+            nextSourceOffset = initialClipState.sourceOffset + effectiveDeltaTime * clipSpeedForTrim;
+            nextSourceOffset = clampNumber(nextSourceOffset, 0, sourceDurationForTrim);
           }
 
           newStartTime = parseFloat(newStartTime.toFixed(2));
           newDuration = parseFloat(newDuration.toFixed(2));
+          nextSourceOffset = parseFloat(nextSourceOffset.toFixed(3));
           nextFadeIn = normalizeClipFade(nextFadeIn, newDuration);
           nextFadeOut = normalizeClipFade(nextFadeOut, newDuration);
         } else if (interactionType === 'fade-in') {
@@ -1926,15 +2306,19 @@ export default function VideoSoundtrack() {
           trackId: nextTrackId,
           startTime: newStartTime,
           duration: newDuration,
+          sourceOffset: nextSourceOffset > 0 ? nextSourceOffset : undefined,
+          sourceAudioDuration: movedClip.sourceAudioDuration || sourceDurationForTrim,
           fadeIn: nextFadeIn,
           fadeOut: nextFadeOut,
-          ...(isDubbingClip ? {
-            autoSpeed: calculateDubbingAutoSpeed(movedClip.sourceAudioDuration, newDuration),
-            timingDirty: true,
+          ...((isDubbingClip || timeStretchEnabled) ? {
+            autoSpeed: timeStretchEnabled
+              ? calculateDubbingAutoSpeed(movedClip.sourceAudioDuration || initialClipState.duration, newDuration)
+              : normalizeAutoSpeed(movedClip.autoSpeed),
+            timingDirty: isDubbingClip ? true : movedClip.timingDirty,
           } : {}),
         };
         const cachedAudio = audioInstancesRef.current[clip.id];
-        if (cachedAudio && isDubbingClip) {
+        if (cachedAudio && (isDubbingClip || timeStretchEnabled)) {
           cachedAudio.playbackRate = getEffectiveClipSpeed(updatedClip);
         }
         if (cachedAudio && nextTrackId !== clip.trackId) {
@@ -1976,14 +2360,83 @@ export default function VideoSoundtrack() {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [activeClipId, interactionType, initialClipState, pixelsPerSecond, safeDuration]);
+  }, [activeClipId, interactionType, initialClipState, pixelsPerSecond, safeDuration, timeStretchEnabled]);
 
   // Refs for audio synchronization
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
+  const timeRulerRef = useRef<HTMLDivElement | null>(null);
   const audioInstancesRef = useRef<{ [clipId: string]: HTMLAudioElement }>({});
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioRoutingRef = useRef<Record<string, { source: MediaElementAudioSourceNode; gain: GainNode }>>({});
+
+  const handleTimelineWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (!event.ctrlKey) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const timelineElement = timelineRef.current;
+    if (!timelineElement) return;
+
+    const rect = timelineElement.getBoundingClientRect();
+    const cursorXInViewport = event.clientX - rect.left;
+    const cursorXInContent = timelineElement.scrollLeft + cursorXInViewport;
+    const timeAtCursor = Math.max(0, (cursorXInContent - 160) / Math.max(pixelsPerSecond, 1));
+    const zoomFactor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
+    const nextPixelsPerSecond = clampNumber(
+      Math.round(pixelsPerSecond * zoomFactor),
+      10,
+      100,
+    );
+
+    if (nextPixelsPerSecond === pixelsPerSecond) return;
+
+    setPixelsPerSecond(nextPixelsPerSecond);
+
+    window.requestAnimationFrame(() => {
+      const nextScrollLeft = (timeAtCursor * nextPixelsPerSecond) + 160 - cursorXInViewport;
+      const maxScrollLeft = Math.max(0, timelineElement.scrollWidth - timelineElement.clientWidth);
+      timelineElement.scrollLeft = clampNumber(nextScrollLeft, 0, maxScrollLeft);
+    });
+  };
+
+  const getTimelineTimeFromPointer = (clientX: number) => {
+    const timelineElement = timelineRef.current;
+    if (!timelineElement) return null;
+
+    const rect = timelineElement.getBoundingClientRect();
+    const timelineContentX = timelineElement.scrollLeft + clientX - rect.left - 160;
+    if (timelineContentX < 0) return null;
+
+    return clampNumber(
+      Number((timelineContentX / Math.max(pixelsPerSecond, 1)).toFixed(3)),
+      0,
+      safeDuration,
+    );
+  };
+
+  const handleTimelineSplitGuideMove = (
+    event: React.MouseEvent<HTMLDivElement>,
+    clip?: TimelineClip,
+  ) => {
+    if (timelineToolMode !== 'split') return;
+
+    const guideTime = getTimelineTimeFromPointer(event.clientX);
+    if (guideTime === null) {
+      setSplitToolGuide(null);
+      return;
+    }
+
+    const canCut = clip ? canSplitClipAtTime(clip, guideTime) : false;
+    setSplitToolGuide(previous => (
+      previous
+      && previous.canCut === canCut
+      && Math.abs(previous.time - guideTime) < 0.001
+        ? previous
+        : { time: guideTime, canCut }
+    ));
+  };
 
   const getOrCreateAudioContext = () => {
     if (typeof window === 'undefined') return null;
@@ -2031,6 +2484,55 @@ export default function VideoSoundtrack() {
     }
   };
 
+  useEffect(() => {
+    const clipAudioUrls: string[] = [];
+    clips.forEach(clip => {
+      if (typeof clip.audioUrl === 'string' && clip.audioUrl.length > 0) {
+        clipAudioUrls.push(clip.audioUrl);
+      }
+    });
+    const audioUrls = Array.from(new Set<string>(clipAudioUrls));
+
+    audioUrls.forEach(audioUrl => {
+      if (waveformRequestUrlsRef.current.has(audioUrl)) return;
+      waveformRequestUrlsRef.current.add(audioUrl);
+      setWaveformByUrl(prev => (
+        prev[audioUrl]
+          ? prev
+          : { ...prev, [audioUrl]: { status: 'loading', channelPeaks: [], channelCount: 0, duration: 0 } }
+      ));
+
+      void (async () => {
+        try {
+          const response = await fetch(audioUrl);
+          if (!response.ok) throw new Error(`Waveform fetch failed: ${response.status}`);
+          const arrayBuffer = await response.arrayBuffer();
+          const audioContext = getOrCreateAudioContext();
+          if (!audioContext) throw new Error('Web Audio is not available');
+          const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+          const channelPeakRanges = buildWaveformChannelPeakRanges(decoded);
+          const channelPeaks = channelPeakRanges.map(peaks => peaks.map(getPeakRangeLevel));
+          setWaveformByUrl(prev => ({
+            ...prev,
+            [audioUrl]: {
+              status: 'ready',
+              channelPeaks,
+              channelPeakRanges,
+              channelCount: decoded.numberOfChannels,
+              duration: decoded.duration,
+            },
+          }));
+        } catch (waveformError) {
+          console.warn('Failed to create clip waveform:', waveformError);
+          setWaveformByUrl(prev => ({
+            ...prev,
+            [audioUrl]: { status: 'error', channelPeaks: [], channelCount: 0, duration: 0 },
+          }));
+        }
+      })();
+    });
+  }, [clips]);
+
   const syncAudioInstancesForTimelineState = (
     nextClips: TimelineClip[],
     nextTracks: SoundtrackTrack[],
@@ -2062,18 +2564,43 @@ export default function VideoSoundtrack() {
     });
   };
 
+  const createTimelineSnapshot = (label: string): TimelineUndoSnapshot => ({
+    label,
+    tracks: tracksRef.current.map(track => ({ ...track })),
+    clips: clipsRef.current.map(clip => ({ ...clip })),
+    showVideoPreviewTrack,
+    selectedClipId,
+    selectedClipIds,
+    selectedTrackId,
+  });
+
+  const restoreTimelineSnapshot = (snapshot: TimelineUndoSnapshot) => {
+    manuallyDeletedTrackIdsRef.current = new Set(
+      DEFAULT_DELETABLE_TRACK_IDS.filter(
+        trackId => !snapshot.tracks.some(track => track.id === trackId),
+      ),
+    );
+    tracksRef.current = snapshot.tracks;
+    clipsRef.current = snapshot.clips;
+    setTracks(snapshot.tracks);
+    setClips(snapshot.clips);
+    setShowVideoPreviewTrack(snapshot.showVideoPreviewTrack ?? true);
+    setSelectedClipId(snapshot.selectedClipId);
+    setSelectedClipIds(snapshot.selectedClipIds || (snapshot.selectedClipId ? [snapshot.selectedClipId] : []));
+    setSelectedTrackId(snapshot.selectedTrackId);
+    syncAudioInstancesForTimelineState(snapshot.clips, snapshot.tracks);
+    invalidateTrackOutputs('bgm');
+    invalidateTrackOutputs('sfx');
+    invalidateTrackOutputs('dubbing');
+    invalidateTrackOutputs('original');
+  };
+
   const pushUndoSnapshot = (label: string) => {
     setUndoStack(prev => [
       ...prev.slice(-39),
-      {
-        label,
-        tracks: tracksRef.current.map(track => ({ ...track })),
-        clips: clipsRef.current.map(clip => ({ ...clip })),
-        selectedClipId,
-        selectedClipIds,
-        selectedTrackId,
-      },
+      createTimelineSnapshot(label),
     ]);
+    setRedoStack([]);
   };
 
   const handleUndoTimelineEdit = () => {
@@ -2088,20 +2615,37 @@ export default function VideoSoundtrack() {
     }
 
     setUndoStack(prev => prev.slice(0, -1));
-    tracksRef.current = snapshot.tracks;
-    clipsRef.current = snapshot.clips;
-    setTracks(snapshot.tracks);
-    setClips(snapshot.clips);
-    setSelectedClipId(snapshot.selectedClipId);
-    setSelectedClipIds(snapshot.selectedClipIds || (snapshot.selectedClipId ? [snapshot.selectedClipId] : []));
-    setSelectedTrackId(snapshot.selectedTrackId);
-    syncAudioInstancesForTimelineState(snapshot.clips, snapshot.tracks);
-    invalidateTrackOutputs('bgm');
-    invalidateTrackOutputs('sfx');
-    invalidateTrackOutputs('dubbing');
-    invalidateTrackOutputs('original');
+    setRedoStack(prev => [
+      ...prev.slice(-39),
+      createTimelineSnapshot(snapshot.label),
+    ]);
+    restoreTimelineSnapshot(snapshot);
     setToast({
       message: `已撤回：${snapshot.label}`,
+      type: 'success',
+    });
+    window.setTimeout(() => setToast(null), 2_000);
+  };
+
+  const handleRedoTimelineEdit = () => {
+    const snapshot = redoStack[redoStack.length - 1];
+    if (!snapshot) {
+      setToast({
+        message: '没有可重做的时间轴操作。',
+        type: 'info',
+      });
+      window.setTimeout(() => setToast(null), 2_000);
+      return;
+    }
+
+    setRedoStack(prev => prev.slice(0, -1));
+    setUndoStack(prev => [
+      ...prev.slice(-39),
+      createTimelineSnapshot(snapshot.label),
+    ]);
+    restoreTimelineSnapshot(snapshot);
+    setToast({
+      message: `已重做：${snapshot.label}`,
       type: 'success',
     });
     window.setTimeout(() => setToast(null), 2_000);
@@ -2133,7 +2677,11 @@ export default function VideoSoundtrack() {
     duration = safeDuration,
   ) => {
     if (!audioUrl) return;
-    const nextTracks = tracksRef.current.some(track => track.id === ORIGINAL_AUDIO_TRACK_ID)
+    const hasOriginalTrack = tracksRef.current.some(track => track.id === ORIGINAL_AUDIO_TRACK_ID);
+    if (!hasOriginalTrack && manuallyDeletedTrackIdsRef.current.has(ORIGINAL_AUDIO_TRACK_ID)) {
+      return;
+    }
+    const nextTracks = hasOriginalTrack
       ? tracksRef.current.map(track => (
         track.id === ORIGINAL_AUDIO_TRACK_ID
           ? { ...track, name: track.name || '视频原声', type: 'original' as const }
@@ -2424,6 +2972,9 @@ export default function VideoSoundtrack() {
     ? tracks.find(track => track.id === selectedClip.trackId)
     : undefined;
   const selectedClipIsOriginalAudio = selectedClipTrack?.type === 'original';
+  const selectedTrackIsSplitAudioTrack = selectedTrack?.id === SPLIT_VOCAL_TRACK_ID;
+  const selectedTrackShowsVoiceLibrary = selectedTrack?.type === 'dubbing'
+    && !selectedTrackIsSplitAudioTrack;
   const hasOriginalAudioClip = clips.some(clip => (
     clip.trackId === ORIGINAL_AUDIO_TRACK_ID && Boolean(clip.audioUrl)
   ));
@@ -2432,17 +2983,23 @@ export default function VideoSoundtrack() {
     || isExportingBgm
     || isExportingSfx
     || isExportingDubbing;
-  const selectedTrackVoiceId = selectedTrack?.type === 'dubbing'
+  const selectedTrackVoiceId = selectedTrackShowsVoiceLibrary
     ? selectedTrack.defaultVoiceId || DEFAULT_DUBBING_VOICE_ID
     : undefined;
   const selectedTrackVoice = selectedTrackVoiceId
     ? displayVoices.find(voice => voice.id === selectedTrackVoiceId)
     : undefined;
+  const activeVoiceRecommendationTrackId = selectedTrack?.id || selectedClipTrack?.id || '';
+  const activeTrackVoiceRecommendations = activeVoiceRecommendationTrackId
+    ? similarVoiceRecommendationsByTrackId[activeVoiceRecommendationTrackId]
+    : undefined;
+  const activeSimilarVoiceRecommendations = activeTrackVoiceRecommendations?.recommendations || similarVoiceRecommendations;
+  const activeSimilarVoiceSourceDescription = activeTrackVoiceRecommendations?.sourceDescription || similarVoiceSourceDescription;
   const similarVoiceRecommendationById = new Map<string, SimilarVoiceRecommendation>(
-    similarVoiceRecommendations.map(recommendation => [recommendation.voiceId, recommendation]),
+    activeSimilarVoiceRecommendations.map(recommendation => [recommendation.voiceId, recommendation]),
   );
   const filteredVoiceOptions = displayVoices.filter(voice => {
-    if (similarVoiceRecommendations.length > 0 && !similarVoiceRecommendationById.has(voice.id)) return false;
+    if (activeSimilarVoiceRecommendations.length > 0 && !similarVoiceRecommendationById.has(voice.id)) return false;
     if (voiceActiveCategory !== '全部' && voice.category !== voiceActiveCategory) return false;
     if (voiceGenderFilter !== 'all' && voice.gender !== voiceGenderFilter) return false;
     const query = voiceSearchQuery.trim().toLowerCase();
@@ -2453,10 +3010,61 @@ export default function VideoSoundtrack() {
       || voice.description.toLowerCase().includes(query)
       || voice.tags.some(tag => tag.toLowerCase().includes(query));
   }).sort((left, right) => {
-    if (similarVoiceRecommendations.length === 0) return 0;
+    if (activeSimilarVoiceRecommendations.length === 0) return 0;
     return (similarVoiceRecommendationById.get(right.id)?.score || 0)
       - (similarVoiceRecommendationById.get(left.id)?.score || 0);
   });
+
+  const requestSimilarVoiceRecommendations = async (referenceAudioUrl: string) => {
+    const response = await fetch('/api/video/match-similar-voices', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        audioUrl: referenceAudioUrl,
+        voices: displayVoices,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.error || '匹配相似声音失败，请稍后重试。');
+    }
+    const recommendations: SimilarVoiceRecommendation[] = Array.isArray(data.recommendations)
+      ? data.recommendations
+        .map((item: any) => ({
+          voiceId: String(item?.voiceId || ''),
+          score: Number(item?.score || 0),
+          reason: String(item?.reason || '音色接近。'),
+        }))
+        .filter((item: SimilarVoiceRecommendation) => (
+          item.voiceId && displayVoices.some(voice => voice.id === item.voiceId)
+        ))
+      : [];
+    if (recommendations.length === 0) {
+      throw new Error('没有在当前声音库中找到相似声音，请刷新 ElevenLabs 声音库后再试。');
+    }
+    return {
+      recommendations,
+      sourceDescription: String(data.sourceDescription || '已根据参考人声音频匹配相似声音。'),
+      performancePrompt: String(data.performancePrompt || data.sourceDescription || ''),
+    };
+  };
+
+  const findVoiceMatchingReferenceClip = (preferredTrackId?: string) => (
+    (selectedClip?.audioUrl ? selectedClip : undefined)
+    || clipsRef.current.find(clip => (
+      preferredTrackId
+      && clip.trackId === preferredTrackId
+      && Boolean(clip.audioUrl)
+    ))
+    || clipsRef.current.find(clip => (
+      clip.trackId === SPLIT_VOCAL_TRACK_ID
+      && Boolean(clip.audioUrl)
+    ))
+    || clipsRef.current.find(clip => (
+      clip.trackId === ORIGINAL_AUDIO_TRACK_ID
+      && Boolean(clip.audioUrl)
+    ))
+  );
 
   const getOrCreateSplitDubbingEditTrack = () => {
     const existingTrack = tracksRef.current.find(track => track.id === SPLIT_DUBBING_EDIT_TRACK_ID);
@@ -2509,7 +3117,47 @@ export default function VideoSoundtrack() {
   };
 
   const updateTrackName = (trackId: string, name: string) => {
-    setTracks(prev => prev.map(track => track.id === trackId ? { ...track, name } : track));
+    const nextTracks = tracksRef.current.map(track => (
+      track.id === trackId ? { ...track, name } : track
+    ));
+    tracksRef.current = nextTracks;
+    setTracks(nextTracks);
+  };
+
+  const startTrackRename = (track: SoundtrackTrack) => {
+    skipTrackRenameCommitRef.current = false;
+    setTrackContextMenu(null);
+    handleSelectTrack(track.id);
+    setEditingTrackId(track.id);
+    setEditingTrackName(track.name);
+  };
+
+  const cancelTrackRename = () => {
+    skipTrackRenameCommitRef.current = true;
+    setEditingTrackId(null);
+    setEditingTrackName('');
+  };
+
+  const commitTrackRename = (trackId: string) => {
+    if (skipTrackRenameCommitRef.current) {
+      skipTrackRenameCommitRef.current = false;
+      return;
+    }
+
+    const targetTrack = tracksRef.current.find(track => track.id === trackId);
+    if (!targetTrack) {
+      cancelTrackRename();
+      return;
+    }
+
+    const nextName = editingTrackName.trim() || targetTrack.name;
+    if (nextName !== targetTrack.name) {
+      pushUndoSnapshot('重命名轨道');
+      updateTrackName(trackId, nextName);
+    }
+
+    setEditingTrackId(null);
+    setEditingTrackName('');
   };
 
   const updateTrackVolume = (trackId: string, value: number) => {
@@ -2681,6 +3329,41 @@ export default function VideoSoundtrack() {
     window.setTimeout(() => setToast(null), 4_000);
   };
 
+  const handleClipVoiceChange = (clipId: string, voiceId: string) => {
+    const clip = clipsRef.current.find(item => item.id === clipId);
+    const voice = displayVoices.find(item => item.id === voiceId);
+    if (!clip || (clip.voiceId || DEFAULT_DUBBING_VOICE_ID) === voiceId) return;
+
+    const audioSource = resolveClipAudioSource(clip);
+    const shouldMarkVoiceDirty = Boolean(
+      clip.audioUrl
+      && audioSource === 'generated'
+      && (clip.voiceId || DEFAULT_DUBBING_VOICE_ID) !== voiceId,
+    );
+
+    pushUndoSnapshot('切换配音片段声音');
+    stopVoicePreview();
+    const nextClips = clipsRef.current.map(item => (
+      item.id === clipId
+        ? {
+          ...item,
+          audioSource,
+          voiceId,
+          voiceDirty: shouldMarkVoiceDirty,
+        }
+        : item
+    ));
+    clipsRef.current = nextClips;
+    setClips(nextClips);
+    setToast({
+      message: shouldMarkVoiceDirty
+        ? `已切换为 ${voice?.name || '新的候选声音'}，请重新合成此片段。`
+        : `已将此片段声音切换为 ${voice?.name || '候选声音'}。`,
+      type: 'success',
+    });
+    window.setTimeout(() => setToast(null), 3_000);
+  };
+
   // Clean up all playing audios when component unmounts
   useEffect(() => {
     return () => {
@@ -2766,7 +3449,7 @@ export default function VideoSoundtrack() {
           maxPlayableDuration = Math.min(clip.duration, Math.max(0, audio.duration - sourceOffset) / clipSpeed);
         }
 
-        if (offset >= 0 && offset < maxPlayableDuration && isTrackPlayable(clip.trackId)) {
+        if (!clip.muted && offset >= 0 && offset < maxPlayableDuration && isTrackPlayable(clip.trackId)) {
           // Clip should be playing
           const expectedAudioTime = sourceOffset + offset * clipSpeed;
           if (audio.paused) {
@@ -2867,7 +3550,7 @@ export default function VideoSoundtrack() {
         maxPlayableDuration = Math.min(clip.duration, Math.max(0, audio.duration - sourceOffset) / clipSpeed);
       }
 
-      if (offset >= 0 && offset < maxPlayableDuration && isTrackPlayable(clip.trackId)) {
+      if (!clip.muted && offset >= 0 && offset < maxPlayableDuration && isTrackPlayable(clip.trackId)) {
         if (isPlaying && audio.paused) {
           setMediaTimeSafely(audio, sourceOffset + offset * clipSpeed);
           setClipPlaybackGain(clip.id, audio, getEffectiveClipVolume(clip, tracks));
@@ -2939,21 +3622,90 @@ export default function VideoSoundtrack() {
 
       const isCopy = (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c';
       const isPaste = (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v';
-      const isUndo = (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z';
+      const isSelectAll = (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a';
+      const isUndo = (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z';
+      const isRedo = (e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'));
+      const isDelete = !e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'Delete' || e.key === 'Backspace');
       const isMoveClipUp = e.altKey && e.key === 'ArrowUp';
       const isMoveClipDown = e.altKey && e.key === 'ArrowDown';
       const isSplitClip = !e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 's';
       const isMergeClip = !e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'j';
+      const isSelectTool = !e.ctrlKey && !e.metaKey && !e.altKey && e.key === '1';
+      const isSplitTool = !e.ctrlKey && !e.metaKey && !e.altKey && (e.key === '2' || e.key.toLowerCase() === 's');
+      const isMuteTool = !e.ctrlKey && !e.metaKey && !e.altKey && (e.key === '4' || e.key.toLowerCase() === 'm');
       const isSpace = e.code === 'Space' || e.key === ' ';
 
       if (isUndo) {
         e.preventDefault();
         handleUndoTimelineEdit();
+      } else if (isRedo) {
+        e.preventDefault();
+        handleRedoTimelineEdit();
+      } else if (isDelete) {
+        const selectedIds = selectedClipIds.length > 0
+          ? selectedClipIds
+          : selectedClipId
+            ? [selectedClipId]
+            : [];
+        const deletableClipIds = selectedIds.filter(id => {
+          const clip = clipsRef.current.find(item => item.id === id);
+          return clip && !isOriginalAudioClip(clip);
+        });
+        if (deletableClipIds.length > 0) {
+          e.preventDefault();
+          const deletedIdSet = new Set(deletableClipIds);
+          const affectedTrackTypes = new Set<SoundtrackTrackType>();
+          clipsRef.current.forEach(clip => {
+            if (!deletedIdSet.has(clip.id)) return;
+            const track = tracksRef.current.find(item => item.id === clip.trackId);
+            if (track) affectedTrackTypes.add(track.type);
+          });
+          pushUndoSnapshot(deletableClipIds.length > 1 ? '删除多个音频片段' : '删除音频片段');
+          deletableClipIds.forEach(clipId => {
+            audioInstancesRef.current[clipId]?.pause();
+            disconnectClipAudioRouting(clipId);
+            delete audioInstancesRef.current[clipId];
+          });
+          const nextClips = clipsRef.current.filter(clip => !deletedIdSet.has(clip.id));
+          clipsRef.current = nextClips;
+          setClips(nextClips);
+          setSelectedClipId(null);
+          setSelectedClipIds([]);
+          setCopiedClip(prev => (prev && deletedIdSet.has(prev.id) ? null : prev));
+          affectedTrackTypes.forEach(type => invalidateTrackOutputs(type));
+          setToast({
+            message: deletableClipIds.length > 1 ? `已删除 ${deletableClipIds.length} 个音频片段。` : '已删除选中音频片段。',
+            type: 'info',
+          });
+          window.setTimeout(() => setToast(null), 2_000);
+        } else if (selectedTrackId) {
+          e.preventDefault();
+          handleDeleteTrack(selectedTrackId);
+        }
       } else if (isMoveClipUp || isMoveClipDown) {
         if (selectedClipId) {
           e.preventDefault();
           moveClipToAdjacentTrack(selectedClipId, isMoveClipUp ? 'up' : 'down');
         }
+      } else if (isSelectAll) {
+        const selectableClipIds = clips
+          .filter(clip => !isOriginalAudioClip(clip))
+          .map(clip => clip.id);
+        if (selectableClipIds.length > 0) {
+          e.preventDefault();
+          setSelectedClipIds(selectableClipIds);
+          setSelectedClipId(selectableClipIds[0]);
+          setSelectedTrackId(null);
+        }
+      } else if (isSelectTool) {
+        e.preventDefault();
+        setTimelineToolMode('select');
+      } else if (isSplitTool) {
+        e.preventDefault();
+        setTimelineToolMode('split');
+      } else if (isMuteTool) {
+        e.preventDefault();
+        setTimelineToolMode('mute');
       } else if (isCopy) {
         if (selectedClipId) {
           const clip = clips.find(c => c.id === selectedClipId);
@@ -2978,6 +3730,11 @@ export default function VideoSoundtrack() {
       } else if (isSpace) {
         e.preventDefault();
         togglePlay();
+      } else if (e.key === 'Escape') {
+        setTimelineToolMode('select');
+        setSelectedClipId(null);
+        setSelectedClipIds([]);
+        setSelectedTrackId(null);
       }
     };
 
@@ -2985,7 +3742,7 @@ export default function VideoSoundtrack() {
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [selectedClipId, selectedClipIds, clips, copiedClip, currentTime, safeDuration, isPlaying, videoLoadFailed, togglePlay, undoStack]);
+  }, [selectedClipId, selectedClipIds, selectedTrackId, clips, copiedClip, currentTime, safeDuration, isPlaying, videoLoadFailed, togglePlay, undoStack, redoStack]);
 
   const handleVideoLoaded = () => {
     if (videoRef.current) {
@@ -3063,6 +3820,7 @@ export default function VideoSoundtrack() {
       }
     });
     audioInstancesRef.current = {};
+    manuallyDeletedTrackIdsRef.current.delete(ORIGINAL_AUDIO_TRACK_ID);
     setClips([]);
 
     // 1. Instantly load locally using object URL for seamless, lag-free user experience
@@ -3454,6 +4212,11 @@ export default function VideoSoundtrack() {
       setError('请至少启用一条需要 AI 规划的音轨。');
       return;
     }
+    const analysisTracks = ensureStandardAudioTracks([
+      ...(analysisBgmEnabled ? ['bgm' as const] : []),
+      ...(analysisSfxEnabled ? ['sfx' as const] : []),
+      ...(analysisDubbingEnabled ? ['dubbing' as const] : []),
+    ]);
     // React state updates are asynchronous, so use a ref as the authoritative
     // lock to prevent a rapid double click from starting duplicate AI jobs.
     if (analysisLockRef.current) {
@@ -3539,7 +4302,7 @@ export default function VideoSoundtrack() {
           .filter((clip: any) => targetTrackIds.has(String(clip.trackId || '')))
           .map((clip: any, clipIndex: number) => {
           const sourceClipId = String(clip.subtitleId || clip.id || '');
-          const clipTrack = tracks.find(track => track.id === clip.trackId);
+          const clipTrack = analysisTracks.find(track => track.id === clip.trackId);
           const isDubbingClip = clipTrack?.type === 'dubbing';
           const clipStartTime = normalizeOptionalTime(clip.startTime) ?? 0;
           const clipDuration = normalizePositiveNumber(clip.duration, 3);
@@ -3634,7 +4397,7 @@ export default function VideoSoundtrack() {
         const dubbingCueCount = typeof data.dubbingCueCount === 'number'
           ? data.dubbingCueCount
           : mappedClips.filter((clip: TimelineClip) => (
-            tracks.find(track => track.id === clip.trackId)?.type === 'dubbing'
+            analysisTracks.find(track => track.id === clip.trackId)?.type === 'dubbing'
           )).length;
         const dubbingStatus = typeof data.dubbingStatus === 'string'
           ? data.dubbingStatus
@@ -3699,7 +4462,7 @@ export default function VideoSoundtrack() {
         name: existingEditableClip?.name || `${clip.name}（重配）`,
         prompt: clip.prompt,
         text: clip.text,
-        voiceId: targetTrack.defaultVoiceId || existingEditableClip?.voiceId || DEFAULT_DUBBING_VOICE_ID,
+        voiceId: existingEditableClip?.voiceId || targetTrack.defaultVoiceId || DEFAULT_DUBBING_VOICE_ID,
         startTime: clip.startTime,
         duration: clip.duration,
         speaker: clip.speaker,
@@ -3744,7 +4507,7 @@ export default function VideoSoundtrack() {
       const clipTrack = tracksRef.current.find(t => t.id === clip.trackId);
       const trackType = clipTrack ? clipTrack.type : undefined;
       const effectiveVoiceId = trackType === 'dubbing'
-        ? clipTrack?.defaultVoiceId || DEFAULT_DUBBING_VOICE_ID
+        ? clip.voiceId || clipTrack?.defaultVoiceId || DEFAULT_DUBBING_VOICE_ID
         : clip.voiceId;
 
       const res = await fetch('/api/video/generate-clip', {
@@ -3764,6 +4527,7 @@ export default function VideoSoundtrack() {
           lipEndTime: clip.lipEndTime,
           lipSyncConfidence: clip.lipSyncConfidence,
           timingSource: clip.timingSource,
+          qualityMode: getElevenLabsQualityMode(),
         })
       });
 
@@ -3790,13 +4554,13 @@ export default function VideoSoundtrack() {
           }
         }
       }
+      const latestClip = clipsRef.current.find(item => item.id === clipId) || clip;
       const latestTrack = tracksRef.current.find(track => track.id === clip.trackId);
       const latestVoiceId = latestTrack?.type === 'dubbing'
-        ? latestTrack.defaultVoiceId || DEFAULT_DUBBING_VOICE_ID
+        ? latestClip.voiceId || latestTrack.defaultVoiceId || DEFAULT_DUBBING_VOICE_ID
         : undefined;
       const voiceChangedDuringGeneration = trackType === 'dubbing'
         && latestVoiceId !== effectiveVoiceId;
-      const latestClip = clipsRef.current.find(item => item.id === clipId) || clip;
       const timingChangedDuringGeneration = trackType === 'dubbing'
         && getDubbingTimingSignature(latestClip) !== generationTimingSignature;
       const nextAutoSpeed = trackType === 'dubbing'
@@ -4103,18 +4867,10 @@ export default function VideoSoundtrack() {
   };
 
   const handleMatchSimilarVoicesWorkflow = async () => {
-    if (!selectedTrack || selectedTrack.type !== 'dubbing') return;
+    if (!selectedTrack || !selectedTrackShowsVoiceLibrary) return;
     if (isMatchingSimilarVoices) return;
 
-    const selectedReferenceClip = selectedClip
-      && selectedClip.audioUrl
-      && selectedClipTrack?.type === 'dubbing'
-      ? selectedClip
-      : clipsRef.current.find(clip => (
-        clip.trackId === selectedTrack.id && Boolean(clip.audioUrl)
-      )) || clipsRef.current.find(clip => (
-        clip.trackId === SPLIT_VOCAL_TRACK_ID && Boolean(clip.audioUrl)
-      ));
+    const selectedReferenceClip = findVoiceMatchingReferenceClip(selectedTrack.id);
 
     const referenceAudioUrl = selectedReferenceClip?.audioUrl;
     if (!referenceAudioUrl) {
@@ -4129,34 +4885,13 @@ export default function VideoSoundtrack() {
     setVoiceGenderFilter('all');
     setVoiceActiveCategory('全部');
     try {
-      const response = await fetch('/api/video/match-similar-voices', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          audioUrl: referenceAudioUrl,
-          voices: displayVoices,
-        }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(data.error || '匹配相似声音失败，请稍后重试。');
-      }
-      const recommendations: SimilarVoiceRecommendation[] = Array.isArray(data.recommendations)
-        ? data.recommendations
-          .map((item: any) => ({
-            voiceId: String(item?.voiceId || ''),
-            score: Number(item?.score || 0),
-            reason: String(item?.reason || '音色接近。'),
-          }))
-          .filter((item: SimilarVoiceRecommendation) => (
-            item.voiceId && displayVoices.some(voice => voice.id === item.voiceId)
-          ))
-        : [];
-      if (recommendations.length === 0) {
-        throw new Error('没有在当前声音库中找到相似声音，请刷新 ElevenLabs 声音库后再试。');
-      }
+      const { recommendations, sourceDescription } = await requestSimilarVoiceRecommendations(referenceAudioUrl);
       setSimilarVoiceRecommendations(recommendations);
-      setSimilarVoiceSourceDescription(String(data.sourceDescription || '已根据拆分人声音频匹配相似声音。'));
+      setSimilarVoiceSourceDescription(sourceDescription);
+      setSimilarVoiceRecommendationsByTrackId(prev => ({
+        ...prev,
+        [selectedTrack.id]: { recommendations, sourceDescription },
+      }));
       setToast({ message: `已匹配到 ${recommendations.length} 个相似声音，声音库已切换为推荐列表。`, type: 'success' });
       window.setTimeout(() => setToast(null), 4_000);
     } catch (err: any) {
@@ -4172,30 +4907,51 @@ export default function VideoSoundtrack() {
     showAudioRepairWorkflowToast('已放置“口型友好局部修改”入口：下一步会评估新台词长度、原句停顿和口型风险，再局部重配这一句。');
   };
 
+  const extractSelectedClipAudioForAnalysis = async (clip: TimelineClip) => {
+    if (!clip.audioUrl) throw new Error('当前选中的音频片段没有可读取的音频。');
+    const response = await fetch('/api/video/extract-audio-clip', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        audioUrl: clip.audioUrl,
+        sourceOffset: getClipSourceOffset(clip),
+        duration: clip.duration,
+        speed: getEffectiveClipSpeed(clip),
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.error || '抽取当前选中音频片段失败，请稍后重试。');
+    }
+    if (!data.audioUrl) {
+      throw new Error('抽取当前选中音频片段后没有返回音频地址。');
+    }
+    return String(data.audioUrl);
+  };
+
+  const fetchAudioUrlAsFile = async (audioUrl: string, fileName: string) => {
+    const response = await fetch(audioUrl);
+    if (!response.ok) throw new Error('读取抽取后的音频片段失败。');
+    const blob = await response.blob();
+    return new File([blob], fileName, { type: blob.type || 'audio/wav' });
+  };
+
   const handleLipFriendlyRewriteWorkflow = async () => {
     if (subtitleSegmentStatus === 'running') return;
-    if (!videoFile) {
+    const sourceClip = selectedClipId
+      ? clipsRef.current.find(clip => clip.id === selectedClipId)
+      : selectedClip;
+    if (!sourceClip || !sourceClip.audioUrl) {
       setSubtitleSegmentStatus('error');
       setSubtitleSegmentProgress(0);
-      setSubtitleSegmentStage('请先上传一个带字幕/台词的视频。');
-      return;
-    }
-    if (isUploadingToServer || !videoFile.isUploaded) {
-      setSubtitleSegmentStatus('error');
-      setSubtitleSegmentProgress(0);
-      setSubtitleSegmentStage('视频还在上传到服务器，请上传完成后再识别字幕。');
+      setSubtitleSegmentStage('请先选中一个已经剪开的、带音频的片段，再识别台词。');
       return;
     }
 
-    const isUsingSplitVocalAsSource = selectedClip?.trackId === SPLIT_VOCAL_TRACK_ID
-      || selectedTrack?.id === SPLIT_VOCAL_TRACK_ID;
-    const targetTrack = isUsingSplitVocalAsSource
-      ? getOrCreateSplitDubbingEditTrack()
-      : selectedClipTrack?.type === 'dubbing'
-        ? selectedClipTrack
-        : selectedTrack?.type === 'dubbing'
-          ? selectedTrack
-          : tracksRef.current.find(track => track.type === 'dubbing');
+    let targetTrack = getOrCreateSplitDubbingEditTrack();
+    let matchedVoiceId = sourceClip.voiceId || targetTrack.defaultVoiceId || DEFAULT_DUBBING_VOICE_ID;
+    let voiceMatchNote = '';
+    let performancePrompt = '';
     if (!targetTrack) {
       setSubtitleSegmentStatus('error');
       setSubtitleSegmentProgress(0);
@@ -4208,174 +4964,159 @@ export default function VideoSoundtrack() {
     setSubtitleSegmentStatus('running');
     setSubtitleSegmentProgress(8);
     setSubtitleSegmentCount(0);
-    setSubtitleSegmentStage('正在读取视频字幕变化和口型窗口...');
+    setSubtitleSegmentStage('正在抽取当前选中的音频片段...');
     setError(null);
 
     try {
-      setSubtitleSegmentProgress(28);
-      const response = await fetch('/api/video/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fileName: videoFile.name,
-          videoDuration,
-          bgmEnabled: false,
-          sfxEnabled: false,
-          dubbingEnabled: true,
-          analysisMode: 'full-video-dubbing-sync',
-          dubbingSyncMode: 'subtitle-and-lip',
-        }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(data.error || '字幕识别失败，请稍后重试。');
-      }
+      const selectedClipAudioUrl = await extractSelectedClipAudioForAnalysis(sourceClip);
       if (subtitleSegmentRunRef.current !== runId) return;
 
-      setSubtitleSegmentProgress(68);
-      setSubtitleSegmentStage('正在按字幕变化生成可编辑配音片段...');
+      setSubtitleSegmentProgress(34);
+      setSubtitleSegmentStage('正在识别当前片段里的台词...');
+      const selectedClipAudioFile = await fetchAudioUrlAsFile(
+        selectedClipAudioUrl,
+        `selected-clip-${sourceClip.id}.wav`,
+      );
+      const transcription = await transcribeSpeech(selectedClipAudioFile, 'auto', false);
+      if (subtitleSegmentRunRef.current !== runId) return;
+      const recognizedText = String(transcription.text || '').trim();
+      if (!recognizedText) {
+        throw new Error('当前选中的音频片段里没有识别到可用台词。');
+      }
+
+      setSubtitleSegmentProgress(58);
+      setSubtitleSegmentStage('正在分析语气情绪并匹配相似声音...');
+      if (selectedClipAudioUrl) {
+        try {
+          const { recommendations, sourceDescription, performancePrompt: matchedPerformancePrompt } = await requestSimilarVoiceRecommendations(selectedClipAudioUrl);
+          if (subtitleSegmentRunRef.current !== runId) return;
+          matchedVoiceId = recommendations[0]?.voiceId || matchedVoiceId;
+          performancePrompt = matchedPerformancePrompt || sourceDescription || '';
+          const matchedVoice = displayVoices.find(voice => voice.id === matchedVoiceId);
+          const nextTracks = tracksRef.current.map(track => (
+            track.id === targetTrack.id
+              ? { ...track, defaultVoiceId: matchedVoiceId }
+              : track
+          ));
+          tracksRef.current = nextTracks;
+          setTracks(nextTracks);
+          targetTrack = nextTracks.find(track => track.id === targetTrack.id) || targetTrack;
+          setSimilarVoiceRecommendations(recommendations);
+          setSimilarVoiceSourceDescription(sourceDescription);
+          setSimilarVoiceRecommendationsByTrackId(prev => ({
+            ...prev,
+            [targetTrack.id]: { recommendations, sourceDescription },
+          }));
+          setVoiceSearchQuery('');
+          setVoiceGenderFilter('all');
+          setVoiceActiveCategory('全部');
+          voiceMatchNote = matchedVoice
+            ? `已匹配到 ${recommendations.length} 个候选声音，当前先使用：${matchedVoice.name}。`
+            : `已匹配到 ${recommendations.length} 个候选声音。`;
+        } catch (voiceErr) {
+          console.warn('Similar voice matching skipped while creating dubbing track:', voiceErr);
+          voiceMatchNote = '相似声音匹配未完成，已使用轨道默认声音。';
+        }
+      }
+
+      setSubtitleSegmentProgress(78);
+      setSubtitleSegmentStage('正在把当前片段台词写入配音轨...');
 
       const existingTargetClips = clipsRef.current.filter(clip => clip.trackId === targetTrack.id);
-      const matchedExistingClipIds = new Set<string>();
-      const findReusableClip = (
-        subtitleId: string,
-        startTime: number,
-        duration: number,
-      ) => {
-        const endTime = startTime + duration;
-        const exactSubtitleMatch = existingTargetClips.find(clip => (
-          clip.subtitleId
-          && clip.subtitleId === subtitleId
-          && !matchedExistingClipIds.has(clip.id)
-        ));
-        if (exactSubtitleMatch) return exactSubtitleMatch;
-        let bestMatch: TimelineClip | undefined;
-        let bestOverlap = 0;
-        existingTargetClips.forEach(clip => {
-          if (matchedExistingClipIds.has(clip.id)) return;
+      const startTime = Number(Math.min(safeDuration, Math.max(0, sourceClip.startTime)).toFixed(3));
+      const duration = Number(Math.max(0.05, sourceClip.duration).toFixed(3));
+      const endTime = Number(Math.min(safeDuration, startTime + duration).toFixed(3));
+      const subtitleId = `selected-audio-${sourceClip.id}`;
+      const reusableClip = existingTargetClips.find(clip => clip.subtitleId === subtitleId)
+        || existingTargetClips.find(clip => {
           const clipStart = normalizeOptionalTime(clip.startTime) ?? 0;
           const clipDuration = normalizePositiveNumber(clip.duration, 0);
           const clipEnd = clipStart + clipDuration;
           const overlap = Math.max(0, Math.min(endTime, clipEnd) - Math.max(startTime, clipStart));
           const overlapRatio = overlap / Math.max(duration, clipDuration, 0.001);
-          if (overlapRatio > bestOverlap) {
-            bestOverlap = overlapRatio;
-            bestMatch = clip;
-          }
+          return overlapRatio >= 0.45;
         });
-        return bestOverlap >= 0.45 ? bestMatch : undefined;
+      const assignedVoiceId = matchedVoiceId || reusableClip?.voiceId || DEFAULT_DUBBING_VOICE_ID;
+      const assignedPerformancePrompt = performancePrompt.trim()
+        ? `语气情绪：${performancePrompt.trim()}`
+        : '语气情绪：参考当前选中音频片段的原始语气、语速、停顿和情绪自然演绎。';
+      const reusableAudioSource = reusableClip ? resolveClipAudioSource(reusableClip) : undefined;
+      const shouldKeepReusableAudio = Boolean(
+        reusableClip?.audioUrl
+        && reusableAudioSource === 'generated'
+        && reusableClip.text === recognizedText
+        && (reusableClip.voiceId || DEFAULT_DUBBING_VOICE_ID) === assignedVoiceId
+      );
+      const subtitleClip: TimelineClip = {
+        ...reusableClip,
+        id: reusableClip?.id || `clip-selected-dubbing-${Date.now().toString(36)}`,
+        trackId: targetTrack.id,
+        name: `${sourceClip.name || '选中片段'} 配音`,
+        prompt: `${assignedPerformancePrompt} 只重配这一段，保持原始语速、停顿和时间长度。`,
+        text: recognizedText,
+        voiceId: assignedVoiceId,
+        startTime,
+        duration,
+        volume: reusableClip?.volume ?? DEFAULT_VOLUME_FADER,
+        origin: 'ai',
+        isGenerating: false,
+        error: undefined,
+        speed: normalizeManualSpeed(reusableClip?.speed),
+        autoSpeed: normalizeAutoSpeed(reusableClip?.autoSpeed),
+        sourceAudioDuration: reusableClip?.sourceAudioDuration,
+        audioUrl: shouldKeepReusableAudio ? reusableClip?.audioUrl : undefined,
+        audioSource: shouldKeepReusableAudio ? reusableClip?.audioSource : undefined,
+        speaker: reusableClip?.speaker || sourceClip.speaker || 'selected-clip',
+        subtitleId,
+        subtitleStartTime: startTime,
+        subtitleEndTime: endTime,
+        lipStartTime: normalizeOptionalTime(sourceClip.lipStartTime) ?? startTime,
+        lipEndTime: normalizeOptionalTime(sourceClip.lipEndTime) ?? endTime,
+        lipSyncConfidence: normalizeUnitVolume(sourceClip.lipSyncConfidence, 0),
+        timingSource: 'selected-audio',
+        timingDirty: false,
+        voiceDirty: Boolean(
+          shouldKeepReusableAudio
+          && (reusableClip?.voiceId || DEFAULT_DUBBING_VOICE_ID) !== assignedVoiceId
+        ),
       };
 
-      const analysisRunId = Date.now().toString(36);
-      const subtitleClips: TimelineClip[] = Array.isArray(data.clips)
-        ? data.clips
-          .filter((clip: any) => String(clip?.trackId || '') === 'dubbing')
-          .map((clip: any, index: number): TimelineClip | null => {
-            const rawText = String(clip?.text ?? clip?.dialogue ?? clip?.caption ?? '').trim();
-            if (!rawText) return null;
-            const rawStart = normalizeOptionalTime(clip?.subtitleStartTime ?? clip?.subtitleStart ?? clip?.startTime) ?? 0;
-            const rawEnd = normalizeOptionalTime(clip?.subtitleEndTime ?? clip?.subtitleEnd);
-            const rawDuration = normalizePositiveNumber(clip?.duration, 0);
-            const startTime = Math.min(safeDuration, Math.max(0, rawStart));
-            const fallbackEndTime = startTime + (rawDuration > 0 ? rawDuration : 2);
-            const endTime = Math.min(
-              safeDuration,
-              Math.max(startTime + 0.05, rawEnd ?? fallbackEndTime),
-            );
-            const duration = Number(Math.max(0.05, endTime - startTime).toFixed(3));
-            const subtitleId = String(
-              clip?.subtitleId || clip?.id || `subtitle-${String(index + 1).padStart(3, '0')}`,
-            );
-            const reusableClip = findReusableClip(subtitleId, startTime, duration);
-            if (reusableClip) matchedExistingClipIds.add(reusableClip.id);
-            const prompt = String(
-              clip?.prompt
-              || clip?.tonePrompt
-              || clip?.emotionPrompt
-              || `Tone reference: match the on-screen character's emotion, pace, breath, and delivery for this subtitle line.`,
-            ).trim();
-            return {
-              ...reusableClip,
-              id: reusableClip?.id || `clip-subtitle-dubbing-${analysisRunId}-${index}`,
-              trackId: targetTrack.id,
-              name: `字幕配音 ${String(index + 1).padStart(2, '0')}`,
-              prompt,
-              text: rawText,
-              voiceId: targetTrack.defaultVoiceId || reusableClip?.voiceId || DEFAULT_DUBBING_VOICE_ID,
-              startTime,
-              duration,
-              volume: reusableClip?.volume ?? DEFAULT_VOLUME_FADER,
-              origin: 'ai',
-              isGenerating: false,
-              error: undefined,
-              speed: normalizeManualSpeed(reusableClip?.speed),
-              autoSpeed: normalizeAutoSpeed(reusableClip?.autoSpeed),
-              sourceAudioDuration: reusableClip?.sourceAudioDuration,
-              audioUrl: reusableClip?.audioUrl,
-              audioSource: reusableClip?.audioSource,
-              speaker: typeof clip?.speaker === 'string' ? clip.speaker.trim() : reusableClip?.speaker,
-              subtitleId,
-              subtitleStartTime: startTime,
-              subtitleEndTime: endTime,
-              lipStartTime: normalizeOptionalTime(clip?.lipStartTime ?? clip?.lipStart) ?? startTime,
-              lipEndTime: normalizeOptionalTime(clip?.lipEndTime ?? clip?.lipEnd) ?? endTime,
-              lipSyncConfidence: normalizeUnitVolume(clip?.lipSyncConfidence ?? clip?.syncConfidence, 0),
-              timingSource: typeof clip?.timingSource === 'string' ? clip.timingSource : 'subtitle',
-              timingDirty: false,
-              voiceDirty: false,
-            };
-          })
-          .filter(Boolean) as TimelineClip[]
-        : [];
-
-      if (subtitleClips.length === 0) {
-        throw new Error('没有识别到可按字幕切分的台词片段；请确认视频里有清晰字幕或人声台词。');
+      setSubtitleSegmentProgress(88);
+      if (reusableClip?.id && reusableClip.id !== subtitleClip.id) {
+        const cachedAudio = audioInstancesRef.current[reusableClip.id];
+        if (cachedAudio) {
+          cachedAudio.pause();
+          disconnectClipAudioRouting(reusableClip.id);
+          delete audioInstancesRef.current[reusableClip.id];
+        }
       }
 
-      setSubtitleSegmentProgress(88);
-      const nextClipIds = new Set(subtitleClips.map(clip => clip.id));
-      clipsRef.current
-        .filter(clip => clip.trackId === targetTrack.id && !nextClipIds.has(clip.id))
-        .forEach(clip => {
-          const cachedAudio = audioInstancesRef.current[clip.id];
-          if (cachedAudio) {
-            cachedAudio.pause();
-            disconnectClipAudioRouting(clip.id);
-            delete audioInstancesRef.current[clip.id];
-          }
-        });
-
-      setClips(prev => [
-        ...prev.filter(clip => clip.trackId !== targetTrack.id),
-        ...subtitleClips,
-      ].sort((left, right) => left.startTime - right.startTime));
-      subtitleClips.forEach(clip => {
-        if (clip.audioUrl) {
-          replaceCachedClipAudio(
-            clip.id,
-            clip.audioUrl,
-            clip.volume,
-            getEffectiveClipSpeed(clip),
-            clip.trackId,
-          );
-        }
-      });
+      const nextClips = [
+        ...clipsRef.current.filter(clip => clip.id !== subtitleClip.id),
+        subtitleClip,
+      ].sort((left, right) => left.startTime - right.startTime);
+      pushUndoSnapshot('识别选中音频片段并生成配音片段');
+      clipsRef.current = nextClips;
+      setClips(nextClips);
+      if (subtitleClip.audioUrl) {
+        replaceCachedClipAudio(
+          subtitleClip.id,
+          subtitleClip.audioUrl,
+          subtitleClip.volume,
+          getEffectiveClipSpeed(subtitleClip),
+          subtitleClip.trackId,
+        );
+      }
       setSelectedTrackId(null);
-      setSelectedClipId(subtitleClips[0]?.id || null);
-      setSelectedClipIds(subtitleClips[0]?.id ? [subtitleClips[0].id] : []);
+      setSelectedClipId(subtitleClip.id);
+      setSelectedClipIds([subtitleClip.id]);
 
-      setSubtitleSegmentCount(subtitleClips.length);
+      setSubtitleSegmentCount(1);
       setSubtitleSegmentProgress(100);
       setSubtitleSegmentStatus('completed');
-      setSubtitleSegmentStage(
-        isUsingSplitVocalAsSource
-          ? `已在“可编辑配音片段”轨生成 ${subtitleClips.length} 个片段，拆分人声已保留。`
-          : `已按字幕变化生成 ${subtitleClips.length} 个可编辑配音片段。`,
-      );
+      setSubtitleSegmentStage(`已根据选中音频片段生成 1 个配音片段，并写入“${targetTrack.name}”轨。${voiceMatchNote}`);
       setToast({
-        message: isUsingSplitVocalAsSource
-          ? `已新建/更新“可编辑配音片段”轨，拆分人声轨不会被覆盖。`
-          : `已按字幕变化生成 ${subtitleClips.length} 个配音片段；每段都带台词文案和语气提示词。`,
+        message: `已只识别当前选中的音频片段，并生成 1 个对应配音片段。${voiceMatchNote}`,
         type: 'success',
       });
       window.setTimeout(() => setToast(null), 4_000);
@@ -4402,6 +5143,7 @@ export default function VideoSoundtrack() {
     const staleDubbingClips = clips.filter(clip => {
       const track = tracks.find(item => item.id === clip.trackId);
       return track?.type === 'dubbing'
+        && !clip.muted
         && Boolean(clip.voiceDirty || clip.timingDirty)
         && isTrackExportable(clip.trackId);
     });
@@ -4431,7 +5173,7 @@ export default function VideoSoundtrack() {
 
     try {
       const playableClips = clips
-        .filter(c => c.audioUrl && isTrackExportable(c.trackId))
+        .filter(c => c.audioUrl && !c.muted && isTrackExportable(c.trackId))
         .map(clip => ({
           ...clip,
           trackType: tracks.find(track => track.id === clip.trackId)?.type,
@@ -4450,6 +5192,7 @@ export default function VideoSoundtrack() {
           sampleRate: exportSampleRate,
           bitrate: exportBitrate,
           bitDepth: exportBitDepth,
+          channelMode: exportChannelMode,
         })
       });
 
@@ -4482,6 +5225,7 @@ export default function VideoSoundtrack() {
       const track = tracks.find(item => item.id === clip.trackId);
       return Boolean(
         track?.type === 'dubbing'
+        && !clip.muted
         && (clip.voiceDirty || clip.timingDirty)
         && isTrackExportable(clip.trackId)
         && (trackId === 'mixed' || track?.type === trackId),
@@ -4516,7 +5260,7 @@ export default function VideoSoundtrack() {
 
     try {
       const generatedClips = clips
-        .filter(c => c.audioUrl && isTrackExportable(c.trackId))
+        .filter(c => c.audioUrl && !c.muted && isTrackExportable(c.trackId))
         .map(clip => ({
           ...clip,
           trackType: tracks.find(track => track.id === clip.trackId)?.type,
@@ -4546,6 +5290,7 @@ export default function VideoSoundtrack() {
           sampleRate: exportSampleRate,
           bitrate: exportBitrate,
           bitDepth: exportBitDepth,
+          channelMode: exportChannelMode,
         })
       });
 
@@ -4591,6 +5336,7 @@ export default function VideoSoundtrack() {
       const track = tracks.find(item => item.id === clip.trackId);
       return Boolean(
         track?.type === 'dubbing'
+        && !clip.muted
         && (clip.voiceDirty || clip.timingDirty)
         && isTrackExportable(clip.trackId),
       );
@@ -4605,7 +5351,7 @@ export default function VideoSoundtrack() {
     }
 
     const exportableClips = clips
-      .filter(clip => clip.audioUrl && isTrackExportable(clip.trackId))
+      .filter(clip => clip.audioUrl && !clip.muted && isTrackExportable(clip.trackId))
       .map(clip => ({
         ...clip,
         trackType: tracks.find(track => track.id === clip.trackId)?.type,
@@ -4637,6 +5383,7 @@ export default function VideoSoundtrack() {
           sampleRate: exportSampleRate,
           bitrate: exportBitrate,
           bitDepth: exportBitDepth,
+          channelMode: exportChannelMode,
         }),
       });
 
@@ -4659,19 +5406,48 @@ export default function VideoSoundtrack() {
     }
   };
 
-  // Timeline seeking by clicking ruler
-  const handleRulerClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const targetTime = (clickX / rect.width) * safeDuration;
-    
-    if (targetTime >= 0 && targetTime <= safeDuration) {
-      if (videoRef.current && !videoLoadFailed) {
-        setMediaTimeSafely(videoRef.current, targetTime);
-      }
-      setCurrentTime(targetTime);
+  const seekTimelineToTime = (time: number) => {
+    const targetTime = clampNumber(Number.isFinite(time) ? time : 0, 0, safeDuration);
+    if (videoRef.current && !videoLoadFailed) {
+      setMediaTimeSafely(videoRef.current, targetTime);
     }
+    setCurrentTime(targetTime);
   };
+
+  const getTimelineTimeFromClientX = (clientX: number) => {
+    const ruler = timeRulerRef.current;
+    if (!ruler) return 0;
+    const rect = ruler.getBoundingClientRect();
+    if (rect.width <= 0) return 0;
+    const x = clampNumber(clientX - rect.left, 0, rect.width);
+    return (x / rect.width) * safeDuration;
+  };
+
+  const handlePlayheadScrubStart = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsPlayheadDragging(true);
+    seekTimelineToTime(getTimelineTimeFromClientX(e.clientX));
+  };
+
+  useEffect(() => {
+    if (!isPlayheadDragging) return;
+
+    const handleMouseMove = (event: MouseEvent) => {
+      event.preventDefault();
+      seekTimelineToTime(getTimelineTimeFromClientX(event.clientX));
+    };
+    const handleMouseUp = () => {
+      setIsPlayheadDragging(false);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isPlayheadDragging, safeDuration, videoLoadFailed]);
 
   // Manual clip adjustment helpers
   const updateClipField = (clipId: string, field: keyof TimelineClip, value: any) => {
@@ -4764,6 +5540,67 @@ export default function VideoSoundtrack() {
     }));
   };
 
+  const openAddTrackModal = (type: CreatableTrackType = 'sfx') => {
+    setTrackContextMenu(null);
+    setNewTrackName('');
+    setNewTrackType(type);
+    setShowAddTrackModal(true);
+  };
+
+  const ensureStandardAudioTracks = (types: CreatableTrackType[]) => {
+    const nextTracks = [...tracksRef.current];
+    let changed = false;
+
+    types.forEach(type => {
+      const standardTrack = createStandardAudioTrack(type);
+      if (nextTracks.some(track => track.id === standardTrack.id)) {
+        return;
+      }
+
+      manuallyDeletedTrackIdsRef.current.delete(standardTrack.id);
+      nextTracks.push(standardTrack);
+      changed = true;
+    });
+
+    if (changed) {
+      tracksRef.current = nextTracks;
+      setTracks(nextTracks);
+    }
+
+    return nextTracks;
+  };
+
+  const openTrackContextMenu = (
+    event: React.MouseEvent<HTMLElement>,
+    trackId: string,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    handleSelectTrack(trackId);
+    const menuWidth = 220;
+    const menuHeight = 420;
+    setTrackContextMenu({
+      trackId,
+      x: clampNumber(event.clientX, 8, Math.max(8, window.innerWidth - menuWidth - 8)),
+      y: clampNumber(event.clientY, 8, Math.max(8, window.innerHeight - menuHeight - 8)),
+      source: 'track',
+    });
+  };
+
+  const openBlankTrackContextMenu = (event: React.MouseEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const menuWidth = 220;
+    const menuHeight = 420;
+    const fallbackTrackId = selectedTrackId || selectedClipTrack?.id || tracksRef.current.find(track => track.type !== 'original')?.id;
+    setTrackContextMenu({
+      trackId: fallbackTrackId,
+      x: clampNumber(event.clientX, 8, Math.max(8, window.innerWidth - menuWidth - 8)),
+      y: clampNumber(event.clientY, 8, Math.max(8, window.innerHeight - menuHeight - 8)),
+      source: 'blank',
+    });
+  };
+
   const handleAddNewClip = (trackId: string) => {
     const track = tracks.find(t => t.id === trackId);
     if (track?.type === 'original') {
@@ -4816,6 +5653,63 @@ export default function VideoSoundtrack() {
     ));
     tracksRef.current = nextTracks;
     setTracks(nextTracks);
+  };
+
+  const toggleMuteClip = (clipId: string) => {
+    const targetClip = clipsRef.current.find(clip => clip.id === clipId);
+    if (!targetClip) return;
+    const nextMuted = !targetClip.muted;
+
+    pushUndoSnapshot(nextMuted ? '片段静音' : '取消片段静音');
+    const nextClips = clipsRef.current.map(clip => (
+      clip.id === clipId ? { ...clip, muted: nextMuted } : clip
+    ));
+    clipsRef.current = nextClips;
+    setClips(nextClips);
+    handleSelectClip(clipId);
+
+    const updatedClip = nextClips.find(clip => clip.id === clipId);
+    const audio = audioInstancesRef.current[clipId];
+    if (audio && updatedClip) {
+      if (nextMuted && !audio.paused) audio.pause();
+      setClipPlaybackGain(clipId, audio, getEffectiveClipVolume(updatedClip, tracksRef.current));
+    }
+
+    const track = tracksRef.current.find(item => item.id === targetClip.trackId);
+    if (track) invalidateTrackOutputs(track.type);
+  };
+
+  const handleTimelineClipMouseDown = (e: React.MouseEvent<HTMLDivElement>, clip: TimelineClip) => {
+    e.stopPropagation();
+
+    if (timelineToolMode === 'split') {
+      e.preventDefault();
+      handleSelectClip(clip.id);
+      const rect = e.currentTarget.getBoundingClientRect();
+      const ratio = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0;
+      const splitTime = clip.startTime + clampNumber(ratio, 0, 1) * clip.duration;
+      splitClipAtTime(clip.id, splitTime);
+      return;
+    }
+
+    if (timelineToolMode === 'mute') {
+      e.preventDefault();
+      toggleMuteClip(clip.id);
+      return;
+    }
+
+    if (e.ctrlKey || e.metaKey || e.shiftKey) {
+      e.preventDefault();
+      handleSelectClip(clip.id, true);
+      return;
+    }
+
+    if (isOriginalAudioClip(clip)) {
+      handleSelectClip(clip.id);
+      return;
+    }
+
+    startDragOrResize(e, clip.id, 'drag');
   };
 
   const toggleSoloTrack = (trackId: string) => {
@@ -4988,10 +5882,14 @@ export default function VideoSoundtrack() {
     return `${first} ${second}`;
   };
 
-  const canSplitClipAtCurrentTime = (clip?: TimelineClip | null) => {
-    if (!clip || isOriginalAudioClip(clip)) return false;
-    const splitTime = Number(currentTime.toFixed(3));
+  const canSplitClipAtTime = (clip: TimelineClip | undefined | null, splitTime: number) => {
+    if (!clip) return false;
     return splitTime > clip.startTime + 0.05 && splitTime < clip.startTime + clip.duration - 0.05;
+  };
+
+  const canSplitClipAtCurrentTime = (clip?: TimelineClip | null) => {
+    const splitTime = Number(currentTime.toFixed(3));
+    return canSplitClipAtTime(clip, splitTime);
   };
 
   const getSelectedMergeableClipPair = () => {
@@ -5009,12 +5907,11 @@ export default function VideoSoundtrack() {
     return [firstClip, secondClip] as const;
   };
 
-  const handleSplitSelectedClipAtPlayhead = () => {
-    const clip = selectedClipId
-      ? clipsRef.current.find(item => item.id === selectedClipId)
-      : null;
+  const splitClipAtTime = (clipId: string, rawSplitTime: number) => {
+    const clip = clipsRef.current.find(item => item.id === clipId);
     if (!clip) return;
-    if (!canSplitClipAtCurrentTime(clip)) {
+    const splitTime = Number(rawSplitTime.toFixed(3));
+    if (!canSplitClipAtTime(clip, splitTime)) {
       setToast({
         message: '请把播放头放在选中音频片段内部，再使用剪刀剪开。',
         type: 'info',
@@ -5023,7 +5920,6 @@ export default function VideoSoundtrack() {
       return;
     }
 
-    const splitTime = Number(currentTime.toFixed(3));
     const leftDuration = Number((splitTime - clip.startTime).toFixed(3));
     const rightDuration = Number((clip.duration - leftDuration).toFixed(3));
     const ratio = leftDuration / Math.max(clip.duration, 0.001);
@@ -5031,9 +5927,8 @@ export default function VideoSoundtrack() {
     const [leftPrompt, rightPrompt] = splitTextByRatio(clip.prompt, ratio);
     const clipSpeed = getEffectiveClipSpeed(clip);
     const sourceOffset = getClipSourceOffset(clip);
+    const fullSourceAudioDuration = normalizeSourceAudioDuration(clip, audioInstancesRef.current[clip.id]?.duration);
     const sourceSplitOffset = Number((sourceOffset + leftDuration * clipSpeed).toFixed(3));
-    const sourceLeftDuration = Number((leftDuration * clipSpeed).toFixed(3));
-    const sourceRightDuration = Number((rightDuration * clipSpeed).toFixed(3));
     const splitId = `${clip.id}-split-${Date.now()}`;
     const leftSubtitleStart = normalizeOptionalTime(clip.subtitleStartTime) ?? clip.startTime;
     const rightSubtitleEnd = normalizeOptionalTime(clip.subtitleEndTime) ?? (clip.startTime + clip.duration);
@@ -5046,7 +5941,7 @@ export default function VideoSoundtrack() {
       text: leftText,
       duration: leftDuration,
       sourceOffset,
-      sourceAudioDuration: clip.sourceAudioDuration ? sourceLeftDuration : clip.sourceAudioDuration,
+      sourceAudioDuration: fullSourceAudioDuration,
       subtitleStartTime: clip.subtitleStartTime !== undefined ? leftSubtitleStart : undefined,
       subtitleEndTime: clip.subtitleEndTime !== undefined ? splitTime : undefined,
       lipStartTime: lipStart,
@@ -5061,7 +5956,7 @@ export default function VideoSoundtrack() {
       startTime: splitTime,
       duration: rightDuration,
       sourceOffset: sourceSplitOffset,
-      sourceAudioDuration: clip.sourceAudioDuration ? sourceRightDuration : clip.sourceAudioDuration,
+      sourceAudioDuration: fullSourceAudioDuration,
       subtitleStartTime: clip.subtitleStartTime !== undefined ? splitTime : undefined,
       subtitleEndTime: clip.subtitleEndTime !== undefined ? rightSubtitleEnd : undefined,
       lipStartTime: lipStart !== undefined ? Math.max(lipStart, splitTime) : undefined,
@@ -5087,6 +5982,11 @@ export default function VideoSoundtrack() {
     window.setTimeout(() => setToast(null), 2_500);
   };
 
+  const handleSplitSelectedClipAtPlayhead = () => {
+    if (!selectedClipId) return;
+    splitClipAtTime(selectedClipId, currentTime);
+  };
+
   const handleMergeSelectedClipWithAdjacent = () => {
     const selectedPair = getSelectedMergeableClipPair();
     if (!selectedPair) {
@@ -5107,6 +6007,12 @@ export default function VideoSoundtrack() {
     const sameAudioSource = Boolean(firstClip.audioUrl && firstClip.audioUrl === secondClip.audioUrl);
     const mergedText = joinClipText(firstClip.text, secondClip.text);
     const mergedPrompt = joinClipText(firstClip.prompt, secondClip.prompt) || firstClip.prompt;
+    const mergedSourceAudioDuration = sameAudioSource
+      ? Math.max(
+        normalizeSourceAudioDuration(firstClip, audioInstancesRef.current[firstClip.id]?.duration),
+        normalizeSourceAudioDuration(secondClip, audioInstancesRef.current[secondClip.id]?.duration),
+      )
+      : firstClip.sourceAudioDuration || secondClip.sourceAudioDuration;
     const mergedClip: TimelineClip = {
       ...firstClip,
       id: firstClip.id,
@@ -5116,9 +6022,7 @@ export default function VideoSoundtrack() {
       startTime: Number(mergedStartTime.toFixed(3)),
       duration: Number((mergedEndTime - mergedStartTime).toFixed(3)),
       sourceOffset: getClipSourceOffset(firstClip),
-      sourceAudioDuration: firstClip.sourceAudioDuration && secondClip.sourceAudioDuration
-        ? Number((firstClip.sourceAudioDuration + secondClip.sourceAudioDuration).toFixed(3))
-        : firstClip.sourceAudioDuration || secondClip.sourceAudioDuration,
+      sourceAudioDuration: mergedSourceAudioDuration,
       audioUrl: sameAudioSource ? firstClip.audioUrl : undefined,
       audioSource: sameAudioSource ? firstClip.audioSource : undefined,
       subtitleStartTime: firstClip.subtitleStartTime ?? secondClip.subtitleStartTime,
@@ -5182,26 +6086,53 @@ export default function VideoSoundtrack() {
 
   const handleDeleteTrack = (trackId: string) => {
     const targetTrack = tracksRef.current.find(track => track.id === trackId);
-    if (targetTrack?.type === 'original') {
-      setToast({
-        message: '视频原声轨是随视频自动生成的系统轨，不能删除。需要去掉原声时请静音该轨道。',
-        type: 'info',
-      });
-      window.setTimeout(() => setToast(null), 3_000);
+    if (!targetTrack) {
       return;
     }
-    if (targetTrack) invalidateTrackOutputs(targetTrack.type);
+    const deletedClipIds = new Set<string>(
+      clipsRef.current
+        .filter(clip => clip.trackId === trackId)
+        .map(clip => clip.id),
+    );
+    if (DEFAULT_DELETABLE_TRACK_IDS.includes(trackId)) {
+      manuallyDeletedTrackIdsRef.current.add(trackId);
+    }
+    invalidateTrackOutputs(targetTrack.type);
     pushUndoSnapshot('删除轨道');
-    // Delete any clips belonging to this track
-    setClips(prev => prev.filter(c => c.trackId !== trackId));
+
+    deletedClipIds.forEach(clipId => {
+      audioInstancesRef.current[clipId]?.pause();
+      disconnectClipAudioRouting(clipId);
+      delete audioInstancesRef.current[clipId];
+    });
+
+    const nextClips = clipsRef.current.filter(c => c.trackId !== trackId);
     const nextTracks = tracksRef.current.filter(track => track.id !== trackId);
+    clipsRef.current = nextClips;
     tracksRef.current = nextTracks;
+    setClips(nextClips);
     setTracks(nextTracks);
     if (selectedTrackId === trackId) setSelectedTrackId(null);
+    setSelectedClipId(prev => (prev && deletedClipIds.has(prev) ? null : prev));
+    setSelectedClipIds(prev => prev.filter(id => !deletedClipIds.has(id)));
+    setCopiedClip(prev => (prev && deletedClipIds.has(prev.id) ? null : prev));
+    setActiveClipId(prev => (prev && deletedClipIds.has(prev) ? null : prev));
+    setDragOverTrackId(prev => (prev === trackId ? null : prev));
+    setClipAlignmentGuide(null);
     
     setToast({
       message: `音轨已删除，关联音频块已清空。`,
       type: 'info'
+    });
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  const handleHideVideoPreviewTrack = () => {
+    pushUndoSnapshot('删除视频画面轨');
+    setShowVideoPreviewTrack(false);
+    setToast({
+      message: '视频画面轨已从时间线移除，视频素材本身已保留。',
+      type: 'info',
     });
     setTimeout(() => setToast(null), 3000);
   };
@@ -5396,7 +6327,7 @@ export default function VideoSoundtrack() {
   const currentProjectDisplayName = getCompactProjectName(currentProjectName);
 
   return (
-    <div id="video-soundtrack-container" className="flex flex-col h-full bg-slate-900 text-slate-100 overflow-hidden">
+    <div id="video-soundtrack-container" className="flex h-[100dvh] min-h-0 flex-col bg-slate-900 text-slate-100 overflow-hidden">
       {/* 顶部工具栏 */}
       <header id="daw-header" className="px-4 py-3 lg:px-6 lg:py-4 border-b border-slate-800 bg-slate-950 flex items-center justify-between gap-3 shadow-md shrink-0 select-none overflow-visible">
         <div className="flex min-w-0 flex-1 flex-nowrap items-center gap-3 overflow-x-auto overflow-y-hidden pr-2 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden lg:gap-6">
@@ -5589,7 +6520,7 @@ export default function VideoSoundtrack() {
                       <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">选择导出格式与音轨</span>
                     </div>
 
-                    <div className="grid grid-cols-4 gap-2 rounded-lg border border-slate-800 bg-slate-950/70 p-2">
+                    <div className="grid grid-cols-5 gap-2 rounded-lg border border-slate-800 bg-slate-950/70 p-2">
                       <label className="space-y-1">
                         <span className="block text-[9px] font-bold uppercase text-slate-500">格式</span>
                         <select
@@ -5662,6 +6593,25 @@ export default function VideoSoundtrack() {
                           <option value={32}>32bit</option>
                         </select>
                       </label>
+                      <label className="space-y-1">
+                        <span className="block text-[9px] font-bold uppercase text-slate-500">声道</span>
+                        <select
+                          value={exportChannelMode}
+                          onChange={(event) => {
+                            setExportChannelMode(event.target.value as ExportChannelMode);
+                            setMixedVideoUrl(null);
+                            setExportedMixedUrl(null);
+                            setExportedStemsUrl(null);
+                            setExportedBgmUrl(null);
+                            setExportedSfxUrl(null);
+                            setExportedDubbingUrl(null);
+                          }}
+                          className="w-full rounded border border-slate-800 bg-slate-900 px-1.5 py-1 text-[10px] font-bold text-slate-200 outline-none focus:border-indigo-500"
+                        >
+                          <option value="stereo">立体声</option>
+                          <option value="mono">单声道</option>
+                        </select>
+                      </label>
                     </div>
 
                     <div className="space-y-2.5">
@@ -5706,7 +6656,7 @@ export default function VideoSoundtrack() {
                             <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400" />
                           ) : exportedMixedUrl ? (
                             <a
-                              href={`/api/sfx/download-file?path=${encodeURIComponent(exportedMixedUrl)}&name=${encodeURIComponent(`master_mixed_soundtrack_${exportSampleRate}_${exportBitDepth}bit_${exportBitrate}.${exportAudioFormat}`)}`}
+                              href={`/api/sfx/download-file?path=${encodeURIComponent(exportedMixedUrl)}&name=${encodeURIComponent(`master_mixed_soundtrack_${exportSampleRate}_${exportChannelMode}_${exportBitDepth}bit_${exportBitrate}.${exportAudioFormat}`)}`}
                               className="text-[10px] font-bold bg-indigo-600 text-white px-2 py-1 rounded transition-colors flex items-center gap-1 cursor-pointer"
                             >
                               <Download className="w-2.5 h-2.5" />
@@ -5715,7 +6665,7 @@ export default function VideoSoundtrack() {
                           ) : (
                             <button
                               onClick={() => handleExportAudio('mixed')}
-                              disabled={clips.filter(c => c.audioUrl).length === 0}
+                              disabled={clips.filter(c => c.audioUrl && !c.muted).length === 0}
                               className="text-[10px] font-bold bg-indigo-600/20 hover:bg-indigo-600 text-indigo-400 hover:text-white px-2 py-1 rounded transition-colors disabled:opacity-50 cursor-pointer"
                             >
                               导出
@@ -5743,7 +6693,7 @@ export default function VideoSoundtrack() {
                             <Loader2 className="w-3.5 h-3.5 animate-spin text-cyan-400" />
                           ) : exportedStemsUrl ? (
                             <a
-                              href={`/api/sfx/download-file?path=${encodeURIComponent(exportedStemsUrl)}&name=${encodeURIComponent(`track_stems_${exportAudioFormat}_${exportSampleRate}_${exportBitDepth}bit_${exportBitrate}.zip`)}`}
+                              href={`/api/sfx/download-file?path=${encodeURIComponent(exportedStemsUrl)}&name=${encodeURIComponent(`track_stems_${exportAudioFormat}_${exportSampleRate}_${exportChannelMode}_${exportBitDepth}bit_${exportBitrate}.zip`)}`}
                               className="text-[10px] font-bold bg-cyan-600 text-white px-2 py-1 rounded transition-colors flex items-center gap-1 cursor-pointer"
                             >
                               <Download className="w-2.5 h-2.5" />
@@ -5752,7 +6702,7 @@ export default function VideoSoundtrack() {
                           ) : (
                             <button
                               onClick={handleExportStems}
-                              disabled={clips.filter(c => c.audioUrl && !tracks.find(track => track.id === c.trackId)?.isMuted).length === 0}
+                              disabled={clips.filter(c => c.audioUrl && !c.muted && !tracks.find(track => track.id === c.trackId)?.isMuted).length === 0}
                               className="text-[10px] font-bold bg-cyan-600/20 hover:bg-cyan-600 text-cyan-400 hover:text-white px-2 py-1 rounded transition-colors disabled:opacity-50 cursor-pointer"
                             >
                               导出
@@ -5775,7 +6725,7 @@ export default function VideoSoundtrack() {
                             <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-400" />
                           ) : exportedSfxUrl ? (
                             <a
-                              href={`/api/sfx/download-file?path=${encodeURIComponent(exportedSfxUrl)}&name=${encodeURIComponent('sfx_track_stem.mp3')}`}
+                              href={`/api/sfx/download-file?path=${encodeURIComponent(exportedSfxUrl)}&name=${encodeURIComponent(`sfx_track_stem_${exportChannelMode}.${exportAudioFormat}`)}`}
                               className="text-[10px] font-bold bg-blue-600 text-white px-2 py-1 rounded transition-colors flex items-center gap-1 cursor-pointer"
                             >
                               <Download className="w-2.5 h-2.5" />
@@ -5784,7 +6734,7 @@ export default function VideoSoundtrack() {
                           ) : (
                             <button
                               onClick={() => handleExportAudio('sfx')}
-                              disabled={clips.filter(c => c.audioUrl && c.trackId === 'sfx').length === 0}
+                              disabled={clips.filter(c => c.audioUrl && !c.muted && c.trackId === 'sfx').length === 0}
                               className="text-[10px] font-bold bg-blue-600/20 hover:bg-blue-600 text-blue-400 hover:text-white px-2 py-1 rounded transition-colors disabled:opacity-50 cursor-pointer"
                             >
                               导出
@@ -5812,7 +6762,7 @@ export default function VideoSoundtrack() {
                             <Loader2 className="w-3.5 h-3.5 animate-spin text-purple-400" />
                           ) : exportedDubbingUrl ? (
                             <a
-                              href={`/api/sfx/download-file?path=${encodeURIComponent(exportedDubbingUrl)}&name=${encodeURIComponent('dubbing_track_stem.mp3')}`}
+                              href={`/api/sfx/download-file?path=${encodeURIComponent(exportedDubbingUrl)}&name=${encodeURIComponent(`dubbing_track_stem_${exportChannelMode}.${exportAudioFormat}`)}`}
                               className="text-[10px] font-bold bg-purple-600 text-white px-2 py-1 rounded transition-colors flex items-center gap-1 cursor-pointer"
                             >
                               <Download className="w-2.5 h-2.5" />
@@ -5821,7 +6771,7 @@ export default function VideoSoundtrack() {
                           ) : (
                             <button
                               onClick={() => handleExportAudio('dubbing')}
-                              disabled={clips.filter(c => c.audioUrl && c.trackId === 'dubbing').length === 0}
+                              disabled={clips.filter(c => c.audioUrl && !c.muted && c.trackId === 'dubbing').length === 0}
                               className="text-[10px] font-bold bg-purple-600/20 hover:bg-purple-600 text-purple-400 hover:text-white px-2 py-1 rounded transition-colors disabled:opacity-50 cursor-pointer"
                             >
                               导出
@@ -5944,11 +6894,6 @@ export default function VideoSoundtrack() {
               )}
 
               <div className="w-full flex-1 min-h-[180px] flex flex-col items-center justify-center bg-slate-900 border border-slate-800 rounded-t-xl overflow-hidden relative shadow-inner">
-                {/* Shared workspace/timeline height resizer */}
-                <div 
-                  className="absolute bottom-0 left-0 right-0 h-1.5 cursor-ns-resize bg-slate-800/20 hover:bg-indigo-500/50 active:bg-indigo-600 transition-colors z-40" 
-                  onMouseDown={startTimelineResize}
-                />
                 {!videoFile ? (
                   <div className="absolute inset-0 bg-slate-950/95 flex flex-col items-center justify-center p-6 text-center z-20">
                     <Film className="w-12 h-12 text-slate-600 mb-3 animate-pulse" />
@@ -5981,7 +6926,7 @@ export default function VideoSoundtrack() {
                     ref={videoRef}
                     src={videoFile.url}
                     muted={hasOriginalAudioClip}
-                    className="max-h-full max-w-full object-contain"
+                    className="w-full h-full object-contain bg-black"
                     onTimeUpdate={handleTimeUpdate}
                     onLoadedMetadata={handleVideoLoaded}
                     onDurationChange={handleVideoLoaded}
@@ -6014,7 +6959,7 @@ export default function VideoSoundtrack() {
                       <span className="text-xs font-bold text-emerald-400">已混音视频生成完毕！</span>
                     </div>
                     <a 
-                      href={`/api/sfx/download-file?path=${encodeURIComponent(mixedVideoUrl)}&name=${encodeURIComponent(`mixed_${(videoFile?.name || 'video').replace(/\.[^/.]+$/, '')}.${getUrlFileExtension(mixedVideoUrl, 'mp4')}`)}`}
+                      href={`/api/sfx/download-file?path=${encodeURIComponent(mixedVideoUrl)}&name=${encodeURIComponent(`mixed_${(videoFile?.name || 'video').replace(/\.[^/.]+$/, '')}_${exportChannelMode}.${getUrlFileExtension(mixedVideoUrl, 'mp4')}`)}`}
                       className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold px-2.5 py-1 rounded-md transition-colors"
                     >
                       <Download className="w-3 h-3" />
@@ -6024,7 +6969,7 @@ export default function VideoSoundtrack() {
                   <video 
                     controls 
                     src={mixedVideoUrl} 
-                    className="w-full rounded-lg border border-slate-800 aspect-video max-h-56 bg-black"
+                    className="block max-h-56 max-w-full mx-auto rounded-lg border border-slate-800 bg-black object-contain"
                   />
                 </motion.div>
               )}
@@ -6122,14 +7067,16 @@ export default function VideoSoundtrack() {
                 {selectedTrack ? (
                   <div data-testid={`track-properties-${selectedTrack.id}`} className="space-y-4">
                     <div className={`rounded-xl border p-3 ${
-                      selectedTrack.type === 'dubbing'
+                      selectedTrackShowsVoiceLibrary
                         ? 'border-purple-500/25 bg-purple-950/20'
                         : 'border-indigo-500/20 bg-indigo-950/15'
                     }`}>
                       <div className="flex items-center justify-between gap-3">
                         <div className="flex min-w-0 items-center gap-2">
-                          {selectedTrack.type === 'dubbing' ? (
+                          {selectedTrackShowsVoiceLibrary ? (
                             <Mic className="h-4 w-4 shrink-0 text-purple-400" />
+                          ) : selectedTrackIsSplitAudioTrack ? (
+                            <AudioLines className="h-4 w-4 shrink-0 text-indigo-400" />
                           ) : selectedTrack.type === 'bgm' ? (
                             <Music className="h-4 w-4 shrink-0 text-emerald-400" />
                           ) : selectedTrack.type === 'original' ? (
@@ -6139,13 +7086,13 @@ export default function VideoSoundtrack() {
                           )}
                           <div className="min-w-0">
                             <p className="truncate text-xs font-bold text-slate-200">
-                              {selectedTrack.type === 'dubbing' ? '配音轨设置' : selectedTrack.type === 'original' ? '视频原声轨设置' : '轨道设置'}
+                              {selectedTrackShowsVoiceLibrary ? '配音轨设置' : selectedTrack.type === 'original' ? '视频原声轨设置' : selectedTrackIsSplitAudioTrack ? '音频轨设置' : '轨道设置'}
                             </p>
                             <p className="mt-0.5 truncate text-[10px] text-slate-500">{selectedTrack.name}</p>
                           </div>
                         </div>
                         <span className="shrink-0 rounded-full border border-slate-700 bg-slate-950 px-2 py-0.5 text-[9px] font-bold uppercase text-slate-400">
-                          {selectedTrack.type === 'dubbing' ? '配音' : selectedTrack.type === 'bgm' ? '配乐' : selectedTrack.type === 'original' ? '原声' : '音效'}
+                          {selectedTrackShowsVoiceLibrary ? '配音' : selectedTrack.type === 'bgm' ? '配乐' : selectedTrack.type === 'original' ? '原声' : selectedTrackIsSplitAudioTrack ? '音频' : '音效'}
                         </span>
                       </div>
                     </div>
@@ -6224,7 +7171,7 @@ export default function VideoSoundtrack() {
                       </div>
                     )}
 
-                    {selectedTrack.type === 'dubbing' ? (
+                    {selectedTrackShowsVoiceLibrary ? (
                       <div className="space-y-3 border-t border-slate-800 pt-4">
                         <div className="space-y-3 rounded-xl border border-purple-500/25 bg-purple-950/20 p-3">
                           <div className="flex items-start justify-between gap-3">
@@ -6374,7 +7321,7 @@ export default function VideoSoundtrack() {
                           })}
                         </div>
 
-                        {similarVoiceRecommendations.length > 0 && (
+                        {activeSimilarVoiceRecommendations.length > 0 && (
                           <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/10 p-2 text-[10px] leading-relaxed text-emerald-100">
                             <div className="flex items-center justify-between gap-2">
                               <span className="font-bold text-emerald-300">已显示相似声音推荐</span>
@@ -6383,14 +7330,21 @@ export default function VideoSoundtrack() {
                                 onClick={() => {
                                   setSimilarVoiceRecommendations([]);
                                   setSimilarVoiceSourceDescription('');
+                                  if (selectedTrack?.id) {
+                                    setSimilarVoiceRecommendationsByTrackId(prev => {
+                                      const next = { ...prev };
+                                      delete next[selectedTrack.id];
+                                      return next;
+                                    });
+                                  }
                                 }}
                                 className="shrink-0 rounded border border-emerald-500/30 px-1.5 py-0.5 text-[9px] font-bold text-emerald-200 hover:bg-emerald-500/20"
                               >
                                 清除推荐
                               </button>
                             </div>
-                            {similarVoiceSourceDescription && (
-                              <p className="mt-1 text-emerald-100/70">{similarVoiceSourceDescription}</p>
+                            {activeSimilarVoiceSourceDescription && (
+                              <p className="mt-1 text-emerald-100/70">{activeSimilarVoiceSourceDescription}</p>
                             )}
                           </div>
                         )}
@@ -6587,9 +7541,9 @@ export default function VideoSoundtrack() {
                         <div className="rounded-xl border border-cyan-500/25 bg-cyan-950/20 p-3">
                           <div className="flex items-start justify-between gap-3">
                             <div>
-                              <p className="text-[10px] font-bold uppercase tracking-wider text-cyan-200">字幕识别 / 可编辑台词片段</p>
+                              <p className="text-[10px] font-bold uppercase tracking-wider text-cyan-200">台词识别 / 自动配音轨</p>
                               <p className="mt-1 text-[10px] leading-relaxed text-slate-400">
-                                按视频画面里的字幕变化来分段；每个片段会带台词文案、语气提示词，并保留字幕时间和口型参考。
+                                识别台词、语气提示词、匹配相似声音，并按时间线生成配音片段。
                               </p>
                             </div>
                             <Gauge className="h-5 w-5 shrink-0 text-cyan-300" />
@@ -6605,7 +7559,7 @@ export default function VideoSoundtrack() {
                             ) : (
                               <Sparkles className="h-3.5 w-3.5" />
                             )}
-                            <span>{subtitleSegmentStatus === 'running' ? '正在识别字幕并生成片段...' : '识别字幕并生成配音片段'}</span>
+                            <span>{subtitleSegmentStatus === 'running' ? '正在生成配音轨...' : '识别台词并生成配音轨'}</span>
                           </button>
                           {subtitleSegmentStatus !== 'idle' && (
                             <div className={`mt-3 rounded-lg border px-2.5 py-2 ${
@@ -6643,7 +7597,7 @@ export default function VideoSoundtrack() {
                               </div>
                               {subtitleSegmentStatus === 'completed' && subtitleSegmentCount > 0 && (
                                 <p className="mt-1.5 text-[10px] text-emerald-200">
-                                  已写入 {subtitleSegmentCount} 个按字幕变化切分的配音片段。
+                                  已写入 {subtitleSegmentCount} 个配音片段，时间线位置已对齐。
                                 </p>
                               )}
                             </div>
@@ -6673,7 +7627,15 @@ export default function VideoSoundtrack() {
                         {(() => {
                           const dubbingTrack = tracks.find(track => track.id === selectedClip.trackId);
                           const inheritedVoiceId = dubbingTrack?.defaultVoiceId || DEFAULT_DUBBING_VOICE_ID;
-                          const inheritedVoice = displayVoices.find(voice => voice.id === inheritedVoiceId);
+                          const effectiveVoiceId = selectedClip.voiceId || inheritedVoiceId;
+                          const effectiveVoice = displayVoices.find(voice => voice.id === effectiveVoiceId);
+                          const hasClipMatchedVoice = Boolean(selectedClip.voiceId && selectedClip.voiceId !== inheritedVoiceId);
+                          const similarVoiceOptions = activeSimilarVoiceRecommendations
+                            .map(recommendation => {
+                              const voice = displayVoices.find(item => item.id === recommendation.voiceId);
+                              return voice ? { voice, recommendation } : null;
+                            })
+                            .filter((item): item is { voice: VoiceItem; recommendation: SimilarVoiceRecommendation } => Boolean(item));
                           const usesUploadedAudio = Boolean(
                             selectedClip.audioUrl
                             && resolveClipAudioSource(selectedClip) === 'uploaded',
@@ -6686,12 +7648,16 @@ export default function VideoSoundtrack() {
                                   <p className="mt-1 truncate text-xs font-semibold text-purple-200">
                                     {usesUploadedAudio
                                       ? '本地音频覆盖轨道默认声音'
-                                      : `继承自轨道：${inheritedVoice?.name || '默认配音声音'}`}
+                                      : hasClipMatchedVoice
+                                        ? `片段匹配声音：${effectiveVoice?.name || '默认配音声音'}`
+                                        : `继承自轨道：${effectiveVoice?.name || '默认配音声音'}`}
                                   </p>
                                   <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
                                     {usesUploadedAudio
-                                      ? `当前播放上传的原音频；重新 AI 合成后将使用“${dubbingTrack?.name || '配音轨'}”的 ${inheritedVoice?.name || '默认声音'}。`
-                                      : `本片段跟随“${dubbingTrack?.name || '配音轨'}”的默认声音。`}
+                                      ? `当前播放上传的原音频；重新 AI 合成后将使用 ${effectiveVoice?.name || '默认声音'}。`
+                                      : hasClipMatchedVoice
+                                        ? '本片段会优先使用这个匹配声音生成。'
+                                        : `本片段跟随“${dubbingTrack?.name || '配音轨'}”的默认声音。`}
                                   </p>
                                 </div>
                                 <Mic className="h-5 w-5 shrink-0 text-purple-400" />
@@ -6699,6 +7665,69 @@ export default function VideoSoundtrack() {
                               {selectedClip.voiceDirty && (
                                 <div className="mt-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-2 text-[10px] leading-relaxed text-amber-300">
                                   轨道声音已变更，请重新合成此片段后再导出。
+                                </div>
+                              )}
+                              {similarVoiceOptions.length > 0 && (
+                                <div className="mt-3 space-y-2 rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-2">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-300">候选相似声音</span>
+                                    <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-bold text-emerald-200">
+                                      {similarVoiceOptions.length} 个
+                                    </span>
+                                  </div>
+                                  <div className="max-h-44 space-y-1 overflow-y-auto pr-1 custom-scrollbar">
+                                    {similarVoiceOptions.map(({ voice, recommendation }) => {
+                                      const isCandidateSelected = effectiveVoiceId === voice.id;
+                                      const isVoicePlaying = playingVoiceId === voice.id;
+                                      return (
+                                        <div
+                                          key={voice.id}
+                                          className={`rounded-md border p-2 transition-all ${
+                                            isCandidateSelected
+                                              ? 'border-emerald-400/45 bg-emerald-400/10'
+                                              : 'border-emerald-500/10 bg-slate-950/30'
+                                          }`}
+                                        >
+                                          <div className="flex items-start justify-between gap-2">
+                                            <button
+                                              type="button"
+                                              onClick={() => handleClipVoiceChange(selectedClip.id, voice.id)}
+                                              className="min-w-0 flex-1 cursor-pointer text-left"
+                                            >
+                                              <div className="flex items-center gap-1.5">
+                                                <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${voice.gender === 'male' ? 'bg-blue-500' : 'bg-pink-500'}`} />
+                                                <span className="truncate text-xs font-bold text-slate-100">{voice.name}</span>
+                                                {isCandidateSelected && (
+                                                  <span className="shrink-0 rounded bg-emerald-500/20 px-1 text-[9px] font-bold text-emerald-200">当前</span>
+                                                )}
+                                              </div>
+                                              <div className="mt-1 rounded border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 text-[9px] leading-relaxed text-emerald-100">
+                                                <span className="font-bold text-emerald-300">相似度 {Math.round(recommendation.score)}%</span>
+                                                <span className="ml-1 text-emerald-100/75">{recommendation.reason}</span>
+                                              </div>
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={(event) => handlePlayVoicePreview(voice.id, voice.previewUrl, event)}
+                                              className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border transition-all ${
+                                                isVoicePlaying
+                                                  ? 'border-emerald-400 bg-emerald-500 text-white'
+                                                  : 'border-slate-700 bg-slate-950 text-slate-400 hover:text-white'
+                                              }`}
+                                              aria-label={isVoicePlaying ? `暂停试听${voice.name}` : `试听${voice.name}`}
+                                              title={isVoicePlaying ? '暂停试听' : '试听声音'}
+                                            >
+                                              {isVoicePlaying ? (
+                                                <Pause className="h-3 w-3 fill-current" />
+                                              ) : (
+                                                <Play className="ml-0.5 h-3 w-3 fill-current" />
+                                              )}
+                                            </button>
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
                                 </div>
                               )}
                               {dubbingTrack && (
@@ -7035,10 +8064,15 @@ export default function VideoSoundtrack() {
           style={{ height: `${timelineHeight}px` }}
         >
           {/* Timeline Height Resizer Handle */}
-          <div 
-            className="absolute top-0 left-0 right-0 h-1.5 cursor-ns-resize bg-transparent hover:bg-indigo-500/50 active:bg-indigo-600 transition-colors z-50" 
-            onMouseDown={startTimelineResize}
-          />
+          <div
+            role="separator"
+            aria-orientation="horizontal"
+            title="上下拖动调整视频预览与时间线高度"
+            className={`absolute -top-3 left-0 right-0 h-6 cursor-ns-resize touch-none transition-colors z-[90] group ${isResizingTimeline ? 'bg-indigo-500/30' : 'bg-transparent hover:bg-indigo-500/20'}`}
+            onPointerDown={startTimelineResize}
+          >
+            <div className={`absolute left-1/2 top-1/2 h-1 w-32 -translate-x-1/2 -translate-y-1/2 rounded-full transition-colors ${isResizingTimeline ? 'bg-indigo-300' : 'bg-slate-600 group-hover:bg-indigo-300'}`} />
+          </div>
           {/* Timeline Header with Zoom and Playback Controls */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3 px-2 pt-1">
             <div className="flex items-center gap-2 min-w-0">
@@ -7056,13 +8090,55 @@ export default function VideoSoundtrack() {
               </button>
               <button
                 type="button"
-                onClick={handleSplitSelectedClipAtPlayhead}
-                disabled={!canSplitClipAtCurrentTime(selectedClip)}
-                aria-label="剪开选中片段"
-                className="flex h-7 w-7 items-center justify-center rounded border border-slate-700/70 bg-slate-900 text-slate-400 transition-all hover:border-cyan-500/50 hover:text-cyan-300 disabled:cursor-not-allowed disabled:opacity-35"
-                title="按播放头位置剪开选中片段，并自动拆分台词 (S)"
+                onClick={handleRedoTimelineEdit}
+                disabled={redoStack.length === 0}
+                aria-label="重做上一步时间轴编辑"
+                className="flex h-7 w-7 items-center justify-center rounded border border-slate-700/70 bg-slate-900 text-slate-400 transition-all hover:border-indigo-500/50 hover:text-indigo-300 disabled:cursor-not-allowed disabled:opacity-35"
+                title="重做上一步时间轴编辑 (Ctrl+Y / Ctrl+Shift+Z)"
+              >
+                <RotateCw className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setTimelineToolMode('select')}
+                aria-pressed={timelineToolMode === 'select'}
+                aria-label="选择工具"
+                className={`flex h-7 w-7 items-center justify-center rounded border transition-all ${
+                  timelineToolMode === 'select'
+                    ? 'border-sky-400/80 bg-sky-500/20 text-sky-200'
+                    : 'border-slate-700/70 bg-slate-900 text-slate-400 hover:border-sky-500/50 hover:text-sky-300'
+                }`}
+                title="选择工具 (1 / Esc)"
+              >
+                <MousePointer2 className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setTimelineToolMode('split')}
+                aria-pressed={timelineToolMode === 'split'}
+                aria-label="剪刀工具"
+                className={`flex h-7 w-7 items-center justify-center rounded border transition-all ${
+                  timelineToolMode === 'split'
+                    ? 'border-cyan-400/80 bg-cyan-500/20 text-cyan-100 shadow-sm shadow-cyan-500/10'
+                    : 'border-slate-700/70 bg-slate-900 text-slate-400 hover:border-cyan-500/50 hover:text-cyan-300'
+                }`}
+                title="剪刀工具：点击片段位置裁剪 (2 / S)"
               >
                 <Scissors className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setTimelineToolMode('mute')}
+                aria-pressed={timelineToolMode === 'mute'}
+                aria-label="静音事件工具"
+                className={`flex h-7 w-7 items-center justify-center rounded border transition-all ${
+                  timelineToolMode === 'mute'
+                    ? 'border-red-400/80 bg-red-500/20 text-red-100 shadow-sm shadow-red-500/10'
+                    : 'border-slate-700/70 bg-slate-900 text-slate-400 hover:border-red-500/50 hover:text-red-300'
+                }`}
+                title="静音事件工具：点击片段静音/取消静音 (4 / M)"
+              >
+                <VolumeX className="h-3.5 w-3.5" />
               </button>
               <button
                 type="button"
@@ -7073,6 +8149,20 @@ export default function VideoSoundtrack() {
                 title="粘合已选中的两个同轨相邻片段，并自动合并台词 (J)"
               >
                 <Combine className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setTimeStretchEnabled(prev => !prev)}
+                aria-pressed={timeStretchEnabled}
+                aria-label="切换时间拉伸工具"
+                className={`flex h-7 w-7 items-center justify-center rounded border transition-all ${
+                  timeStretchEnabled
+                    ? 'border-amber-400/70 bg-amber-500/20 text-amber-200 shadow-sm shadow-amber-500/10'
+                    : 'border-slate-700/70 bg-slate-900 text-slate-400 hover:border-amber-500/50 hover:text-amber-300'
+                }`}
+                title={timeStretchEnabled ? '时间拉伸已开启：左右拖拽会改变声音快慢' : '时间拉伸：开启后左右拖拽会改变声音快慢'}
+              >
+                <Gauge className="h-3.5 w-3.5" />
               </button>
               <div className="ml-2 hidden items-center gap-1 rounded-lg border border-slate-800 bg-slate-950/60 px-1 py-1 xl:flex">
                 <button
@@ -7183,18 +8273,24 @@ export default function VideoSoundtrack() {
           <div className="flex-1 min-h-0 flex border border-slate-800 rounded-xl overflow-hidden bg-slate-950">
             
             {/* Unified Scroll Container (Handles both vertical and horizontal scrolling) */}
-            <div className="flex-1 overflow-auto custom-scrollbar bg-slate-950/20 relative" ref={timelineRef}>
+            <div
+              className="flex-1 overflow-auto custom-scrollbar bg-slate-950/20 relative"
+              ref={timelineRef}
+              onWheel={handleTimelineWheel}
+              onMouseMove={(event) => handleTimelineSplitGuideMove(event)}
+              onMouseLeave={() => setSplitToolGuide(null)}
+            >
               
               {/* Outer timeline wrapper with horizontal min-width to support zooming */}
               <div 
                 className="relative flex flex-col select-none min-h-full"
-                style={{ width: '100%', minWidth: `${safeDuration * pixelsPerSecond + 160}px` }}
+                style={{ width: '100%', minWidth: `${safeDuration * pixelsPerSecond + 160}px`, cursor: timelineToolCursor }}
               >
                 
                 {/* 1. TOP ROW: Ruler & Spacer (Sticky top to stay visible vertically) */}
                 <div className="sticky top-0 z-30 flex h-8 shrink-0 bg-slate-950 border-b border-slate-800">
                   {/* Top-Left Spacer: Sticky Left and Sticky Top! */}
-                  <div className="sticky left-0 top-0 w-[160px] shrink-0 bg-slate-900 border-r border-slate-800/80 z-40 flex items-center justify-between px-3 select-none text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                  <div className="sticky left-0 top-0 w-[160px] shrink-0 bg-slate-900 border-r border-slate-800/80 z-[80] flex items-center px-3 select-none text-[10px] font-bold text-slate-500 uppercase tracking-wider shadow-[10px_0_18px_rgba(2,6,23,0.95)]">
                     <span>轨道列表</span>
                     <button
                       type="button"
@@ -7203,7 +8299,7 @@ export default function VideoSoundtrack() {
                         setNewTrackType('sfx');
                         setShowAddTrackModal(true);
                       }}
-                      className="p-1 hover:bg-slate-800 text-indigo-400 hover:text-white rounded transition-colors cursor-pointer"
+                      className="hidden"
                       title="新建轨道"
                     >
                       <Plus className="w-3.5 h-3.5" />
@@ -7212,8 +8308,10 @@ export default function VideoSoundtrack() {
 
                   {/* Ruler Ticks Area: Sticky Top, scrolls horizontally */}
                   <div 
-                    onClick={handleRulerClick}
-                    className="flex-1 h-8 bg-slate-900 relative cursor-col-resize select-none overflow-hidden"
+                    ref={timeRulerRef}
+                    onMouseDown={handlePlayheadScrubStart}
+                    className={`flex-1 h-8 bg-slate-900 relative cursor-ew-resize select-none overflow-hidden ${isPlayheadDragging ? 'bg-slate-800' : ''}`}
+                    title="按住拖动定位播放头"
                   >
                     {/* Ticks rendering */}
                     {Array.from({ length: Math.ceil(safeDuration) + 1 }).map((_, i) => {
@@ -7241,17 +8339,26 @@ export default function VideoSoundtrack() {
                 </div>
 
                 {/* Main scrollable body with track rows */}
-                <div className="flex-1 flex flex-col py-2 pr-2 bg-slate-950/30 relative space-y-2.5">
+                <div
+                  className="flex-1 flex flex-col py-2 pr-2 bg-slate-950/30 relative space-y-2.5"
+                  onContextMenu={openBlankTrackContextMenu}
+                >
                   
                   {/* Vertical Playhead Line running across ALL rows! (Offsets by sticky header width of 160px) */}
                   <div 
                     className="absolute top-0 bottom-0 left-[160px] right-2 pointer-events-none z-30"
                   >
                     <div
-                      className="absolute top-0 bottom-0 w-[1.5px] bg-rose-500"
+                      className={`absolute top-0 bottom-0 w-[1.5px] cursor-ew-resize ${isPlayheadDragging ? 'bg-cyan-300 shadow-[0_0_16px_rgba(103,232,249,0.95)]' : 'bg-rose-500'}`}
                       style={{ left: `${(currentTime / safeDuration) * 100}%` }}
+                      onMouseDown={handlePlayheadScrubStart}
+                      title="拖动播放头"
                     >
-                      <div className="w-2.5 h-2.5 bg-rose-500 rounded-full absolute -top-1 -left-1 shadow-lg shadow-rose-500/50" />
+                      <div
+                        className="absolute inset-y-0 -left-2.5 w-5 pointer-events-auto"
+                        onMouseDown={handlePlayheadScrubStart}
+                      />
+                      <div className={`w-2.5 h-2.5 rounded-full absolute -top-1 -left-1 pointer-events-auto ${isPlayheadDragging ? 'bg-cyan-300 shadow-lg shadow-cyan-300/50' : 'bg-rose-500 shadow-lg shadow-rose-500/50'}`} />
                     </div>
                   </div>
 
@@ -7270,23 +8377,62 @@ export default function VideoSoundtrack() {
                     </div>
                   )}
 
-                  {/* 1. Video Preview Row */}
-                  <div className="flex h-9 shrink-0 gap-0">
-                    {/* Video Header: Sticky Left */}
-                    <div className="sticky left-0 w-[160px] shrink-0 bg-slate-900 border-r border-slate-800 z-20 flex items-center justify-end pr-3 select-none text-[10px] font-bold text-slate-400 uppercase tracking-wider shadow-md">
-                      <Film className="w-3 h-3 text-indigo-400 mr-1.5" />
-                      视频画面
-                    </div>
-                    {/* Video Content Cell */}
-                    <div className="flex-1 bg-indigo-950/10 rounded-r-lg border-y border-r border-indigo-900/20 overflow-hidden relative">
-                      <div className="absolute inset-0 flex items-center justify-around opacity-15 text-[9px] text-indigo-400 font-mono">
-                        <span>镜头 A</span>
-                        <span>镜头 B</span>
-                        <span>镜头 C</span>
-                        <span>镜头 D</span>
+                  {timelineToolMode === 'split' && splitToolGuide && (
+                    <div className="absolute top-0 bottom-0 left-[160px] right-2 pointer-events-none z-[65]">
+                      <div
+                        className={`absolute top-0 bottom-0 w-[2px] ${
+                          splitToolGuide.canCut
+                            ? 'bg-cyan-200 shadow-[0_0_18px_rgba(103,232,249,0.95)]'
+                            : 'bg-slate-500/70'
+                        }`}
+                        style={{ left: `${(splitToolGuide.time / safeDuration) * 100}%` }}
+                      >
+                        <div className={`absolute -top-1 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border px-2 py-0.5 text-[9px] font-bold shadow-lg ${
+                          splitToolGuide.canCut
+                            ? 'border-cyan-200/80 bg-cyan-950/95 text-cyan-50 shadow-cyan-500/20'
+                            : 'border-slate-500/70 bg-slate-950/90 text-slate-400'
+                        }`}>
+                          ✂ {splitToolGuide.time.toFixed(2)}s
+                        </div>
+                        <div className={`absolute inset-y-0 -left-[4px] border-l border-dashed ${
+                          splitToolGuide.canCut ? 'border-cyan-50/80' : 'border-slate-500/50'
+                        }`} />
+                        <div className={`absolute inset-y-0 left-[5px] border-l border-dashed ${
+                          splitToolGuide.canCut ? 'border-cyan-100/50' : 'border-slate-600/40'
+                        }`} />
                       </div>
                     </div>
-                  </div>
+                  )}
+
+                  {/* 1. Video Preview Row */}
+                  {showVideoPreviewTrack && (
+                    <div className="flex h-9 shrink-0 gap-0">
+                      {/* Video Header: Sticky Left */}
+                      <div className="sticky left-0 w-[160px] shrink-0 bg-slate-900 border-r border-slate-800 z-[70] flex items-center justify-between gap-1 px-2 select-none text-[10px] font-bold text-slate-400 uppercase tracking-wider shadow-[10px_0_18px_rgba(2,6,23,0.95)] group">
+                        <div className="flex min-w-0 items-center justify-end gap-1.5">
+                          <Film className="w-3 h-3 shrink-0 text-indigo-400" />
+                          <span className="truncate">视频画面</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleHideVideoPreviewTrack}
+                          className="p-0.5 text-slate-500 hover:text-red-400 hover:bg-red-950/40 rounded transition-colors cursor-pointer shrink-0"
+                          title="删除视频画面轨（仅隐藏时间线行）"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                      {/* Video Content Cell */}
+                      <div className="flex-1 bg-indigo-950/10 rounded-r-lg border-y border-r border-indigo-900/20 overflow-hidden relative">
+                        <div className="absolute inset-0 flex items-center justify-around opacity-15 text-[9px] text-indigo-400 font-mono">
+                          <span>镜头 A</span>
+                          <span>镜头 B</span>
+                          <span>镜头 C</span>
+                          <span>镜头 D</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Dynamic Track Rows */}
                   {(() => {
@@ -7294,7 +8440,6 @@ export default function VideoSoundtrack() {
                     return tracks.map((track) => {
                       const IconComponent = track.type === 'bgm' ? Music : track.type === 'dubbing' ? Mic : track.type === 'original' ? Film : Waves;
                       const iconColor = track.type === 'bgm' ? 'text-emerald-400' : track.type === 'dubbing' ? 'text-purple-400' : track.type === 'original' ? 'text-amber-400' : 'text-blue-400';
-                      const isDefaultTrack = ['bgm', 'sfx', 'dubbing', ORIGINAL_AUDIO_TRACK_ID].includes(track.id);
                       const isTrackSelected = track.id === selectedTrackId;
 
                       // Custom styles depending on track type
@@ -7316,19 +8461,101 @@ export default function VideoSoundtrack() {
 
                       const loaderColor = track.type === 'bgm' ? 'text-emerald-400' : track.type === 'dubbing' ? 'text-purple-400' : track.type === 'original' ? 'text-amber-400' : 'text-blue-400';
                       const checkColor = track.type === 'bgm' ? 'text-emerald-300' : track.type === 'dubbing' ? 'text-purple-300' : track.type === 'original' ? 'text-amber-300' : 'text-blue-300';
+                      const trackHeight = normalizeTrackHeight(track.height);
 
                       return (
-                        <div key={track.id} className="flex h-12 shrink-0 gap-0">
+                        <div
+                          key={track.id}
+                          className="relative flex shrink-0 gap-0 isolate"
+                          style={{ height: `${trackHeight}px` }}
+                        >
                           {/* Left Sticky Track Header */}
-                          <div className={`sticky left-0 w-[160px] shrink-0 border-r p-1.5 rounded-l-lg z-20 flex flex-col justify-between group shadow-md transition-all ${
+                          <div
+                            onClick={() => handleSelectTrack(track.id)}
+                            onContextMenu={(event) => openTrackContextMenu(event, track.id)}
+                            className={`sticky left-0 w-[160px] shrink-0 border-r px-1.5 py-1 rounded-l-lg z-[70] flex items-center gap-1.5 group shadow-[10px_0_18px_rgba(2,6,23,0.95)] transition-all relative cursor-pointer ${
                             isTrackSelected
                               ? track.type === 'dubbing'
-                                ? 'bg-purple-950/45 border-purple-500/70 ring-1 ring-inset ring-purple-500/60'
-                                : 'bg-indigo-950/40 border-indigo-500/60 ring-1 ring-inset ring-indigo-500/50'
+                                ? 'bg-purple-950 border-purple-500/70 ring-1 ring-inset ring-purple-500/60'
+                                : 'bg-indigo-950 border-indigo-500/60 ring-1 ring-inset ring-indigo-500/50'
                               : 'bg-slate-900 border-slate-800'
-                          }`}>
+                          }`}
+                            title="右键打开轨道菜单；拖动底边调整轨道高度"
+                          >
+                            {editingTrackId === track.id && (
+                              <div className="min-w-0 flex-1 h-7 rounded-md border border-indigo-400/70 bg-slate-950/85 px-1.5 flex items-center gap-1.5">
+                                <IconComponent className={`w-3.5 h-3.5 shrink-0 ${iconColor}`} />
+                                <input
+                                  data-testid={`track-rename-input-${track.id}`}
+                                  value={editingTrackName}
+                                  onChange={(event) => setEditingTrackName(event.target.value)}
+                                  onBlur={() => commitTrackRename(track.id)}
+                                  onKeyDown={(event) => {
+                                    if (event.key === 'Enter') {
+                                      event.preventDefault();
+                                      commitTrackRename(track.id);
+                                    } else if (event.key === 'Escape') {
+                                      event.preventDefault();
+                                      cancelTrackRename();
+                                    }
+                                  }}
+                                  onClick={(event) => event.stopPropagation()}
+                                  onMouseDown={(event) => event.stopPropagation()}
+                                  onContextMenu={(event) => event.stopPropagation()}
+                                  className="min-w-0 flex-1 bg-transparent text-[10px] font-bold text-white outline-none"
+                                  autoFocus
+                                />
+                              </div>
+                            )}
+                            <button
+                              type="button"
+                              data-testid={`track-selector-${track.id}`}
+                              onClick={() => handleSelectTrack(track.id)}
+                              onDoubleClick={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                startTrackRename(track);
+                              }}
+                              className={`${editingTrackId === track.id ? 'hidden' : 'flex'} min-w-0 flex-1 h-7 rounded-md px-1.5 text-[10px] font-bold text-slate-300 uppercase tracking-wider items-center gap-1.5 text-left cursor-pointer hover:bg-slate-800/70 hover:text-white`}
+                              title={`配置${track.name}轨道；右键管理轨道`}
+                            >
+                              <IconComponent className={`w-3.5 h-3.5 shrink-0 ${iconColor}`} />
+                              <span className="truncate">{track.name}</span>
+                            </button>
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  toggleMuteTrack(track.id);
+                                }}
+                                className={`h-6 w-6 text-[9px] font-bold rounded transition-all cursor-pointer ${
+                                  track.isMuted
+                                    ? 'bg-red-500/25 text-red-400 border border-red-500/40 shadow-sm shadow-red-500/10'
+                                    : 'bg-slate-950/50 hover:bg-slate-800/80 text-slate-500 border border-slate-800/60'
+                                }`}
+                                title="静音（试听与导出均不参与）"
+                              >
+                                M
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  toggleSoloTrack(track.id);
+                                }}
+                                className={`h-6 w-6 text-[9px] font-bold rounded transition-all cursor-pointer ${
+                                  track.isSoloed
+                                    ? 'bg-amber-500/25 text-amber-400 border border-amber-500/40 shadow-sm shadow-amber-500/10'
+                                    : 'bg-slate-950/50 hover:bg-slate-800/80 text-slate-500 border border-slate-800/60'
+                                }`}
+                                title="独奏试听（不影响导出）"
+                              >
+                                S
+                              </button>
+                            </div>
                             {/* Top row: plus, title, delete */}
-                            <div className="flex items-center justify-between gap-1 min-w-0">
+                            <div className="hidden">
                               <button
                                 type="button"
                                 onClick={() => handleAddNewClip(track.id)}
@@ -7340,7 +8567,7 @@ export default function VideoSoundtrack() {
                               </button>
                               <button
                                 type="button"
-                                data-testid={`track-selector-${track.id}`}
+                                data-testid={`track-selector-legacy-${track.id}`}
                                 onClick={() => handleSelectTrack(track.id)}
                                 className="text-[10px] font-bold text-slate-300 uppercase tracking-wider truncate flex-1 flex items-center gap-1 min-w-0 text-left cursor-pointer hover:text-white"
                                 title={`配置${track.name}轨道`}
@@ -7362,20 +8589,18 @@ export default function VideoSoundtrack() {
                                   <Copy className="w-3 h-3" />
                                 </button>
                               )}
-                              {!isDefaultTrack && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleDeleteTrack(track.id)}
-                                  className="p-0.5 hover:bg-red-950/40 text-slate-500 hover:text-red-400 rounded transition-colors cursor-pointer shrink-0"
-                                  title="删除此轨道"
-                                >
-                                  <Trash2 className="w-3 h-3" />
-                                </button>
-                              )}
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteTrack(track.id)}
+                                className="p-0.5 hover:bg-red-950/40 text-slate-500 hover:text-red-400 rounded transition-colors cursor-pointer shrink-0"
+                                title="删除此轨道"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
                             </div>
 
                             {/* Bottom row: Mute, Solo, and Ordering buttons */}
-                            <div className="flex items-center gap-1.5 justify-between pt-1 border-t border-slate-800/10 w-full">
+                            <div className="hidden">
                               <div className="flex items-center gap-1">
                                 <button
                                   type="button"
@@ -7429,6 +8654,16 @@ export default function VideoSoundtrack() {
                                 </button>
                               </div>
                             </div>
+                            <div
+                              role="separator"
+                              aria-orientation="horizontal"
+                              aria-label="调整轨道高度"
+                              onMouseDown={(e) => startTrackHeightResize(e, track.id)}
+                              className="absolute -bottom-1 left-0 right-0 z-40 h-2 cursor-row-resize rounded-b-lg opacity-0 transition-opacity group-hover:opacity-100"
+                              title="上下拖动调整轨道高度"
+                            >
+                              <div className="absolute left-3 right-3 top-1/2 h-px -translate-y-1/2 rounded-full bg-slate-500/70" />
+                            </div>
                           </div>
 
                           {/* Right Timeline Track Cell */}
@@ -7436,6 +8671,7 @@ export default function VideoSoundtrack() {
                             data-testid={`track-lane-${track.id}`}
                             data-track-lane-id={track.id}
                             onClick={() => handleSelectTrack(track.id)}
+                            onContextMenu={(event) => openTrackContextMenu(event, track.id)}
                             className={`flex-1 rounded-r-lg border-y border-r relative transition-all ${
                               track.isMuted 
                                 ? 'bg-red-950/5 border-red-900/10 opacity-60' 
@@ -7468,6 +8704,14 @@ export default function VideoSoundtrack() {
                                 const width = (clip.duration / safeDuration) * 100;
                                 const isSelected = selectedClipIds.includes(clip.id);
                                 const clipIsOriginalAudio = isOriginalAudioClip(clip);
+                                const clipIsMuted = Boolean(clip.muted);
+                                const waveformEntry = clip.audioUrl ? waveformByUrl[clip.audioUrl] : undefined;
+                                const visibleWaveformChannelPeakRanges = waveformEntry?.status === 'ready'
+                                  ? getVisibleWaveformChannelPeakRanges(waveformEntry, clip)
+                                  : [];
+                                const waveformChannelPaths = renderWaveformChannelPaths(visibleWaveformChannelPeakRanges);
+                                const shouldShowWaveform = waveformChannelPaths.length > 0;
+                                const shouldShowStereoWaveform = isStereoWaveform(visibleWaveformChannelPeakRanges);
                                 const fadeInSeconds = normalizeClipFade(clip.fadeIn, clip.duration);
                                 const fadeOutSeconds = normalizeClipFade(clip.fadeOut, clip.duration);
                                 const fadeInPercent = clip.duration > 0 ? Math.min(100, (fadeInSeconds / clip.duration) * 100) : 0;
@@ -7480,27 +8724,67 @@ export default function VideoSoundtrack() {
                                       if (e.ctrlKey || e.metaKey || e.shiftKey) return;
                                       handleSelectClip(clip.id);
                                     }}
-                                    className={`absolute top-1 bottom-1 rounded-md px-2 py-1 ${clipIsOriginalAudio ? 'cursor-default' : 'cursor-grab active:cursor-grabbing'} flex flex-col justify-between text-left select-none transition-all group/clip ${
+                                    className={`absolute top-1 bottom-1 rounded-md px-2 py-1 ${clipIsMuted ? 'opacity-55 saturate-50' : ''} flex flex-col justify-between text-left select-none transition-all group/clip ${
                                       isSelected ? clipBgActive : clipBgInactive
                                     }`}
-                                    style={{ left: `${left}%`, width: `${width}%` }}
-                                    onMouseDown={clipIsOriginalAudio ? undefined : (e) => {
-                                      if (e.ctrlKey || e.metaKey || e.shiftKey) {
-                                        e.stopPropagation();
-                                        e.preventDefault();
-                                        handleSelectClip(clip.id, true);
-                                        return;
-                                      }
-                                      startDragOrResize(e, clip.id, 'drag');
+                                    style={{
+                                      left: `${left}%`,
+                                      width: `${width}%`,
+                                      cursor: timelineToolMode === 'select'
+                                        ? clipIsOriginalAudio ? 'default' : 'grab'
+                                        : timelineToolCursor,
                                     }}
+                                    onMouseDown={(e) => handleTimelineClipMouseDown(e, clip)}
+                                    onMouseMove={(e) => {
+                                      if (timelineToolMode !== 'split') return;
+                                      e.stopPropagation();
+                                      handleTimelineSplitGuideMove(e, clip);
+                                    }}
+                                    onContextMenu={(e) => e.stopPropagation()}
                                   >
+                                    {shouldShowWaveform && (
+                                      <svg
+                                        className="pointer-events-none absolute inset-0 z-0 h-full w-full opacity-75 mix-blend-screen"
+                                        viewBox="0 0 100 100"
+                                        preserveAspectRatio="none"
+                                        aria-hidden="true"
+                                      >
+                                        {shouldShowStereoWaveform && (
+                                          <line
+                                            x1="0"
+                                            y1="50"
+                                            x2="100"
+                                            y2="50"
+                                            stroke="rgba(255,255,255,0.18)"
+                                            strokeWidth="1"
+                                            vectorEffect="non-scaling-stroke"
+                                          />
+                                        )}
+                                        {waveformChannelPaths.map(path => (
+                                          <path
+                                            key={path.label}
+                                            d={path.d}
+                                            fill={path.label === 'right' ? 'rgba(191,219,254,0.34)' : 'rgba(255,255,255,0.34)'}
+                                            stroke={path.label === 'right' ? 'rgba(191,219,254,0.74)' : 'rgba(255,255,255,0.74)'}
+                                            strokeWidth={shouldShowStereoWaveform ? '0.65' : '0.8'}
+                                            strokeLinejoin="round"
+                                            vectorEffect="non-scaling-stroke"
+                                          />
+                                        ))}
+                                      </svg>
+                                    )}
+                                    {clipIsMuted && (
+                                      <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-md bg-slate-950/35">
+                                        <VolumeX className="h-4 w-4 text-white/80" />
+                                      </div>
+                                    )}
                                     {fadeInPercent > 0 && (
                                       <div
                                         className="pointer-events-none absolute inset-y-0 left-0 z-10 overflow-hidden rounded-l-md bg-gradient-to-r from-white/10 to-transparent"
                                         style={{ width: `${fadeInPercent}%` }}
                                       >
                                         <svg className="h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-                                          <line x1="0" y1="0" x2="100" y2="100" stroke="rgba(255,255,255,0.55)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+                                          <line x1="0" y1="100" x2="100" y2="0" stroke="rgba(255,255,255,0.55)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
                                         </svg>
                                       </div>
                                     )}
@@ -7510,7 +8794,7 @@ export default function VideoSoundtrack() {
                                         style={{ width: `${fadeOutPercent}%` }}
                                       >
                                         <svg className="h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-                                          <line x1="100" y1="0" x2="0" y2="100" stroke="rgba(255,255,255,0.55)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+                                          <line x1="0" y1="0" x2="100" y2="100" stroke="rgba(255,255,255,0.55)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
                                         </svg>
                                       </div>
                                     )}
@@ -7519,12 +8803,12 @@ export default function VideoSoundtrack() {
                                     {!clipIsOriginalAudio && (
                                       <>
                                         <div
-                                          className={`absolute left-0 top-0 z-30 h-3 w-5 cursor-ew-resize rounded-br-md rounded-tl-md border-b border-r border-white/25 bg-white/20 opacity-0 transition-opacity hover:bg-cyan-300/45 group-hover/clip:opacity-100 ${isSelected ? 'opacity-80' : ''}`}
+                                          className={`absolute left-0 top-0 z-30 h-3 w-5 cursor-ew-resize rounded-br-md rounded-tl-md border-b border-r border-white/25 bg-white/20 opacity-0 transition-opacity hover:bg-cyan-300/45 group-hover/clip:opacity-100 ${timelineToolMode !== 'select' ? 'pointer-events-none' : ''} ${isSelected ? 'opacity-80' : ''}`}
                                           onMouseDown={(e) => startDragOrResize(e, clip.id, 'fade-in')}
                                           title={`拖动调整淡入：${fadeInSeconds.toFixed(2)}s`}
                                         />
                                         <div
-                                          className={`absolute right-0 top-0 z-30 h-3 w-5 cursor-ew-resize rounded-bl-md rounded-tr-md border-b border-l border-white/25 bg-white/20 opacity-0 transition-opacity hover:bg-cyan-300/45 group-hover/clip:opacity-100 ${isSelected ? 'opacity-80' : ''}`}
+                                          className={`absolute right-0 top-0 z-30 h-3 w-5 cursor-ew-resize rounded-bl-md rounded-tr-md border-b border-l border-white/25 bg-white/20 opacity-0 transition-opacity hover:bg-cyan-300/45 group-hover/clip:opacity-100 ${timelineToolMode !== 'select' ? 'pointer-events-none' : ''} ${isSelected ? 'opacity-80' : ''}`}
                                           onMouseDown={(e) => startDragOrResize(e, clip.id, 'fade-out')}
                                           title={`拖动调整淡出：${fadeOutSeconds.toFixed(2)}s`}
                                         />
@@ -7534,13 +8818,13 @@ export default function VideoSoundtrack() {
                                     {/* Bottom corner stretch handles */}
                                     {!clipIsOriginalAudio && (
                                       <div 
-                                        className="absolute bottom-0 left-0 z-20 h-1/2 w-3 cursor-ew-resize rounded-bl-md rounded-tr-sm opacity-0 transition-opacity hover:bg-white/30 group-hover/clip:opacity-100"
+                                        className={`absolute bottom-0 left-0 z-20 h-1/2 w-3 cursor-ew-resize rounded-bl-md rounded-tr-sm opacity-0 transition-opacity hover:bg-white/30 group-hover/clip:opacity-100 ${timelineToolMode !== 'select' ? 'pointer-events-none' : ''}`}
                                         onMouseDown={(e) => startDragOrResize(e, clip.id, 'resize-left')}
-                                        title="拖动调整片段起点"
+                                        title={timeStretchEnabled ? '时间拉伸：拖动改变声音快慢' : '拖动调整片段起点；往左拉可显示音频前面的声音'}
                                       />
                                     )}
 
-                                    <div className="flex items-center justify-between min-w-0 pointer-events-none px-0.5">
+                                    <div className="relative z-20 flex items-center justify-between min-w-0 pointer-events-none px-0.5">
                                       <span className="text-[10px] font-bold truncate pr-1">{clip.name}</span>
                                       {clip.isGenerating ? (
                                         <Loader2 className={`w-2.5 h-2.5 animate-spin shrink-0 ${loaderColor}`} />
@@ -7550,16 +8834,16 @@ export default function VideoSoundtrack() {
                                         <Check className={`w-2.5 h-2.5 shrink-0 ${checkColor}`} />
                                       ) : null}
                                     </div>
-                                    <span className="text-[8px] font-mono truncate opacity-60 px-0.5 pointer-events-none">
+                                    <span className="relative z-20 text-[8px] font-mono truncate opacity-60 px-0.5 pointer-events-none">
                                       {track.type === 'dubbing' ? `"${clip.text || clip.prompt}"` : clip.prompt}
                                     </span>
 
                                     {/* Right stretch handle */}
                                     {!clipIsOriginalAudio && (
                                       <div 
-                                        className="absolute bottom-0 right-0 z-20 h-1/2 w-3 cursor-ew-resize rounded-br-md rounded-tl-sm opacity-0 transition-opacity hover:bg-white/30 group-hover/clip:opacity-100"
+                                        className={`absolute bottom-0 right-0 z-20 h-1/2 w-3 cursor-ew-resize rounded-br-md rounded-tl-sm opacity-0 transition-opacity hover:bg-white/30 group-hover/clip:opacity-100 ${timelineToolMode !== 'select' ? 'pointer-events-none' : ''}`}
                                         onMouseDown={(e) => startDragOrResize(e, clip.id, 'resize-right')}
-                                        title="拖动调整片段终点"
+                                        title={timeStretchEnabled ? '时间拉伸：拖动改变声音快慢' : '拖动调整片段终点；往右拉可显示音频后面的声音'}
                                       />
                                     )}
                                   </div>
@@ -7571,9 +8855,20 @@ export default function VideoSoundtrack() {
                     });
                   })()}
 
+                  <div
+                    className="sticky left-0 z-[55] min-h-20 w-[160px] shrink-0 rounded-lg bg-transparent transition-colors hover:bg-slate-900/30"
+                    onClick={() => {
+                      setSelectedTrackId(null);
+                      setSelectedClipId(null);
+                      setSelectedClipIds([]);
+                    }}
+                    onContextMenu={openBlankTrackContextMenu}
+                    title="右键新建轨道；选中轨道后可复制或删除"
+                  />
+
                   {/* Add Track Row */}
-                  <div className="flex h-10 shrink-0 gap-0">
-                    <div className="sticky left-0 w-[160px] shrink-0 bg-transparent z-20" />
+                  <div className="hidden">
+                    <div className="sticky left-0 w-[160px] shrink-0 bg-slate-950 z-[70] shadow-[10px_0_18px_rgba(2,6,23,0.95)]" />
                     <div className="flex-1">
                       <button
                         type="button"
@@ -7596,6 +8891,141 @@ export default function VideoSoundtrack() {
           </div>
         </div>
       )}
+
+      {/* Track Context Menu */}
+      <AnimatePresence>
+        {trackContextMenu && (() => {
+          const menuTrack = tracks.find(track => track.id === trackContextMenu.trackId);
+
+          const menuTrackIndex = menuTrack ? tracks.findIndex(track => track.id === menuTrack.id) : -1;
+          const canAddClip = Boolean(menuTrack && menuTrack.type !== 'original');
+          const canDuplicate = Boolean(menuTrack && menuTrack.type !== 'original');
+          const canDelete = Boolean(menuTrack);
+          const canMoveUp = menuTrackIndex > 0;
+          const canMoveDown = menuTrackIndex >= 0 && menuTrackIndex < tracks.length - 1;
+          const closeMenu = () => setTrackContextMenu(null);
+          const runMenuAction = (action: () => void) => {
+            action();
+            closeMenu();
+          };
+          const menuButtonBase = 'w-full flex items-center gap-2 rounded-md px-2.5 py-2 text-left text-[11px] font-semibold transition-colors';
+          const menuButtonEnabled = 'text-slate-200 hover:bg-slate-800 hover:text-white cursor-pointer';
+          const menuButtonDisabled = 'text-slate-600 cursor-not-allowed';
+          const renderMenuSeparator = () => <div className="my-1 h-px bg-slate-800/80" />;
+
+          return (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.98, y: -4 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.98, y: -4 }}
+              transition={{ duration: 0.12 }}
+              onClick={(event) => event.stopPropagation()}
+              onContextMenu={(event) => event.preventDefault()}
+              onWheel={(event) => event.stopPropagation()}
+              className="fixed z-[9995] w-[220px] overflow-y-auto overscroll-contain rounded-xl border border-slate-700/80 bg-slate-950/98 p-1.5 shadow-2xl shadow-slate-950/70 backdrop-blur custom-scrollbar"
+              style={{
+                left: trackContextMenu.x,
+                top: trackContextMenu.y,
+                maxHeight: `calc(100vh - ${trackContextMenu.y + 8}px)`,
+              }}
+              role="menu"
+            >
+              <div className="px-2.5 py-2">
+                <div className="truncate text-[10px] font-bold uppercase tracking-[0.18em] text-slate-500">轨道菜单</div>
+                <div className="mt-0.5 truncate text-xs font-bold text-slate-200">
+                  {menuTrack?.name || '空白轨道区'}
+                </div>
+                {!menuTrack && (
+                  <div className="mt-1 text-[10px] leading-snug text-slate-500">
+                    可新建轨道；选中某条轨道后可在这里复制或删除。
+                  </div>
+                )}
+              </div>
+              {renderMenuSeparator()}
+              <button
+                type="button"
+                disabled={!canAddClip}
+                onClick={() => menuTrack && canAddClip && runMenuAction(() => handleAddNewClip(menuTrack.id))}
+                className={`${menuButtonBase} ${canAddClip ? menuButtonEnabled : menuButtonDisabled}`}
+                role="menuitem"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>添加音频片段</span>
+              </button>
+              <button
+                type="button"
+                disabled={!canDuplicate}
+                onClick={() => menuTrack && canDuplicate && runMenuAction(() => handleDuplicateTrack(menuTrack.id))}
+                className={`${menuButtonBase} ${canDuplicate ? menuButtonEnabled : menuButtonDisabled}`}
+                role="menuitem"
+              >
+                <Copy className="h-3.5 w-3.5" />
+                <span>复制轨道</span>
+              </button>
+              <button
+                type="button"
+                disabled={!canDelete}
+                onClick={() => menuTrack && runMenuAction(() => handleDeleteTrack(menuTrack.id))}
+                className={`${menuButtonBase} ${canDelete ? 'text-red-300 hover:bg-red-950/40 hover:text-red-200 cursor-pointer' : menuButtonDisabled}`}
+                role="menuitem"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                <span>删除轨道</span>
+              </button>
+              {renderMenuSeparator()}
+              <button
+                type="button"
+                disabled={!canMoveUp}
+                onClick={() => canMoveUp && runMenuAction(() => moveTrack(menuTrackIndex, 'up'))}
+                className={`${menuButtonBase} ${canMoveUp ? menuButtonEnabled : menuButtonDisabled}`}
+                role="menuitem"
+              >
+                <ChevronUp className="h-3.5 w-3.5" />
+                <span>上移轨道</span>
+              </button>
+              <button
+                type="button"
+                disabled={!canMoveDown}
+                onClick={() => canMoveDown && runMenuAction(() => moveTrack(menuTrackIndex, 'down'))}
+                className={`${menuButtonBase} ${canMoveDown ? menuButtonEnabled : menuButtonDisabled}`}
+                role="menuitem"
+              >
+                <ChevronDown className="h-3.5 w-3.5" />
+                <span>下移轨道</span>
+              </button>
+              {renderMenuSeparator()}
+              <div className="px-2.5 pb-1 pt-1.5 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">新增轨道</div>
+              <button
+                type="button"
+                onClick={() => runMenuAction(() => openAddTrackModal('bgm'))}
+                className={`${menuButtonBase} ${menuButtonEnabled}`}
+                role="menuitem"
+              >
+                <Music className="h-3.5 w-3.5 text-emerald-400" />
+                <span>新增 BGM 轨</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => runMenuAction(() => openAddTrackModal('sfx'))}
+                className={`${menuButtonBase} ${menuButtonEnabled}`}
+                role="menuitem"
+              >
+                <Waves className="h-3.5 w-3.5 text-blue-400" />
+                <span>新增音效轨</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => runMenuAction(() => openAddTrackModal('dubbing'))}
+                className={`${menuButtonBase} ${menuButtonEnabled}`}
+                role="menuitem"
+              >
+                <Mic className="h-3.5 w-3.5 text-purple-400" />
+                <span>新增配音轨</span>
+              </button>
+            </motion.div>
+          );
+        })()}
+      </AnimatePresence>
 
       {/* Toast Notification Banner */}
       <AnimatePresence>

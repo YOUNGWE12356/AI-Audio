@@ -59,29 +59,20 @@ interface FactoryLoudnessInfo {
   peakDb: number;
 }
 
-type RenameCaseMode = 'keep' | 'lower' | 'upper' | 'snake' | 'pascal';
-type RenameNumberPosition = 'none' | 'prefix' | 'suffix';
 type FactoryAudioFormat = 'mp3' | 'wav' | 'ogg' | 'flac' | 'aac' | 'm4a';
 
-interface RenameRules {
-  template: string;
-  category: string;
-  scene: string;
-  action: string;
-  variation: string;
+type RenameRuleType = 'remove' | 'replace';
+
+interface RenameOperation {
+  id: string;
+  type: RenameRuleType;
   findText: string;
   replaceText: string;
-  removeText: string;
-  removeFromStart: number;
-  removeFromEnd: number;
-  prefix: string;
-  suffix: string;
-  separator: string;
-  caseMode: RenameCaseMode;
-  normalizeSeparators: boolean;
-  numberPosition: RenameNumberPosition;
-  numberStart: number;
-  numberPadding: number;
+}
+
+interface RenameRules {
+  operations: RenameOperation[];
+  normalizeFileName: boolean;
 }
 
 interface RenamePreviewItem {
@@ -129,24 +120,8 @@ const FACTORY_FORMAT_OPTIONS: Array<{
 ];
 
 const DEFAULT_RENAME_RULES: RenameRules = {
-  template: '{original}',
-  category: 'sfx',
-  scene: 'ui',
-  action: '',
-  variation: '',
-  findText: '',
-  replaceText: '',
-  removeText: '',
-  removeFromStart: 0,
-  removeFromEnd: 0,
-  prefix: '',
-  suffix: '',
-  separator: '_',
-  caseMode: 'keep',
-  normalizeSeparators: true,
-  numberPosition: 'none',
-  numberStart: 1,
-  numberPadding: 2,
+  operations: [],
+  normalizeFileName: true,
 };
 
 // Helper to extract audio from video/audio files via MediaElement fallback
@@ -972,37 +947,64 @@ export default function AudioTools() {
 
   const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-  const trimBySeparator = (value: string, separator: string): string => {
-    const safeSeparator = escapeRegExp(separator || '_');
-    return value
-      .replace(new RegExp(`${safeSeparator}{2,}`, 'g'), separator || '_')
-      .replace(new RegExp(`^${safeSeparator}+|${safeSeparator}+$`, 'g'), '');
-  };
-
-  const normalizeRenameText = (value: string, separator: string): string => {
-    const safeSeparator = separator || '_';
-    return trimBySeparator(
-      value
-        .replace(/[<>:"/\\|?*\x00-\x1F]/g, safeSeparator)
-        .replace(/[\s\-_]+/g, safeSeparator),
-      safeSeparator,
-    );
-  };
-
-  const toPascalCase = (value: string): string => (
+  const normalizeRenameText = (value: string): string => (
     value
-      .split(/[\s\-_]+/g)
-      .filter(Boolean)
-      .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
-      .join('')
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+      .replace(/\s+/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_+|_+$/g, '')
   );
 
-  const applyRenameCase = (value: string, mode: RenameCaseMode, separator: string): string => {
-    if (mode === 'lower') return value.toLowerCase();
-    if (mode === 'upper') return value.toUpperCase();
-    if (mode === 'snake') return normalizeRenameText(value, separator || '_').toLowerCase();
-    if (mode === 'pascal') return toPascalCase(value);
-    return value;
+  const getRenameOperationLabel = (operation: RenameOperation) => {
+    if (operation.type === 'remove') return `删除「${operation.findText || '未填写'}」`;
+    return `把「${operation.findText || '未填写'}」替换成「${operation.replaceText || '空'}」`;
+  };
+
+  const createRenameOperation = (type: RenameRuleType): RenameOperation => ({
+    id: `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    type,
+    findText: '',
+    replaceText: '',
+  });
+
+  const addRenameOperation = React.useCallback((type: RenameRuleType) => {
+    setRenameRules((prev) => ({
+      ...prev,
+      operations: [...prev.operations, createRenameOperation(type)],
+    }));
+  }, []);
+
+  const updateRenameOperation = React.useCallback((id: string, patch: Partial<RenameOperation>) => {
+    setRenameRules((prev) => ({
+      ...prev,
+      operations: prev.operations.map((operation) => (
+        operation.id === id ? { ...operation, ...patch } : operation
+      )),
+    }));
+  }, []);
+
+  const removeRenameOperation = React.useCallback((id: string) => {
+    setRenameRules((prev) => ({
+      ...prev,
+      operations: prev.operations.filter((operation) => operation.id !== id),
+    }));
+  }, []);
+
+  const applyRenameRulesToBase = (sourceBase: string): string => {
+    let processedBase = sourceBase;
+
+    renameRules.operations.forEach((operation) => {
+      if (!operation.findText) return;
+      const pattern = new RegExp(escapeRegExp(operation.findText), 'g');
+      processedBase = processedBase.replace(
+        pattern,
+        operation.type === 'remove' ? '' : operation.replaceText,
+      );
+    });
+
+    return renameRules.normalizeFileName
+      ? normalizeRenameText(processedBase) || 'renamed_audio'
+      : processedBase.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_') || 'renamed_audio';
   };
 
   const getRenameOutputRootName = (): string => {
@@ -1014,54 +1016,6 @@ export default function AudioTools() {
       .filter((root): root is string => Boolean(root))));
     if (roots.length === 1) return `${sanitizeArchiveName(roots[0])}_renamed`;
     return 'renamed_audio_1';
-  };
-
-  const applyRenameRulesToBase = (sourceBase: string, index: number): string => {
-    const separator = renameRules.separator || '_';
-    let processedBase = sourceBase;
-
-    if (renameRules.findText) {
-      processedBase = processedBase.replace(new RegExp(escapeRegExp(renameRules.findText), 'g'), renameRules.replaceText);
-    }
-    if (renameRules.removeText) {
-      processedBase = processedBase.replace(new RegExp(escapeRegExp(renameRules.removeText), 'g'), '');
-    }
-    if (renameRules.removeFromStart > 0) {
-      processedBase = processedBase.slice(Math.min(renameRules.removeFromStart, processedBase.length));
-    }
-    if (renameRules.removeFromEnd > 0) {
-      processedBase = processedBase.slice(0, Math.max(0, processedBase.length - renameRules.removeFromEnd));
-    }
-    if (renameRules.normalizeSeparators) {
-      processedBase = normalizeRenameText(processedBase, separator);
-    }
-    processedBase = applyRenameCase(processedBase, renameRules.caseMode, separator);
-
-    const template = renameRules.template.trim() || '{original}';
-    const tokenValues: Record<string, string> = {
-      original: processedBase,
-      category: renameRules.category,
-      scene: renameRules.scene,
-      action: renameRules.action,
-      variation: renameRules.variation,
-      index: String(renameRules.numberStart + index).padStart(renameRules.numberPadding, '0'),
-    };
-
-    let outputBase = template.replace(/\{(original|category|scene|action|variation|index)\}/g, (_, token) => tokenValues[token] || '');
-    outputBase = [renameRules.prefix, outputBase, renameRules.suffix].filter(Boolean).join('');
-
-    if (renameRules.numberPosition !== 'none') {
-      const paddedNumber = String(renameRules.numberStart + index).padStart(renameRules.numberPadding, '0');
-      outputBase = renameRules.numberPosition === 'prefix'
-        ? `${paddedNumber}${separator}${outputBase}`
-        : `${outputBase}${separator}${paddedNumber}`;
-    }
-
-    const normalizedOutput = renameRules.normalizeSeparators
-      ? normalizeRenameText(outputBase, separator)
-      : outputBase.replace(/[<>:"/\\|?*\x00-\x1F]/g, separator);
-
-    return applyRenameCase(normalizedOutput, renameRules.caseMode, separator) || 'renamed_audio';
   };
 
   const getUniqueRenamePath = (relativePath: string, usedPaths: Set<string>): { path: string; fixed: boolean } => {
@@ -1093,7 +1047,7 @@ export default function AudioTools() {
 
   const renamePreviewItems = React.useMemo<RenamePreviewItem[]>(() => {
     const usedPaths = new Set<string>();
-    return renameFiles.map((file, index) => {
+    return renameFiles.map((file) => {
       const id = getRenameFileId(file);
       const sourceRelativePath = getFactoryFilePath(file).replace(/\\/g, '/').replace(/^\/+/, '');
       const sourceParts = sourceRelativePath.split('/').filter(Boolean);
@@ -1102,7 +1056,7 @@ export default function AudioTools() {
 
       const { base, extension } = splitFileName(sourceName);
       const manualName = renameManualNames[id]?.trim();
-      let outputName = manualName || `${applyRenameRulesToBase(base, index)}${extension}`;
+      let outputName = manualName || `${applyRenameRulesToBase(base)}${extension}`;
       if (manualName && !splitFileName(manualName).extension) outputName = `${manualName}${extension}`;
       outputName = sanitizeArchiveName(outputName);
 
@@ -1172,11 +1126,20 @@ export default function AudioTools() {
     downloadNamedBlob(new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' }), `${getRenameOutputRootName()}_命名对照.csv`);
   };
 
-  const exportRenamedZip = async () => {
+  const exportRenamedAudio = async () => {
     if (renamePreviewItems.length === 0) return;
     setRenameExporting(true);
     setRenameError(null);
     try {
+      if (renamePreviewItems.length === 1) {
+        const item = renamePreviewItems[0];
+        const outputFileName = item.outputRelativePath.split('/').pop() || item.outputName;
+        setRenameStatus(`正在导出 ${outputFileName}...`);
+        downloadNamedBlob(item.file, outputFileName);
+        setRenameStatus(`已开始下载 ${outputFileName}。`);
+        return;
+      }
+
       const { default: JSZip } = await import('jszip');
       const zip = new JSZip();
       const rootName = getRenameOutputRootName();
@@ -1193,7 +1156,7 @@ export default function AudioTools() {
       downloadNamedBlob(zipBlob, `${rootName}.zip`);
       setRenameStatus(`已生成并开始下载 ${rootName}.zip。`);
     } catch (err: any) {
-      setRenameError(err?.message || '导出重命名 ZIP 失败。');
+      setRenameError(err?.message || '导出失败。');
     } finally {
       setRenameExporting(false);
     }
@@ -1581,11 +1544,16 @@ export default function AudioTools() {
                 </div>
               </div>
 
-              <div className="bg-slate-50 border border-slate-150 p-5 rounded-2xl space-y-5">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <Sliders className="w-4 h-4 text-emerald-600" />
-                    <span className="text-xs font-bold text-slate-700">命名规则</span>
+              <div className="bg-slate-50 border border-slate-150 p-5 rounded-2xl space-y-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-2">
+                    <Sliders className="mt-0.5 w-4 h-4 text-emerald-600" />
+                    <div>
+                      <span className="text-xs font-bold text-slate-700">命名规则</span>
+                      <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
+                        默认不添加规则，文件名只做基础清理；需要时再添加“删除文本”或“替换文本”。
+                      </p>
+                    </div>
                   </div>
                   <button
                     type="button"
@@ -1593,183 +1561,117 @@ export default function AudioTools() {
                       setRenameRules(DEFAULT_RENAME_RULES);
                       setRenameManualNames({});
                     }}
-                    className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-[10px] font-bold text-slate-500 hover:text-emerald-700"
+                    className="shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-1 text-[10px] font-bold text-slate-500 hover:text-emerald-700"
                   >
                     重置规则
                   </button>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <label className="space-y-1.5 md:col-span-2">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">命名模板</span>
-                    <input
-                      value={renameRules.template}
-                      onChange={(e) => setRenameRules((prev) => ({ ...prev, template: e.target.value }))}
-                      placeholder="sfx_{scene}_{action}_{variation}"
-                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all font-mono"
-                    />
-                    <span className="block text-[10px] text-slate-400">
-                      可用变量：{'{original}'} / {'{category}'} / {'{scene}'} / {'{action}'} / {'{variation}'} / {'{index}'}
-                    </span>
-                  </label>
-
-                  {([
-                    ['category', '类型', 'sfx'],
-                    ['scene', '场景', 'ui'],
-                    ['action', '动作', 'UpgradePage_Open'],
-                    ['variation', '变体', '01'],
-                  ] as Array<[keyof RenameRules, string, string]>).map(([key, label, placeholder]) => (
-                    <label key={key} className="space-y-1.5">
-                      <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">{label}</span>
-                      <input
-                        value={String(renameRules[key])}
-                        onChange={(e) => setRenameRules((prev) => ({ ...prev, [key]: e.target.value }))}
-                        placeholder={placeholder}
-                        className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
-                      />
-                    </label>
-                  ))}
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => addRenameOperation('remove')}
+                    className="rounded-full border border-emerald-100 bg-emerald-50 px-3 py-1.5 text-[10px] font-black text-emerald-700 hover:border-emerald-200 hover:bg-emerald-100"
+                  >
+                    + 删除文本
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => addRenameOperation('replace')}
+                    className="rounded-full border border-sky-100 bg-sky-50 px-3 py-1.5 text-[10px] font-black text-sky-700 hover:border-sky-200 hover:bg-sky-100"
+                  >
+                    + 替换文本
+                  </button>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-slate-200 pt-4">
-                  <label className="space-y-1.5">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">查找字符</span>
-                    <input
-                      value={renameRules.findText}
-                      onChange={(e) => setRenameRules((prev) => ({ ...prev, findText: e.target.value }))}
-                      placeholder="例如：空格、gold、copy"
-                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
-                    />
-                  </label>
-                  <label className="space-y-1.5">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">替换为</span>
-                    <input
-                      value={renameRules.replaceText}
-                      onChange={(e) => setRenameRules((prev) => ({ ...prev, replaceText: e.target.value }))}
-                      placeholder="例如：_"
-                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
-                    />
-                  </label>
-                  <label className="space-y-1.5 md:col-span-2">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">批量删除字符/词</span>
-                    <input
-                      value={renameRules.removeText}
-                      onChange={(e) => setRenameRules((prev) => ({ ...prev, removeText: e.target.value }))}
-                      placeholder="例如：未命名、_old、copy"
-                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
-                    />
-                  </label>
-                  <label className="space-y-1.5">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">删除开头 N 个字符</span>
-                    <input
-                      type="number"
-                      min={0}
-                      value={renameRules.removeFromStart}
-                      onChange={(e) => setRenameRules((prev) => ({ ...prev, removeFromStart: Math.max(0, Number(e.target.value) || 0) }))}
-                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
-                    />
-                  </label>
-                  <label className="space-y-1.5">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">删除结尾 N 个字符</span>
-                    <input
-                      type="number"
-                      min={0}
-                      value={renameRules.removeFromEnd}
-                      onChange={(e) => setRenameRules((prev) => ({ ...prev, removeFromEnd: Math.max(0, Number(e.target.value) || 0) }))}
-                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
-                    />
-                  </label>
-                </div>
+                {renameRules.operations.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-slate-200 bg-white px-4 py-5 text-center">
+                    <p className="text-[11px] font-black text-slate-700">暂无命名规则</p>
+                    <p className="mt-1 text-[10px] leading-relaxed text-slate-400">
+                      上传文件后会保留原名，只清理空格、重复下划线和非法字符。
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2.5">
+                    {renameRules.operations.map((operation, operationIndex) => (
+                      <div
+                        key={operation.id}
+                        className="rounded-2xl border border-slate-200 bg-white p-3.5 space-y-3"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-50 border border-slate-200 text-[10px] font-black text-slate-500">
+                              {operationIndex + 1}
+                            </span>
+                            <p className="truncate text-[11px] font-bold text-slate-700">
+                              {getRenameOperationLabel(operation)}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => removeRenameOperation(operation.id)}
+                            className="shrink-0 rounded-lg border border-rose-100 bg-white px-2.5 py-1.5 text-[10px] font-black text-rose-500 hover:border-rose-200 hover:bg-rose-50"
+                          >
+                            删除
+                          </button>
+                        </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-slate-200 pt-4">
-                  <label className="space-y-1.5">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">添加前缀</span>
-                    <input
-                      value={renameRules.prefix}
-                      onChange={(e) => setRenameRules((prev) => ({ ...prev, prefix: e.target.value }))}
-                      placeholder="例如：sfx_ui_"
-                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
-                    />
-                  </label>
-                  <label className="space-y-1.5">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">添加后缀</span>
-                    <input
-                      value={renameRules.suffix}
-                      onChange={(e) => setRenameRules((prev) => ({ ...prev, suffix: e.target.value }))}
-                      placeholder="例如：_v1"
-                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
-                    />
-                  </label>
-                  <label className="space-y-1.5">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">大小写/命名风格</span>
-                    <select
-                      value={renameRules.caseMode}
-                      onChange={(e) => setRenameRules((prev) => ({ ...prev, caseMode: e.target.value as RenameCaseMode }))}
-                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all font-semibold"
-                    >
-                      <option value="keep">保持原样</option>
-                      <option value="lower">全部小写</option>
-                      <option value="upper">全部大写</option>
-                      <option value="snake">snake_case</option>
-                      <option value="pascal">PascalCase</option>
-                    </select>
-                  </label>
-                  <label className="space-y-1.5">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">分隔符</span>
-                    <input
-                      value={renameRules.separator}
-                      maxLength={2}
-                      onChange={(e) => setRenameRules((prev) => ({ ...prev, separator: e.target.value || '_' }))}
-                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all font-mono"
-                    />
-                  </label>
-                  <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-semibold text-slate-600">
-                    <input
-                      type="checkbox"
-                      checked={renameRules.normalizeSeparators}
-                      onChange={(e) => setRenameRules((prev) => ({ ...prev, normalizeSeparators: e.target.checked }))}
-                      className="accent-emerald-600"
-                    />
-                    自动清理空格、重复下划线和非法字符
-                  </label>
-                </div>
+                        <div className="grid grid-cols-1 md:grid-cols-[150px_1fr_1fr] gap-3">
+                          <label className="space-y-1.5">
+                            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">规则类型</span>
+                            <select
+                              value={operation.type}
+                              onChange={(e) => updateRenameOperation(operation.id, {
+                                type: e.target.value as RenameRuleType,
+                                replaceText: e.target.value === 'remove' ? '' : operation.replaceText,
+                              })}
+                              className="w-full bg-slate-50 border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all font-semibold"
+                            >
+                              <option value="remove">删除文本</option>
+                              <option value="replace">替换文本</option>
+                            </select>
+                          </label>
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 border-t border-slate-200 pt-4">
-                  <label className="space-y-1.5">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">自动编号</span>
-                    <select
-                      value={renameRules.numberPosition}
-                      onChange={(e) => setRenameRules((prev) => ({ ...prev, numberPosition: e.target.value as RenameNumberPosition }))}
-                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all font-semibold"
-                    >
-                      <option value="none">不编号</option>
-                      <option value="suffix">后缀编号</option>
-                      <option value="prefix">前缀编号</option>
-                    </select>
-                  </label>
-                  <label className="space-y-1.5">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">起始编号</span>
-                    <input
-                      type="number"
-                      min={0}
-                      value={renameRules.numberStart}
-                      onChange={(e) => setRenameRules((prev) => ({ ...prev, numberStart: Math.max(0, Number(e.target.value) || 0) }))}
-                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
-                    />
-                  </label>
-                  <label className="space-y-1.5">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">编号位数</span>
-                    <input
-                      type="number"
-                      min={1}
-                      max={6}
-                      value={renameRules.numberPadding}
-                      onChange={(e) => setRenameRules((prev) => ({ ...prev, numberPadding: Math.min(6, Math.max(1, Number(e.target.value) || 1)) }))}
-                      className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
-                    />
-                  </label>
-                </div>
+                          <label className="space-y-1.5">
+                            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">查找内容</span>
+                            <input
+                              value={operation.findText}
+                              onChange={(e) => updateRenameOperation(operation.id, { findText: e.target.value })}
+                              placeholder={operation.type === 'remove' ? '要删除的文字/符号，例如：copy' : '要查找的文字/符号，例如：空格'}
+                              className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
+                            />
+                          </label>
+
+                          {operation.type === 'replace' ? (
+                            <label className="space-y-1.5">
+                              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">替换成</span>
+                              <input
+                                value={operation.replaceText}
+                                onChange={(e) => updateRenameOperation(operation.id, { replaceText: e.target.value })}
+                                placeholder="替换成，例如：_"
+                                className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
+                              />
+                            </label>
+                          ) : (
+                            <div className="hidden md:block" />
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-semibold text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={renameRules.normalizeFileName}
+                    onChange={(e) => setRenameRules((prev) => ({ ...prev, normalizeFileName: e.target.checked }))}
+                    className="accent-emerald-600"
+                  />
+                  自动清理空格、重复下划线和非法字符
+                </label>
               </div>
+
             </div>
           </div>
 
@@ -1856,11 +1758,11 @@ export default function AudioTools() {
                 <button
                   type="button"
                   disabled={renamePreviewItems.length === 0 || renameExporting}
-                  onClick={exportRenamedZip}
+                  onClick={exportRenamedAudio}
                   className="h-10 rounded-xl bg-slate-900 text-[11px] font-black text-white shadow-lg hover:bg-slate-800 disabled:opacity-50 flex items-center justify-center gap-2"
                 >
                   {renameExporting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-                  <span>导出重命名 ZIP</span>
+                  <span>导出</span>
                 </button>
               </div>
             </div>
@@ -1997,6 +1899,11 @@ export default function AudioTools() {
                 <div className="flex items-center gap-2 mb-1.5">
                   <Settings className="w-4 h-4 text-emerald-600" />
                   <span className="text-xs font-bold text-slate-700">格式转换高级属性设定</span>
+                </div>
+
+                <div className="rounded-xl border border-emerald-100 bg-emerald-50/70 px-3 py-2 text-[10px] font-semibold text-emerald-800 flex items-center gap-2">
+                  <Sparkles className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span>推荐压缩参数：<strong className="font-black">32kHz / 96kbps</strong>，适合人声批量压缩。</span>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -2176,15 +2083,6 @@ export default function AudioTools() {
                     </div>
                   </div>
 
-                </div>
-
-                {/* Compression Recommendation Note */}
-                <div className="mt-4 bg-emerald-50/60 border border-emerald-100/80 p-3.5 rounded-xl flex items-start gap-2.5 text-[11px] text-emerald-800 font-medium leading-relaxed">
-                  <Sparkles className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                  <div>
-                    <span className="font-bold block text-emerald-900 mb-0.5">💡 格式与参数压缩建议</span>
-                    <span>压缩文件建议使用：<strong className="underline decoration-emerald-400 decoration-2 font-black">32.000hz，96kbps</strong>。该配置在保持极高语音清晰度与人声还原度的同时，能够将文件体积降至最低，非常适合批量发布或低带宽网络传输。</span>
-                  </div>
                 </div>
 
               </div>

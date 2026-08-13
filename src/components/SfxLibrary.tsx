@@ -79,6 +79,22 @@ interface AudioAssetLibraryStats {
   indexedAt: string;
 }
 
+const SFX_DIRECTORY_TREE_VERSION = 'custom-empty-directory-tree-v2';
+const LEGACY_DIRECTORY_IDS = new Set([
+  'music_all',
+  'company_sfx',
+  'char_foley',
+  'weapons_combat',
+  'magic_skills',
+  'creatures_monsters',
+  'ambient_nature',
+  'system_ui',
+]);
+
+const isLegacyDirectoryTree = (categories: CategoryGroup[]) => (
+  categories.some(category => LEGACY_DIRECTORY_IDS.has(category.id))
+);
+
 const isUploadedAudioAsset = (sound: SoundEffect) => {
   const url = (sound.url || '').toLowerCase();
   const fileName = (sound.fileName || '').toLowerCase();
@@ -578,16 +594,27 @@ export default function SfxLibrary() {
   // Dynamic Categories state
   const [categories, setCategories] = useState<CategoryGroup[]>(() => {
     if (typeof window !== 'undefined') {
+      const treeVersion = localStorage.getItem('sfx_library_directory_tree_version');
+      if (treeVersion !== SFX_DIRECTORY_TREE_VERSION) {
+        localStorage.setItem('sfx_library_directory_tree_version', SFX_DIRECTORY_TREE_VERSION);
+        localStorage.setItem('sfx_library_categories', JSON.stringify([]));
+        return [];
+      }
       const saved = localStorage.getItem('sfx_library_categories');
       if (saved) {
         try {
-          return JSON.parse(saved);
+          const parsed = JSON.parse(saved);
+          if (Array.isArray(parsed) && isLegacyDirectoryTree(parsed)) {
+            localStorage.setItem('sfx_library_categories', JSON.stringify([]));
+            return [];
+          }
+          return parsed;
         } catch (e) {
           console.error("Failed to parse saved categories from localStorage", e);
         }
       }
     }
-    return DEFAULT_CATEGORIES;
+    return [];
   });
 
   // Category management helper states
@@ -599,18 +626,16 @@ export default function SfxLibrary() {
   const [isAddingGroup, setIsAddingGroup] = useState<boolean>(false);
   const [newGroupNameInput, setNewGroupNameInput] = useState<string>('');
   const [isDirectoryManageMode, setIsDirectoryManageMode] = useState<boolean>(false);
-  const canManageDirectories = isAuthorized && isDirectoryManageMode;
+  const canManageDirectories = isDirectoryManageMode;
 
   useEffect(() => {
-    if (!isDirectoryManageMode || !isAuthorized) return;
-    setIsCompanySfxParentExpanded(true);
-    setIsMusicParentExpanded(true);
+    if (!isDirectoryManageMode) return;
     setIsStandardSfxParentExpanded(true);
     setExpandedGroups(prev => ({
       ...prev,
       ...categories.reduce((acc, group) => ({ ...acc, [group.id]: true }), {}),
     }));
-  }, [categories, isAuthorized, isDirectoryManageMode]);
+  }, [categories, isDirectoryManageMode]);
 
   // Multidimensional Filters
   const [filterDuration, setFilterDuration] = useState<string>('全部'); // 全部, <1s, 1-3s, >3s
@@ -735,8 +760,19 @@ export default function SfxLibrary() {
           fetchJsonIfAvailable<AudioAssetLibraryStats>('/api/audio-assets/stats')
         ]);
         if (Array.isArray(catData)) {
-          setCategories(catData);
-          localStorage.setItem('sfx_library_categories', JSON.stringify(catData));
+          const treeVersion = localStorage.getItem('sfx_library_directory_tree_version');
+          const shouldResetLegacyTree = treeVersion !== SFX_DIRECTORY_TREE_VERSION || isLegacyDirectoryTree(catData);
+          const nextCategories = shouldResetLegacyTree ? [] : catData;
+          setCategories(nextCategories);
+          localStorage.setItem('sfx_library_directory_tree_version', SFX_DIRECTORY_TREE_VERSION);
+          localStorage.setItem('sfx_library_categories', JSON.stringify(nextCategories));
+          if (shouldResetLegacyTree) {
+            fetch('/api/sfx/categories', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify([]),
+            }).catch(err => console.error("Failed to clear legacy categories on backend:", err));
+          }
         }
         if (Array.isArray(soundData)) {
           setSounds(soundData);
@@ -1135,10 +1171,7 @@ export default function SfxLibrary() {
 
   // --- Category / Directory Tree Management Functions ---
   const moveCategory = (catId: string, direction: 'up' | 'down') => {
-    if (!checkOwnerPermission()) return;
-    const isSpecial = catId === 'music_all' || catId === 'company_sfx';
-    if (isSpecial) return; // These are now standalone parent groups and cannot be reordered inside their sections
-    const sectionCats = categories.filter(c => c.id !== 'music_all' && c.id !== 'company_sfx');
+    const sectionCats = categories;
     const idx = sectionCats.findIndex(c => c.id === catId);
     if (idx === -1) return;
     if (direction === 'up' && idx === 0) return;
@@ -1158,7 +1191,6 @@ export default function SfxLibrary() {
   };
 
   const moveSubCategory = (groupId: string, subId: string, direction: 'up' | 'down') => {
-    if (!checkOwnerPermission()) return;
     setCategories(prev => {
       return prev.map(group => {
         if (group.id !== groupId) return group;
@@ -1178,7 +1210,6 @@ export default function SfxLibrary() {
   };
 
   const handleAddSubCategory = (groupId: string) => {
-    if (!checkOwnerPermission()) return;
     if (!newSubNameInput.trim()) return;
     const newSubName = newSubNameInput.trim();
     const newSub = {
@@ -1199,7 +1230,6 @@ export default function SfxLibrary() {
   };
 
   const handleAddGroup = () => {
-    if (!checkOwnerPermission()) return;
     if (!newGroupNameInput.trim()) return;
     const newGroup: CategoryGroup = {
       id: `custom_group_${Date.now()}`,
@@ -1213,24 +1243,13 @@ export default function SfxLibrary() {
   };
 
   const handleDeleteCategory = (catId: string, catName: string) => {
-    if (!checkOwnerPermission()) return;
-    // Count sounds to delete
-    const soundsToDeleteCount = sounds.filter(s => s.category === catName).length;
+    const affectedSoundsCount = sounds.filter(s => s.category === catName).length;
     showCustomConfirm(
       `确定要删除整个目录分类 "${catName}" 吗？`,
-      `⚠️ 警告：删除此目录将同时永久物理删除该目录下属的 ${soundsToDeleteCount} 个音频文件，该操作不可撤销！`,
+      `只会删除这个目录，并将 ${affectedSoundsCount} 个关联音频移到“未分类”。不会删除任何音频文件。`,
       () => {
         setCategories(prev => prev.filter(c => c.id !== catId));
-        setSounds(prev => {
-          const remaining = prev.filter(s => s.category !== catName);
-          // If the currently playing / selected sound is deleted, select another one
-          if (selectedSoundId && prev.find(s => s.id === selectedSoundId)?.category === catName) {
-            if (remaining.length > 0) {
-              setSelectedSoundId(remaining[0].id);
-            }
-          }
-          return remaining;
-        });
+        setSounds(prev => prev.map(s => s.category === catName ? { ...s, category: '未分类', subcategory: undefined } : s));
         if (selectedCategory === catName) {
           setSelectedCategory('全部');
         }
@@ -1239,12 +1258,10 @@ export default function SfxLibrary() {
   };
 
   const handleDeleteSubCategory = (groupId: string, subId: string, subName: string) => {
-    if (!checkOwnerPermission()) return;
-    // Count sounds to delete
-    const soundsToDeleteCount = sounds.filter(s => s.subcategory === subName).length;
+    const affectedSoundsCount = sounds.filter(s => s.subcategory === subName).length;
     showCustomConfirm(
       `确定要删除子文件夹 "${subName}" 吗？`,
-      `⚠️ 警告：删除此子文件夹将同时永久物理删除该子文件夹下属的 ${soundsToDeleteCount} 个音频文件，该操作不可撤销！`,
+      `只会删除这个子文件夹，并清空 ${affectedSoundsCount} 个音频的子文件夹归属。不会删除任何音频文件。`,
       () => {
         setCategories(prev => prev.map(group => {
           if (group.id !== groupId) return group;
@@ -1253,16 +1270,7 @@ export default function SfxLibrary() {
             subCategories: group.subCategories.filter(sub => sub.id !== subId)
           };
         }));
-        setSounds(prev => {
-          const remaining = prev.filter(s => s.subcategory !== subName);
-          // If the currently playing / selected sound is deleted, select another one
-          if (selectedSoundId && prev.find(s => s.id === selectedSoundId)?.subcategory === subName) {
-            if (remaining.length > 0) {
-              setSelectedSoundId(remaining[0].id);
-            }
-          }
-          return remaining;
-        });
+        setSounds(prev => prev.map(s => s.subcategory === subName ? { ...s, subcategory: undefined } : s));
         if (selectedCategory === subName) {
           setSelectedCategory('全部');
         }
@@ -1271,13 +1279,11 @@ export default function SfxLibrary() {
   };
 
   const startRenameCategory = (catId: string, name: string) => {
-    if (!checkOwnerPermission()) return;
     setEditingCategoryId(catId);
     setEditNameInput(name);
   };
 
   const confirmRenameCategory = (catId: string, oldName: string) => {
-    if (!checkOwnerPermission()) return;
     if (!editNameInput.trim()) return;
     const newName = editNameInput.trim();
     setCategories(prev => prev.map(c => c.id === catId ? { ...c, name: newName } : c));
@@ -1289,13 +1295,11 @@ export default function SfxLibrary() {
   };
 
   const startRenameSubCategory = (subId: string, name: string) => {
-    if (!checkOwnerPermission()) return;
     setEditingSubCategoryId(subId);
     setEditNameInput(name);
   };
 
   const confirmRenameSubCategory = (groupId: string, subId: string, oldName: string) => {
-    if (!checkOwnerPermission()) return;
     if (!editNameInput.trim()) return;
     const newName = editNameInput.trim();
     setCategories(prev => prev.map(group => {
@@ -2533,39 +2537,24 @@ export default function SfxLibrary() {
               <div className="flex items-center justify-between text-[11px] font-bold tracking-wider text-slate-400 uppercase px-1">
                 <div className="flex items-center gap-1.5">
                   <span>标准目录树</span>
-                  {isAuthorized ? (
-                    <ShieldCheck className="h-3 w-3 text-emerald-500" />
-                  ) : (
-                    <Lock className="h-3 w-3 text-slate-300" />
-                  )}
+                  <FolderPlus className="h-3 w-3 text-emerald-500" />
                 </div>
-                {isAuthorized ? (
-                  <button
-                    type="button"
-                    onClick={() => setIsDirectoryManageMode(prev => !prev)}
-                    className={`rounded-full border px-2 py-0.5 text-[9px] font-black transition-all ${
-                      isDirectoryManageMode
-                        ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                        : 'border-slate-200 bg-white text-slate-400 hover:text-slate-700'
-                    }`}
-                    title="开启后可重命名、上下移动、删除和新增目录"
-                  >
-                    {isDirectoryManageMode ? '管理中' : '管理'}
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={checkOwnerPermission}
-                    className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[9px] font-black text-slate-400 hover:text-slate-700"
-                    title="只有所有者和已授权成员可编辑目录"
-                  >
-                    只读
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={() => setIsDirectoryManageMode(prev => !prev)}
+                  className={`rounded-full border px-2 py-0.5 text-[9px] font-black transition-all ${
+                    isDirectoryManageMode
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                      : 'border-slate-200 bg-white text-slate-400 hover:text-slate-700'
+                  }`}
+                  title="开启后可重命名、上下移动、删除和新增目录"
+                >
+                  {isDirectoryManageMode ? '管理中' : '管理'}
+                </button>
               </div>
-              {isDirectoryManageMode && isAuthorized && (
+              {isDirectoryManageMode && (
                 <div className="rounded-lg border border-emerald-100 bg-emerald-50/70 px-2 py-1 text-[10px] font-bold text-emerald-700">
-                  目录管理已开启：可改名、上下移动、新增、删除。
+                  目录管理已开启：可新建母文件夹、添加子文件夹、改名、上下移动和删除目录。
                 </div>
               )}
               <nav className="space-y-2">
@@ -2589,7 +2578,7 @@ export default function SfxLibrary() {
                 </button>
 
                 {/* ----------------- PARENT GROUP A: 公司游戏音效 ----------------- */}
-                <div className="border border-slate-150 rounded-xl bg-slate-50/50 p-1.5 space-y-1">
+                <div className="hidden">
                   <div 
                     onClick={() => setIsCompanySfxParentExpanded(!isCompanySfxParentExpanded)}
                     className="flex items-center justify-between px-2 py-1.5 rounded-lg text-[10.5px] font-black text-slate-500 uppercase tracking-wider cursor-pointer hover:bg-slate-100/50 transition-all"
@@ -2898,7 +2887,7 @@ export default function SfxLibrary() {
                 </div>
 
                 {/* ----------------- PARENT GROUP B: 全部音乐 ----------------- */}
-                <div className="border border-slate-150 rounded-xl bg-slate-50/50 p-1.5 space-y-1">
+                <div className="hidden">
                   <div 
                     onClick={() => setIsMusicParentExpanded(!isMusicParentExpanded)}
                     className="flex items-center justify-between px-2 py-1.5 rounded-lg text-[10.5px] font-black text-slate-500 uppercase tracking-wider cursor-pointer hover:bg-slate-100/50 transition-all"
@@ -3206,7 +3195,7 @@ export default function SfxLibrary() {
                   )}
                 </div>
 
-                {/* ----------------- PARENT GROUP C: 音效分类 ----------------- */}
+                {/* ----------------- CUSTOM DIRECTORY TREE ----------------- */}
                 <div className="border border-slate-150 rounded-xl bg-slate-50/50 p-1.5 space-y-1">
                   <div 
                     onClick={() => setIsStandardSfxParentExpanded(!isStandardSfxParentExpanded)}
@@ -3214,17 +3203,22 @@ export default function SfxLibrary() {
                   >
                     <span className="flex items-center gap-1">
                       {isStandardSfxParentExpanded ? <ChevronDown className="w-3 h-3 text-slate-400" /> : <ChevronRight className="w-3 h-3 text-slate-400" />}
-                      音效分类
+                      自定义文件夹
                     </span>
                     <span className="text-[9px] bg-emerald-50 text-emerald-600 border border-emerald-100 px-1.5 py-0.2 rounded font-bold font-mono">
-                      {categories.filter(c => c.id !== 'music_all' && c.id !== 'company_sfx').reduce((acc, c) => acc + sounds.filter(s => s.category === c.name || c.subCategories.map(sub => sub.name).includes(s.category) || (s.subcategory && c.subCategories.map(sub => sub.name).includes(s.subcategory))).length, 0)}
+                      {categories.reduce((acc, c) => acc + sounds.filter(s => s.category === c.name || c.subCategories.map(sub => sub.name).includes(s.category) || (s.subcategory && c.subCategories.map(sub => sub.name).includes(s.subcategory))).length, 0)}
                     </span>
                   </div>
 
                   {isStandardSfxParentExpanded && (
                     <div className="space-y-1 pl-0.5">
+                      {categories.length === 0 && (
+                        <div className="rounded-lg border border-dashed border-slate-200 bg-white px-3 py-3 text-center">
+                          <p className="text-[10px] font-bold text-slate-500">还没有文件夹</p>
+                          <p className="mt-1 text-[9px] leading-relaxed text-slate-400">点击下方“新增母文件夹”后，再在母文件夹里添加子文件夹。</p>
+                        </div>
+                      )}
                       {categories
-                        .filter(c => c.id !== 'music_all' && c.id !== 'company_sfx')
                         .map((group, sectionIdx) => {
                           const isExpanded = !!expandedGroups[group.id];
                           const isGroupActive = selectedCategory === group.name;
@@ -3538,8 +3532,8 @@ export default function SfxLibrary() {
                     </div>
                   )}
 
-                  {/* Add parent category input (only for designer) */}
-                  {canManageDirectories && (
+                  {/* Add parent folder */}
+                  {isDirectoryManageMode && (
                     <div className="pt-2 px-1 border-t border-slate-100">
                       {isAddingGroup ? (
                         <div className="flex items-center gap-1.5 p-1 bg-slate-50 rounded-lg border border-slate-200">
@@ -3571,7 +3565,7 @@ export default function SfxLibrary() {
                           className="w-full flex items-center justify-center gap-1 py-1.5 px-2 bg-slate-100 hover:bg-slate-200 text-slate-500 hover:text-slate-800 text-[9.5px] rounded-lg transition-all border border-slate-150 border-dashed"
                         >
                           <FolderPlus className="w-3.5 h-3.5 text-slate-400" />
-                          <span>新增音效主分类目录</span>
+                           <span>新增母文件夹</span>
                         </button>
                       )}
                     </div>
@@ -3600,42 +3594,6 @@ export default function SfxLibrary() {
                   <span className="text-[10px] font-mono text-slate-450 bg-slate-100 px-1.5 py-0.2 rounded">{sounds.filter(s => s.isFavorite).length}</span>
                 </button>
               </nav>
-            </div>
-
-            {/* Smart Tag Cloud */}
-            <div className="space-y-2.5">
-              <div className="flex items-center justify-between text-[11px] font-bold tracking-wider text-slate-400 uppercase px-1">
-                <span>动态特征标签云</span>
-                <span className="text-[10px] text-slate-400">AI Tags</span>
-              </div>
-              <div className="flex flex-wrap gap-1.5 p-1">
-                <button
-                  onClick={() => setSelectedTag(null)}
-                  className={`px-2 py-1 rounded-md text-[10px] font-bold transition-all ${
-                    selectedTag === null 
-                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
-                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200/75'
-                  }`}
-                >
-                  # 全部标签
-                </button>
-                {allTags.map((tag, i) => {
-                  const isActive = selectedTag === tag;
-                  return (
-                    <button
-                      key={i}
-                      onClick={() => setSelectedTag(isActive ? null : tag)}
-                      className={`px-2 py-1 rounded-md text-[10px] font-bold transition-all ${
-                        isActive 
-                          ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
-                          : 'bg-slate-100 border border-transparent text-slate-600 hover:bg-slate-200/75 hover:text-slate-800'
-                      }`}
-                    >
-                      #{tag}
-                    </button>
-                  );
-                })}
-              </div>
             </div>
 
           </div>

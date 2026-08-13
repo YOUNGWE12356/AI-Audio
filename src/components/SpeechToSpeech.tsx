@@ -19,7 +19,9 @@ import {
   FileAudio,
   Loader2,
   Pencil,
-  Check
+  Check,
+  PlusCircle,
+  Trash2
 } from 'lucide-react';
 import { HistoryItem } from '../types';
 import { VoiceItem } from '../data/voices';
@@ -34,6 +36,78 @@ interface SpeechToSpeechProps {
   handlePlayVoicePreview: (voiceId: string, url: string, e: React.MouseEvent) => void;
   onAudioPlay: () => void;
 }
+
+interface PendingStsOption {
+  url: string;
+  voiceLabel: string;
+  displayName: string;
+  sourceName: string;
+  timestamp: string;
+  details: string;
+}
+
+interface StsAudioPreviewAnalysis {
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  duration: number | null;
+  peaks: number[];
+}
+
+const EMPTY_STS_AUDIO_PREVIEW: StsAudioPreviewAnalysis = {
+  status: 'idle',
+  duration: null,
+  peaks: [],
+};
+
+const FALLBACK_STS_WAVEFORM = [
+  0.22, 0.38, 0.56, 0.31, 0.64, 0.78, 0.42, 0.58,
+  0.86, 0.48, 0.72, 0.36, 0.52, 0.28, 0.44, 0.62,
+  0.34, 0.50, 0.76, 0.92, 0.54, 0.68, 0.40, 0.30,
+  0.46, 0.70, 0.84, 0.60, 0.74, 0.38, 0.56, 0.32,
+  0.48, 0.66, 0.88, 0.44, 0.63, 0.35, 0.52, 0.76,
+  0.90, 0.58, 0.72, 0.42, 0.60, 0.34, 0.50, 0.26,
+];
+
+const formatStsAudioDuration = (duration?: number | null) => {
+  if (!duration || !Number.isFinite(duration)) return '--:--';
+  const totalSeconds = Math.max(0, Math.round(duration));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+};
+
+const sanitizeStsDownloadName = (value: string) => (
+  (value || 'speech_to_speech')
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 120) || 'speech_to_speech'
+);
+
+const stripAudioExtension = (fileName: string) => fileName.replace(/\.[^/.]+$/, '');
+
+const buildStsMonoPeaks = (audioBuffer: AudioBuffer, barCount = 72) => {
+  const channels = Array.from({ length: audioBuffer.numberOfChannels }, (_, index) => audioBuffer.getChannelData(index));
+  const samplesPerBar = Math.max(1, Math.floor(audioBuffer.length / barCount));
+  const peaks = Array.from({ length: barCount }, (_, barIndex) => {
+    const start = barIndex * samplesPerBar;
+    const end = barIndex === barCount - 1
+      ? audioBuffer.length
+      : Math.min(audioBuffer.length, start + samplesPerBar);
+    let peak = 0;
+    for (let sampleIndex = start; sampleIndex < end; sampleIndex += 1) {
+      let mixedSample = 0;
+      for (const channelData of channels) {
+        mixedSample += Math.abs(channelData[sampleIndex] || 0);
+      }
+      peak = Math.max(peak, mixedSample / Math.max(1, channels.length));
+    }
+    return peak;
+  });
+
+  const maxPeak = Math.max(...peaks, 0.001);
+  return peaks.map(peak => Math.min(1, Math.max(0.08, peak / maxPeak)));
+};
 
 export default function SpeechToSpeech({
   historyList,
@@ -50,6 +124,7 @@ export default function SpeechToSpeech({
   const stsInputRef = useRef<HTMLInputElement | null>(null);
   const [stsInputIsPlaying, setStsInputIsPlaying] = useState(false);
   const stsInputAudioRef = useRef<HTMLAudioElement | null>(null);
+  const stsFileUrlRef = useRef<string | null>(null);
 
   // STS Voice Selection States
   const [stsVoiceRole, setStsVoiceRole] = useState('');
@@ -65,6 +140,17 @@ export default function SpeechToSpeech({
   const [stsError, setStsError] = useState<string | null>(null);
   const [stsIsPlaying, setStsIsPlaying] = useState(false);
   const stsAudioRef = useRef<HTMLAudioElement | null>(null);
+  const stsAudioUrlRef = useRef<string | null>(null);
+  const [pendingStsOptions, setPendingStsOptions] = useState<{
+    optionA: PendingStsOption | null;
+    optionB: PendingStsOption | null;
+  }>({ optionA: null, optionB: null });
+  const [playingOptionId, setPlayingOptionId] = useState<'A' | 'B' | null>(null);
+  const [optionPreviews, setOptionPreviews] = useState<Record<'A' | 'B', StsAudioPreviewAnalysis>>({
+    A: EMPTY_STS_AUDIO_PREVIEW,
+    B: EMPTY_STS_AUDIO_PREVIEW,
+  });
+  const optionAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // History play states in sub-component
   const [playingHistoryId, setPlayingHistoryId] = useState<string | null>(null);
@@ -73,11 +159,65 @@ export default function SpeechToSpeech({
   const historyAudioRefs = useRef<{ [key: string]: HTMLAudioElement | null }>({});
 
   useEffect(() => {
-    return () => {
-      if (stsFileUrl) URL.revokeObjectURL(stsFileUrl);
-      if (stsAudioUrl) URL.revokeObjectURL(stsAudioUrl);
+    stsFileUrlRef.current = stsFileUrl;
+  }, [stsFileUrl]);
+
+  useEffect(() => {
+    stsAudioUrlRef.current = stsAudioUrl;
+  }, [stsAudioUrl]);
+
+  useEffect(() => () => {
+    if (stsFileUrlRef.current) URL.revokeObjectURL(stsFileUrlRef.current);
+    if (stsAudioUrlRef.current) URL.revokeObjectURL(stsAudioUrlRef.current);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const AudioContextCtor = window.AudioContext || (window as any).webkitAudioContext;
+
+    const analyseOption = async (id: 'A' | 'B', url?: string) => {
+      if (!url || !AudioContextCtor) {
+        setOptionPreviews(prev => ({ ...prev, [id]: EMPTY_STS_AUDIO_PREVIEW }));
+        return;
+      }
+
+      setOptionPreviews(prev => ({
+        ...prev,
+        [id]: { status: 'loading', duration: null, peaks: [] },
+      }));
+
+      try {
+        const response = await fetch(url);
+        const arrayBuffer = await response.arrayBuffer();
+        const audioContext = new AudioContextCtor();
+        const decodedBuffer = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+        await audioContext.close().catch(() => undefined);
+        if (cancelled) return;
+        setOptionPreviews(prev => ({
+          ...prev,
+          [id]: {
+            status: 'ready',
+            duration: decodedBuffer.duration,
+            peaks: buildStsMonoPeaks(decodedBuffer),
+          },
+        }));
+      } catch (error) {
+        console.warn('Failed to analyse STS waveform:', error);
+        if (cancelled) return;
+        setOptionPreviews(prev => ({
+          ...prev,
+          [id]: { status: 'error', duration: null, peaks: [] },
+        }));
+      }
     };
-  }, [stsFileUrl, stsAudioUrl]);
+
+    analyseOption('A', pendingStsOptions.optionA?.url);
+    analyseOption('B', pendingStsOptions.optionB?.url);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pendingStsOptions.optionA?.url, pendingStsOptions.optionB?.url]);
 
   const handleStsDrag = (e: React.DragEvent) => {
     e.preventDefault();
@@ -106,6 +246,9 @@ export default function SpeechToSpeech({
     setStsFileUrl(URL.createObjectURL(file));
     setStsInputIsPlaying(false);
     setStsAudioUrl(null);
+    if (pendingStsOptions.optionA) URL.revokeObjectURL(pendingStsOptions.optionA.url);
+    if (pendingStsOptions.optionB) URL.revokeObjectURL(pendingStsOptions.optionB.url);
+    setPendingStsOptions({ optionA: null, optionB: null });
   };
 
   const toggleStsInputPlay = () => {
@@ -143,30 +286,46 @@ export default function SpeechToSpeech({
     setStsLoading(true);
     setStsError(null);
     try {
-      const blob = await generateSpeechToSpeech(stsFile, stsVoiceRole);
-      const url = URL.createObjectURL(blob);
-      setStsAudioUrl(url);
+      if (pendingStsOptions.optionA) URL.revokeObjectURL(pendingStsOptions.optionA.url);
+      if (pendingStsOptions.optionB) URL.revokeObjectURL(pendingStsOptions.optionB.url);
+
+      const [blobA, blobB] = await Promise.all([
+        generateSpeechToSpeech(stsFile, stsVoiceRole),
+        generateSpeechToSpeech(stsFile, stsVoiceRole),
+      ]);
+      const urlA = URL.createObjectURL(blobA);
+      const urlB = URL.createObjectURL(blobB);
+      setStsAudioUrl(urlA);
 
       const matchedVoice = displayVoices.find(v => v.id === stsVoiceRole);
       const voiceLabel = matchedVoice ? matchedVoice.name : '自定义声线';
-      
-      const newHistoryItem: HistoryItem = {
-        id: `sts-${Date.now()}`,
-        type: 'voice',
-        title: `语音变声 - ${voiceLabel}`,
-        prompt: `源音频：${stsFile.name} ➡️ 变声目标：${voiceLabel}`,
-        url: url,
-        timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
-        details: `${(stsFile.size / 1024 / 1024).toFixed(2)}MB · ${stsVoiceGender === 'male' ? '男声' : '女声'}`,
-        speed: 1.0
-      };
-      setHistoryList(prev => [newHistoryItem, ...prev]);
+      const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 16);
+      const details = `${(stsFile.size / 1024 / 1024).toFixed(2)}MB · ${stsVoiceGender === 'male' ? '男声' : '女声'}`;
+      const sourceBaseName = stripAudioExtension(stsFile.name);
+      setPendingStsOptions({
+        optionA: {
+          url: urlA,
+          voiceLabel,
+          displayName: `${sourceBaseName}_变声_A`,
+          sourceName: stsFile.name,
+          timestamp,
+          details,
+        },
+        optionB: {
+          url: urlB,
+          voiceLabel,
+          displayName: `${sourceBaseName}_变声_B`,
+          sourceName: stsFile.name,
+          timestamp,
+          details,
+        },
+      });
 
       // Auto play the converted audio to give instant feedback
       setTimeout(() => {
         if (stsAudioRef.current) {
           onAudioPlay();
-          stsAudioRef.current.src = url;
+          stsAudioRef.current.src = urlA;
           stsAudioRef.current.play().catch(e => console.error(e));
           setStsIsPlaying(true);
         }
@@ -176,6 +335,137 @@ export default function SpeechToSpeech({
     } finally {
       setStsLoading(false);
     }
+  };
+
+  const playStsOption = (id: 'A' | 'B', url: string) => {
+    if (stsAudioRef.current) {
+      stsAudioRef.current.pause();
+      setStsIsPlaying(false);
+    }
+    if (stsInputAudioRef.current) {
+      stsInputAudioRef.current.pause();
+      setStsInputIsPlaying(false);
+    }
+    if (playingHistoryId && historyAudioRefs.current[playingHistoryId]) {
+      historyAudioRefs.current[playingHistoryId]?.pause();
+      setPlayingHistoryId(null);
+    }
+    onAudioPlay();
+    if (!optionAudioRef.current) optionAudioRef.current = new Audio();
+
+    if (playingOptionId === id) {
+      optionAudioRef.current.pause();
+      setPlayingOptionId(null);
+      return;
+    }
+    optionAudioRef.current.src = url;
+    optionAudioRef.current.play()
+      .then(() => setPlayingOptionId(id))
+      .catch(error => console.error('Play STS option failed:', error));
+    optionAudioRef.current.onended = () => setPlayingOptionId(null);
+  };
+
+  const saveStsOption = (id: 'A' | 'B') => {
+    const selected = id === 'A' ? pendingStsOptions.optionA : pendingStsOptions.optionB;
+    const other = id === 'A' ? pendingStsOptions.optionB : pendingStsOptions.optionA;
+    if (!selected) return;
+    setHistoryList(prev => [{
+      id: `sts-${id}-${Date.now()}`,
+      type: 'voice',
+      title: selected.displayName || `语音变声 - ${selected.voiceLabel}（版本 ${id}）`,
+      prompt: `源音频：${selected.sourceName} ➡️ 变声目标：${selected.voiceLabel}`,
+      url: selected.url,
+      timestamp: selected.timestamp,
+      details: selected.details,
+      speed: 1.0,
+    }, ...prev]);
+    setStsAudioUrl(selected.url);
+    if (other) URL.revokeObjectURL(other.url);
+    optionAudioRef.current?.pause();
+    setPlayingOptionId(null);
+    setPendingStsOptions({ optionA: null, optionB: null });
+  };
+
+  const saveBothStsOptions = () => {
+    const now = Date.now();
+    const items: HistoryItem[] = [];
+    if (pendingStsOptions.optionA) {
+      items.push({
+        id: `sts-A-${now}`,
+        type: 'voice',
+        title: pendingStsOptions.optionA.displayName || `语音变声 - ${pendingStsOptions.optionA.voiceLabel}（版本 A）`,
+        prompt: `源音频：${pendingStsOptions.optionA.sourceName} ➡️ 变声目标：${pendingStsOptions.optionA.voiceLabel}`,
+        url: pendingStsOptions.optionA.url,
+        timestamp: pendingStsOptions.optionA.timestamp,
+        details: pendingStsOptions.optionA.details,
+        speed: 1.0,
+      });
+      setStsAudioUrl(pendingStsOptions.optionA.url);
+    }
+    if (pendingStsOptions.optionB) {
+      items.push({
+        id: `sts-B-${now}`,
+        type: 'voice',
+        title: pendingStsOptions.optionB.displayName || `语音变声 - ${pendingStsOptions.optionB.voiceLabel}（版本 B）`,
+        prompt: `源音频：${pendingStsOptions.optionB.sourceName} ➡️ 变声目标：${pendingStsOptions.optionB.voiceLabel}`,
+        url: pendingStsOptions.optionB.url,
+        timestamp: pendingStsOptions.optionB.timestamp,
+        details: pendingStsOptions.optionB.details,
+        speed: 1.0,
+      });
+    }
+    if (items.length > 0) setHistoryList(prev => [...items, ...prev]);
+    optionAudioRef.current?.pause();
+    setPlayingOptionId(null);
+    setPendingStsOptions({ optionA: null, optionB: null });
+  };
+
+  const discardStsOptions = () => {
+    if (pendingStsOptions.optionA) URL.revokeObjectURL(pendingStsOptions.optionA.url);
+    if (pendingStsOptions.optionB) URL.revokeObjectURL(pendingStsOptions.optionB.url);
+    optionAudioRef.current?.pause();
+    setPlayingOptionId(null);
+    setPendingStsOptions({ optionA: null, optionB: null });
+    setStsAudioUrl(null);
+    setStsIsPlaying(false);
+  };
+
+  const updateStsOptionName = (id: 'A' | 'B', displayName: string) => {
+    setPendingStsOptions(prev => ({
+      ...prev,
+      [id === 'A' ? 'optionA' : 'optionB']: prev[id === 'A' ? 'optionA' : 'optionB']
+        ? { ...prev[id === 'A' ? 'optionA' : 'optionB']!, displayName }
+        : null,
+    }));
+  };
+
+  const renderStsOptionWaveform = (id: 'A' | 'B') => {
+    const preview = optionPreviews[id];
+    const peaks = preview.peaks.length > 0 ? preview.peaks : FALLBACK_STS_WAVEFORM;
+    const isPlaying = playingOptionId === id;
+    const barColor = id === 'A'
+      ? 'from-emerald-500 to-emerald-700'
+      : 'from-teal-500 to-cyan-700';
+
+    return (
+      <div className="rounded-xl border border-slate-200 bg-slate-950 px-3 py-3 shadow-inner">
+        <div className="flex h-16 items-center gap-[2px]">
+          {peaks.map((peak, index) => {
+            const heightPercent = Math.max(12, Math.round(peak * 100));
+            return (
+              <div
+                key={`${id}-sts-wave-${index}`}
+                className={`flex-1 rounded-full bg-gradient-to-t ${barColor} ${isPlaying ? 'opacity-100' : 'opacity-80'}`}
+                style={{
+                  height: `${heightPercent}%`,
+                  boxShadow: isPlaying ? '0 0 10px rgba(16, 185, 129, 0.35)' : undefined,
+                }}
+              />
+            );
+          })}
+        </div>
+      </div>
+    );
   };
 
   const handleHistoryPlayPause = (id: string) => {
@@ -600,117 +890,107 @@ export default function SpeechToSpeech({
 
       {/* Right Column: Player & History Panel */}
       <div className="lg:col-span-5 space-y-5">
-        {/* Playback card */}
-        <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-4 shadow-sm">
-          <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider">变声结果预览与回放控制</h3>
-
-          {stsLoading ? (
-            <div className="bg-slate-50 border border-slate-200 rounded-xl p-10 flex flex-col items-center justify-center text-center space-y-3">
-              <div className="w-12 h-12 bg-emerald-50 border border-emerald-200 rounded-full flex items-center justify-center animate-spin">
-                <Mic className="w-5 h-5 text-emerald-600 animate-pulse" />
+        {(pendingStsOptions.optionA || pendingStsOptions.optionB) && (
+          <div className="bg-emerald-50/40 border-2 border-emerald-500/30 rounded-2xl p-5 space-y-4 shadow-sm">
+            <div className="flex items-center justify-between gap-3 border-b border-emerald-500/10 pb-2.5">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-emerald-600" />
+                <h4 className="text-[11px] font-black text-slate-800 uppercase tracking-wider">已生成双版本变声</h4>
               </div>
-              <div className="space-y-0.5">
-                <p className="text-xs font-bold text-slate-700">正在生成变声作品...</p>
-                <p className="text-[10px] text-slate-400">大约需要 5 - 10 秒</p>
-              </div>
+              <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[9px] font-bold text-emerald-700">先试听再保留</span>
             </div>
-          ) : stsAudioUrl ? (
-            <div className="bg-slate-50 border border-slate-200 rounded-xl p-5 space-y-4 relative overflow-hidden">
-              <div className="absolute top-0 right-0 w-24 h-24 bg-emerald-500/5 blur-xl pointer-events-none" />
-              <audio
-                ref={stsAudioRef}
-                src={stsAudioUrl}
-                onPlay={() => setStsIsPlaying(true)}
-                onPause={() => setStsIsPlaying(false)}
-                onEnded={() => setStsIsPlaying(false)}
-              />
 
-              <div className="flex items-center gap-4">
-                <button
-                  onClick={() => {
-                    if (stsAudioRef.current) {
-                      if (stsIsPlaying) {
-                        stsAudioRef.current.pause();
-                        setStsIsPlaying(false);
-                      } else {
-                        onAudioPlay();
-                        if (stsInputAudioRef.current) {
-                          stsInputAudioRef.current.pause();
-                          setStsInputIsPlaying(false);
-                        }
-                        if (playingHistoryId && historyAudioRefs.current[playingHistoryId]) {
-                          historyAudioRefs.current[playingHistoryId]?.pause();
-                          setPlayingHistoryId(null);
-                        }
-                        stsAudioRef.current.play().catch(e => console.error(e));
-                        setStsIsPlaying(true);
-                      }
-                    }
-                  }}
-                  className={`w-12 h-12 rounded-full flex items-center justify-center shrink-0 border transition-all ${
-                    stsIsPlaying
-                      ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm shadow-emerald-500/20'
-                      : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100 hover:text-slate-950'
-                  }`}
-                >
-                  {stsIsPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
-                </button>
+            <div className="grid grid-cols-1 gap-3">
+              {([
+                ['A', pendingStsOptions.optionA, 'bg-emerald-600 hover:bg-emerald-700'],
+                ['B', pendingStsOptions.optionB, 'bg-teal-600 hover:bg-teal-700'],
+              ] as const).map(([id, option, buttonClass]) => option && (
+                <div key={id} className="rounded-2xl border border-emerald-100 bg-white p-3.5 shadow-sm space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5 text-[11px] font-black text-slate-800">
+                      <span className={`flex h-4.5 w-4.5 items-center justify-center rounded-full text-[9px] font-black text-white ${id === 'A' ? 'bg-emerald-600' : 'bg-teal-600'}`}>{id}</span>
+                      版本 {id}
+                    </span>
+                    <span className="rounded-full bg-slate-100 px-2 py-0.5 font-mono text-[10px] font-black text-slate-600">
+                      {formatStsAudioDuration(optionPreviews[id].duration)}
+                    </span>
+                  </div>
 
-                <div className="min-w-0 flex-1">
-                  <p className="text-xs font-bold text-slate-800 truncate">AI 语音变声转换后</p>
-                  <p className="text-[10px] text-slate-500 truncate italic mt-0.5">源音频: "{stsFile?.name}"</p>
-                  <span className="text-[9px] text-emerald-600 font-semibold mt-1 block">
-                    音色：{stsVoiceGender === 'male' ? '男声' : '女声'} · {(() => {
-                      const matched = displayVoices.find(v => v.id === stsVoiceRole);
-                      return matched ? matched.name : '经典声线';
-                    })()}
-                  </span>
+                  <label className="block space-y-1">
+                    <span className="text-[9px] font-black uppercase tracking-wider text-slate-400">下载文件名</span>
+                    <input
+                      type="text"
+                      value={option.displayName}
+                      onChange={(event) => updateStsOptionName(id, event.target.value)}
+                      className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] font-bold text-slate-800 outline-none transition-all hover:border-slate-300 focus:border-emerald-400 focus:bg-white focus:ring-1 focus:ring-emerald-200"
+                    />
+                  </label>
+
+                  <div className="flex items-center gap-2 rounded-xl border border-slate-100 bg-slate-50 p-2.5">
+                    <button
+                      type="button"
+                      onClick={() => playStsOption(id, option.url)}
+                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition-all ${
+                        playingOptionId === id
+                          ? `${id === 'A' ? 'bg-emerald-600 border-emerald-500' : 'bg-teal-600 border-teal-500'} text-white`
+                          : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
+                      }`}
+                      title={playingOptionId === id ? '暂停试听' : '试听'}
+                    >
+                      {playingOptionId === id ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
+                    </button>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[11px] font-black text-slate-800">{option.voiceLabel}</p>
+                      <p className="mt-0.5 truncate text-[9px] text-slate-400">
+                        {optionPreviews[id].status === 'loading' ? '正在读取音波...' : `源音频：${option.sourceName}`}
+                      </p>
+                    </div>
+                  </div>
+
+                  {renderStsOptionWaveform(id)}
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => downloadAudioHelper(option.url, `${sanitizeStsDownloadName(option.displayName)}.mp3`)}
+                      className="flex w-full items-center justify-center gap-1 rounded-lg border border-slate-200 bg-white py-1.5 text-[10px] font-bold text-slate-700 transition-colors hover:bg-emerald-50 hover:text-emerald-700"
+                    >
+                      <Download className="w-3 h-3" />
+                      <span>下载版本 {id}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => saveStsOption(id)}
+                      className={`flex w-full items-center justify-center gap-1 rounded-lg py-1.5 text-[10px] font-bold text-white transition-colors ${buttonClass}`}
+                    >
+                      <Check className="w-3 h-3" />
+                      <span>保留版本 {id}</span>
+                    </button>
+                  </div>
                 </div>
-
-                <button
-                  onClick={() => {
-                    if (stsAudioUrl) URL.revokeObjectURL(stsAudioUrl);
-                    setStsAudioUrl(null);
-                    setStsIsPlaying(false);
-                  }}
-                  className="p-1 text-slate-400 hover:text-red-500 transition-colors"
-                  title="清除"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-
-              {/* Waveform visual simulator */}
-              <div className="flex items-end justify-between h-8 bg-slate-200/50 p-2 rounded-lg gap-0.5 border border-slate-200">
-                {Array.from({ length: 24 }).map((_, i) => (
-                  <span
-                    key={i}
-                    className="bg-emerald-500 rounded-t w-1"
-                    style={{
-                      height: stsIsPlaying ? `${Math.floor(Math.random() * 95) + 5}%` : '15%',
-                      transition: 'height 0.12s ease-in-out'
-                    }}
-                  />
-                ))}
-              </div>
-
-              <div className="flex items-center gap-2 pt-1">
-                <button
-                  onClick={() => stsAudioUrl && downloadAudioHelper(stsAudioUrl, `converted_${stsVoiceRole}.mp3`)}
-                  className="w-full bg-white hover:bg-emerald-50 border border-slate-200 text-slate-700 hover:text-emerald-700 py-2 rounded-xl text-[10px] font-bold text-center transition-all flex items-center justify-center gap-1.5 shadow-sm cursor-pointer"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>下载 MP3 变声文件</span>
-                </button>
-              </div>
+              ))}
             </div>
-          ) : (
-            <div className="border border-dashed border-slate-200 bg-slate-50 rounded-xl p-10 text-center text-slate-400 text-xs leading-relaxed">
-              <Mic className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-              <span>上传本地人声源文件，并指定变声目标，点击立刻生成移植音色后的声音。</span>
+
+            <div className="flex items-center gap-2 border-t border-emerald-500/10 pt-2">
+              <button
+                type="button"
+                onClick={saveBothStsOptions}
+                className="flex flex-1 items-center justify-center gap-1 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 py-2 text-[10px] font-black text-white hover:from-emerald-700 hover:to-teal-700"
+              >
+                <PlusCircle className="w-3.5 h-3.5" />
+                <span>两个都保留</span>
+              </button>
+              <button
+                type="button"
+                onClick={discardStsOptions}
+                className="flex items-center justify-center gap-1 rounded-lg bg-slate-100 px-3 py-2 text-[10px] font-bold text-slate-600 hover:bg-slate-200"
+              >
+                <Trash2 className="w-3 h-3" />
+                <span>放弃</span>
+              </button>
             </div>
-          )}
-        </div>
+          </div>
+        )}
 
         {/* Saved archive history */}
         <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-4 shadow-sm">

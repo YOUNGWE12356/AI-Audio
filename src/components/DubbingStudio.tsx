@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -17,15 +17,12 @@ import {
   Sparkles,
   Volume2,
   Users,
-  Smile,
   Globe,
   Pencil,
   Check,
   Search,
   ChevronDown,
   Info,
-  PlusCircle,
-  Trash2,
   Languages,
   UploadCloud,
   FileAudio
@@ -33,21 +30,21 @@ import {
 import { HistoryItem } from '../types';
 import { ELEVENLABS_VOICES, VoiceItem } from '../data/voices';
 import { fetchAvailableVoices, generateSpeechToSpeech } from '../services/elevenLabsService';
-import { translateToEnglish } from '../services/geminiService';
 import SpeechToSpeech from './SpeechToSpeech';
 import SpeechToText from './SpeechToText';
+import CrossLanguageDubbing from './CrossLanguageDubbing';
 import { downloadAudioHelper } from '../utils/downloadHelper';
 
 interface PendingVoiceOption {
   url: string;
   voiceLabel: string;
+  displayName: string;
   emotionLabel: string;
   processedText: string;
   timestamp: string;
   details: string;
   speed: number;
 }
-
 interface DubbingStudioProps {
   standaloneVoicePrompt: string;
   setStandaloneVoicePrompt: (prompt: string) => void;
@@ -55,6 +52,7 @@ interface DubbingStudioProps {
   setStandaloneVoiceGender: (gender: 'male' | 'female') => void;
   standaloneVoiceRole: string;
   setStandaloneVoiceRole: (role: string) => void;
+  setSelectedStandaloneVoice?: (voice: VoiceItem | null) => void;
   standaloneVoiceLang: string;
   setStandaloneVoiceLang: (lang: string) => void;
   standaloneVoiceSpeed: number;
@@ -84,6 +82,7 @@ export default function DubbingStudio({
   setStandaloneVoiceGender,
   standaloneVoiceRole,
   setStandaloneVoiceRole,
+  setSelectedStandaloneVoice,
   standaloneVoiceLang,
   setStandaloneVoiceLang,
   standaloneVoiceSpeed,
@@ -103,9 +102,15 @@ export default function DubbingStudio({
   const [playingHistoryId, setPlayingHistoryId] = useState<string | null>(null);
   const [editingHistoryId, setEditingHistoryId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
+  const [fetchedVoices, setFetchedVoices] = useState<VoiceItem[]>([]);
+  const [isLoadingVoices, setIsLoadingVoices] = useState(false);
+  const [previewPlayingId, setPreviewPlayingId] = useState<'A' | 'B' | null>(null);
+  const [previewDurations, setPreviewDurations] = useState<Record<'A' | 'B', number | null>>({ A: null, B: null });
+  const generatedPreviewAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // Active sub-tab state ('tts' = Text-to-Speech, 'sts' = Speech-to-Speech, 'stt' = Speech-to-Text)
-  const [activeSubTab, setActiveSubTab] = useState<'tts' | 'sts' | 'stt'>('tts');
+  const [activeSubTab, setActiveSubTab] = useState<'tts' | 'sts' | 'translate' | 'stt'>('tts');
+  const [visitedSubTabs, setVisitedSubTabs] = useState<Set<'tts' | 'sts' | 'translate' | 'stt'>>(() => new Set(['tts']));
   const [subNavWidth, setSubNavWidth] = useState(() => {
     if (typeof window === 'undefined') return 240;
     const saved = Number(window.localStorage.getItem('ai-audio-dubbing-subnav-width'));
@@ -166,6 +171,15 @@ export default function DubbingStudio({
     if (typeof window === 'undefined') return;
     window.localStorage.setItem('ai-audio-dubbing-subnav-width', String(subNavWidth));
   }, [subNavWidth]);
+
+  useEffect(() => {
+    setVisitedSubTabs(prev => {
+      if (prev.has(activeSubTab)) return prev;
+      const next = new Set(prev);
+      next.add(activeSubTab);
+      return next;
+    });
+  }, [activeSubTab]);
 
   useEffect(() => {
     return () => {
@@ -252,7 +266,7 @@ export default function DubbingStudio({
         id: `sts-${Date.now()}`,
         type: 'voice',
         title: `语音变声 - ${voiceLabel}`,
-        prompt: `源音频：${stsFile.name} ➡️ 变声目标：${voiceLabel}`,
+        prompt: `源音频：${stsFile.name} → 变声目标：${voiceLabel}`,
         url: url,
         timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
         details: `${(stsFile.size / 1024 / 1024).toFixed(2)}MB · ${stsVoiceGender === 'male' ? '男声' : '女声'}`,
@@ -275,126 +289,6 @@ export default function DubbingStudio({
     }
   };
 
-  // Dual option play states & ref
-  const [playingOptionId, setPlayingOptionId] = useState<'A' | 'B' | null>(null);
-  const optionAudioRef = useRef<HTMLAudioElement | null>(null);
-
-  const handlePlayOptionAudio = (id: 'A' | 'B', url: string, speed: number) => {
-    if (!optionAudioRef.current) {
-      optionAudioRef.current = new Audio();
-    }
-
-    if (playingOptionId === id) {
-      optionAudioRef.current.pause();
-      setPlayingOptionId(null);
-    } else {
-      optionAudioRef.current.src = url;
-      optionAudioRef.current.playbackRate = speed;
-      optionAudioRef.current.play()
-        .then(() => setPlayingOptionId(id))
-        .catch(e => console.error("Play option audio failed:", e));
-      
-      optionAudioRef.current.onended = () => {
-        setPlayingOptionId(null);
-      };
-    }
-  };
-
-  const handleSaveSingleOption = (id: 'A' | 'B') => {
-    const selected = id === 'A' ? pendingVoiceOptions.optionA : pendingVoiceOptions.optionB;
-    const other = id === 'A' ? pendingVoiceOptions.optionB : pendingVoiceOptions.optionA;
-
-    if (selected) {
-      const newItem: HistoryItem = {
-        id: `voice-${Date.now()}`,
-        type: 'voice',
-        title: `角色配音 - ${selected.voiceLabel}`,
-        prompt: selected.processedText,
-        url: selected.url,
-        timestamp: selected.timestamp,
-        details: selected.details,
-        speed: selected.speed
-      };
-
-      setHistoryList(prev => [newItem, ...prev]);
-
-      // Revoke the other option's object URL to free memory, and keep the saved one
-      if (other) {
-        URL.revokeObjectURL(other.url);
-      }
-
-      // Clear pending options
-      setPendingVoiceOptions({ optionA: null, optionB: null });
-      setPlayingOptionId(null);
-      if (optionAudioRef.current) {
-        optionAudioRef.current.pause();
-      }
-    }
-  };
-
-  const handleSaveBothOptions = () => {
-    const items: HistoryItem[] = [];
-    const nowTime = Date.now();
-
-    if (pendingVoiceOptions.optionA) {
-      items.push({
-        id: `voice-A-${nowTime}`,
-        type: 'voice',
-        title: `角色配音 - ${pendingVoiceOptions.optionA.voiceLabel}`,
-        prompt: pendingVoiceOptions.optionA.processedText,
-        url: pendingVoiceOptions.optionA.url,
-        timestamp: pendingVoiceOptions.optionA.timestamp,
-        details: pendingVoiceOptions.optionA.details,
-        speed: pendingVoiceOptions.optionA.speed
-      });
-    }
-
-    if (pendingVoiceOptions.optionB) {
-      items.push({
-        id: `voice-B-${nowTime}`,
-        type: 'voice',
-        title: `角色配音 - ${pendingVoiceOptions.optionB.voiceLabel}`,
-        prompt: pendingVoiceOptions.optionB.processedText,
-        url: pendingVoiceOptions.optionB.url,
-        timestamp: pendingVoiceOptions.optionB.timestamp,
-        details: pendingVoiceOptions.optionB.details,
-        speed: pendingVoiceOptions.optionB.speed
-      });
-    }
-
-    if (items.length > 0) {
-      setHistoryList(prev => [...items, ...prev]);
-    }
-
-    setPendingVoiceOptions({ optionA: null, optionB: null });
-    setPlayingOptionId(null);
-    if (optionAudioRef.current) {
-      optionAudioRef.current.pause();
-    }
-  };
-
-  const handleDiscardOptions = () => {
-    if (pendingVoiceOptions.optionA) {
-      URL.revokeObjectURL(pendingVoiceOptions.optionA.url);
-    }
-    if (pendingVoiceOptions.optionB) {
-      URL.revokeObjectURL(pendingVoiceOptions.optionB.url);
-    }
-    setPendingVoiceOptions({ optionA: null, optionB: null });
-    setPlayingOptionId(null);
-    if (optionAudioRef.current) {
-      optionAudioRef.current.pause();
-    }
-  };
-
-  useEffect(() => {
-    return () => {
-      if (optionAudioRef.current) {
-        optionAudioRef.current.pause();
-      }
-    };
-  }, []);
-  
   // Voice selection states
   const [voiceSearchQuery, setVoiceSearchQuery] = useState('');
   const [voiceActiveCategory, setVoiceActiveCategory] = useState('全部');
@@ -407,72 +301,6 @@ export default function DubbingStudio({
   const highlightRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const [isTranslating, setIsTranslating] = useState(false);
-  const [translationError, setTranslationError] = useState<string | null>(null);
-
-  const handleTranslateSelectionToEmotion = async () => {
-    if (!textareaRef.current) return;
-    
-    const selectionStart = textareaRef.current.selectionStart;
-    const selectionEnd = textareaRef.current.selectionEnd;
-    
-    const selectedText = standaloneVoicePrompt.substring(selectionStart, selectionEnd);
-    if (!selectedText.trim()) {
-      setTranslationError('请先在下方输入框中选中需要转为情绪的文字（如：开心、悲伤）');
-      setTimeout(() => setTranslationError(null), 4000);
-      return;
-    }
-
-    setIsTranslating(true);
-    setTranslationError(null);
-
-    try {
-      // Split by common Chinese/English punctuation/symbols and spaces
-      const rawWords = selectedText
-        .split(/[,，、／\/;\s+＆&+\-_\|]+/g)
-        .map(w => w.trim())
-        .filter(Boolean);
-      
-      // Translate each word and wrap with []
-      const processedWords = await Promise.all(
-        rawWords.map(async (word) => {
-          let translated = word;
-          // Only translate if contains non-English characters
-          if (/[\u4e00-\u9fa5]/.test(word)) {
-            translated = await translateToEnglish(word);
-          }
-          // Normalize to lowercase, trim, remove brackets if Gemini accidentally output them
-          translated = translated.replace(/[\[\]]/g, '').trim().toLowerCase();
-          return `[${translated}]`;
-        })
-      );
-
-      const replacement = processedWords.join('');
-      
-      const beforeText = standaloneVoicePrompt.substring(0, selectionStart);
-      const afterText = standaloneVoicePrompt.substring(selectionEnd);
-      const newPrompt = beforeText + replacement + afterText;
-      
-      // Update state
-      handleTextChange(newPrompt);
-      
-      // Refocus textarea and place selection right after the inserted bracket
-      setTimeout(() => {
-        if (textareaRef.current) {
-          textareaRef.current.focus();
-          const newCursorPos = beforeText.length + replacement.length;
-          textareaRef.current.setSelectionRange(newCursorPos, newCursorPos);
-        }
-      }, 50);
-
-    } catch (err: any) {
-      console.error("Emotion translation failed:", err);
-      setTranslationError('情绪翻译失败，请检查网络或重试: ' + (err.message || err));
-    } finally {
-      setIsTranslating(false);
-    }
-  };
-
   const handleScroll = () => {
     if (textareaRef.current && highlightRef.current) {
       highlightRef.current.scrollTop = textareaRef.current.scrollTop;
@@ -483,57 +311,36 @@ export default function DubbingStudio({
     if (!text) {
       return (
         <span className="text-slate-400 leading-normal block">
-          在此输入要配音的文本，直接在台词中（例如开头）使用中括号来控制情绪（例如：<span className="text-emerald-600 font-bold bg-emerald-50 px-1 py-0.5 rounded border border-emerald-200">[激动地]</span> 我们终于抵达了这颗被称为蔚蓝家园的星球...）
+          在此输入要配音的文本，在台词中使用中括号标注情绪，例如 <span className="text-emerald-600 font-bold rounded-sm shadow-[inset_0_-0.7em_0_rgba(16,185,129,0.14)]">[激动地]</span> 我们终于抵达了这颗被称为蔚蓝家园的星球...
         </span>
       );
     }
-    
-    // Split by bracket expressions like [excited] or ［激动地］
-    const parts = text.split(/([\[［][^\]］]*[\]］])/g);
+
+    // Split by bracket expressions like [excited] or [开心地]
+    const parts = text.split(/(\[[^\]]+\])/g);
     return parts.map((part, index) => {
-      if ((part.startsWith('[') && part.endsWith(']')) || (part.startsWith('［') && part.endsWith('］'))) {
+      if (part.startsWith("[") && part.endsWith("]")) {
         return (
           <span 
             key={index} 
-            className="text-emerald-600 font-bold bg-emerald-100/60 px-1.5 py-0.5 rounded border border-emerald-300"
+            className="text-emerald-600 font-bold rounded-sm shadow-[inset_0_-0.7em_0_rgba(16,185,129,0.16)]"
           >
             {part}
           </span>
         );
       }
-      return <span key={index}>{part}</span>;
+      return <React.Fragment key={index}>{part}</React.Fragment>;
     });
   };
 
-  // Dynamically fetched voices from ElevenLabs API
-  const [fetchedVoices, setFetchedVoices] = useState<VoiceItem[]>([]);
-  const [isLoadingVoices, setIsLoadingVoices] = useState(false);
-  const removedDubbingVoiceIds = new Set([
-    '21m00Tcm4TlvDq8ikWAM',
-    'AZnzlk1XvdvUeBnXmlld',
-    'EXAVITQu4vr4xnSDxMaL',
-    'pMs2g89Yc9Y9Dq8ikWAM',
-    'Lcfc5YV999TaS7COCHwv',
-    'MF3mGyEYCl7XYWbV9V6O',
-    'piTKgcLEGmPEe24v88Ie',
-    'jBpfY8zp764RNis60YCH',
-    'pNInz6obpg7IdgWAs6g8',
-    'TxGEqn74MsS85u8PXrvg',
-    'CYw3mofc8g90OBpw9rfg',
-    'IKne3meq5aSn9XLyUdCD',
-    'VR6AHRvj9K9Ge6v96XmY',
-    '29vD33N1CtxCmqQRPOHJ',
-    '5Q0t7uMc9ZUB5L7xkFF1',
-    'TX3LPaxmToCDRxJDt37v',
-  ]);
-  const removedDubbingVoiceNames = new Set(['rachel', 'domi', 'sarah', 'serena', 'emily', 'ellie', 'nicole', 'gigi', 'adam', 'josh', 'dave', 'charlie', 'arnold', 'drew', 'paul', 'liam']);
-  const shouldHideDubbingVoice = (voice: Pick<VoiceItem, 'id' | 'name' | 'englishName'>) => {
-    const name = voice.name.toLowerCase();
-    const englishName = voice.englishName.toLowerCase();
+  const shouldHideDubbingVoice = (voice: VoiceItem) => {
+    const category = String(voice.category || '').toLowerCase();
+    const tags = (voice.tags || []).map(tag => String(tag).toLowerCase());
+    const searchable = [category, ...tags].join(' ');
     return (
-      removedDubbingVoiceIds.has(voice.id) ||
-      removedDubbingVoiceNames.has(englishName) ||
-      Array.from(removedDubbingVoiceNames).some(removedName => name.startsWith(removedName))
+      searchable.includes('premade') ||
+      searchable.includes('default') ||
+      searchable.includes('legacy')
     );
   };
 
@@ -589,7 +396,9 @@ export default function DubbingStudio({
             category: category,
             tags,
             description: av.labels?.description || `ElevenLabs ${category} · 已适配 eleven_v3`,
-            previewUrl: av.preview_url || ''
+            previewUrl: av.preview_url || '',
+            source: av.source,
+            publicOwnerId: av.public_owner_id,
           };
         });
         setFetchedVoices(mapped.filter(voice => !shouldHideDubbingVoice(voice)));
@@ -621,6 +430,20 @@ export default function DubbingStudio({
       ? [...ELEVENLABS_VOICES, ...fetchedVoices.filter(fv => !ELEVENLABS_VOICES.some(ev => ev.id === fv.id))]
       : ELEVENLABS_VOICES
   ).filter(voice => !shouldHideDubbingVoice(voice));
+  const voiceCategories = ['全部', ...Array.from(new Set(displayVoices.map(voice => voice.category).filter(Boolean)))];
+  const filteredVoiceOptions = displayVoices.filter((voice) => {
+    const query = voiceSearchQuery.trim().toLowerCase();
+    if (voiceActiveCategory !== '全部' && voice.category !== voiceActiveCategory) return false;
+    if (voiceGenderFilter !== 'all' && voice.gender !== voiceGenderFilter) return false;
+    if (!query) return true;
+    return [
+      voice.name,
+      voice.englishName,
+      voice.category,
+      voice.description,
+      ...(voice.tags || []),
+    ].join(' ').toLowerCase().includes(query);
+  });
 
   // Derived state to check if current standaloneVoiceRole is an ElevenLabs Premium Voice ID
   const isPremiumVoiceSelected = displayVoices.some(v => v.id === standaloneVoiceRole);
@@ -631,9 +454,11 @@ export default function DubbingStudio({
     if (standaloneVoiceRole && !displayVoices.some(v => v.id === standaloneVoiceRole)) {
       if (displayVoices.length > 0) {
         setStandaloneVoiceRole(displayVoices[0].id);
+        setSelectedStandaloneVoice?.(displayVoices[0]);
         setStandaloneVoiceGender(displayVoices[0].gender);
       } else {
         setStandaloneVoiceRole('');
+        setSelectedStandaloneVoice?.(null);
         setStandaloneVoiceGender('male');
       }
     }
@@ -662,7 +487,6 @@ export default function DubbingStudio({
       
       const text = `你好！我是 AI 配音助理 ${voiceName}。这是我为您准备的专属声线。我擅长 ${tags.join('、')}等不同风格的拟真配音，期待能为您生成完美的音频。`;
       const utterance = new SpeechSynthesisUtterance(text);
-      
       const nativeVoices = window.speechSynthesis.getVoices();
       let chineseVoices = nativeVoices.filter(v => v.lang.includes('zh') || v.lang.includes('ZH'));
       if (chineseVoices.length === 0) {
@@ -787,6 +611,7 @@ export default function DubbingStudio({
 
   const handleSelectVoice = (voice: VoiceItem) => {
     setStandaloneVoiceRole(voice.id);
+    setSelectedStandaloneVoice?.(voice);
     setStandaloneVoiceGender(voice.gender);
     setShowVoiceDropdown(false);
   };
@@ -856,7 +681,7 @@ export default function DubbingStudio({
 
   const langsList = [
     { id: 'zh', name: '中文 普通话 (Chinese)' },
-    { id: 'en', name: '英语 美英式 (English)' },
+    { id: 'en', name: '英语 美式/英式 (English)' },
     { id: 'ja', name: '日语 (Japanese)' },
     { id: 'fr', name: '法语 (French)' },
     { id: 'de', name: '德语 (German)' },
@@ -870,10 +695,10 @@ export default function DubbingStudio({
     if (/[\u4e00-\u9fa5]/.test(text)) {
       return 'zh';
     }
-    if (/[äöüßÄÖÜ]/.test(text)) {
+    if (/[盲枚眉脽脛脰脺]/.test(text)) {
       return 'de';
     }
-    if (/[éàèùçâêîôûëïüËÏÜÂÊÎÔÛÉÀÈÙÇ]/.test(text)) {
+    if (/[茅脿猫霉莽芒锚卯么没毛茂眉脣脧脺脗脢脦脭脹脡脌脠脵脟]/.test(text)) {
       return 'fr';
     }
     if (/[a-zA-Z]/.test(text)) {
@@ -894,6 +719,94 @@ export default function DubbingStudio({
   const detectedLangObj = langsList.find(l => l.id === detectedLangCode);
 
   const voiceHistory = historyList.filter(item => item.type === 'voice');
+  const selectedVoiceObj = displayVoices.find(v => v.id === standaloneVoiceRole);
+  const generatedVoiceOptions = [
+    pendingVoiceOptions.optionA ? { id: 'A' as const, label: '版本 A', option: pendingVoiceOptions.optionA } : null,
+    pendingVoiceOptions.optionB ? { id: 'B' as const, label: '版本 B', option: pendingVoiceOptions.optionB } : null,
+  ].filter(Boolean) as Array<{ id: 'A' | 'B'; label: string; option: PendingVoiceOption }>;
+
+  const formatDuration = (duration?: number | null) => {
+    if (!duration || !Number.isFinite(duration)) return '--:--';
+    const minutes = Math.floor(duration / 60);
+    const seconds = Math.floor(duration % 60);
+    return `${minutes}:${String(seconds).padStart(2, '0')}`;
+  };
+
+  const sanitizeDownloadName = (name: string) => (
+    name
+      .trim()
+      .replace(/[\\/:*?"<>|]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .slice(0, 80) || `generated_voiceover_${Date.now()}`
+  );
+
+  const updateGeneratedVoiceName = (id: 'A' | 'B', name: string) => {
+    const key = id === 'A' ? 'optionA' : 'optionB';
+    const current = pendingVoiceOptions[key];
+    setPendingVoiceOptions(prev => ({
+      ...prev,
+      [key]: prev[key] ? { ...prev[key], displayName: name } : prev[key],
+    }));
+    if (current?.url) {
+      const normalizedName = name.trim() || current.displayName;
+      setHistoryList(prev => prev.map(item => (
+        item.url === current.url ? { ...item, title: normalizedName } : item
+      )));
+    }
+  };
+
+  const getWaveHeight = (versionId: 'A' | 'B', index: number) => {
+    const seed = versionId === 'A' ? 7 : 17;
+    return 20 + ((index * 37 + seed * 13) % 72);
+  };
+
+  const toggleGeneratedPreview = (id: 'A' | 'B', url: string, speed: number) => {
+    if (!generatedPreviewAudioRef.current) {
+      generatedPreviewAudioRef.current = new Audio();
+    }
+
+    const audio = generatedPreviewAudioRef.current;
+    if (previewPlayingId === id && !audio.paused) {
+      audio.pause();
+      setPreviewPlayingId(null);
+      return;
+    }
+
+    audio.pause();
+    audio.src = url;
+    audio.playbackRate = speed;
+    audio.onended = () => setPreviewPlayingId(null);
+    audio.onpause = () => setPreviewPlayingId(prev => (prev === id ? null : prev));
+    audio.play()
+      .then(() => setPreviewPlayingId(id))
+      .catch(error => console.error('Play generated voice preview failed:', error));
+  };
+
+  useEffect(() => {
+    if (selectedVoiceObj) {
+      setSelectedStandaloneVoice?.(selectedVoiceObj);
+    } else if (!standaloneVoiceRole) {
+      setSelectedStandaloneVoice?.(null);
+    }
+  }, [selectedVoiceObj, standaloneVoiceRole, setSelectedStandaloneVoice]);
+
+  useEffect(() => {
+    generatedVoiceOptions.forEach(({ id, option }) => {
+      if (previewDurations[id] != null) return;
+      const audio = new Audio(option.url);
+      audio.onloadedmetadata = () => {
+        const duration = Number.isFinite(audio.duration) ? audio.duration : null;
+        setPreviewDurations(prev => ({ ...prev, [id]: duration }));
+      };
+      audio.onerror = () => setPreviewDurations(prev => ({ ...prev, [id]: null }));
+    });
+  }, [pendingVoiceOptions.optionA?.url, pendingVoiceOptions.optionB?.url]);
+
+  useEffect(() => () => {
+    if (generatedPreviewAudioRef.current) {
+      generatedPreviewAudioRef.current.pause();
+    }
+  }, []);
 
   return (
     <div id="dubbingstudio-view" className="flex-1 flex flex-col md:flex-row bg-slate-50 min-h-screen overflow-hidden">
@@ -909,7 +822,6 @@ export default function DubbingStudio({
           <button
             onClick={() => {
               setActiveSubTab('tts');
-              if (optionAudioRef.current) optionAudioRef.current.pause();
             }}
             className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 cursor-pointer ${
               activeSubTab === 'tts'
@@ -938,7 +850,23 @@ export default function DubbingStudio({
             <span>语音转语音</span>
           </button>
 
-          {/* Subtab Button 3: 语音转文本 */}
+          {/* Subtab Button 3: 跨语种转换 */}
+          <button
+            onClick={() => {
+              setActiveSubTab('translate');
+              if (standaloneVoiceAudioRef.current) standaloneVoiceAudioRef.current.pause();
+              setIsPlaying(false);
+            }}
+            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 cursor-pointer ${
+              activeSubTab === 'translate'
+                ? 'bg-emerald-50 text-emerald-700 shadow-sm border border-emerald-100'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+            }`}
+          >
+            <Languages className={`w-4 h-4 transition-colors ${activeSubTab === 'translate' ? 'text-emerald-600' : 'text-slate-400'}`} />
+            <span>跨语种转换</span>
+          </button>
+
           <button
             onClick={() => {
               setActiveSubTab('stt');
@@ -975,11 +903,12 @@ export default function DubbingStudio({
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-6 mb-6">
           <div>
             <h2 className="text-xl font-black text-slate-800">AI 配音</h2>
-            <p className="text-xs text-slate-500 mt-1">输入文字或上传语音，自定义声音库，多场景拟真人声配音、跨音色变声体验。</p>
+            <p className="text-xs text-slate-500 mt-1">输入文字或上传语音，自定义声音库，多场景拟真人声配音、跨语种转换体验。</p>
           </div>
         </div>
 
-        {activeSubTab === 'tts' ? (
+        {visitedSubTabs.has('tts') && (
+          <div hidden={activeSubTab !== 'tts'}>
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
               {/* Core parameters */}
               <div className="lg:col-span-7 space-y-5">
@@ -991,43 +920,10 @@ export default function DubbingStudio({
                 {detectedLangObj && (
                   <span className="text-[10px] text-emerald-700 font-semibold bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-100 flex items-center gap-1">
                     <Sparkles className="w-2.5 h-2.5 animate-pulse text-emerald-600" />
-                    已智能检测语种为: {detectedLangObj.name.split(' ')[0]}
+                    已智能检测语种：{detectedLangObj.name.split(' ')[0]}
                   </span>
                 )}
               </div>
-              
-              <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-50 border border-slate-200/85 rounded-xl p-2.5">
-                <div className="flex items-center gap-1.5">
-                  <Smile className="w-3.5 h-3.5 text-emerald-600" />
-                  <span className="text-[11px] text-slate-600">
-                    💡 用鼠标划选中文字词，点击右键自动翻译并生成情绪括号
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleTranslateSelectionToEmotion}
-                  disabled={isTranslating}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold shadow-sm transition-all cursor-pointer select-none ${
-                    isTranslating
-                      ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
-                      : 'bg-emerald-600 hover:bg-emerald-700 text-white border border-emerald-500 hover:shadow'
-                  }`}
-                >
-                  {isTranslating ? (
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                  ) : (
-                    <Languages className="w-3 h-3" />
-                  )}
-                  <span>划选转英文情绪 [ ]</span>
-                </button>
-              </div>
-
-              {translationError && (
-                <div className="text-[10px] text-rose-600 bg-rose-50 border border-rose-100 rounded-lg px-3 py-2 flex items-center gap-1.5 animate-fade-in">
-                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                  <span>{translationError}</span>
-                </div>
-              )}
               
               <style>{`
                 .sync-input-textarea {
@@ -1080,7 +976,7 @@ export default function DubbingStudio({
               <label className="text-[11px] font-bold text-slate-700 flex items-center justify-between">
                 <span className="flex items-center gap-1">
                   <Volume2 className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>声线设定方式 (精品人声库)</span>
+                  <span>声线设定方式（精品人声库）</span>
                 </span>
                 <span className="text-[10px] text-slate-450 font-semibold bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded">ElevenLabs 引擎支持</span>
               </label>
@@ -1088,10 +984,6 @@ export default function DubbingStudio({
               {/* PREMIUM VOICE SELECTION WIDGET */}
               <div className="space-y-3 relative">
                   {/* Selected Voice Display & Trigger Button */}
-                  {(() => {
-                    const selectedVoiceObj = displayVoices.find(v => v.id === standaloneVoiceRole);
-                    return (
-                      <>
                         <button
                           type="button"
                           onClick={() => setShowVoiceDropdown(!showVoiceDropdown)}
@@ -1113,17 +1005,15 @@ export default function DubbingStudio({
                           <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform duration-200 ${showVoiceDropdown ? 'rotate-180' : ''}`} />
                         </button>
 
-                        {/* Interactive Voice Dropdown Popover */}
                         {showVoiceDropdown && (
                           <div className="absolute top-full left-0 right-0 mt-1.5 bg-white border border-slate-200 rounded-2xl shadow-xl z-50 p-4 space-y-3">
-                            {/* Keyword Search Input */}
                             <div className="relative">
                               <Search className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
                               <input
                                 type="text"
                                 value={voiceSearchQuery}
-                                onChange={(e) => setVoiceSearchQuery(e.target.value)}
-                                placeholder="搜索声线名称、分类、标签或音色特点..."
+                                onChange={(event) => setVoiceSearchQuery(event.target.value)}
+                                placeholder="搜索声音名称、分类、标签或音色特点..."
                                 className="w-full bg-slate-50 border border-slate-200 rounded-xl py-2 pl-9 pr-8 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all placeholder-slate-400"
                               />
                               {voiceSearchQuery && (
@@ -1137,181 +1027,124 @@ export default function DubbingStudio({
                               )}
                             </div>
 
-                            {/* Gender filters */}
-                            <div className="flex items-center gap-1.5 border-b border-slate-100 pb-2">
-                              <span className="text-[9px] font-bold text-slate-400 uppercase mr-1">声弹性别:</span>
-                              <button
-                                type="button"
-                                onClick={() => setVoiceGenderFilter('all')}
-                                className={`text-[9px] px-2.5 py-0.5 rounded font-bold transition-all ${
-                                  voiceGenderFilter === 'all'
-                                    ? 'bg-emerald-600 text-white'
-                                    : 'bg-slate-50 hover:bg-slate-100 text-slate-600'
-                                }`}
-                              >
-                                全部
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setVoiceGenderFilter('male')}
-                                className={`text-[9px] px-2.5 py-0.5 rounded font-bold transition-all ${
-                                  voiceGenderFilter === 'male'
-                                    ? 'bg-blue-600 text-white'
-                                    : 'bg-slate-50 hover:bg-slate-100 text-slate-600'
-                                }`}
-                              >
-                                男声
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setVoiceGenderFilter('female')}
-                                className={`text-[9px] px-2.5 py-0.5 rounded font-bold transition-all ${
-                                  voiceGenderFilter === 'female'
-                                    ? 'bg-pink-600 text-white'
-                                    : 'bg-slate-50 hover:bg-slate-100 text-slate-600'
-                                }`}
-                              >
-                                女声
-                              </button>
+                            <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-100 pb-2">
+                              <span className="text-[9px] font-bold text-slate-400 uppercase mr-1">分类:</span>
+                              {voiceCategories.map(category => (
+                                <button
+                                  key={category}
+                                  type="button"
+                                  onClick={() => setVoiceActiveCategory(category)}
+                                  className={`text-[9px] px-2.5 py-0.5 rounded font-bold transition-all ${
+                                    voiceActiveCategory === category
+                                      ? 'bg-emerald-600 text-white'
+                                      : 'bg-slate-50 hover:bg-slate-100 text-slate-600'
+                                  }`}
+                                >
+                                  {category}
+                                </button>
+                              ))}
                             </div>
 
-                            {/* Category Filter Tabs */}
-                            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
-                              {['全部', 'ElevenLabs 人声库', '我的克隆'].map(cat => {
-                                if (cat === '我的克隆' && !displayVoices.some(v => v.category === '我的克隆')) {
-                                  return null;
-                                }
+                            <div className="flex items-center gap-1.5 border-b border-slate-100 pb-2">
+                              <span className="text-[9px] font-bold text-slate-400 uppercase mr-1">性别:</span>
+                              {[
+                                { value: 'all', label: '全部', activeClassName: 'bg-emerald-600 text-white' },
+                                { value: 'male', label: '男声', activeClassName: 'bg-blue-600 text-white' },
+                                { value: 'female', label: '女声', activeClassName: 'bg-pink-600 text-white' },
+                              ].map(option => (
+                                <button
+                                  key={option.value}
+                                  type="button"
+                                  onClick={() => setVoiceGenderFilter(option.value as 'all' | 'male' | 'female')}
+                                  className={`text-[9px] px-2.5 py-0.5 rounded font-bold transition-all ${
+                                    voiceGenderFilter === option.value
+                                      ? option.activeClassName
+                                      : 'bg-slate-50 hover:bg-slate-100 text-slate-600'
+                                  }`}
+                                >
+                                  {option.label}
+                                </button>
+                              ))}
+                            </div>
+
+                            <div className="max-h-72 overflow-y-auto custom-scrollbar space-y-1 pr-1">
+                              {isLoadingVoices ? (
+                                <div className="py-8 text-center text-xs text-slate-400 flex items-center justify-center gap-2">
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  正在加载声音库...
+                                </div>
+                              ) : displayVoices.length === 0 ? (
+                                <div className="py-10 px-4 text-center flex flex-col items-center justify-center gap-3">
+                                  <div className="w-10 h-10 rounded-full bg-amber-50 flex items-center justify-center text-amber-600 border border-amber-100">
+                                    <Info className="w-5 h-5" />
+                                  </div>
+                                  <div className="space-y-1">
+                                    <p className="text-xs font-bold text-slate-700">配音声音库为空</p>
+                                    <p className="text-[11px] text-slate-500 max-w-xs leading-relaxed">
+                                      请检查 ElevenLabs 服务状态，或先同步/添加可用声线。
+                                    </p>
+                                  </div>
+                                </div>
+                              ) : filteredVoiceOptions.length === 0 ? (
+                                <div className="py-8 text-center text-slate-400 text-xs">
+                                  未找到匹配的声音，请换一个搜索词或筛选条件。
+                                </div>
+                              ) : filteredVoiceOptions.map(voice => {
+                                const isSelected = standaloneVoiceRole === voice.id;
                                 return (
-                                  <button
-                                    key={cat}
-                                    type="button"
-                                    onClick={() => setVoiceActiveCategory(cat)}
-                                    className={`text-[9px] font-bold px-2.5 py-1 rounded-full border whitespace-nowrap transition-all shrink-0 ${
-                                      voiceActiveCategory === cat
-                                        ? 'bg-emerald-50 border-emerald-500/40 text-emerald-800 font-black'
-                                        : 'bg-white border-slate-200 hover:border-slate-300 text-slate-600'
+                                  <div
+                                    key={voice.id}
+                                    onClick={() => handleSelectVoice(voice)}
+                                    className={`w-full py-2 px-2.5 rounded-xl flex items-start justify-between gap-3 cursor-pointer transition-colors text-left ${
+                                      isSelected ? 'bg-emerald-50/60' : 'hover:bg-slate-50'
                                     }`}
                                   >
-                                    {cat}
-                                  </button>
+                                    <div className="min-w-0 flex-1 space-y-0.5">
+                                      <div className="flex items-center flex-wrap gap-1">
+                                        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${voice.gender === 'male' ? 'bg-blue-500' : 'bg-pink-500'}`} />
+                                        <span className="text-xs font-bold text-slate-850">{voice.name}</span>
+                                        <span className="text-[9px] text-slate-400 bg-slate-50 px-1 py-0.2 rounded border border-slate-100 font-mono">
+                                          {voice.category}
+                                        </span>
+                                      </div>
+                                      <p className="text-[10px] text-slate-500 truncate leading-normal">{voice.description}</p>
+                                      <div className="flex flex-wrap gap-1">
+                                        {(voice.tags || []).slice(0, 3).map((tag, index) => (
+                                          <span key={index} className="text-[9px] text-emerald-700 bg-emerald-50 px-1 rounded-sm">
+                                            #{tag}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    </div>
+
+                                    <div className="flex shrink-0 items-center gap-1 mt-1">
+                                      <button
+                                        type="button"
+                                        onClick={(event) => handlePlayVoicePreview(voice.id, voice.previewUrl || '', event)}
+                                        aria-label={`试听 ${voice.name}`}
+                                        title="试听"
+                                        className={`w-5.5 h-5.5 rounded-full flex items-center justify-center border transition-colors ${
+                                          playingVoiceId === voice.id
+                                            ? 'bg-emerald-600 border-emerald-500 text-white'
+                                            : 'bg-white border-slate-200 hover:bg-slate-50 text-slate-500 hover:text-slate-700'
+                                        }`}
+                                      >
+                                        {playingVoiceId === voice.id ? (
+                                          <Pause className="w-2.5 h-2.5 fill-current" />
+                                        ) : (
+                                          <Play className="w-2.5 h-2.5 fill-current ml-0.2" />
+                                        )}
+                                      </button>
+
+                                      <div className={`w-5 h-5 rounded-full flex items-center justify-center border ${
+                                        isSelected ? 'bg-emerald-600 border-emerald-600 text-white' : 'border-slate-200 bg-white'
+                                      }`}>
+                                        {isSelected && <Check className="w-3 h-3 stroke-[3]" />}
+                                      </div>
+                                    </div>
+                                  </div>
                                 );
                               })}
-                            </div>
-
-                            {/* Scrollable List container */}
-                            <div className="max-h-56 overflow-y-auto divide-y divide-slate-100 custom-scrollbar pr-1">
-                              {isLoadingVoices ? (
-                                <div className="py-12 flex flex-col items-center justify-center gap-2 text-slate-400 text-xs">
-                                  <Loader2 className="w-5 h-5 animate-spin text-emerald-600" />
-                                  <span>正在同步您的 ElevenLabs 声线库...</span>
-                                </div>
-                              ) : (() => {
-                                const categories = ['全部', 'ElevenLabs 人声库', '我的克隆'];
-                                const filteredVoices = displayVoices.filter(voice => {
-                                  if (voiceActiveCategory !== '全部' && voice.category !== voiceActiveCategory) return false;
-                                  if (voiceGenderFilter !== 'all' && voice.gender !== voiceGenderFilter) return false;
-                                  if (voiceSearchQuery.trim()) {
-                                    const q = voiceSearchQuery.toLowerCase();
-                                    return voice.name.toLowerCase().includes(q) ||
-                                           voice.englishName.toLowerCase().includes(q) ||
-                                           voice.category.toLowerCase().includes(q) ||
-                                           voice.description.toLowerCase().includes(q) ||
-                                           voice.tags.some(t => t.toLowerCase().includes(q));
-                                  }
-                                  return true;
-                                });
-
-                                if (displayVoices.length === 0) {
-                                  return (
-                                    <div className="py-12 px-4 text-center flex flex-col items-center justify-center gap-3">
-                                      <div className="w-10 h-10 rounded-full bg-amber-50 flex items-center justify-center text-amber-600 border border-amber-100">
-                                        <Info className="w-5 h-5 animate-bounce" />
-                                      </div>
-                                      <div className="space-y-1">
-                                        <p className="text-xs font-bold text-slate-700">精品人声库为空</p>
-                                        <p className="text-[11px] text-slate-500 max-w-xs leading-relaxed">
-                                          服务端未返回可用声线。请在“设置”页面检查 ElevenLabs 服务状态，或登录 ElevenLabs 添加声线资产。
-                                        </p>
-                                      </div>
-                                    </div>
-                                  );
-                                }
-
-                                if (filteredVoices.length === 0) {
-                                  return (
-                                    <div className="py-8 text-center text-slate-400 text-xs">
-                                      未找到匹配的优质声线，请尝试其他搜索词
-                                    </div>
-                                  );
-                                }
-
-                                return filteredVoices.map(voice => {
-                                  const isSelected = standaloneVoiceRole === voice.id;
-                                  const isVoicePlaying = playingVoiceId === voice.id;
-                                  return (
-                                    <div
-                                      key={voice.id}
-                                      onClick={() => handleSelectVoice(voice)}
-                                      className={`py-2 px-2.5 rounded-xl flex items-start justify-between gap-3 cursor-pointer transition-colors ${
-                                        isSelected ? 'bg-emerald-50/40' : 'hover:bg-slate-50'
-                                      }`}
-                                    >
-                                      <div className="min-w-0 flex-1 space-y-0.5">
-                                        <div className="flex items-center flex-wrap gap-1">
-                                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${voice.gender === 'male' ? 'bg-blue-500' : 'bg-pink-500'}`} />
-                                          <span className="text-xs font-bold text-slate-850">{voice.name}</span>
-                                          <span className="text-[9px] text-slate-400 bg-slate-50 px-1 py-0.2 rounded border border-slate-100 font-mono">
-                                            {voice.category}
-                                          </span>
-                                        </div>
-                                        <p className="text-[10px] text-slate-500 truncate leading-normal">{voice.description}</p>
-                                        <div className="flex flex-wrap gap-1">
-                                          {voice.tags.slice(0, 3).map((tag, tIdx) => (
-                                            <span key={tIdx} className="text-[9px] text-emerald-700 bg-emerald-50 px-1 rounded-sm">
-                                              #{tag}
-                                            </span>
-                                          ))}
-                                        </div>
-                                      </div>
-
-                                      <div className="flex items-center gap-1.5 shrink-0 pt-1">
-                                        {/* Play Preview */}
-                                        <button
-                                          type="button"
-                                          onClick={(e) => handlePlayVoicePreview(voice.id, voice.previewUrl, e)}
-                                          className={`w-7 h-7 rounded-full flex items-center justify-center border transition-all ${
-                                            isVoicePlaying
-                                              ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm animate-pulse'
-                                              : 'bg-white text-slate-600 hover:text-slate-900 border-slate-200 hover:bg-slate-100'
-                                          }`}
-                                          title={isVoicePlaying ? '暂停试听' : '点击试听音质'}
-                                        >
-                                          {isVoicePlaying ? (
-                                            <Pause className="w-3.5 h-3.5 fill-current" />
-                                          ) : (
-                                            <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
-                                          )}
-                                        </button>
-
-                                        {/* Selection mark */}
-                                        <div className={`w-5 h-5 rounded-full flex items-center justify-center border ${
-                                          isSelected ? 'bg-emerald-600 border-emerald-600 text-white' : 'border-slate-200 bg-white'
-                                        }`}>
-                                          {isSelected && <Check className="w-3 h-3 stroke-[3]" />}
-                                        </div>
-                                      </div>
-                                    </div>
-                                  );
-                                });
-                              })()}
-                            </div>
-
-                            {/* Reassuring tip about playback stability */}
-                            <div className="mt-2 pt-2 border-t border-slate-100 flex items-center justify-between text-[10px] text-slate-400">
-                              <span>💡 提示：点击 ▶ 按钮即可一键试听音质特点。</span>
-                              <span className="text-emerald-600 font-semibold flex items-center gap-1">
-                                <CheckCircle2 className="w-3 h-3" /> 已开启 WebSpeech 试听容灾保障
-                              </span>
                             </div>
                           </div>
                         )}
@@ -1367,9 +1200,6 @@ export default function DubbingStudio({
                             </div>
                           </div>
                         )}
-                      </>
-                    );
-                  })()}
                 </div>
             </div>
 
@@ -1390,7 +1220,7 @@ export default function DubbingStudio({
               {standaloneVoiceLoading ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>ElevenLabs 合成引擎正在全力咬字配音中...</span>
+                  <span>ElevenLabs 正在生成配音...</span>
                 </>
               ) : (
                 <>
@@ -1400,148 +1230,6 @@ export default function DubbingStudio({
               )}
             </button>
 
-            {/* COMPONENT: DOUBLE OPTION CHOICE PICKER */}
-            {(pendingVoiceOptions.optionA || pendingVoiceOptions.optionB) && (
-              <div className="bg-emerald-50/40 border-2 border-emerald-500/30 rounded-2xl p-5 space-y-4 shadow-md animate-fade-in mt-4">
-                <div className="flex items-center justify-between border-b border-emerald-500/10 pb-2.5">
-                  <div className="flex items-center gap-2">
-                    <Sparkles className="w-4 h-4 text-emerald-600 animate-pulse" />
-                    <h4 className="text-[11px] font-bold text-slate-800 uppercase tracking-wider">
-                      AI 智能多重配音方案（已生成双版本供对比）
-                    </h4>
-                  </div>
-                  <span className="text-[9px] text-emerald-700 font-bold bg-emerald-100 px-2 py-0.5 rounded-full">
-                    对比推荐
-                  </span>
-                </div>
-
-                <p className="text-[10px] text-slate-600 leading-relaxed">
-                  系统已为您一次性生成了两个略有不同的演绎版本。请试听并选择您满意的保留到历史记录中：
-                </p>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  {/* OPTION A CARD */}
-                  {pendingVoiceOptions.optionA && (
-                    <div className="bg-white border border-emerald-100 rounded-xl p-3 space-y-3 relative overflow-hidden group shadow-sm hover:border-emerald-200 transition-all flex flex-col justify-between">
-                      <div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-[11px] font-black text-slate-850 flex items-center gap-1.5">
-                            <span className="w-4.5 h-4.5 rounded-full bg-emerald-600 text-white flex items-center justify-center text-[9px] font-black">A</span>
-                            方案版本 A
-                          </span>
-                        </div>
-
-                        {/* Custom Audio Player for A */}
-                        <div className="bg-slate-50 border border-slate-100 rounded-lg p-2 mt-2 flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => handlePlayOptionAudio('A', pendingVoiceOptions.optionA!.url, pendingVoiceOptions.optionA!.speed)}
-                            className={`w-7 h-7 rounded-full flex items-center justify-center border transition-all shrink-0 ${
-                              playingOptionId === 'A'
-                                ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm'
-                                : 'bg-white text-slate-600 hover:text-slate-900 border-slate-200 hover:bg-slate-100'
-                            }`}
-                          >
-                            {playingOptionId === 'A' ? (
-                              <Pause className="w-3 h-3 fill-current" />
-                            ) : (
-                              <Play className="w-3 h-3 fill-current ml-0.5" />
-                            )}
-                          </button>
-                          <div className="min-w-0 flex-1">
-                            <div className="text-[10px] font-bold text-slate-700 truncate">
-                              {pendingVoiceOptions.optionA.voiceLabel}
-                            </div>
-                            <div className="text-[9px] text-slate-400 truncate">
-                              情绪：{pendingVoiceOptions.optionA.emotionLabel} · 语速 {pendingVoiceOptions.optionA.speed}x
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => handleSaveSingleOption('A')}
-                        className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer shadow-sm mt-2"
-                      >
-                        <Check className="w-3 h-3 stroke-[2.5]" />
-                        <span>仅保留此版本 (A)</span>
-                      </button>
-                    </div>
-                  )}
-
-                  {/* OPTION B CARD */}
-                  {pendingVoiceOptions.optionB && (
-                    <div className="bg-white border border-emerald-100 rounded-xl p-3 space-y-3 relative overflow-hidden group shadow-sm hover:border-emerald-200 transition-all flex flex-col justify-between">
-                      <div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-[11px] font-black text-slate-850 flex items-center gap-1.5">
-                            <span className="w-4.5 h-4.5 rounded-full bg-teal-600 text-white flex items-center justify-center text-[9px] font-black">B</span>
-                            方案版本 B
-                          </span>
-                        </div>
-
-                        {/* Custom Audio Player for B */}
-                        <div className="bg-slate-50 border border-slate-100 rounded-lg p-2 mt-2 flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => handlePlayOptionAudio('B', pendingVoiceOptions.optionB!.url, pendingVoiceOptions.optionB!.speed)}
-                            className={`w-7 h-7 rounded-full flex items-center justify-center border shrink-0 transition-all ${
-                              playingOptionId === 'B'
-                                ? 'bg-teal-600 text-white border-teal-500 shadow-sm'
-                                : 'bg-white text-slate-600 hover:text-slate-900 border-slate-200 hover:bg-slate-100'
-                            }`}
-                          >
-                            {playingOptionId === 'B' ? (
-                              <Pause className="w-3 h-3 fill-current" />
-                            ) : (
-                              <Play className="w-3 h-3 fill-current ml-0.5" />
-                            )}
-                          </button>
-                          <div className="min-w-0 flex-1">
-                            <div className="text-[10px] font-bold text-slate-700 truncate">
-                              {pendingVoiceOptions.optionB.voiceLabel}
-                            </div>
-                            <div className="text-[9px] text-slate-400 truncate">
-                              情绪：{pendingVoiceOptions.optionB.emotionLabel} · 语速 {pendingVoiceOptions.optionB.speed}x
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => handleSaveSingleOption('B')}
-                        className="w-full py-1.5 bg-teal-600 hover:bg-teal-700 text-white text-[10px] font-bold rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer shadow-sm mt-2"
-                      >
-                        <Check className="w-3 h-3 stroke-[2.5]" />
-                        <span>仅保留此版本 (B)</span>
-                      </button>
-                    </div>
-                  )}
-                </div>
-
-                {/* TWO OPTIONS ACTION BAR */}
-                <div className="flex items-center gap-2 pt-2 border-t border-emerald-500/10">
-                  <button
-                    type="button"
-                    onClick={handleSaveBothOptions}
-                    className="flex-1 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white text-[10px] font-black rounded-lg transition-all flex items-center justify-center gap-1 shadow-sm cursor-pointer"
-                  >
-                    <PlusCircle className="w-3.5 h-3.5" />
-                    <span>两个版本都保留</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleDiscardOptions}
-                    className="py-2 px-3 bg-slate-100 hover:bg-slate-200 text-slate-600 hover:text-slate-800 text-[10px] font-bold rounded-lg transition-all flex items-center justify-center gap-0.5 cursor-pointer"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                    <span>全部放弃</span>
-                  </button>
-                </div>
-              </div>
-            )}
           </div>
         </div>
 
@@ -1549,7 +1237,7 @@ export default function DubbingStudio({
         <div className="lg:col-span-5 space-y-5">
           {/* Main active preview player */}
           <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-4 shadow-sm">
-            <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider">配音预览与回放控制</h3>
+            <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider">配音预览与播放控制</h3>
             
             {standaloneVoiceLoading ? (
               <div className="bg-slate-50 border border-slate-200 rounded-xl p-10 flex flex-col items-center justify-center text-center space-y-3">
@@ -1561,82 +1249,69 @@ export default function DubbingStudio({
                   <p className="text-[10px] text-slate-400">大约需要 5 - 10 秒</p>
                 </div>
               </div>
-            ) : standaloneVoiceAudioUrl ? (
-              <div className="bg-slate-50 border border-slate-200 rounded-xl p-5 space-y-4 relative overflow-hidden">
-                <div className="absolute top-0 right-0 w-24 h-24 bg-emerald-500/5 blur-xl pointer-events-none" />
-                <audio 
-                  ref={standaloneVoiceAudioRef} 
-                  src={standaloneVoiceAudioUrl} 
-                  onPlay={() => setIsPlaying(true)}
-                  onPause={() => setIsPlaying(false)}
-                  onEnded={() => setIsPlaying(false)}
-                />
+            ) : generatedVoiceOptions.length > 0 ? (
+              <div className="space-y-3">
+                {generatedVoiceOptions.map(({ id, label, option }) => {
+                  const isPreviewPlaying = previewPlayingId === id;
+                  return (
+                    <div key={id} className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3 relative overflow-hidden">
+                      <div className="absolute top-0 right-0 w-24 h-24 bg-emerald-500/5 blur-xl pointer-events-none" />
+                      <div className="flex items-center gap-3">
+                        <button
+                          onClick={() => toggleGeneratedPreview(id, option.url, option.speed)}
+                          className={`w-11 h-11 rounded-full flex items-center justify-center shrink-0 border transition-all ${
+                            isPreviewPlaying
+                              ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm shadow-emerald-500/20'
+                              : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100 hover:text-slate-950'
+                          }`}
+                        >
+                          {isPreviewPlaying ? <Pause className="w-4.5 h-4.5 fill-current" /> : <Play className="w-4.5 h-4.5 fill-current ml-0.5" />}
+                        </button>
 
-                <div className="flex items-center gap-4">
-                  <button
-                    onClick={toggleMainPlay}
-                    className={`w-12 h-12 rounded-full flex items-center justify-center shrink-0 border transition-all ${
-                      isPlaying 
-                        ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm shadow-emerald-500/20' 
-                        : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100 hover:text-slate-950'
-                    }`}
-                  >
-                    {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
-                  </button>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="shrink-0 rounded-full bg-emerald-100 px-2 py-0.5 text-[9px] font-black text-emerald-700">{label}</span>
+                            <input
+                              type="text"
+                              value={option.displayName}
+                              onChange={(event) => updateGeneratedVoiceName(id, event.target.value)}
+                              className="min-w-0 flex-1 rounded-md border border-transparent bg-white/70 px-2 py-1 text-xs font-bold text-slate-800 outline-none transition-all hover:border-slate-200 focus:border-emerald-400 focus:bg-white focus:ring-1 focus:ring-emerald-200"
+                              aria-label={`${label} 配音名称`}
+                            />
+                            <span className="text-[10px] font-mono font-bold text-slate-400 shrink-0">{formatDuration(previewDurations[id])}</span>
+                          </div>
+                          <p className="text-[10px] text-slate-500 truncate italic mt-0.5">"{option.processedText}"</p>
+                          <span className="text-[9px] text-emerald-600 font-semibold mt-1 block">
+                            属性：{standaloneVoiceGender === 'male' ? '男声' : '女声'} · {standaloneVoiceLang.toUpperCase()} · {option.speed}x
+                          </span>
+                        </div>
+                      </div>
 
-                  <div className="min-w-0 flex-1">
-                    <p className="text-xs font-bold text-slate-800 truncate">AI 独立人设配音</p>
-                    <p className="text-[10px] text-slate-500 truncate italic mt-0.5">"{standaloneVoicePrompt}"</p>
-                    <span className="text-[9px] text-emerald-600 font-semibold mt-1 block">
-                      属性：{standaloneVoiceGender === 'male' ? '男声' : '女声'} · {(() => {
-                        const bracketRegex = /[\[［]([^\]］]+)[\]］]/g;
-                        const matches = [...standaloneVoicePrompt.matchAll(bracketRegex)];
-                        return matches.length > 0 ? matches.map(m => m[1]).join(', ') : '默认情绪';
-                      })()} · {standaloneVoiceLang.toUpperCase()}语种
-                    </span>
-                  </div>
+                      <div className="flex items-center h-10 bg-slate-200/50 p-2 rounded-lg gap-0.5 border border-slate-200 overflow-hidden">
+                        {Array.from({ length: 44 }).map((_, index) => (
+                          <span
+                            key={index}
+                            className={`rounded-full w-1 transition-all ${isPreviewPlaying ? 'bg-emerald-500' : 'bg-emerald-400/70'}`}
+                            style={{ height: `${getWaveHeight(id, index)}%` }}
+                          />
+                        ))}
+                      </div>
 
-                  <button
-                    onClick={() => {
-                      if (standaloneVoiceAudioUrl) URL.revokeObjectURL(standaloneVoiceAudioUrl);
-                      setStandaloneVoiceAudioUrl(null);
-                      setIsPlaying(false);
-                    }}
-                    className="p-1 text-slate-400 hover:text-red-500 transition-colors"
-                    title="清除"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-
-                {/* Simulated waveforms */}
-                <div className="flex items-end justify-between h-8 bg-slate-200/50 p-2 rounded-lg gap-0.5 border border-slate-200">
-                  {Array.from({ length: 24 }).map((_, i) => (
-                    <span 
-                      key={i} 
-                      className="bg-emerald-500 rounded-t w-1"
-                      style={{ 
-                        height: isPlaying ? `${Math.floor(Math.random() * 95) + 5}%` : '15%',
-                        transition: 'height 0.12s ease-in-out'
-                      }} 
-                    />
-                  ))}
-                </div>
-
-                <div className="flex items-center gap-2 pt-1">
-                  <button
-                    onClick={() => standaloneVoiceAudioUrl && downloadAudioHelper(standaloneVoiceAudioUrl, 'generated_voiceover.mp3')}
-                    className="w-full bg-white hover:bg-emerald-50 border border-slate-200 text-slate-700 hover:text-emerald-700 py-2 rounded-xl text-[10px] font-bold text-center transition-all flex items-center justify-center gap-1.5 shadow-sm cursor-pointer"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>下载 MP3 配音</span>
-                  </button>
-                </div>
+                      <button
+                        onClick={() => downloadAudioHelper(option.url, `${sanitizeDownloadName(option.displayName)}.mp3`)}
+                        className="w-full bg-white hover:bg-emerald-50 border border-slate-200 text-slate-700 hover:text-emerald-700 py-2 rounded-xl text-[10px] font-bold text-center transition-all flex items-center justify-center gap-1.5 shadow-sm cursor-pointer"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>下载 MP3 配音（{label}）</span>
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             ) : (
               <div className="border border-dashed border-slate-200 bg-slate-50 rounded-xl p-10 text-center text-slate-400 text-xs leading-relaxed">
                 <Mic className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-                <span>输入台词，指定人设调校偏好，点击立刻渲染高品质配音音轨。</span>
+                <span>输入台词，指定人设和语气偏好，点击生成高品质配音音轨。</span>
               </div>
             )}
           </div>
@@ -1645,11 +1320,11 @@ export default function DubbingStudio({
           <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-4 shadow-sm">
             <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center justify-between">
               <span>已归档配音 ({voiceHistory.length})</span>
-              <span className="text-[10px] text-slate-400 font-normal">本会话</span>
+              <span className="text-[10px] text-slate-400 font-normal">本次会话</span>
             </h3>
 
             {voiceHistory.length === 0 ? (
-              <p className="text-slate-400 text-[10px] text-center py-6">暂无历史配音。配音渲染成功后，将在此自动归档。</p>
+              <p className="text-slate-400 text-[10px] text-center py-6">暂无历史配音。配音生成成功后，将在此自动归档。</p>
             ) : (
               <div className="space-y-2 max-h-64 overflow-y-auto pr-1 custom-scrollbar">
                 {voiceHistory.map((item) => {
@@ -1737,22 +1412,45 @@ export default function DubbingStudio({
           </div>
         </div>
       </div>
-          ) : activeSubTab === 'sts' ? (
-            <SpeechToSpeech
-              historyList={historyList}
-              setHistoryList={setHistoryList}
-              displayVoices={displayVoices}
-              playingVoiceId={playingVoiceId}
-              handlePlayVoicePreview={handlePlayVoicePreview}
-              onAudioPlay={() => {
-                if (standaloneVoiceAudioRef.current) {
-                  standaloneVoiceAudioRef.current.pause();
-                  setIsPlaying(false);
-                }
-              }}
-            />
-          ) : (
-            <SpeechToText />
+          </div>
+          )}
+          {visitedSubTabs.has('sts') && (
+            <div hidden={activeSubTab !== 'sts'}>
+              <SpeechToSpeech
+                historyList={historyList}
+                setHistoryList={setHistoryList}
+                displayVoices={displayVoices}
+                playingVoiceId={playingVoiceId}
+                handlePlayVoicePreview={handlePlayVoicePreview}
+                onAudioPlay={() => {
+                  if (standaloneVoiceAudioRef.current) {
+                    standaloneVoiceAudioRef.current.pause();
+                    setIsPlaying(false);
+                  }
+                }}
+              />
+            </div>
+          )}
+          {visitedSubTabs.has('translate') && (
+            <div hidden={activeSubTab !== 'translate'}>
+              <CrossLanguageDubbing
+                displayVoices={displayVoices}
+                setHistoryList={setHistoryList}
+                playingVoiceId={playingVoiceId}
+                handlePlayVoicePreview={handlePlayVoicePreview}
+                onAudioPlay={() => {
+                  if (standaloneVoiceAudioRef.current) {
+                    standaloneVoiceAudioRef.current.pause();
+                    setIsPlaying(false);
+                  }
+                }}
+              />
+            </div>
+          )}
+          {visitedSubTabs.has('stt') && (
+            <div hidden={activeSubTab !== 'stt'}>
+              <SpeechToText />
+            </div>
           )}
       </div>
     </div>

@@ -71,6 +71,7 @@ type ResizeEdge = 'left' | 'right';
 type WorkstationExportFormat = 'wav' | 'mp3';
 type WorkstationBitDepth = 16 | 24 | 32;
 type RulerMode = 'time' | 'bars';
+type TimeSignature = '2/4' | '3/4' | '4/4' | '5/4' | '6/8' | '7/8' | '12/8';
 
 // Colors list for visual representation of clips
 const CLIP_COLORS = [
@@ -97,7 +98,9 @@ const DEFAULT_TRACK_VOLUME_DB = 0;
 const DEFAULT_TEMPO_BPM = 120;
 const MIN_TEMPO_BPM = 40;
 const MAX_TEMPO_BPM = 240;
-const BEATS_PER_BAR = 4;
+const DEFAULT_RULER_MODE: RulerMode = 'time';
+const DEFAULT_TIME_SIGNATURE: TimeSignature = '4/4';
+const TIME_SIGNATURE_OPTIONS: TimeSignature[] = ['2/4', '3/4', '4/4', '5/4', '6/8', '7/8', '12/8'];
 
 const createToolCursor = (label: string, fallback: string) => {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28"><rect x="1" y="1" width="26" height="26" rx="7" fill="rgba(15,23,42,0.92)" stroke="rgba(56,189,248,0.95)" stroke-width="2"/><text x="14" y="18" text-anchor="middle" font-size="14" font-family="Arial, sans-serif" font-weight="700" fill="white">${label}</text></svg>`;
@@ -131,8 +134,9 @@ export default function AudioWorkstation() {
   const [toolMode, setToolMode] = useState<ToolMode>('select');
   const [snapEnabled, setSnapEnabled] = useState<boolean>(true);
   const [snapStep, setSnapStep] = useState<number>(0.1);
-  const [rulerMode, setRulerMode] = useState<RulerMode>('time');
+  const [rulerMode, setRulerMode] = useState<RulerMode>(DEFAULT_RULER_MODE);
   const [tempoBpm, setTempoBpm] = useState<number>(DEFAULT_TEMPO_BPM);
+  const [timeSignature, setTimeSignature] = useState<TimeSignature>(DEFAULT_TIME_SIGNATURE);
   const [exportFormat, setExportFormat] = useState<WorkstationExportFormat>('wav');
   const [exportSampleRate, setExportSampleRate] = useState<number>(WORKSTATION_SAMPLE_RATE);
   const [exportBitrate, setExportBitrate] = useState<number>(192);
@@ -168,8 +172,11 @@ export default function AudioWorkstation() {
   const ZOOM_PX_PER_SECOND = 20; // 1 second = 20 pixels
   const TIMELINE_MAX_SECONDS = 180; // default 3 minutes, expands dynamically
   const TIMELINE_CONTENT_WIDTH = TIMELINE_MAX_SECONDS * ZOOM_PX_PER_SECOND;
-  const beatDurationSeconds = 60 / tempoBpm;
-  const barDurationSeconds = beatDurationSeconds * BEATS_PER_BAR;
+  const [timeSignatureBeatsRaw, timeSignatureUnitRaw] = timeSignature.split('/').map(Number);
+  const beatsPerBar = Number.isFinite(timeSignatureBeatsRaw) ? timeSignatureBeatsRaw : 4;
+  const beatUnit = Number.isFinite(timeSignatureUnitRaw) ? timeSignatureUnitRaw : 4;
+  const beatDurationSeconds = (60 / tempoBpm) * (4 / beatUnit);
+  const barDurationSeconds = beatDurationSeconds * beatsPerBar;
   const activeSnapStep = rulerMode === 'bars' ? beatDurationSeconds : snapStep;
   
   // Audio sources keeping track of what's playing in real time
@@ -1846,8 +1853,8 @@ export default function AudioWorkstation() {
   const formatBarsBeatsStr = (sec: number): string => {
     const totalBeats = Math.max(0, sec) / beatDurationSeconds;
     const wholeBeats = Math.floor(totalBeats);
-    const bar = Math.floor(wholeBeats / BEATS_PER_BAR) + 1;
-    const beat = (wholeBeats % BEATS_PER_BAR) + 1;
+    const bar = Math.floor(wholeBeats / beatsPerBar) + 1;
+    const beat = (wholeBeats % beatsPerBar) + 1;
     const subBeat = Math.round((totalBeats - wholeBeats) * 100);
     return `${bar}.${beat}.${subBeat.toString().padStart(2, '0')}`;
   };
@@ -1865,8 +1872,8 @@ export default function AudioWorkstation() {
   if (rulerMode === 'bars') {
     const totalBeats = Math.ceil(TIMELINE_MAX_SECONDS / beatDurationSeconds);
     for (let beatIndex = 0; beatIndex <= totalBeats; beatIndex += 1) {
-      const major = beatIndex % BEATS_PER_BAR === 0;
-      const barNumber = Math.floor(beatIndex / BEATS_PER_BAR) + 1;
+      const major = beatIndex % beatsPerBar === 0;
+      const barNumber = Math.floor(beatIndex / beatsPerBar) + 1;
       rulerTicks.push({
         id: `bar-${beatIndex}`,
         time: beatIndex * beatDurationSeconds,
@@ -2098,26 +2105,23 @@ export default function AudioWorkstation() {
               <span className="text-[9px] font-black text-amber-300">BPM</span>
             </div>
 
-            <div className="flex h-8 items-center overflow-hidden rounded-md border border-slate-800 bg-[#10151c] p-0.5">
-              {([
-                { id: 'time', label: '时间' },
-                { id: 'bars', label: '小节' },
-              ] as const).map(mode => (
-                <button
-                  key={mode.id}
-                  type="button"
-                  onClick={() => setRulerMode(mode.id)}
-                  title={mode.id === 'time' ? '时间线：按秒显示和吸附' : '小节线：按 4/4 小节与拍显示和吸附'}
-                  className={`h-6 rounded px-2 text-[10px] font-black transition-all ${
-                    rulerMode === mode.id
-                      ? 'bg-emerald-500 text-slate-950'
-                      : 'text-slate-500 hover:bg-slate-800 hover:text-slate-200'
-                  }`}
-                >
-                  {mode.label}
-                </button>
-              ))}
-            </div>
+            <label
+              className="relative flex h-8 items-center rounded-md border border-slate-800 bg-[#10151c]"
+              title={`工程拍号：当前 ${timeSignature}`}
+            >
+              <span className="sr-only">工程拍号</span>
+              <select
+                value={timeSignature}
+                onChange={(e) => setTimeSignature(e.target.value as TimeSignature)}
+                aria-label="工程拍号"
+                className="h-full cursor-pointer appearance-none border-0 bg-transparent py-0 pl-2.5 pr-6 font-mono text-[11px] font-black text-slate-100 outline-none hover:text-emerald-200 focus:text-emerald-200"
+              >
+                {TIME_SIGNATURE_OPTIONS.map(signature => (
+                  <option key={signature} value={signature}>{signature}</option>
+                ))}
+              </select>
+              <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[9px] text-slate-500">▾</span>
+            </label>
 
             <button
               type="button"
@@ -2147,10 +2151,10 @@ export default function AudioWorkstation() {
           
           {/* Absolute Playhead indicator */}
           <div 
-            className="absolute top-8 bottom-0 w-0.5 bg-red-500 z-30 pointer-events-none transition-transform duration-75"
+            className="absolute top-8 bottom-0 w-0.5 bg-slate-400 z-30 pointer-events-none transition-transform duration-75"
             style={{ 
               left: `${trackHeaderWidth + currentTime * ZOOM_PX_PER_SECOND}px`,
-              boxShadow: '0 0 8px #ef4444'
+              boxShadow: '0 0 8px rgba(148, 163, 184, 0.45)'
             }}
           />
 
@@ -2158,12 +2162,26 @@ export default function AudioWorkstation() {
           <div className="flex bg-[#151a21] border-b border-slate-800 shrink-0 h-8">
             {/* Header placeholder spacer */}
             <div
-              className="shrink-0 bg-[#151a21] h-full flex items-center px-4"
+              className="shrink-0 bg-[#151a21] h-full flex items-center justify-between gap-2 px-3"
               style={{ width: `${trackHeaderWidth}px` }}
             >
               <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest font-mono">
-                {rulerMode === 'bars' ? 'bars · beats' : 'timeline'}
+                {rulerMode === 'bars' ? `${timeSignature} · bars` : 'timeline'}
               </span>
+              <label className="relative flex items-center">
+                <span className="sr-only">时间尺显示模式</span>
+                <select
+                  value={rulerMode}
+                  onChange={(e) => setRulerMode(e.target.value as RulerMode)}
+                  title={rulerMode === 'time' ? '时间线：按秒显示和吸附' : `小节线：按 ${timeSignature} 小节与拍显示和吸附`}
+                  aria-label="选择时间尺显示模式"
+                  className="h-6 cursor-pointer appearance-none rounded-md border border-slate-700 bg-slate-950/80 py-0 pl-2 pr-6 text-[10px] font-black text-slate-200 outline-none transition-colors hover:border-emerald-500/70 focus:border-emerald-400 focus:ring-1 focus:ring-emerald-400/30"
+                >
+                  <option value="time">时间</option>
+                  <option value="bars">小节</option>
+                </select>
+                <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[9px] text-slate-500">▾</span>
+              </label>
             </div>
 
             {/* Scale markings container */}

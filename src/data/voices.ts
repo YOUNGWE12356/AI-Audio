@@ -12,6 +12,8 @@ export interface VoiceItem {
   tags: string[]; // 标签
   description: string; // 描述
   previewUrl: string; // 试听 URL
+  source?: 'my_voices' | 'voice_library';
+  publicOwnerId?: string;
 }
 
 export const ELEVENLABS_VOICES: VoiceItem[] = [];

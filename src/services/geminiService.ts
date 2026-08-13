@@ -1051,13 +1051,13 @@ export interface SfxRequirementRow {
 
 export async function generateSfxRequirements(
   inputText: string,
-  screenshot: { data: string; mimeType: string } | null,
+  referenceFile: { data: string; mimeType: string } | null,
   templateType: 'game_sfx_general' | 'game_sfx_middleware' | 'voiceover_general' | 'voiceover_multilang'
 ): Promise<{ items: any[] }> {
   if (isBrowser) {
     return postJson<{ items: any[] }>('/api/ai/gemini/sfx-requirements', {
       inputText,
-      screenshot,
+      screenshot: referenceFile,
       templateType,
     });
   }
@@ -1071,10 +1071,12 @@ export async function generateSfxRequirements(
       【游戏音效配乐通用需求表模板参考1】
       该模板主要包含以下字段，请在输出 JSON 时填充：
       - index (序号): 整数，从1开始递增。
+      - audio_type (类型): 必须填写 "SFX"、"BGM" 或 "VO"。音效为 SFX，背景音乐为 BGM，角色台词/旁白/字幕配音为 VO。
       - filename (文件命名): 采用下划线小写英文命名规范。例如 sfx_ui_button, bgm_battle, sfx_foley_footstep_wood_01。只有同一基础音效存在多个变体/随机样本时才使用 _01/_02/_03；如果该类型只有一个音效，不要添加尾号。
       - duration_logic (时长&播放逻辑): 声效时长描述及触发/播放逻辑，例如 "1s, 单次播放", "10s, 循环播放", "3s, 随机多样本触发"。
       - scene (应用场景): 音效触发的具体场景与时机描述，如 "通用与主界面&游戏内的ui点击按键"。
       - description (描述): 对声音声学物理表现与听觉感受的文字描述，如 "清脆的交互点击声，带有科技高频感"。
+      - script_tone (台词/语气): SFX/BGM 行填 "-"；VO 行必须填写识别到或创作出的台词文案，并包含语气提示。不要在内容开头重复写“台词：”，例如 "欢迎回来，指挥官。语气：沉稳、亲切、略带科技感"。
       - remarks (备注): 混音、响度或音频程序实现的注意事项，如 "链接&视频说明" 或 "需要混响衰减处理"。
       - video_link (动效视频): 默认为 "链接&视频说明" 或类似视频占位说明。
     `;
@@ -1086,13 +1088,15 @@ export async function generateSfxRequirements(
           type: Type.ARRAY,
           items: {
             type: Type.OBJECT,
-            required: ["index", "filename", "duration_logic", "scene", "description", "remarks", "video_link"],
+            required: ["index", "audio_type", "filename", "duration_logic", "scene", "description", "script_tone", "remarks", "video_link"],
             properties: {
               index: { type: Type.INTEGER },
+              audio_type: { type: Type.STRING },
               filename: { type: Type.STRING },
               duration_logic: { type: Type.STRING },
               scene: { type: Type.STRING },
               description: { type: Type.STRING },
+              script_tone: { type: Type.STRING },
               remarks: { type: Type.STRING },
               video_link: { type: Type.STRING }
             }
@@ -1208,18 +1212,46 @@ export async function generateSfxRequirements(
     };
   }
 
+  const hasTextInput = inputText.trim().length > 0;
+  const inputInterpretationInstruction = hasTextInput
+    ? `
+    【当前输入识别重点：用户输入的是自然语言需求文本】
+    本次必须优先分析“用户输入要求”里的自然语言内容，而不是按模板示例自由扩写。
+    请把用户输入的一段话拆成一张真正可制作、可分配给声音设计师的需求表：
+    - 先识别文本中明确提到的每一个声音交付物：音效、环境氛围、BGM/音乐、配音/旁白/字幕台词、UI反馈、角色动作、道具、技能、怪物、场景机关等。
+    - 一行只对应一个可制作的声音资产或一组强相关随机样本；不要把多个不相关声音塞进同一行。
+    - 如果一句话里用“包含、以及、还有、/、顿号、逗号、换行、编号”列出多个需求，必须拆成多行。
+    - 如果文本是剧情/玩法描述，而不是清单，请只提取其中“画面上或交互中确实会发生、需要声音反馈”的事件；不要生成无关的通用游戏音效库。
+    - 如果用户给了具体数量、风格、时长、情绪、角色、语种、是否循环、是否随机多样本、是否 3D、参考作品等约束，必须写入对应字段。
+    - 如果用户说“不需要、去掉、不要、仅、只要”，必须严格遵守，不要把排除项生成出来。
+    - 对不确定的信息可以在 remarks 里写“待确认/建议”，但不要凭空编造角色名、关卡名或与原文无关的资产。
+    - 当用户输入已经很具体时，items 数量应接近文本中可识别的需求数量；不要自动扩展成 6-10 条模板化内容。
+    - 当用户输入很抽象，例如“做一套末日游戏音效表”，才可以头脑风暴生成 6-10 条典型条目。
+    - 输出的 scene 必须说明触发时机；description 必须说明声音材质和听感；filename 必须来自真实触发对象/动作，而不是从华丽描述词里硬凑。
+    `
+    : `
+    【当前输入识别重点：用户没有提供明确文字需求】
+    如果也没有上传参考文件，请按所选模板生成一套 6-10 条典型专业示例需求；如果上传了参考文件，请以参考文件内容为主。
+    `;
+
   const prompt = `
     你是一个顶级的游戏音频总监、声音设计师和配音导演。
-    你的任务是：根据用户输入的文字描述、或上传的草稿表格/需求表截图（图片数据），进行高品质的识别、结构化重构、工程化规范命名、以及专业化的填充和优化。最终生成一张完美格式的、可以直接用于项目开发、给外包和合作团队看的专业“音效/配音需求表”。
+    你的任务是：根据用户输入的文字描述、或上传的参考文件（图片/截图、音频、视频），进行高品质的识别、结构化重构、工程化规范命名、以及专业化的填充和优化。最终生成一张完美格式的、可以直接用于项目开发、给外包和合作团队看的专业“音效/配音需求表”。
+
+    ${inputInterpretationInstruction}
 
     请严格遵守以下规则进行处理：
     1. **多模态输入识别与需求数量控制**：
-       - **精确识别并锁定数量**：请首先仔细识别用户输入的文字或上传的截图（图片数据）中**实际包含的、具体的音效或配音需求条目数量**。
-       - **严禁增加额外行**：在重构和优化用户已有草稿、列表或截图时，生成返回的 items 数组大小**必须与原输入条目的数量完全一致（1:1 对应），优化时不需要增加需求数量。**严禁自动填充任何无中生有的占位示例需求行。
-       - 只有当用户仅仅提供了极其空泛抽象的提示词（例如“生成一个科幻游戏的音效需求表”），而未提供任何具体列表、条目或截图时，你才应当自动头脑风暴生成 6-10 行典型的模板推荐条目。
+       - **图片/截图/表格草稿**：如果上传文件是已有需求表、表格截图、手写/截图清单，请仔细 OCR 并识别其中实际包含的音效、BGM 或配音条目数量；重构和优化时 items 数组必须与原输入条目数量 1:1 对应，不要额外增加行。
+       - **普通图片/视觉参考图**：如果上传文件不是表格，而是画面、角色、场景、UI 或概念图，请根据画面内容生成适合当前模板的音乐/音效/配音需求，不要求 1:1。
+       - **音频文件**：音频通常作为 BGM/音乐参考处理。请聆听并分析风格、情绪、速度、节奏密度、配器、音色、段落结构、循环/无缝衔接需求和适用场景；优先生成 BGM 或音乐方向需求。如果用户文字另有说明，再结合文字修正。
+       - **视频文件**：视频默认只分析画面、镜头节奏、角色动作、UI变化、场景氛围和画面中的可见字幕；请忽略视频内嵌音频，因为它大概率与画面无关。不要根据视频原声推断音乐或音效。
+       - **视频字幕 / 配音需求混合输出**：如果视频画面中有字幕，或用户文字/参考文件里出现角色台词、旁白、对白、播报、引导语、口语化文案等配音需求，必须识别字幕内容和语境，并生成对应 VO 配音需求。即使当前选择的是“游戏音效配乐通用表”或其它音效/BGM模板，也不能忽略配音需求；通用表里请把音效、BGM、VO 放在同一个 items 数组中，VO 行使用 \`vo_\` 文件名，\`audio_type\` 填 \`VO\`，\`script_tone\` 直接填写文案和语气，不要在开头加“台词：”。
+       - **同一素材的一次性综合需求**：同一个视频、图片或文字需求可能同时包含 SFX、BGM 和 VO。除非用户明确只要某一种类型，否则请一次性输出素材中可识别的所有音频需求，避免让用户反复切模板才能得到完整结果。
+       - **空泛输入或只选模板**：当用户没有提供具体列表、表格或参考文件，只选择模板或输入非常抽象的提示词时，自动头脑风暴生成 6-10 行典型专业条目。
 
     2. **文件名命名优化与直接保留**：
-       - 如果用户输入或上传的截图/草稿表格中**本身就带有文件命名或名称**（如 \`sfx_click\`, \`bg_battle\`, \`刀剑砍击声\` 等）：
+       - 如果用户输入或上传的参考文件/草稿表格中**本身就带有文件命名或名称**（如 \`sfx_click\`, \`bg_battle\`, \`刀剑砍击声\` 等）：
          - 你可以根据专业的下划线英文命名规范（如：\`[sfx / bgm / vo]_[模块]_[动作/角色]_[描述]\`，多变体时才追加 \`_[序号]\`）来智能优化重构这些命名；
          - 如果用户提供的命名已经相当成熟、合理或带有特定的版本代号，你应当**直接使用和保留**给到的命名；
          - 确保优化的命名与原始名称的意图保持强关联，不得凭空捏造全新的无关名称。
@@ -1239,20 +1271,24 @@ export async function generateSfxRequirements(
        - **时长与播放逻辑**：用声效术语编写，例如 "1s, 单次播放", "loop, 循环播放"。
        - **3D 距离规范 (distance_3d)**：对于 FMOD/Wwise 中间件需求表，如果是 3D 事件（如备注或播放逻辑里包含 3D 空间、3D 空间定位等），必须在 \`distance_3d\` 中增加一个 3D 距离，默认值为 \`"20"\`（或根据音量、场景大小评估为 "15", "30" 等数字字符串）；如果是 2D 事件，则该字段输出为 \`"-"\`。
        - **多语种台词生成**：在多语种配音模板下，根据简中台词，翻译并创作出对应的英语台词和韩语台词。台词要带有文学色彩、符合游戏中的魔幻/科幻/写实风格，不能是粗暴的机器人机翻。
+       - **通用表中的 VO 行**：当模板是“游戏音效配乐通用表”时，配音需求不要丢弃；请把配音行作为普通综合音频需求行输出，\`audio_type\` 为 \`VO\`，\`filename\` 使用 \`vo_[speaker_or_role]_[intent]\`，\`description\` 写声音角色/声线方向，\`script_tone\` 直接写台词文案与语气，\`remarks\` 写配音制作、口型、情绪或交付注意事项。
+       - **通用表排序规则**：当模板是“游戏音效配乐通用表”时，输出顺序不要跟随用户文字描述顺序；必须先集中输出所有 SFX，再输出所有 BGM，最后输出所有 VO/人声/配音/台词需求。同一大类内部再保留需求的自然逻辑顺序。
 
     4. **输出格式**：
        - 必须输出符合以下模板要求的 JSON 数组。
-       \${templateDescription}
+       - 为避免生成结果过长导致 JSON 截断，每个字段都要简洁：description、remarks、script_tone 尽量控制在 120 个中文字符内；除非用户原始表格本身包含更多条目，否则一次最多输出 24 行。
+       - 视频字幕类 VO 行不要重复写长段分析；优先保留台词、语气、时间/场景和制作注意事项。
+       ${templateDescription}
 
-    用户输入要求：\${inputText || "请根据提供的图片生成，或自动生成该类型游戏的标准专业需求表"}
+    用户输入要求：${inputText || "请根据上传参考文件生成；如果没有参考文件，则自动生成该类型游戏的标准专业需求表"}
   `;
 
   const parts: any[] = [{ text: prompt }];
-  if (screenshot) {
+  if (referenceFile) {
     parts.push({
       inlineData: {
-        data: screenshot.data.split(',')[1] || screenshot.data,
-        mimeType: screenshot.mimeType
+        data: referenceFile.data.split(',')[1] || referenceFile.data,
+        mimeType: referenceFile.mimeType
       }
     });
   }
@@ -1262,6 +1298,7 @@ export async function generateSfxRequirements(
     contents: [{ parts }],
     config: {
       responseMimeType: "application/json",
+      maxOutputTokens: 24_576,
       responseSchema: schema
     }
   });
@@ -1273,8 +1310,13 @@ export async function generateSfxRequirements(
   try {
     return JSON.parse(response.text);
   } catch (e) {
-    console.error("JSON 解析失败:", response.text);
-    throw new Error("AI 返回的数据格式有误，请重试");
+    console.error("JSON 解析失败:", {
+      length: response.text.length,
+      preview: response.text.slice(0, 500),
+      tail: response.text.slice(-500),
+      error: e,
+    });
+    throw new Error("AI 返回的需求表结果过长或格式不完整，系统已收紧输出长度，请再点击生成一次。");
   }
 }
 
@@ -1414,6 +1456,58 @@ export async function translateToEnglish(text: string): Promise<string> {
   } catch (err) {
     console.error("Translation to English failed:", err);
     return text.trim();
+  }
+}
+
+export async function translateTextToLanguage(
+  text: string,
+  targetLanguage: string,
+  options?: { preserveTone?: boolean }
+): Promise<string> {
+  const normalizedText = text.trim();
+  if (!normalizedText) return '';
+
+  const normalizedTargetLanguage = targetLanguage.trim() || 'English';
+
+  if (isBrowser) {
+    const result = await postJson<{ text: string }>('/api/ai/gemini/translate-language', {
+      text: normalizedText,
+      targetLanguage: normalizedTargetLanguage,
+      preserveTone: options?.preserveTone !== false,
+    });
+    return result.text;
+  }
+
+  try {
+    const { ai, ThinkingLevel } = await getAI();
+    const prompt = `You are a professional dubbing translator.
+Translate the source dialogue into ${normalizedTargetLanguage}.
+Preserve the original meaning, emotion, tone, speaking intention, and natural spoken rhythm.
+Make the translated line sound like a real voice actor would say it, not like a literal subtitle.
+The output language MUST be ${normalizedTargetLanguage}. Do not return the source language unless the source is already ${normalizedTargetLanguage}.
+Return only the translated dialogue. Do not add explanations, labels, quotation marks, or markdown.
+
+Source dialogue:
+${normalizedText}`;
+
+    const response = await generateGeminiContent(ai, {
+      model: "gemini-3.5-flash",
+      contents: [{ parts: [{ text: prompt }] }],
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
+      }
+    });
+
+    const translatedText = response.text ? response.text.trim() : '';
+    if (!translatedText) {
+      throw new Error(`未能翻译成${normalizedTargetLanguage}，请稍后重试。`);
+    }
+    return translatedText;
+  } catch (err) {
+    console.error("Target-language translation failed:", err);
+    throw err instanceof Error
+      ? err
+      : new Error(`翻译成${normalizedTargetLanguage}失败，请稍后重试。`);
   }
 }
 

@@ -42,6 +42,7 @@ export interface TimelineClip {
   startTime: number; // in seconds
   duration: number; // in seconds
   volume: number; // Clip fader position from 0 to 1; 0.8 is unity, above 0.8 adds gain
+  muted?: boolean; // Clip/event mute
   audioUrl?: string; // Generated or uploaded file URL
   audioSource?: 'generated' | 'uploaded';
   sourceOffset?: number; // Offset in the source audio file, used when a clip has been cut from a longer source

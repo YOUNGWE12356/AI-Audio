@@ -16,9 +16,20 @@ import {
 } from './services/geminiService';
 import { generateSoundEffect, generateMusic, generateVoice } from './services/elevenLabsService';
 import { FileItem, HistoryItem, TabType } from './types';
-import { ELEVENLABS_VOICES } from './data/voices';
+import { ELEVENLABS_VOICES, VoiceItem } from './data/voices';
 import { fetchPlatformHealth } from './services/platformService';
 import { prepareFilesForGemini } from './utils/mediaPreparation';
+
+export interface PendingMusicOption {
+  id: 'A' | 'B';
+  url: string;
+  title: string;
+  prompt: string;
+  timestamp: string;
+  details: string;
+  duration: number;
+  type: 'instrumental' | 'vocal';
+}
 
 // Modular Components
 import Sidebar from './components/Sidebar';
@@ -47,12 +58,15 @@ function WorkspaceLoading() {
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState<TabType>('workbench');
+  const [visitedTabs, setVisitedTabs] = useState<Set<TabType>>(() => new Set(['workbench']));
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   
   // The HTML5 client only reads service availability from the same-origin API.
   // Secret values remain on the server and are never embedded into the bundle.
   const [hasGeminiKey, setHasGeminiKey] = useState(false);
   const [hasElevenLabsKey, setHasElevenLabsKey] = useState(false);
+  const elevenLabsQualityMode = 'pro' as const;
+  const isElevenLabsProMode = true;
 
   const handleKeysUpdated = () => {
     fetchPlatformHealth()
@@ -69,6 +83,15 @@ export default function App() {
   useEffect(() => {
     handleKeysUpdated();
   }, []);
+
+  useEffect(() => {
+    setVisitedTabs(prev => {
+      if (prev.has(currentTab)) return prev;
+      const next = new Set(prev);
+      next.add(currentTab);
+      return next;
+    });
+  }, [currentTab]);
 
   // Pre-filled sample historic creations for a complete look on first load
   const [historyList, setHistoryList] = useState<HistoryItem[]>([
@@ -121,15 +144,17 @@ export default function App() {
   const filesRef = useRef<FileItem[]>([]);
   const previousFilesRef = useRef<FileItem[]>([]);
   const objectUrlsRef = useRef<{
-    standaloneAudioUrl: string | null;
-    standaloneMusicAudioUrl: string | null;
-    standaloneVoiceAudioUrl: string | null;
+    pendingSfxOptionAUrl: string | null;
+    pendingSfxOptionBUrl: string | null;
+    pendingMusicOptionAUrl: string | null;
+    pendingMusicOptionBUrl: string | null;
     pendingVoiceOptionAUrl: string | null;
     pendingVoiceOptionBUrl: string | null;
   }>({
-    standaloneAudioUrl: null,
-    standaloneMusicAudioUrl: null,
-    standaloneVoiceAudioUrl: null,
+    pendingSfxOptionAUrl: null,
+    pendingSfxOptionBUrl: null,
+    pendingMusicOptionAUrl: null,
+    pendingMusicOptionBUrl: null,
     pendingVoiceOptionAUrl: null,
     pendingVoiceOptionBUrl: null,
   });
@@ -138,11 +163,13 @@ export default function App() {
 
   // Standalone SFX Generator States
   const [standalonePrompt, setStandalonePrompt] = useState('');
-  const [standaloneDuration, setStandaloneDuration] = useState(5);
+  const [standaloneDuration, setStandaloneDuration] = useState(1);
   const [standaloneLoading, setStandaloneLoading] = useState(false);
-  const [standaloneAudioUrl, setStandaloneAudioUrl] = useState<string | null>(null);
   const [standaloneError, setStandaloneError] = useState<string | null>(null);
-  const standaloneAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [pendingSfxOptions, setPendingSfxOptions] = useState<{
+    optionA: { url: string; title: string; prompt: string; timestamp: string; details: string; duration: number } | null;
+    optionB: { url: string; title: string; prompt: string; timestamp: string; details: string; duration: number } | null;
+  }>({ optionA: null, optionB: null });
 
   // Standalone Music Generator States
   const [standaloneMusicPrompt, setStandaloneMusicPrompt] = useState('');
@@ -151,6 +178,10 @@ export default function App() {
   const [standaloneMusicLyrics, setStandaloneMusicLyrics] = useState('');
   const [standaloneMusicLoading, setStandaloneMusicLoading] = useState(false);
   const [standaloneMusicAudioUrl, setStandaloneMusicAudioUrl] = useState<string | null>(null);
+  const [pendingMusicOptions, setPendingMusicOptions] = useState<{
+    optionA: PendingMusicOption | null;
+    optionB: PendingMusicOption | null;
+  }>({ optionA: null, optionB: null });
   const [standaloneMusicError, setStandaloneMusicError] = useState<string | null>(null);
   const standaloneMusicAudioRef = useRef<HTMLAudioElement | null>(null);
 
@@ -158,6 +189,7 @@ export default function App() {
   const [standaloneVoiceText, setStandaloneVoiceText] = useState('');
   const [standaloneVoiceGender, setStandaloneVoiceGender] = useState<'male' | 'female'>('male');
   const [standaloneVoiceRole, setStandaloneVoiceRole] = useState(''); 
+  const [selectedStandaloneVoice, setSelectedStandaloneVoice] = useState<VoiceItem | null>(null);
   const [standaloneVoiceEmotion, setStandaloneVoiceEmotion] = useState('');
   const [standaloneVoiceLang, setStandaloneVoiceLang] = useState('zh');
   const [standaloneVoiceSpeed, setStandaloneVoiceSpeed] = useState<number>(1.0);
@@ -168,8 +200,8 @@ export default function App() {
 
   // Two alternatives state for standalone voiceover generation
   const [pendingVoiceOptions, setPendingVoiceOptions] = useState<{
-    optionA: { url: string; voiceLabel: string; emotionLabel: string; processedText: string; timestamp: string; details: string; speed: number } | null;
-    optionB: { url: string; voiceLabel: string; emotionLabel: string; processedText: string; timestamp: string; details: string; speed: number } | null;
+    optionA: { url: string; voiceLabel: string; displayName: string; emotionLabel: string; processedText: string; timestamp: string; details: string; speed: number } | null;
+    optionB: { url: string; voiceLabel: string; displayName: string; emotionLabel: string; processedText: string; timestamp: string; details: string; speed: number } | null;
   }>({ optionA: null, optionB: null });
 
   useEffect(() => {
@@ -187,9 +219,10 @@ export default function App() {
     return () => {
       const latestUrls = objectUrlsRef.current;
       previousFilesRef.current.forEach(f => URL.revokeObjectURL(f.preview));
-      if (latestUrls.standaloneAudioUrl) URL.revokeObjectURL(latestUrls.standaloneAudioUrl);
-      if (latestUrls.standaloneMusicAudioUrl) URL.revokeObjectURL(latestUrls.standaloneMusicAudioUrl);
-      if (latestUrls.standaloneVoiceAudioUrl) URL.revokeObjectURL(latestUrls.standaloneVoiceAudioUrl);
+      if (latestUrls.pendingSfxOptionAUrl) URL.revokeObjectURL(latestUrls.pendingSfxOptionAUrl);
+      if (latestUrls.pendingSfxOptionBUrl) URL.revokeObjectURL(latestUrls.pendingSfxOptionBUrl);
+      if (latestUrls.pendingMusicOptionAUrl) URL.revokeObjectURL(latestUrls.pendingMusicOptionAUrl);
+      if (latestUrls.pendingMusicOptionBUrl) URL.revokeObjectURL(latestUrls.pendingMusicOptionBUrl);
       if (latestUrls.pendingVoiceOptionAUrl) URL.revokeObjectURL(latestUrls.pendingVoiceOptionAUrl);
       if (latestUrls.pendingVoiceOptionBUrl) URL.revokeObjectURL(latestUrls.pendingVoiceOptionBUrl);
     };
@@ -201,13 +234,14 @@ export default function App() {
 
   useEffect(() => {
     objectUrlsRef.current = {
-      standaloneAudioUrl,
-      standaloneMusicAudioUrl,
-      standaloneVoiceAudioUrl,
+      pendingSfxOptionAUrl: pendingSfxOptions.optionA?.url || null,
+      pendingSfxOptionBUrl: pendingSfxOptions.optionB?.url || null,
+      pendingMusicOptionAUrl: pendingMusicOptions.optionA?.url || null,
+      pendingMusicOptionBUrl: pendingMusicOptions.optionB?.url || null,
       pendingVoiceOptionAUrl: pendingVoiceOptions.optionA?.url || null,
       pendingVoiceOptionBUrl: pendingVoiceOptions.optionB?.url || null,
     };
-  }, [standaloneAudioUrl, standaloneMusicAudioUrl, standaloneVoiceAudioUrl, pendingVoiceOptions]);
+  }, [pendingSfxOptions, pendingMusicOptions, pendingVoiceOptions]);
 
   useEffect(() => {
     const liveFileIds = new Set(files.map(item => item.id));
@@ -343,8 +377,9 @@ export default function App() {
         }
       }
 
-      // Strip all bracketed expressions completely from the text sent to ElevenLabs to prevent them from being spoken aloud!
-      // The spoken text should ONLY contain the plain dialogue content.
+      // Eleven v3 understands bracketed performance directions such as [excited] / [whispering].
+      // Keep the bracketed text for v3, but provide a clean fallback text for older models so tags are not spoken aloud.
+      const elevenV3Text = processedText;
       const finalSpokenText = processedText
         .replace(bracketRegex, ' ')
         .replace(/\s+/g, ' ')
@@ -380,10 +415,16 @@ export default function App() {
       // Intelligent parsing for unified emotions
       const rawEmoDesc = bracketMatches.map(m => m[1].trim()).filter(Boolean).join(', ');
       
-      // 语调控制已去除，不再根据情绪标签动态调整配音稳定性、相似度或语气风格，以保持发音的自然与平顺。
-      const stability = 0.50;
-      const similarity = 0.75;
-      const styleExaggeration = 0.0;
+      const normalizedEmotionText = allTranslatedEmotions.join(' ').toLowerCase();
+      const isHighEnergyEmotion = /excited|energetic|angry|furious|shout|shouting|surprised|fear|scared|urgent|tense|happy|joy|cheerful|激动|兴奋|愤怒|惊讶|紧张|开心|高兴|热血/.test(normalizedEmotionText);
+      const isSoftEmotion = /whisper|whispering|soft|calm|gentle|sad|cry|crying|tired|weak|warm|温柔|轻声|低语|悲伤|难过|哭|平静|疲惫/.test(normalizedEmotionText);
+      const stability = isSoftEmotion ? (isElevenLabsProMode ? 0.50 : 0.55) : (isElevenLabsProMode ? 0.45 : 0.50);
+      const similarity = isElevenLabsProMode ? 0.82 : 0.75;
+      const styleExaggeration = isHighEnergyEmotion
+        ? (isElevenLabsProMode ? 0.28 : 0.16)
+        : isSoftEmotion
+          ? (isElevenLabsProMode ? 0.10 : 0.04)
+          : (isElevenLabsProMode ? 0.14 : 0.0);
 
       // Intelligent fallback parsing for custom voice descriptions
       const voiceDesc = englishRole;
@@ -415,22 +456,46 @@ export default function App() {
         }
       }
 
-      const [blobA, blobB] = await Promise.all([
-        generateVoice(
-          finalSpokenText,
-          voiceId,
-          stability,
-          similarity,
-          styleExaggeration
-        ),
-        generateVoice(
-          finalSpokenText,
-          voiceId,
-          stability,
-          similarity,
-          styleExaggeration
-        )
-      ]);
+      const selectedGeneratedVoice = selectedStandaloneVoice?.id === voiceId ? selectedStandaloneVoice : null;
+      const sharedVoiceOptions = selectedGeneratedVoice?.source === 'voice_library'
+        ? {
+            voiceSource: 'voice_library' as const,
+            publicOwnerId: selectedGeneratedVoice.publicOwnerId,
+            voiceName: selectedGeneratedVoice.name,
+          }
+        : {};
+      const takeSeedBase = Date.now() % 1_000_000_000;
+
+      // Generate the two selectable takes sequentially for the same ElevenLabs voice.
+      // Voice Library voices can trigger an internal "add voice" step on first use;
+      // parallel requests for the same voice may collide and return
+      // "Multiple voice additions/deletions for the same voice were called at the same time".
+      const blobA = await generateVoice(
+        elevenV3Text,
+        voiceId,
+        stability,
+        similarity,
+        styleExaggeration,
+        {
+          qualityMode: elevenLabsQualityMode,
+          fallbackText: finalSpokenText,
+          seed: takeSeedBase,
+          ...sharedVoiceOptions,
+        },
+      );
+      const blobB = await generateVoice(
+        elevenV3Text,
+        voiceId,
+        stability,
+        similarity,
+        styleExaggeration,
+        {
+          qualityMode: elevenLabsQualityMode,
+          fallbackText: finalSpokenText,
+          seed: takeSeedBase + 1,
+          ...sharedVoiceOptions,
+        },
+      );
       const urlA = URL.createObjectURL(blobA);
       const urlB = URL.createObjectURL(blobB);
       
@@ -439,7 +504,6 @@ export default function App() {
 
       const matchedVoice = ELEVENLABS_VOICES.find(v => v.id === voiceId);
       const voiceLabel = matchedVoice ? matchedVoice.name : (voiceDesc || (detectedGender === 'male' ? '自定义男声' : '自定义女声'));
-      const emotionLabel = rawEmoDesc || '默认情绪';
       const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 16);
       const details = `${processedText.length}字 · ${standaloneVoiceLang.toUpperCase()}语种 · 语速${standaloneVoiceSpeed}x`;
 
@@ -447,7 +511,8 @@ export default function App() {
         optionA: {
           url: urlA,
           voiceLabel: `${voiceLabel} (版本 A)`,
-          emotionLabel,
+          displayName: `角色配音 - ${voiceLabel} (版本 A)`,
+          emotionLabel: rawEmoDesc || '默认情绪',
           processedText,
           timestamp,
           details,
@@ -456,13 +521,37 @@ export default function App() {
         optionB: {
           url: urlB,
           voiceLabel: `${voiceLabel} (版本 B)`,
-          emotionLabel,
+          displayName: `角色配音 - ${voiceLabel} (版本 B)`,
+          emotionLabel: rawEmoDesc || '默认情绪',
           processedText,
           timestamp,
           details,
           speed: standaloneVoiceSpeed
         }
       });
+      setHistoryList(prev => [
+        {
+          id: `voice-A-${Date.now()}`,
+          type: 'voice',
+          title: `角色配音 - ${voiceLabel} (版本 A)`,
+          prompt: processedText,
+          url: urlA,
+          timestamp,
+          details,
+          speed: standaloneVoiceSpeed
+        },
+        {
+          id: `voice-B-${Date.now()}`,
+          type: 'voice',
+          title: `角色配音 - ${voiceLabel} (版本 B)`,
+          prompt: processedText,
+          url: urlB,
+          timestamp,
+          details,
+          speed: standaloneVoiceSpeed
+        },
+        ...prev,
+      ]);
 
       // Auto play Option A to give instant feedback
       setTimeout(() => {
@@ -493,27 +582,48 @@ export default function App() {
     setStandaloneLoading(true);
     setStandaloneError(null);
     try {
-      const blob = await generateSoundEffect(standalonePrompt.trim(), standaloneDuration);
-      const url = URL.createObjectURL(blob);
-      setStandaloneAudioUrl(url);
+      if (pendingSfxOptions.optionA?.url) URL.revokeObjectURL(pendingSfxOptions.optionA.url);
+      if (pendingSfxOptions.optionB?.url) URL.revokeObjectURL(pendingSfxOptions.optionB.url);
 
-      const newHistoryItem: HistoryItem = {
-        id: `sfx-${Date.now()}`,
-        type: 'sfx',
-        title: `独立音效 - ${standalonePrompt.trim().substring(0, 20)}${standalonePrompt.trim().length > 20 ? '...' : ''}`,
-        prompt: standalonePrompt.trim(),
-        url: url,
-        timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
-        details: `${standaloneDuration}秒 · 电影声效`
-      };
-      setHistoryList(prev => [newHistoryItem, ...prev]);
+      const prompt = standalonePrompt.trim();
+      const englishPrompt = await translateToEnglish(prompt);
+      const generationPrompt = englishPrompt.trim() || prompt;
+      const [blobA, blobB] = await Promise.all([
+        generateSoundEffect(generationPrompt, standaloneDuration, {
+          qualityMode: elevenLabsQualityMode,
+        }),
+        generateSoundEffect(generationPrompt, standaloneDuration, {
+          qualityMode: elevenLabsQualityMode,
+        }),
+      ]);
+      const urlA = URL.createObjectURL(blobA);
+      const urlB = URL.createObjectURL(blobB);
+
+      const baseTitle = `独立音效 - ${prompt.substring(0, 20)}${prompt.length > 20 ? '...' : ''}`;
+      const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 16);
+      const details = generationPrompt !== prompt
+        ? `${standaloneDuration}秒 · 电影声效 · 已自动英译`
+        : `${standaloneDuration}秒 · 电影声效`;
+      setPendingSfxOptions({
+        optionA: {
+          url: urlA,
+          title: `${baseTitle}（版本 A）`,
+          prompt,
+          timestamp,
+          details,
+          duration: standaloneDuration,
+        },
+        optionB: {
+          url: urlB,
+          title: `${baseTitle}（版本 B）`,
+          prompt,
+          timestamp,
+          details,
+          duration: standaloneDuration,
+        },
+      });
       
-      // Auto play
-      setTimeout(() => {
-        if (standaloneAudioRef.current) {
-          standaloneAudioRef.current.play().catch(e => console.error(e));
-        }
-      }, 150);
+      // Auto play option A
     } catch (err: any) {
       setStandaloneError(err.message || '生成失败，请重试');
     } finally {
@@ -534,26 +644,65 @@ export default function App() {
 
     setStandaloneMusicLoading(true);
     setStandaloneMusicError(null);
+    if (standaloneMusicAudioUrl) URL.revokeObjectURL(standaloneMusicAudioUrl);
+    if (pendingMusicOptions.optionA?.url) URL.revokeObjectURL(pendingMusicOptions.optionA.url);
+    if (pendingMusicOptions.optionB?.url) URL.revokeObjectURL(pendingMusicOptions.optionB.url);
+    setStandaloneMusicAudioUrl(null);
+    setPendingMusicOptions({ optionA: null, optionB: null });
     try {
-      const blob = await generateMusic(
-        standaloneMusicPrompt.trim(), 
-        standaloneMusicDuration, 
-        standaloneMusicType === 'instrumental',
-        standaloneMusicLyrics.trim()
-      );
-      const url = URL.createObjectURL(blob);
-      setStandaloneMusicAudioUrl(url);
-      
-      const newHistoryItem: HistoryItem = {
-        id: `music-${Date.now()}`,
-        type: 'music',
-        title: `独立音乐 - ${standaloneMusicPrompt.trim().substring(0, 20)}${standaloneMusicPrompt.trim().length > 20 ? '...' : ''}`,
-        prompt: standaloneMusicPrompt.trim(),
-        url: url,
-        timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
-        details: `${standaloneMusicDuration}秒 · ${standaloneMusicType === 'instrumental' ? '纯伴奏' : '歌词人声'}`
+      const prompt = standaloneMusicPrompt.trim();
+      let generationPrompt = prompt;
+      let usedAutoTranslation = false;
+
+      try {
+        const translatedPrompt = await translateToEnglish(prompt);
+        generationPrompt = translatedPrompt.trim() || prompt;
+        usedAutoTranslation = generationPrompt !== prompt;
+      } catch (translationError) {
+        console.error('Music prompt auto-translation failed:', translationError);
+        throw new Error('自动翻译成英文失败，请检查 Gemini 配置后重试，或先手动输入英文提示词。');
+      }
+
+      const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 16);
+      const details = `${standaloneMusicDuration}秒 · ${standaloneMusicType === 'instrumental' ? '纯伴奏' : '歌词人声'}${usedAutoTranslation ? ' · 已自动英译' : ''}`;
+      const baseTitle = `独立音乐 - ${prompt.substring(0, 20)}${prompt.length > 20 ? '...' : ''}`;
+      const createMusicOption = async (id: 'A' | 'B'): Promise<PendingMusicOption> => {
+        const versionPrompt = id === 'A'
+          ? generationPrompt
+          : `${generationPrompt}. Alternate take, different arrangement and performance variation while keeping the same core mood.`;
+        const blob = await generateMusic(
+          versionPrompt,
+          standaloneMusicDuration,
+          standaloneMusicType === 'instrumental',
+          standaloneMusicLyrics.trim(),
+          { qualityMode: elevenLabsQualityMode },
+        );
+        return {
+          id,
+          url: URL.createObjectURL(blob),
+          title: `${baseTitle}（版本 ${id}）`,
+          prompt,
+          timestamp,
+          details,
+          duration: standaloneMusicDuration,
+          type: standaloneMusicType,
+        };
       };
-      setHistoryList(prev => [newHistoryItem, ...prev]);
+      const optionA = await createMusicOption('A');
+      const optionB = await createMusicOption('B');
+      setPendingMusicOptions({ optionA, optionB });
+      setStandaloneMusicAudioUrl(optionA.url);
+      
+      const historyItems: HistoryItem[] = [optionA, optionB].map((option) => ({
+        id: `music-${Date.now()}-${option.id}`,
+        type: 'music',
+        title: option.title,
+        prompt,
+        url: option.url,
+        timestamp,
+        details,
+      }));
+      setHistoryList(prev => [...historyItems, ...prev]);
 
       // Auto play
       setTimeout(() => {
@@ -920,133 +1069,155 @@ export default function App() {
         {/* Right Side Workspace Frame */}
         <main id="app-workspace-viewport" className="relative min-h-0 min-w-0 flex-1 overflow-auto bg-slate-50 custom-scrollbar">
           <Suspense fallback={<WorkspaceLoading />}>
-        {currentTab === 'workbench' && (
-          <Workbench 
-            setCurrentTab={setCurrentTab} 
-            historyList={historyList} 
-          />
-        )}
+            {visitedTabs.has('workbench') && (
+              <section hidden={currentTab !== 'workbench'} className="min-h-full">
+                <Workbench
+                  setCurrentTab={setCurrentTab}
+                  historyList={historyList}
+                />
+              </section>
+            )}
 
-        {currentTab === 'audio-director' && (
-          <AudioDirector
-            files={files}
-            setFiles={setFiles}
-            requirements={requirements}
-            setRequirements={setRequirements}
-            target={target}
-            setTarget={setTarget}
-            loading={loading}
-            analysisStage={analysisStage}
-            error={error}
-            setError={setError}
-            result={result}
-            onGenerate={onGenerate}
-            onCancel={cancelAnalysis}
-            copyToClipboard={copyToClipboard}
-            copyTableToClipboard={copyTableToClipboard}
-            downloadTableAsCSV={downloadTableAsCSV}
-            copiedId={copiedId}
-            isUploading={isUploading}
-            setIsUploading={setIsUploading}
-            isInstrumental={isInstrumental}
-            setIsInstrumental={setIsInstrumental}
-            activeTab={activeTab}
-            setActiveTab={setActiveTab}
-            selectedLyrics={selectedLyrics}
-            setSelectedLyrics={setSelectedLyrics}
-            lyricEditDirection={lyricEditDirection}
-            setLyricEditDirection={setLyricEditDirection}
-            editingLyrics={editingLyrics}
-            handleRegenerateLyrics={handleRegenerateLyrics}
-            onLoadDemo={setResult}
-            onSendMusicPrompt={sendDirectorPromptToMusicStudio}
-          />
-        )}
+            {visitedTabs.has('audio-director') && (
+              <section hidden={currentTab !== 'audio-director'} className="min-h-full">
+                <AudioDirector
+                  files={files}
+                  setFiles={setFiles}
+                  requirements={requirements}
+                  setRequirements={setRequirements}
+                  target={target}
+                  setTarget={setTarget}
+                  loading={loading}
+                  analysisStage={analysisStage}
+                  error={error}
+                  setError={setError}
+                  result={result}
+                  onGenerate={onGenerate}
+                  onCancel={cancelAnalysis}
+                  copyToClipboard={copyToClipboard}
+                  copyTableToClipboard={copyTableToClipboard}
+                  downloadTableAsCSV={downloadTableAsCSV}
+                  copiedId={copiedId}
+                  isUploading={isUploading}
+                  setIsUploading={setIsUploading}
+                  isInstrumental={isInstrumental}
+                  setIsInstrumental={setIsInstrumental}
+                  activeTab={activeTab}
+                  setActiveTab={setActiveTab}
+                  selectedLyrics={selectedLyrics}
+                  setSelectedLyrics={setSelectedLyrics}
+                  lyricEditDirection={lyricEditDirection}
+                  setLyricEditDirection={setLyricEditDirection}
+                  editingLyrics={editingLyrics}
+                  handleRegenerateLyrics={handleRegenerateLyrics}
+                  onLoadDemo={setResult}
+                  onSendMusicPrompt={sendDirectorPromptToMusicStudio}
+                />
+              </section>
+            )}
 
-        {currentTab === 'music-studio' && (
-          <MusicStudio
-            standaloneMusicPrompt={standaloneMusicPrompt}
-            setStandaloneMusicPrompt={setStandaloneMusicPrompt}
-            standaloneMusicDuration={standaloneMusicDuration}
-            setStandaloneMusicDuration={setStandaloneMusicDuration}
-            standaloneMusicType={standaloneMusicType}
-            setStandaloneMusicType={setStandaloneMusicType}
-            standaloneMusicLyrics={standaloneMusicLyrics}
-            setStandaloneMusicLyrics={setStandaloneMusicLyrics}
-            standaloneMusicLoading={standaloneMusicLoading}
-            standaloneMusicAudioUrl={standaloneMusicAudioUrl}
-            setStandaloneMusicAudioUrl={setStandaloneMusicAudioUrl}
-            standaloneMusicError={standaloneMusicError}
-            standaloneMusicAudioRef={standaloneMusicAudioRef}
-            handleStandaloneMusicGenerate={handleStandaloneMusicGenerate}
-            historyList={historyList}
-          />
-        )}
+            {visitedTabs.has('music-studio') && (
+              <section hidden={currentTab !== 'music-studio'} className="min-h-full">
+                <MusicStudio
+                  standaloneMusicPrompt={standaloneMusicPrompt}
+                  setStandaloneMusicPrompt={setStandaloneMusicPrompt}
+                  standaloneMusicDuration={standaloneMusicDuration}
+                  setStandaloneMusicDuration={setStandaloneMusicDuration}
+                  standaloneMusicType={standaloneMusicType}
+                  setStandaloneMusicType={setStandaloneMusicType}
+                  standaloneMusicLyrics={standaloneMusicLyrics}
+                  setStandaloneMusicLyrics={setStandaloneMusicLyrics}
+                  standaloneMusicLoading={standaloneMusicLoading}
+                  standaloneMusicAudioUrl={standaloneMusicAudioUrl}
+                  setStandaloneMusicAudioUrl={setStandaloneMusicAudioUrl}
+                  pendingMusicOptions={pendingMusicOptions}
+                  setPendingMusicOptions={setPendingMusicOptions}
+                  standaloneMusicError={standaloneMusicError}
+                  standaloneMusicAudioRef={standaloneMusicAudioRef}
+                  handleStandaloneMusicGenerate={handleStandaloneMusicGenerate}
+                  historyList={historyList}
+                />
+              </section>
+            )}
 
-        {currentTab === 'sfx-studio' && (
-          <SfxStudio
-            standalonePrompt={standalonePrompt}
-            setStandalonePrompt={setStandalonePrompt}
-            standaloneDuration={standaloneDuration}
-            setStandaloneDuration={setStandaloneDuration}
-            standaloneLoading={standaloneLoading}
-            standaloneAudioUrl={standaloneAudioUrl}
-            setStandaloneAudioUrl={setStandaloneAudioUrl}
-            standaloneError={standaloneError}
-            standaloneAudioRef={standaloneAudioRef}
-            handleStandaloneGenerate={handleStandaloneGenerate}
-            historyList={historyList}
-          />
-        )}
+            {visitedTabs.has('sfx-studio') && (
+              <section hidden={currentTab !== 'sfx-studio'} className="min-h-full">
+                <SfxStudio
+                  standalonePrompt={standalonePrompt}
+                  setStandalonePrompt={setStandalonePrompt}
+                  standaloneDuration={standaloneDuration}
+                  setStandaloneDuration={setStandaloneDuration}
+                  standaloneLoading={standaloneLoading}
+                  standaloneError={standaloneError}
+                  handleStandaloneGenerate={handleStandaloneGenerate}
+                  historyList={historyList}
+                  pendingSfxOptions={pendingSfxOptions}
+                  setPendingSfxOptions={setPendingSfxOptions}
+                />
+              </section>
+            )}
 
-        {currentTab === 'dubbing-studio' && (
-          <DubbingStudio
-            standaloneVoicePrompt={standaloneVoiceText}
-            setStandaloneVoicePrompt={setStandaloneVoiceText}
-            standaloneVoiceGender={standaloneVoiceGender}
-            setStandaloneVoiceGender={setStandaloneVoiceGender}
-            standaloneVoiceRole={standaloneVoiceRole}
-            setStandaloneVoiceRole={setStandaloneVoiceRole}
-            standaloneVoiceLang={standaloneVoiceLang}
-            setStandaloneVoiceLang={setStandaloneVoiceLang}
-            standaloneVoiceSpeed={standaloneVoiceSpeed}
-            setStandaloneVoiceSpeed={setStandaloneVoiceSpeed}
-            standaloneVoiceLoading={standaloneVoiceLoading}
-            standaloneVoiceAudioUrl={standaloneVoiceAudioUrl}
-            setStandaloneVoiceAudioUrl={setStandaloneVoiceAudioUrl}
-            standaloneVoiceError={standaloneVoiceError}
-            standaloneVoiceAudioRef={standaloneVoiceAudioRef}
-            handleStandaloneVoiceGenerate={handleStandaloneVoiceGenerate}
-            historyList={historyList}
-            setHistoryList={setHistoryList}
-            pendingVoiceOptions={pendingVoiceOptions}
-            setPendingVoiceOptions={setPendingVoiceOptions}
-          />
-        )}
+            {visitedTabs.has('dubbing-studio') && (
+              <section hidden={currentTab !== 'dubbing-studio'} className="min-h-full">
+                <DubbingStudio
+                  standaloneVoicePrompt={standaloneVoiceText}
+                  setStandaloneVoicePrompt={setStandaloneVoiceText}
+                  standaloneVoiceGender={standaloneVoiceGender}
+                  setStandaloneVoiceGender={setStandaloneVoiceGender}
+                  standaloneVoiceRole={standaloneVoiceRole}
+                  setStandaloneVoiceRole={setStandaloneVoiceRole}
+                  setSelectedStandaloneVoice={setSelectedStandaloneVoice}
+                  standaloneVoiceLang={standaloneVoiceLang}
+                  setStandaloneVoiceLang={setStandaloneVoiceLang}
+                  standaloneVoiceSpeed={standaloneVoiceSpeed}
+                  setStandaloneVoiceSpeed={setStandaloneVoiceSpeed}
+                  standaloneVoiceLoading={standaloneVoiceLoading}
+                  standaloneVoiceAudioUrl={standaloneVoiceAudioUrl}
+                  setStandaloneVoiceAudioUrl={setStandaloneVoiceAudioUrl}
+                  standaloneVoiceError={standaloneVoiceError}
+                  standaloneVoiceAudioRef={standaloneVoiceAudioRef}
+                  handleStandaloneVoiceGenerate={handleStandaloneVoiceGenerate}
+                  historyList={historyList}
+                  setHistoryList={setHistoryList}
+                  pendingVoiceOptions={pendingVoiceOptions}
+                  setPendingVoiceOptions={setPendingVoiceOptions}
+                />
+              </section>
+            )}
 
-        {currentTab === 'audio-tools' && (
-          <AudioTools />
-        )}
+            {visitedTabs.has('audio-tools') && (
+              <section hidden={currentTab !== 'audio-tools'} className="min-h-full">
+                <AudioTools />
+              </section>
+            )}
 
-        {currentTab === 'settings' && (
-          <SettingsComponent 
-            onKeysUpdated={handleKeysUpdated}
-          />
-        )}
+            {visitedTabs.has('settings') && (
+              <section hidden={currentTab !== 'settings'} className="min-h-full">
+                <SettingsComponent
+                  onKeysUpdated={handleKeysUpdated}
+                />
+              </section>
+            )}
 
-        {currentTab === 'sfx-library' && (
-          <SfxLibrary />
-        )}
+            {visitedTabs.has('sfx-library') && (
+              <section hidden={currentTab !== 'sfx-library'} className="min-h-full">
+                <SfxLibrary />
+              </section>
+            )}
 
-        {currentTab === 'sfx-requirements' && (
-          <SfxRequirements 
-            hasGeminiKey={hasGeminiKey}
-          />
-        )}
+            {visitedTabs.has('sfx-requirements') && (
+              <section hidden={currentTab !== 'sfx-requirements'} className="min-h-full">
+                <SfxRequirements
+                  hasGeminiKey={hasGeminiKey}
+                />
+              </section>
+            )}
 
-        {currentTab === 'video-soundtrack' && (
-          <VideoSoundtrack />
-        )}
+            {visitedTabs.has('video-soundtrack') && (
+              <section hidden={currentTab !== 'video-soundtrack'} className="min-h-full">
+                <VideoSoundtrack />
+              </section>
+            )}
           </Suspense>
         </main>
       </div>

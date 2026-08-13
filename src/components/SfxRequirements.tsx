@@ -10,7 +10,6 @@ import {
   CheckCircle2, 
   Copy, 
   Download, 
-  RefreshCw, 
   Plus, 
   Trash2, 
   Loader2, 
@@ -26,6 +25,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { generateSfxRequirements } from '../services/geminiService';
 
 type TemplateType = 'game_sfx_general' | 'game_sfx_middleware' | 'voiceover_general' | 'voiceover_multilang';
+type GenerateMode = 'replace' | 'append';
 
 interface SfxRequirementsProps {
   hasGeminiKey: boolean;
@@ -36,37 +36,45 @@ const DEMO_ROWS: Record<TemplateType, any[]> = {
   game_sfx_general: [
     {
       index: 1,
+      audio_type: "SFX",
       filename: "sfx_ui_common_button_click",
       duration_logic: "1s, 单次播放",
       scene: "通用与主界面&游戏内的ui点击按键",
       description: "清脆的交互点击声，带有轻微的拟物触感与中高频数字质感",
+      script_tone: "-",
       remarks: "常用全局 UI 按钮，声音要小巧，响度控制在 -14 LUFS 左右",
       video_link: "UI点击演示.mp4"
     },
     {
       index: 2,
+      audio_type: "BGM",
       filename: "bgm_battle",
       duration_logic: "loop, 循环播放",
       scene: "关卡内战斗场景、遭遇战",
       description: "热血、紧张有战斗感的电子摇滚乐，由重击鼓点、失真吉他与动感合成器主导",
+      script_tone: "-",
       remarks: "需要无缝循环，包含一个 4s 的 Intro 前奏，BPM 135",
       video_link: "核心战斗参考.mp4"
     },
     {
       index: 3,
+      audio_type: "SFX",
       filename: "sfx_player_dash",
       duration_logic: "0.8s, 单次播放",
       scene: "主角执行前冲闪避、瞬移的一瞬间",
       description: "带有疾风气流撕裂声，高频气流破空音色叠合电声粒子回馈",
+      script_tone: "-",
       remarks: "瞬态触发极快，高音需要做压限，避免连续触发破音",
       video_link: "前冲动作.mp4"
     },
     {
       index: 4,
+      audio_type: "SFX",
       filename: "sfx_item_pickup_gold",
       duration_logic: "1.2s, 随机多样本",
       scene: "玩家拾取金币或重要战利品时",
       description: "清脆悦耳的高频金属撞击声，带有闪闪发光的粒子声尾音",
+      script_tone: "-",
       remarks: "提供 3 个随机音调微调样本，增强连续拾取时的多变性",
       video_link: "拾取反馈.mp4"
     }
@@ -140,9 +148,9 @@ const DEMO_ROWS: Record<TemplateType, any[]> = {
 const TEMPLATE_INFO = {
   game_sfx_general: {
     name: "游戏音效配乐通用表",
-    desc: "适合各类游戏基础开发，涵盖经典命名、场景及听觉特征描述",
-    headers: ["序号", "文件命名", "时长&播放逻辑", "应用场景", "描述", "备注", "动效视频"],
-    keys: ["index", "filename", "duration_logic", "scene", "description", "remarks", "video_link"]
+    desc: "适合把音效、BGM、配音需求放在同一张综合音频需求表里",
+    headers: ["序号", "类型", "文件命名", "时长&播放逻辑", "应用场景", "描述", "台词/语气", "备注", "动效视频"],
+    keys: ["index", "audio_type", "filename", "duration_logic", "scene", "description", "script_tone", "remarks", "video_link"]
   },
   game_sfx_middleware: {
     name: "FMOD / Wwise 引擎中间件需求表",
@@ -165,13 +173,72 @@ const TEMPLATE_INFO = {
 };
 
 const LOADING_STEPS = [
-  "AI 正在识别用户上传的截图及文字...",
-  "正在提取表格框架与数据条目...",
+  "AI 正在识别用户上传的参考文件与文字...",
+  "正在提取表格、画面、字幕或音频线索...",
   "正在应用专业音频工程规范重构文件名...",
   "正在扩充细致、具体的声学材质与动效描述...",
   "正在转换语境并生成多国台词对照...",
   "正在为您进行高精度的排版排程，即将呈现..."
 ];
+
+const MAX_REFERENCE_FILE_BYTES = 80 * 1024 * 1024;
+
+const isSupportedReferenceFile = (file: File) => (
+  file.type.startsWith('image/')
+  || file.type.startsWith('audio/')
+  || file.type.startsWith('video/')
+);
+
+const getReferenceFileKind = (file: File | null) => {
+  if (!file) return '参考文件';
+  if (file.type.startsWith('image/')) return '图片/截图';
+  if (file.type.startsWith('audio/')) return '音频/BGM参考';
+  if (file.type.startsWith('video/')) return '视频/画面参考';
+  return '参考文件';
+};
+
+const normalizeRequirementText = (value: unknown) => String(value || '')
+  .trim()
+  .toLowerCase()
+  .replace(/[\s\u3000，。！？、…,.!?;；:："'“”‘’【】\[\]()（）]/g, '');
+
+const stripScriptToneLabel = (value: unknown) => String(value ?? '')
+  .trim()
+  .replace(/^台词\s*[：:]\s*/u, '');
+
+const inferGeneralAudioType = (item: any) => {
+  const explicitType = String(item?.audio_type || item?.type || '').trim().toUpperCase();
+  if (['SFX', 'BGM', 'VO'].includes(explicitType)) return explicitType;
+  const rawType = String(item?.audio_type || item?.type || '').trim().toLowerCase();
+  if (/(配音|人声|台词|旁白|对白|语音|voice|voiceover|vocal|dialogue|dialog|speech)/i.test(rawType)) return 'VO';
+  if (/(音乐|配乐|背景音乐|bgm|music|score)/i.test(rawType)) return 'BGM';
+  if (/(音效|声效|sfx|sound effect|foley)/i.test(rawType)) return 'SFX';
+  const filename = String(item?.filename || '').trim().toLowerCase();
+  if (filename.startsWith('vo_')) return 'VO';
+  if (filename.startsWith('bgm_')) return 'BGM';
+  const combinedText = [
+    item?.scene,
+    item?.description,
+    item?.script_tone,
+    item?.remarks,
+  ].filter(Boolean).join(' ').toLowerCase();
+  if (/(配音|人声|台词|旁白|对白|语音|voice|voiceover|vocal|dialogue|dialog|speech)/i.test(combinedText)) return 'VO';
+  if (/(背景音乐|配乐|bgm|music|score|loop|循环音乐)/i.test(combinedText)) return 'BGM';
+  return 'SFX';
+};
+
+const sortGeneralAudioItemsByType = (items: any[]) => {
+  const typeOrder: Record<string, number> = { SFX: 0, BGM: 1, VO: 2 };
+  return items
+    .map((item, originalIndex) => ({ item, originalIndex, audioType: inferGeneralAudioType(item) }))
+    .sort((left, right) => {
+      const leftOrder = typeOrder[left.audioType] ?? 99;
+      const rightOrder = typeOrder[right.audioType] ?? 99;
+      if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+      return left.originalIndex - right.originalIndex;
+    })
+    .map(entry => entry.item);
+};
 
 const stripGeneratedVariantSuffix = (value: unknown) => (
   typeof value === 'string' ? value.trim().replace(/_(\d{2,3})$/i, '') : ''
@@ -307,9 +374,20 @@ const simplifySingletonFilenameSuffixes = (items: any[]) => {
 export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) {
   const [templateType, setTemplateType] = useState<TemplateType>('game_sfx_general');
   const [inputText, setInputText] = useState('');
-  const [rows, setRows] = useState<any[]>(DEMO_ROWS.game_sfx_general);
+  const [rowsByTemplate, setRowsByTemplate] = useState<Record<TemplateType, any[]>>(() => ({
+    game_sfx_general: DEMO_ROWS.game_sfx_general.map(row => ({ ...row })),
+    game_sfx_middleware: DEMO_ROWS.game_sfx_middleware.map(row => ({ ...row })),
+    voiceover_general: DEMO_ROWS.voiceover_general.map(row => ({ ...row })),
+    voiceover_multilang: DEMO_ROWS.voiceover_multilang.map(row => ({ ...row })),
+  }));
+  const [draftByTemplate, setDraftByTemplate] = useState<Record<TemplateType, boolean>>({
+    game_sfx_general: false,
+    game_sfx_middleware: false,
+    voiceover_general: false,
+    voiceover_multilang: false,
+  });
   
-  // Screenshot states
+  // Reference upload states
   const [screenshot, setScreenshot] = useState<File | null>(null);
   const [screenshotPreview, setScreenshotPreview] = useState<string | null>(null);
   const [screenshotBase64, setScreenshotBase64] = useState<string | null>(null);
@@ -321,19 +399,55 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
   const [loadingStep, setLoadingStep] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [successMessage, setSuccessMessage] = useState('已根据您的要求完美扩充并格式化。您可直接在下方表格中修改任何单元格！');
+  const [activeGenerateMode, setActiveGenerateMode] = useState<GenerateMode>('replace');
   
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const rows = rowsByTemplate[templateType] || [];
+  const hasCurrentRequirementDraft = draftByTemplate[templateType] || false;
+
+  const setRowsForTemplate = (
+    type: TemplateType,
+    nextRowsOrUpdater: any[] | ((previousRows: any[]) => any[]),
+    isDraft?: boolean,
+  ) => {
+    setRowsByTemplate(prev => {
+      const previousRows = prev[type] || [];
+      const nextRows = typeof nextRowsOrUpdater === 'function'
+        ? nextRowsOrUpdater(previousRows)
+        : nextRowsOrUpdater;
+      return {
+        ...prev,
+        [type]: nextRows,
+      };
+    });
+    if (typeof isDraft === 'boolean') {
+      setDraftByTemplate(prev => ({
+        ...prev,
+        [type]: isDraft,
+      }));
+    }
+  };
+
+  const setCurrentRows = (
+    nextRowsOrUpdater: any[] | ((previousRows: any[]) => any[]),
+    isDraft?: boolean,
+  ) => {
+    setRowsForTemplate(templateType, nextRowsOrUpdater, isDraft);
+  };
 
   // Auto-switch rows when changing template type if they haven't been customized, or let user reset
   const handleTemplateChange = (type: TemplateType) => {
     setTemplateType(type);
-    setRows(DEMO_ROWS[type]);
+    setSuccess(false);
+    setSuccessMessage('已切换模板，之前生成的其它模板需求已保留。');
   };
 
   // Restore defaults
   const handleRestoreDefaults = () => {
-    setRows(DEMO_ROWS[templateType]);
+    setCurrentRows(DEMO_ROWS[templateType].map(row => ({ ...row })), false);
     setSuccess(false);
+    setSuccessMessage('已恢复当前模板的示例内容。');
   };
 
   // Drag and Drop handlers
@@ -346,13 +460,17 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
     setIsDragging(false);
   };
 
-  const processImageFile = (file: File, source: 'upload' | 'drop' | 'paste' = 'upload') => {
-    if (!file.type.startsWith('image/')) {
-      setError('只支持上传截图（图片格式文件）');
+  const processReferenceFile = (file: File, source: 'upload' | 'drop' | 'paste' = 'upload') => {
+    if (!isSupportedReferenceFile(file)) {
+      setError('只支持上传图片/截图、音频或视频文件。');
+      return;
+    }
+    if (file.size > MAX_REFERENCE_FILE_BYTES) {
+      setError('参考文件不能超过 80MB。视频建议先压缩或截取关键片段后再上传。');
       return;
     }
     setError(null);
-    setPasteMessage(source === 'paste' ? '已从剪贴板粘贴截图，可以直接生成/优化需求表。' : null);
+    setPasteMessage(source === 'paste' ? '已从剪贴板粘贴图片，可以直接生成/优化需求表。' : null);
     setScreenshot(file);
     if (screenshotPreview) {
       URL.revokeObjectURL(screenshotPreview);
@@ -366,7 +484,7 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
       setScreenshotBase64(reader.result as string);
     };
     reader.onerror = () => {
-      setError('截图文件读取失败');
+      setError('参考文件读取失败，请重新上传。');
     };
     reader.readAsDataURL(file);
   };
@@ -375,13 +493,13 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
     e.preventDefault();
     setIsDragging(false);
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      processImageFile(e.dataTransfer.files[0], 'drop');
+      processReferenceFile(e.dataTransfer.files[0], 'drop');
     }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      processImageFile(e.target.files[0], 'upload');
+      processReferenceFile(e.target.files[0], 'upload');
     }
   };
 
@@ -408,7 +526,7 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
     const imageFile = getClipboardImageFile(e.clipboardData);
     if (!imageFile) return;
     e.preventDefault();
-    processImageFile(imageFile, 'paste');
+    processReferenceFile(imageFile, 'paste');
   };
 
   const handleRemoveScreenshot = () => {
@@ -437,7 +555,7 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
       ...updated[rowIndex],
       [key]: value
     };
-    setRows(updated);
+    setCurrentRows(updated, true);
   };
 
   const handleAddRow = () => {
@@ -447,12 +565,16 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
     const newRow: any = { index: newIndex };
     currentKeys.forEach(key => {
       if (key !== 'index') {
-        if (key === 'filename') {
+        if (key === 'audio_type') {
+          newRow[key] = "SFX";
+        } else if (key === 'filename') {
           newRow[key] = templateType.startsWith('voiceover') ? `vo_character_new_${newIndex}` : `sfx_module_new_${newIndex}`;
         } else if (key === 'event_name') {
           newRow[key] = `event:/SFX/Module/new_${newIndex}`;
         } else if (key === 'duration' || key === 'duration_logic') {
           newRow[key] = "1s";
+        } else if (key === 'script_tone') {
+          newRow[key] = "-";
         } else if (key === 'distance_3d') {
           newRow[key] = "20";
         } else {
@@ -461,7 +583,7 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
       }
     });
 
-    setRows([...rows, newRow]);
+    setCurrentRows([...rows, newRow], true);
   };
 
   const handleDeleteRow = (rowIndex: number) => {
@@ -469,15 +591,153 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
       ...row,
       index: idx + 1 // Re-index neatly
     }));
-    setRows(updated);
+    setCurrentRows(updated, updated.length > 0);
   };
 
   const handleClearTable = () => {
-    setRows([]);
+    setCurrentRows([], false);
+    setSuccess(false);
+  };
+
+  const normalizeGeneratedRows = (items: any[], startIndex: number, type: TemplateType = templateType) => {
+    const currentKeys = TEMPLATE_INFO[type].keys;
+    const orderedItems = type === 'game_sfx_general'
+      ? sortGeneralAudioItemsByType(items)
+      : items;
+    return orderedItems.map((item, itemIndex) => {
+      const normalizedRow: any = { index: startIndex + itemIndex };
+      currentKeys.forEach(key => {
+        if (key === 'index') return;
+        if (type === 'game_sfx_general' && key === 'audio_type') {
+          normalizedRow[key] = inferGeneralAudioType(item);
+        } else if (type === 'game_sfx_general' && key === 'script_tone') {
+          normalizedRow[key] = stripScriptToneLabel(item?.[key] || (inferGeneralAudioType(item) === 'VO' ? '' : '-'));
+        } else {
+          normalizedRow[key] = item?.[key] ?? '';
+        }
+      });
+      return normalizedRow;
+    });
+  };
+
+  const getVideoDurationFromFile = (file: File): Promise<number> => new Promise((resolve) => {
+    const video = document.createElement('video');
+    const objectUrl = URL.createObjectURL(file);
+    const cleanup = () => {
+      URL.revokeObjectURL(objectUrl);
+      video.removeAttribute('src');
+      video.load();
+    };
+    video.preload = 'metadata';
+    video.onloadedmetadata = () => {
+      const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 30;
+      cleanup();
+      resolve(duration);
+    };
+    video.onerror = () => {
+      cleanup();
+      resolve(30);
+    };
+    video.src = objectUrl;
+  });
+
+  const uploadRequirementVideoForSubtitleAnalysis = async (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await fetch('/api/sfx/upload', {
+      method: 'POST',
+      body: formData,
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(data?.error || '视频上传失败，无法读取字幕配音需求。');
+    }
+    if (!data?.fileName) {
+      throw new Error('视频上传后未返回文件名，无法读取字幕配音需求。');
+    }
+    return String(data.fileName);
+  };
+
+  const createVoRowsFromDubbingClips = (clips: any[]) => {
+    const dubbingClips = clips
+      .filter(clip => clip?.trackId === 'dubbing' && String(clip?.text || '').trim())
+      .sort((left, right) => Number(left.subtitleStartTime ?? left.startTime ?? 0) - Number(right.subtitleStartTime ?? right.startTime ?? 0));
+
+    return dubbingClips.map((clip, index) => {
+      const cueIndex = String(index + 1).padStart(2, '0');
+      const speaker = String(clip.speaker || 'subtitle').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'subtitle';
+      const start = Number(clip.subtitleStartTime ?? clip.startTime ?? 0);
+      const end = Number(clip.subtitleEndTime ?? (start + Number(clip.duration || 0)));
+      const duration = Math.max(0, end - start);
+      const text = String(clip.text || '').trim();
+      return {
+        index: index + 1,
+        audio_type: 'VO',
+        filename: `vo_${speaker}_subtitle_${cueIndex}`,
+        duration_logic: `${duration > 0 ? `${duration.toFixed(2)}s` : '按字幕时长'}, 字幕配音`,
+        scene: `视频字幕 ${cueIndex}，${start.toFixed(2)}s-${end.toFixed(2)}s`,
+        description: `根据视频画面字幕生成的配音需求，角色/说话人：${clip.speaker || 'unknown'}。需匹配画面语境、字幕节奏和原始情绪。`,
+        script_tone: `${text}；语气：结合画面表情、动作与剧情情绪自然演绎`,
+        remarks: `字幕ID：${clip.subtitleId || `subtitle-${cueIndex}`}；时间依据：${clip.timingSource || 'subtitle'}；后续制作时建议按字幕出现/消失边界控制口型与语速。`,
+        video_link: screenshot?.name || '上传视频',
+      };
+    });
+  };
+
+  const extractVideoSubtitleVoRows = async (file: File) => {
+    if (!file.type.startsWith('video/')) return [];
+    setLoadingStep(1);
+    const [fileName, videoDuration] = await Promise.all([
+      uploadRequirementVideoForSubtitleAnalysis(file),
+      getVideoDurationFromFile(file),
+    ]);
+    setLoadingStep(2);
+    const response = await fetch('/api/video/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fileName,
+        videoDuration,
+        bgmEnabled: false,
+        sfxEnabled: false,
+        dubbingEnabled: true,
+      }),
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(data?.error || '视频字幕配音需求识别失败。');
+    }
+    return createVoRowsFromDubbingClips(Array.isArray(data?.clips) ? data.clips : []);
+  };
+
+  const mergeGeneralRowsWithDetectedVoRows = (items: any[], voRows: any[]) => {
+    if (voRows.length === 0) return items;
+    const existingVoTexts = new Set(
+      items
+        .filter(item => inferGeneralAudioType(item) === 'VO')
+        .map(item => normalizeRequirementText(item.script_tone || item.description || item.scene)),
+    );
+    const uniqueVoRows = voRows.filter(row => {
+      const normalizedText = normalizeRequirementText(row.script_tone);
+      if (!normalizedText || existingVoTexts.has(normalizedText)) return false;
+      existingVoTexts.add(normalizedText);
+      return true;
+    });
+    return [...items, ...uniqueVoRows];
   };
 
   // Generate / Optimize handler using Gemini model
-  const handleGenerate = async () => {
+  const handleGenerate = async (mode: GenerateMode = 'replace') => {
+    if (!TEMPLATE_INFO[templateType]) {
+      setError('请先选择一个需求表模板。模板是必选项，文字描述和图片资料都只是可选补充。');
+      return;
+    }
+
+    if (screenshot && !screenshotBase64) {
+      setError('参考文件还在读取中，请稍等一秒后再生成。');
+      return;
+    }
+
     if (!hasGeminiKey) {
       setError('GEMINI_API_KEY 未配置，请前往设置页面或 Secrets 面板添加。');
       return;
@@ -486,7 +746,11 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
     setLoading(true);
     setError(null);
     setSuccess(false);
+    setActiveGenerateMode(mode);
     setLoadingStep(0);
+    const requestTemplateType = templateType;
+    const requestReferenceFile = screenshot;
+    const requestReferenceBase64 = screenshotBase64;
 
     // Start automated loading step simulator
     const interval = setInterval(() => {
@@ -495,17 +759,38 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
 
     try {
       let imageObj = null;
-      if (screenshotBase64 && screenshot) {
+      if (requestReferenceBase64 && requestReferenceFile) {
         imageObj = {
-          data: screenshotBase64,
-          mimeType: screenshot.type
+          data: requestReferenceBase64,
+          mimeType: requestReferenceFile.type
         };
       }
 
-      const response = await generateSfxRequirements(inputText, imageObj, templateType);
+      const detectedVoRowsPromise = requestTemplateType === 'game_sfx_general'
+        && requestReferenceFile?.type.startsWith('video/')
+        ? extractVideoSubtitleVoRows(requestReferenceFile)
+        : Promise.resolve([]);
+
+      const [response, detectedVoRows] = await Promise.all([
+        generateSfxRequirements(inputText.trim(), imageObj, requestTemplateType),
+        detectedVoRowsPromise,
+      ]);
       
       if (response && Array.isArray(response.items)) {
-        setRows(simplifySingletonFilenameSuffixes(response.items));
+        const generatedItems = mergeGeneralRowsWithDetectedVoRows(
+          simplifySingletonFilenameSuffixes(response.items),
+          detectedVoRows,
+        );
+        if (mode === 'append') {
+          setRowsForTemplate(requestTemplateType, prevRows => [
+            ...prevRows,
+            ...normalizeGeneratedRows(generatedItems, prevRows.length + 1, requestTemplateType),
+          ], true);
+          setSuccessMessage(`已继续添加 ${generatedItems.length} 条新需求到当前表格末尾${detectedVoRows.length ? `，其中包含 ${detectedVoRows.length} 条视频字幕配音需求` : ''}。`);
+        } else {
+          setRowsForTemplate(requestTemplateType, normalizeGeneratedRows(generatedItems, 1, requestTemplateType), true);
+          setSuccessMessage(`已生成 ${generatedItems.length} 条需求，并替换为当前这版需求表${detectedVoRows.length ? `，其中包含 ${detectedVoRows.length} 条视频字幕配音需求` : ''}。`);
+        }
         setSuccess(true);
       } else {
         throw new Error('AI 返回了不完整的数据，请稍后重试');
@@ -528,7 +813,8 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
     // Build lines
     const rowsContent = rows.map(row => {
       return keys.map(key => {
-        const val = row[key] !== undefined && row[key] !== null ? String(row[key]) : "";
+        const rawVal = row[key] !== undefined && row[key] !== null ? row[key] : "";
+        const val = String(key === 'script_tone' ? stripScriptToneLabel(rawVal) : rawVal);
         // Escape quotes
         return `"${val.replace(/"/g, '""')}"`;
       }).join(',');
@@ -553,11 +839,6 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
     document.body.removeChild(link);
   };
 
-  // Fast text templates helper
-  const handleApplyPresetPrompt = (text: string) => {
-    setInputText(text);
-  };
-
   // Clean preview URL on unmount
   useEffect(() => {
     return () => {
@@ -566,6 +847,12 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
   }, [screenshotPreview]);
 
   const currentTemplate = TEMPLATE_INFO[templateType];
+  const hasSelectedTemplate = Boolean(currentTemplate);
+  const hasTextSource = inputText.trim().length > 0;
+  const hasImageSource = Boolean(screenshot && screenshotBase64);
+  const isImageLoading = Boolean(screenshot && !screenshotBase64);
+  const canGenerateRequirements = hasSelectedTemplate && !isImageLoading;
+  const uploadedReferenceKind = getReferenceFileKind(screenshot);
 
   return (
     <div id="sfx-requirements-main" className="p-6 md:p-8 space-y-8 max-w-7xl mx-auto">
@@ -577,19 +864,8 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
             <h2 id="sfx-req-title" className="text-xl font-bold tracking-tight text-slate-800">音效需求表优化</h2>
           </div>
           <p className="text-xs text-slate-500">
-            支持输入简短想法或上传已有需求表的草稿截图，通过 AI 精准识别、翻译并一键优化为标准化、工业级的音频制作排程需求表。
+            支持输入简短想法，或上传图片/截图、音频、视频参考文件，通过 AI 识别表格、画面、字幕与音乐线索，标准化音频制作需求表。
           </p>
-        </div>
-        <div className="flex gap-2.5">
-          <button
-            id="btn-restore-defaults"
-            onClick={handleRestoreDefaults}
-            className="flex items-center gap-1.5 px-3.5 py-1.5 border border-slate-200 bg-white text-slate-600 hover:text-slate-800 hover:bg-slate-50 rounded-xl text-xs font-semibold transition-all shadow-sm"
-            title="恢复当前模板为精美示例行"
-          >
-            <RefreshCw className="w-3.5 h-3.5 text-emerald-600" />
-            <span>恢复默认示例</span>
-          </button>
         </div>
       </div>
 
@@ -601,6 +877,7 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div className="flex items-center gap-2">
                 <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-50 text-emerald-600 text-xs font-bold font-mono border border-emerald-200/50">1</span>
+                <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700 border border-emerald-100">必选</span>
                 <span className="text-sm font-semibold text-slate-750">选择目标数据表格式模板</span>
               </div>
             </div>
@@ -639,6 +916,7 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div className="flex items-center gap-2">
                 <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-50 text-emerald-600 text-xs font-bold font-mono border border-emerald-200/50">2</span>
+                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500 border border-slate-200">可选</span>
                 <span className="text-sm font-semibold text-slate-750">填写需求描述</span>
               </div>
               <HelpCircle className="w-4 h-4 text-slate-400" title="可输入您对音效库的需求想法，AI 将自动融合至表格中" />
@@ -652,31 +930,6 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
                 placeholder="例如：生成一份末日丧尸游戏的基础音效表，包含UI按钮声、撕咬声、沉重脚步、警报器、电锯启动声以及低沉的背景音乐，并且帮我规范化英文命名与技术实现细节..."
                 className="w-full h-28 bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-3 text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500/20 focus:bg-white transition-all resize-none leading-relaxed"
               />
-
-              {/* Quick Prompt Presets */}
-              <div className="space-y-1.5">
-                <p className="text-[10px] font-semibold text-slate-450">点击应用快速构思预设：</p>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    onClick={() => handleApplyPresetPrompt("帮我生成一份科幻太空飞行射击游戏的音效需求表，要求有激光束开火、护盾碰撞、重力引擎超频、UI警告音效，命名要极度规范。")}
-                    className="px-2.5 py-1 bg-slate-50 border border-slate-200 rounded-lg text-[10px] text-slate-600 hover:text-slate-850 hover:bg-slate-100 hover:border-slate-300 transition-all"
-                  >
-                    🚀 科幻飞船战
-                  </button>
-                  <button
-                    onClick={() => handleApplyPresetPrompt("生成一份萌系闯关休闲手游的配音脚本需求表。角色是小狐狸，语气要活泼傲娇。包含普通问候、大招技能、战败低落和宝箱开启。")}
-                    className="px-2.5 py-1 bg-slate-50 border border-slate-200 rounded-lg text-[10px] text-slate-600 hover:text-slate-850 hover:bg-slate-100 hover:border-slate-300 transition-all"
-                  >
-                    🦊 萌系手游配音
-                  </button>
-                  <button
-                    onClick={() => handleApplyPresetPrompt("生成一份横版魂系动作游戏音效中间件需求表（FMOD），包含重击格挡、刀刃附魔、暗影闪避，包含细致的Wwise/FMOD随机样本播放参数配置。")}
-                    className="px-2.5 py-1 bg-slate-50 border border-slate-200 rounded-lg text-[10px] text-slate-600 hover:text-slate-850 hover:bg-slate-100 hover:border-slate-300 transition-all"
-                  >
-                    ⚔️ 魂系动作(FMOD)
-                  </button>
-                </div>
-              </div>
             </div>
           </div>
         </div>
@@ -686,7 +939,8 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
           <div id="card-screenshot" className="bg-white border border-slate-200 rounded-2xl p-5 h-full flex flex-col justify-between space-y-4 shadow-sm">
             <div className="flex items-center gap-2 border-b border-slate-100 pb-3 shrink-0">
               <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-50 text-emerald-600 text-xs font-bold font-mono border border-emerald-200/50">3</span>
-              <span className="text-sm font-semibold text-slate-750">导入已有需求表截图（可选）</span>
+              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500 border border-slate-200">可选</span>
+              <span className="text-sm font-semibold text-slate-750">上传参考文件（可选）</span>
             </div>
 
             {/* Drag & Drop Stage */}
@@ -699,7 +953,7 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
               onClick={() => fileInputRef.current?.click()}
               tabIndex={0}
               role="button"
-              aria-label="上传、拖拽或粘贴需求表截图"
+              aria-label="上传、拖拽或粘贴参考文件"
               className={`flex-1 min-h-[170px] border-2 border-dashed rounded-xl flex flex-col items-center justify-center p-4 text-center cursor-pointer transition-all ${
                 isDragging 
                   ? 'border-emerald-500 bg-emerald-50' 
@@ -712,7 +966,7 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
                 type="file"
                 ref={fileInputRef}
                 onChange={handleFileChange}
-                accept="image/*"
+                accept="image/*,audio/*,video/*"
                 className="hidden"
               />
 
@@ -722,20 +976,28 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
                     <Upload className="w-5 h-5 text-slate-400" />
                   </div>
                   <div>
-                    <p className="text-xs font-semibold text-slate-700">拖拽或粘贴已有表格截图到此</p>
-                    <p className="text-[10px] text-slate-400 mt-1">支持 Ctrl+V 粘贴，也可点击浏览文件（PNG, JPG 等）</p>
+                    <p className="text-xs font-semibold text-slate-700">拖拽或上传参考文件到此</p>
+                    <p className="text-[10px] text-slate-400 mt-1">支持图片/截图、音频、视频；图片也可 Ctrl+V 粘贴</p>
                   </div>
                 </div>
               ) : (
                 <div className="relative w-full h-full flex flex-col items-center justify-center">
                   <div className="relative group overflow-hidden rounded-lg border border-slate-200">
-                    <img
-                      src={screenshotPreview}
-                      alt="Uploaded screenshot preview"
-                      className="max-h-[120px] object-contain"
-                    />
+                    {screenshot?.type.startsWith('image/') ? (
+                      <img
+                        src={screenshotPreview}
+                        alt="Uploaded reference preview"
+                        className="max-h-[120px] object-contain"
+                      />
+                    ) : (
+                      <div className="min-h-[104px] min-w-[180px] flex flex-col items-center justify-center gap-2 bg-white px-6 py-5 text-slate-600">
+                        <FileText className="w-7 h-7 text-emerald-600" />
+                        <span className="text-[11px] font-bold">{uploadedReferenceKind}</span>
+                        <span className="max-w-[160px] truncate text-[10px] text-slate-400">{screenshot?.name}</span>
+                      </div>
+                    )}
                     <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                      <span className="text-[10px] font-semibold text-white">点击更换图片</span>
+                      <span className="text-[10px] font-semibold text-white">点击更换文件</span>
                     </div>
                   </div>
                   <div className="mt-2.5 flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-full text-[10px] text-slate-700">
@@ -747,7 +1009,7 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
                         handleRemoveScreenshot();
                       }}
                       className="p-0.5 hover:text-red-500 transition-colors"
-                      title="移除图片"
+                      title="移除文件"
                     >
                       <X className="w-3 h-3" />
                     </button>
@@ -755,6 +1017,9 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
                 </div>
               )}
             </div>
+            <p className="text-[10px] text-slate-400 leading-relaxed">
+              参考文件不是必填：图片/截图用于识别表格或画面；音频按 BGM/音乐参考分析；视频只分析画面与字幕，默认忽略视频内音频。
+            </p>
             {pasteMessage && (
               <div className="flex items-center gap-1.5 rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-[10px] font-medium text-emerald-700">
                 <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
@@ -766,14 +1031,14 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
             <div className="pt-2 shrink-0">
               <button
                 id="btn-generate-requirements"
-                disabled={loading || (!inputText.trim() && !screenshot)}
-                onClick={handleGenerate}
+                disabled={loading || !canGenerateRequirements}
+                onClick={() => handleGenerate('replace')}
                 className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 disabled:from-slate-100 disabled:to-slate-200 text-white font-semibold text-xs py-3 rounded-xl transition-all shadow-md shadow-emerald-500/5 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {loading ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin text-white" />
-                    <span>AI 正在全力构思与排版...</span>
+                    <span>{activeGenerateMode === 'append' ? 'AI 正在继续追加需求...' : 'AI 正在全力构思与排版...'}</span>
                   </>
                 ) : (
                   <>
@@ -782,9 +1047,30 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
                   </>
                 )}
               </button>
-              {(!inputText.trim() && !screenshot) && (
+              {rows.length > 0 && hasCurrentRequirementDraft && (
+                <button
+                  id="btn-append-requirements"
+                  disabled={loading || !canGenerateRequirements}
+                  onClick={() => handleGenerate('append')}
+                  className="mt-2 w-full flex items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 py-2.5 text-xs font-semibold text-emerald-700 transition-all hover:border-emerald-300 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  title="保留当前表格，把新上传或新输入的一批需求追加到表格末尾"
+                >
+                  {loading && activeGenerateMode === 'append' ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Plus className="w-4 h-4" />
+                  )}
+                  <span>继续添加需求</span>
+                </button>
+              )}
+              {isImageLoading && (
+                <p className="text-[9px] text-amber-500 text-center mt-1.5">
+                  参考文件正在读取中，读完后即可生成。
+                </p>
+              )}
+              {!isImageLoading && !hasTextSource && !hasImageSource && (
                 <p className="text-[9px] text-slate-400 text-center mt-1.5">
-                  提示：请输入文字或拖入一张需求表截图以激活生成
+                  已选择模板。可直接生成标准表，也可补充文字描述、图片、音频或视频后再生成。
                 </p>
               )}
             </div>
@@ -814,7 +1100,7 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
               </p>
             </div>
             <p className="text-[10px] text-slate-400 max-w-sm text-center leading-relaxed">
-              Gemini 正在针对截图进行多模态识别与高级转译。为了确保技术参数与双语翻译的最高品质，可能需要 15-30 秒的时间。
+              Gemini 正在针对参考文件进行多模态识别与高级转译。为了确保技术参数、字幕与配音语境的准确性，可能需要 15-30 秒的时间。
             </p>
           </motion.div>
         )}
@@ -838,7 +1124,7 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
             <CheckCircle2 className="w-4 h-4 text-emerald-600" />
             <div>
               <h4 className="text-xs font-bold text-emerald-700">生成成功！</h4>
-              <p className="text-[10px] text-emerald-600">已根据您的要求完美扩充并格式化。您可直接在下方表格中修改任何单元格！</p>
+              <p className="text-[10px] text-emerald-600">{successMessage}</p>
             </div>
           </div>
           <button
@@ -935,7 +1221,8 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
                 {rows.map((row, rowIndex) => (
                   <tr key={rowIndex} className="hover:bg-slate-50/60 transition-colors">
                     {currentTemplate.keys.map((key) => {
-                      const value = row[key] !== undefined && row[key] !== null ? row[key] : "";
+                      const rawValue = row[key] !== undefined && row[key] !== null ? row[key] : "";
+                      const value = key === 'script_tone' ? stripScriptToneLabel(rawValue) : rawValue;
                       const isIndex = key === 'index';
                       return (
                         <td key={key} className="p-1 px-2.5">

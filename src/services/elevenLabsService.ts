@@ -3,27 +3,80 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  getElevenLabsQualityMode,
+  isElevenLabsProQualityMode,
+} from '../utils/elevenLabsQuality';
+import type { ElevenLabsQualityMode } from '../utils/elevenLabsQuality';
+
 const isBrowser = typeof window !== 'undefined';
+
+interface ElevenLabsGenerationOptions {
+  qualityMode?: ElevenLabsQualityMode;
+  fallbackText?: string;
+  seed?: number;
+  voiceSource?: 'my_voices' | 'voice_library';
+  publicOwnerId?: string;
+  voiceName?: string;
+}
+
+export interface TranslateDubbingOptions extends ElevenLabsGenerationOptions {
+  sourceLanguage?: string;
+  targetLanguage: string;
+  voiceId: string;
+  timingMode: 'natural' | 'match' | 'strict';
+}
+
+export interface TranslateDubbingResult {
+  audioUrl: string;
+  sourceText: string;
+  translatedText: string;
+  detectedLanguage?: string;
+  sourceDuration?: number;
+  generatedDuration?: number;
+  outputDuration?: number;
+  timingMode: 'natural' | 'match' | 'strict';
+  speedRatio?: number;
+  qualityMode?: ElevenLabsQualityMode;
+}
+
+const resolveQualityMode = (options?: ElevenLabsGenerationOptions): ElevenLabsQualityMode => (
+  options?.qualityMode || (isBrowser ? getElevenLabsQualityMode() : 'pro')
+);
 
 async function requestBlob(path: string, init: RequestInit): Promise<Blob> {
   const response = await fetch(path, init);
   if (!response.ok) {
     const errorBody = await response.json().catch(() => ({}));
-    throw new Error(errorBody.error || `音频服务请求失败 (${response.status})`);
+    const message = String(errorBody.error || `音频服务请求失败 (${response.status})`);
+    if (/Multiple voice additions\/deletions for the same voice/i.test(message)) {
+      throw new Error('声音库正在同步这个声音，请稍等几秒后重试。');
+    }
+    throw new Error(message);
   }
   return response.blob();
+}
+
+async function requestJson<T>(path: string, init: RequestInit): Promise<T> {
+  const response = await fetch(path, init);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error || `AI 服务请求失败 (${response.status})`);
+  }
+  return body as T;
 }
 
 const getApiKey = () => {
   return process.env.ELEVENLABS_API_KEY || process.env.VITE_ELEVENLABS_API_KEY || "";
 };
 
-export async function generateSoundEffect(text: string, duration?: number): Promise<Blob> {
+export async function generateSoundEffect(text: string, duration?: number, options?: ElevenLabsGenerationOptions): Promise<Blob> {
+  const qualityMode = resolveQualityMode(options);
   if (isBrowser) {
     return requestBlob('/api/ai/elevenlabs/sound-effect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, duration }),
+      body: JSON.stringify({ text, duration, qualityMode }),
     });
   }
 
@@ -32,33 +85,28 @@ export async function generateSoundEffect(text: string, duration?: number): Prom
     throw new Error("ElevenLabs API Key is not configured. Please add it in the Secrets panel.");
   }
 
-  // Extract English prompt if the text contains Chinese or Search Keyword
-  let cleanText = text;
-  
-  // 1. Try to find content inside (Search Keyword: ...) or [Search Keyword: ...] or simply containing english description
+  // Build a richer English prompt instead of stripping Chinese to nothing.
+  let cleanText = text.trim();
   const searchKeywordRegex = /(?:Search Keyword|Keyword):\s*([^)]+)/i;
   const match = text.match(searchKeywordRegex);
   if (match) {
     cleanText = match[1].replace(/\)$/, '').trim();
-    cleanText = cleanText.replace(/[\u4e00-\u9fa5]/g, '').trim();
-  } else {
-    // If no match but contains chinese, clean it
-    if (/[\u4e00-\u9fa5]/.test(text)) {
-      cleanText = text.replace(/[\u4e00-\u9fa5]/g, '').trim();
-      cleanText = cleanText.replace(/\[Duration:\s*\d+s\]/gi, '').trim();
-      cleanText = cleanText.replace(/[，。；：！？（）“”‘’【】()]/g, ' ').replace(/\s+/g, ' ').trim();
-    }
   }
+  cleanText = cleanText.replace(/\[Duration:\s*\d+s\]/gi, '').trim();
+  cleanText = cleanText.replace(/[，。；：！？（）“”‘’【】()\[\]]/g, ' ').replace(/\s+/g, ' ').trim();
 
   if (!cleanText) {
-    cleanText = "cinematic ambient sound effect";
+    cleanText = "sound effect";
   }
 
-  // Limit to 50 words to avoid exceeding ElevenLabs limits
-  cleanText = cleanText.split(/\s+/).slice(0, 45).join(" ");
+  // Keep the prompt short and direct, which aligns better with the ElevenLabs sound generator.
+  cleanText = cleanText.split(/\s+/).slice(0, 20).join(" ");
 
-  // Ensure prompt explicitly says no speech with strong negative framing
-  const sfxPrompt = `Pure sound effect, instrumental, no vocals, no speech, no language, no human voice: ${cleanText}`;
+  // Keep the model focused on the user's description without over-biasing toward impact / metal Foley.
+  const isProQuality = isElevenLabsProQualityMode(qualityMode);
+  const sfxPrompt = isProQuality
+    ? `Studio-quality sound effect, realistic texture, layered ambience, clear spatial depth, high fidelity, no spoken words. Description: ${cleanText}`
+    : `Sound effect, realistic texture, clear spatial depth, no spoken words. Description: ${cleanText}`;
 
   console.log("Generating sound effect with English prompt:", sfxPrompt);
 
@@ -69,9 +117,10 @@ export async function generateSoundEffect(text: string, duration?: number): Prom
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
+      model_id: "eleven_text_to_sound_v2",
       text: sfxPrompt,
       duration_seconds: duration || 10,
-      prompt_influence: 0.3,
+      prompt_influence: isProQuality ? 0.45 : 0.3,
     }),
   });
 
@@ -83,12 +132,19 @@ export async function generateSoundEffect(text: string, duration?: number): Prom
   return await response.blob();
 }
 
-export async function generateMusic(text: string, duration?: number, isInstrumental: boolean = true, lyrics?: string): Promise<Blob> {
+export async function generateMusic(
+  text: string,
+  duration?: number,
+  isInstrumental: boolean = true,
+  lyrics?: string,
+  options?: ElevenLabsGenerationOptions,
+): Promise<Blob> {
+  const qualityMode = resolveQualityMode(options);
   if (isBrowser) {
     return requestBlob('/api/ai/elevenlabs/music', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, duration, isInstrumental, lyrics }),
+      body: JSON.stringify({ text, duration, isInstrumental, lyrics, qualityMode }),
     });
   }
 
@@ -115,11 +171,15 @@ export async function generateMusic(text: string, duration?: number, isInstrumen
   const normalizedDurationSeconds = Math.min(600, Math.max(3, duration || 30));
   const musicLengthMs = Math.round(normalizedDurationSeconds * 1000);
   const normalizedLyrics = lyrics?.trim();
+  const isProQuality = isElevenLabsProQualityMode(qualityMode);
+  const proQualityPrefix = isProQuality
+    ? 'Broadcast-ready professional mix, high fidelity, polished arrangement, clear low end, wide stereo image, clean dynamics. '
+    : '';
   const musicPrompt = isInstrumental
-    ? `Full-length background instrumental music, no vocals, no speech, no lyrics. Style: ${cleanText}`
+    ? `${proQualityPrefix}Full-length background instrumental music, no vocals, no speech, no lyrics. Style: ${cleanText}`
     : (normalizedLyrics
-        ? `Complete vocal song with expressive vocals and a full music mix. Style: ${cleanText}. Lyrics:\n${normalizedLyrics}`
-        : `AI Music, complete song with expressive vocals and lyrics, vocal track, full mix: ${cleanText}`);
+        ? `${proQualityPrefix}Complete vocal song with expressive vocals and a full music mix. Style: ${cleanText}. Lyrics:\n${normalizedLyrics}`
+        : `${proQualityPrefix}AI Music, complete song with expressive vocals and lyrics, vocal track, full mix: ${cleanText}`);
   const limitedMusicPrompt = musicPrompt.slice(0, 4100);
 
   console.log(`Generating music (instrumental=${isInstrumental}, duration=${normalizedDurationSeconds}s) with ElevenLabs Music API prompt:`, limitedMusicPrompt);
@@ -154,13 +214,28 @@ export async function generateVoice(
   voiceId: string, 
   stability: number = 0.5, 
   similarity: number = 0.75,
-  style: number = 0.05
+  style: number = 0.05,
+  options?: ElevenLabsGenerationOptions,
 ): Promise<Blob> {
+  const qualityMode = resolveQualityMode(options);
+  const fallbackText = options?.fallbackText?.trim() || text;
   if (isBrowser) {
     return requestBlob('/api/ai/elevenlabs/voice', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, voiceId, stability, similarity, style }),
+      body: JSON.stringify({
+        text,
+        fallbackText,
+        voiceId,
+        stability,
+        similarity,
+        style,
+        qualityMode,
+        seed: options?.seed,
+        voiceSource: options?.voiceSource,
+        publicOwnerId: options?.publicOwnerId,
+        voiceName: options?.voiceName,
+      }),
     });
   }
 
@@ -179,6 +254,7 @@ export async function generateVoice(
   for (const modelId of modelsToTry) {
     try {
       console.log(`Attempting voice generation using model: ${modelId}`);
+      const textForModel = modelId === "eleven_v3" ? text : fallbackText;
       const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
         method: "POST",
         headers: {
@@ -186,8 +262,9 @@ export async function generateVoice(
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          text: text,
+          text: textForModel,
           model_id: modelId,
+          ...(typeof options?.seed === 'number' ? { seed: options.seed } : {}),
           voice_settings: {
             stability: stability,
             similarity_boost: similarity,
@@ -237,7 +314,7 @@ export async function generateVoice(
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          text: text,
+          text: fallbackText,
           model_id: "eleven_multilingual_v2",
           voice_settings: {
             stability: stability,
@@ -489,6 +566,28 @@ export async function generateSpeechToSpeech(
   }
 
   return await response.blob();
+}
+
+export async function translateDubbingAudio(
+  audioFile: File | Blob,
+  options: TranslateDubbingOptions,
+): Promise<TranslateDubbingResult> {
+  if (!isBrowser) {
+    throw new Error("translateDubbingAudio is only available through the browser API proxy.");
+  }
+
+  const proxyFormData = new FormData();
+  proxyFormData.append('audio', audioFile, audioFile instanceof File ? audioFile.name : 'source.wav');
+  proxyFormData.append('sourceLanguage', options.sourceLanguage || 'auto');
+  proxyFormData.append('targetLanguage', options.targetLanguage);
+  proxyFormData.append('voiceId', options.voiceId);
+  proxyFormData.append('timingMode', options.timingMode);
+  proxyFormData.append('qualityMode', options.qualityMode || getElevenLabsQualityMode());
+
+  return requestJson<TranslateDubbingResult>('/api/ai/elevenlabs/translate-dubbing', {
+    method: 'POST',
+    body: proxyFormData,
+  });
 }
 
 /**
