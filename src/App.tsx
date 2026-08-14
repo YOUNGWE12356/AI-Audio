@@ -10,6 +10,7 @@ import {
   analyzeAudioDesignPreuploadedVideo,
   analyzeAudioDesignVideo,
   AudioDesignResult,
+  createEnglishMusicPromptForElevenLabs,
   preuploadAudioDesignVideo,
   regenerateLyrics,
   translateToEnglish,
@@ -164,6 +165,7 @@ export default function App() {
   // Standalone SFX Generator States
   const [standalonePrompt, setStandalonePrompt] = useState('');
   const [standaloneDuration, setStandaloneDuration] = useState(1);
+  const [standaloneDurationMode, setStandaloneDurationMode] = useState<'auto' | 'fixed'>('auto');
   const [standaloneLoading, setStandaloneLoading] = useState(false);
   const [standaloneError, setStandaloneError] = useState<string | null>(null);
   const [pendingSfxOptions, setPendingSfxOptions] = useState<{
@@ -588,11 +590,12 @@ export default function App() {
       const prompt = standalonePrompt.trim();
       const englishPrompt = await translateToEnglish(prompt);
       const generationPrompt = englishPrompt.trim() || prompt;
+      const requestedDuration = standaloneDurationMode === 'fixed' ? standaloneDuration : undefined;
       const [blobA, blobB] = await Promise.all([
-        generateSoundEffect(generationPrompt, standaloneDuration, {
+        generateSoundEffect(generationPrompt, requestedDuration, {
           qualityMode: elevenLabsQualityMode,
         }),
-        generateSoundEffect(generationPrompt, standaloneDuration, {
+        generateSoundEffect(generationPrompt, requestedDuration, {
           qualityMode: elevenLabsQualityMode,
         }),
       ]);
@@ -601,9 +604,10 @@ export default function App() {
 
       const baseTitle = `独立音效 - ${prompt.substring(0, 20)}${prompt.length > 20 ? '...' : ''}`;
       const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 16);
+      const durationLabel = requestedDuration ? `${requestedDuration}秒` : '自动时长';
       const details = generationPrompt !== prompt
-        ? `${standaloneDuration}秒 · 电影声效 · 已自动英译`
-        : `${standaloneDuration}秒 · 电影声效`;
+        ? `${durationLabel} · 电影声效 · 已自动英译`
+        : `${durationLabel} · 电影声效`;
       setPendingSfxOptions({
         optionA: {
           url: urlA,
@@ -611,7 +615,7 @@ export default function App() {
           prompt,
           timestamp,
           details,
-          duration: standaloneDuration,
+          duration: requestedDuration || 0,
         },
         optionB: {
           url: urlB,
@@ -619,7 +623,7 @@ export default function App() {
           prompt,
           timestamp,
           details,
-          duration: standaloneDuration,
+          duration: requestedDuration || 0,
         },
       });
       
@@ -652,19 +656,21 @@ export default function App() {
     try {
       const prompt = standaloneMusicPrompt.trim();
       let generationPrompt = prompt;
-      let usedAutoTranslation = false;
+      let usedPromptRewrite = false;
 
       try {
-        const translatedPrompt = await translateToEnglish(prompt);
-        generationPrompt = translatedPrompt.trim() || prompt;
-        usedAutoTranslation = generationPrompt !== prompt;
-      } catch (translationError) {
-        console.error('Music prompt auto-translation failed:', translationError);
-        throw new Error('自动翻译成英文失败，请检查 Gemini 配置后重试，或先手动输入英文提示词。');
+        const rewrittenPrompt = await createEnglishMusicPromptForElevenLabs(prompt, {
+          instrumental: standaloneMusicType === 'instrumental',
+        });
+        generationPrompt = rewrittenPrompt.trim() || prompt;
+        usedPromptRewrite = generationPrompt !== prompt;
+      } catch (rewriteError) {
+        console.error('Music prompt auto-rewrite failed:', rewriteError);
+        throw new Error('自动改写音乐提示词失败，请检查 Gemini 配置后重试，或先手动输入英文音乐提示词。');
       }
 
       const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 16);
-      const details = `${standaloneMusicDuration}秒 · ${standaloneMusicType === 'instrumental' ? '纯伴奏' : '歌词人声'}${usedAutoTranslation ? ' · 已自动英译' : ''}`;
+      const details = `${standaloneMusicDuration}秒 · ${standaloneMusicType === 'instrumental' ? '纯伴奏' : '歌词人声'}${usedPromptRewrite ? ' · 已自动改写提示词' : ''}`;
       const baseTitle = `独立音乐 - ${prompt.substring(0, 20)}${prompt.length > 20 ? '...' : ''}`;
       const createMusicOption = async (id: 'A' | 'B'): Promise<PendingMusicOption> => {
         const versionPrompt = id === 'A'
@@ -1147,6 +1153,8 @@ export default function App() {
                   setStandalonePrompt={setStandalonePrompt}
                   standaloneDuration={standaloneDuration}
                   setStandaloneDuration={setStandaloneDuration}
+                  standaloneDurationMode={standaloneDurationMode}
+                  setStandaloneDurationMode={setStandaloneDurationMode}
                   standaloneLoading={standaloneLoading}
                   standaloneError={standaloneError}
                   handleStandaloneGenerate={handleStandaloneGenerate}

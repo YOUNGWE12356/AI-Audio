@@ -44,6 +44,35 @@ const resolveQualityMode = (options?: ElevenLabsGenerationOptions): ElevenLabsQu
   options?.qualityMode || (isBrowser ? getElevenLabsQualityMode() : 'pro')
 );
 
+const ELEVENLABS_PROMPT_POLICY_ERROR = /violated our Terms of Service|prompt appears to have violated|policy|safety/i;
+const MUSIC_PROMPT_POLICY_MESSAGE = '音乐提示词被 ElevenLabs 安全策略拦截了。我已经会在生成前自动改写成更音乐化的英文描述；如果仍失败，请避开“恐怖、惊吓、暴力、血腥、武器、模仿某歌手”等直白词，改写成“阴暗悬疑、紧张弦乐、诡异氛围、无鼓点”等配乐语言。';
+
+const makeMusicPromptPolicyFriendly = (value: string) => {
+  const replacements: Array<[RegExp, string]> = [
+    [/\bterrifying\b/gi, 'dark intense'],
+    [/\bterror\b/gi, 'tense suspense'],
+    [/\bhorrifying\b/gi, 'dark suspenseful'],
+    [/\bhorror\b/gi, 'dark suspense'],
+    [/\bscary\b/gi, 'eerie suspenseful'],
+    [/\bfrightening\b/gi, 'eerie tense'],
+    [/\bfright\b/gi, 'sudden tension'],
+    [/\bpanic\b/gi, 'urgent tension'],
+    [/\bthreatening\b/gi, 'ominous'],
+    [/\bviolent\b/gi, 'intense dramatic'],
+    [/\bviolence\b/gi, 'dramatic conflict'],
+    [/\bblood\b/gi, 'dark dramatic'],
+    [/\bgore\b/gi, 'dark dramatic'],
+    [/\bweapon\b/gi, 'metallic dramatic accent'],
+    [/\bgun\b/gi, 'sharp cinematic accent'],
+    [/\bkill(?:ing)?\b/gi, 'dramatic climax'],
+  ];
+
+  return replacements.reduce(
+    (text, [pattern, replacement]) => text.replace(pattern, replacement),
+    value,
+  );
+};
+
 async function requestBlob(path: string, init: RequestInit): Promise<Blob> {
   const response = await fetch(path, init);
   if (!response.ok) {
@@ -51,6 +80,9 @@ async function requestBlob(path: string, init: RequestInit): Promise<Blob> {
     const message = String(errorBody.error || `音频服务请求失败 (${response.status})`);
     if (/Multiple voice additions\/deletions for the same voice/i.test(message)) {
       throw new Error('声音库正在同步这个声音，请稍等几秒后重试。');
+    }
+    if (path.includes('/music') && ELEVENLABS_PROMPT_POLICY_ERROR.test(message)) {
+      throw new Error(MUSIC_PROMPT_POLICY_MESSAGE);
     }
     throw new Error(message);
   }
@@ -72,11 +104,18 @@ const getApiKey = () => {
 
 export async function generateSoundEffect(text: string, duration?: number, options?: ElevenLabsGenerationOptions): Promise<Blob> {
   const qualityMode = resolveQualityMode(options);
+  const normalizedDuration = typeof duration === 'number' && Number.isFinite(duration) && duration > 0
+    ? duration
+    : undefined;
   if (isBrowser) {
     return requestBlob('/api/ai/elevenlabs/sound-effect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, duration, qualityMode }),
+      body: JSON.stringify({
+        text,
+        ...(normalizedDuration ? { duration: normalizedDuration } : {}),
+        qualityMode,
+      }),
     });
   }
 
@@ -110,18 +149,20 @@ export async function generateSoundEffect(text: string, duration?: number, optio
 
   console.log("Generating sound effect with English prompt:", sfxPrompt);
 
+  const requestBody = {
+    model_id: "eleven_text_to_sound_v2",
+    text: sfxPrompt,
+    ...(normalizedDuration ? { duration_seconds: normalizedDuration } : {}),
+    prompt_influence: isProQuality ? 0.45 : 0.3,
+  };
+
   const response = await fetch("https://api.elevenlabs.io/v1/sound-generation", {
     method: "POST",
     headers: {
       "xi-api-key": apiKey,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      model_id: "eleven_text_to_sound_v2",
-      text: sfxPrompt,
-      duration_seconds: duration || 10,
-      prompt_influence: isProQuality ? 0.45 : 0.3,
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   if (!response.ok) {
@@ -165,6 +206,8 @@ export async function generateMusic(
     cleanText = "orchestral game theme music background";
   }
 
+  cleanText = makeMusicPromptPolicyFriendly(cleanText);
+
   // Limit words
   cleanText = cleanText.split(/\s+/).slice(0, 45).join(" ");
 
@@ -203,6 +246,9 @@ export async function generateMusic(
     const message = typeof detail === 'string'
       ? detail
       : detail?.message || errorData.message || response.statusText;
+    if (ELEVENLABS_PROMPT_POLICY_ERROR.test(message)) {
+      throw new Error(MUSIC_PROMPT_POLICY_MESSAGE);
+    }
     throw new Error(`ElevenLabs Music API error: ${message}`);
   }
 

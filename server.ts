@@ -16,13 +16,18 @@ import {
   analyzeAudioDesignVideoFile,
   generateSfxRequirements,
   generateLyricsFromMusicStyle,
+  createEnglishMusicPromptForElevenLabs,
   matchBestVoice,
   optimizeImportMetadata,
   regenerateLyrics,
   translateTextToLanguage,
   translateToEnglish,
 } from './src/services/geminiService';
-import { generateGeminiContent } from './src/services/geminiRetry';
+import {
+  GEMINI_PRIMARY_MODEL,
+  generateGeminiContent,
+  isGptTextConfigured,
+} from './src/services/geminiRetry';
 import {
   fetchAvailableVoices,
   generateMusic,
@@ -428,6 +433,7 @@ async function startServer() {
       runtime: 'server',
       services: {
         gemini: Boolean(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY),
+        gptText: isGptTextConfigured(),
         elevenLabs: Boolean(process.env.ELEVENLABS_API_KEY || process.env.VITE_ELEVENLABS_API_KEY),
         ffmpeg: Boolean(FFMPEG_BINARY),
         demucsConfigured: Boolean(process.env.DEMUCS_COMMAND || process.env.DEMUCS_PYTHON),
@@ -1956,6 +1962,16 @@ async function startServer() {
     return res.json({ text });
   }));
 
+  app.post('/api/ai/gemini/music-prompt', asyncRoute(async (req, res) => {
+    const text = String(req.body?.text || '').trim();
+    if (!text) return res.status(400).json({ error: '请先输入配乐风格与情感描述。' });
+    if (text.length > 5000) return res.status(400).json({ error: '配乐描述过长，请精简后重试。' });
+    const rewritten = await createEnglishMusicPromptForElevenLabs(text, {
+      instrumental: req.body?.instrumental !== false,
+    });
+    return res.json({ text: rewritten });
+  }));
+
   app.post('/api/ai/gemini/translate-language', asyncRoute(async (req, res) => {
     const text = await translateTextToLanguage(
       String(req.body?.text || ''),
@@ -2080,7 +2096,7 @@ ${JSON.stringify(normalizedVoices)}
 
     try {
       const response = await generateGeminiContent(ai, {
-        model: 'gemini-3.5-flash',
+        model: GEMINI_PRIMARY_MODEL,
         contents: [{
           parts: [
             { inlineData: { data: audioBase64, mimeType } },
@@ -2249,7 +2265,10 @@ ${JSON.stringify(normalizedVoices)}
   app.post('/api/ai/elevenlabs/sound-effect', asyncRoute(async (req, res) => {
     const text = String(req.body?.text || '').trim();
     if (!text) return res.status(400).json({ error: 'text is required' });
-    const duration = parseNumber(req.body?.duration, 10, 0.5, 60);
+    const rawDuration = req.body?.duration;
+    const duration = rawDuration === undefined || rawDuration === null || rawDuration === ''
+      ? undefined
+      : parseNumber(rawDuration, 10, 0.5, 60);
     const qualityMode = normalizeElevenLabsQualityMode(req.body?.qualityMode);
     const englishText = /[^\x00-\x7F]/.test(text)
       ? await translateToEnglish(text)
@@ -2898,9 +2917,9 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
         }
       }
 
-      console.log(`Sending content generation request to Gemini (models/gemini-3.5-flash)...`);
+      console.log(`Sending content generation request to Gemini (models/${GEMINI_PRIMARY_MODEL})...`);
       const response = await generateGeminiContent(ai, {
-        model: "gemini-3.5-flash",
+        model: GEMINI_PRIMARY_MODEL,
         contents,
         config: {
           responseMimeType: "application/json",

@@ -34,6 +34,7 @@ import SpeechToSpeech from './SpeechToSpeech';
 import SpeechToText from './SpeechToText';
 import CrossLanguageDubbing from './CrossLanguageDubbing';
 import { downloadAudioHelper } from '../utils/downloadHelper';
+import GeneratedAudioPlayer, { sanitizeAudioFileName } from './GeneratedAudioPlayer';
 
 interface PendingVoiceOption {
   url: string;
@@ -104,9 +105,7 @@ export default function DubbingStudio({
   const [editingTitle, setEditingTitle] = useState('');
   const [fetchedVoices, setFetchedVoices] = useState<VoiceItem[]>([]);
   const [isLoadingVoices, setIsLoadingVoices] = useState(false);
-  const [previewPlayingId, setPreviewPlayingId] = useState<'A' | 'B' | null>(null);
-  const [previewDurations, setPreviewDurations] = useState<Record<'A' | 'B', number | null>>({ A: null, B: null });
-  const generatedPreviewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [activeGeneratedVoiceId, setActiveGeneratedVoiceId] = useState<string | null>(null);
 
   // Active sub-tab state ('tts' = Text-to-Speech, 'sts' = Speech-to-Speech, 'stt' = Speech-to-Text)
   const [activeSubTab, setActiveSubTab] = useState<'tts' | 'sts' | 'translate' | 'stt'>('tts');
@@ -725,21 +724,6 @@ export default function DubbingStudio({
     pendingVoiceOptions.optionB ? { id: 'B' as const, label: '版本 B', option: pendingVoiceOptions.optionB } : null,
   ].filter(Boolean) as Array<{ id: 'A' | 'B'; label: string; option: PendingVoiceOption }>;
 
-  const formatDuration = (duration?: number | null) => {
-    if (!duration || !Number.isFinite(duration)) return '--:--';
-    const minutes = Math.floor(duration / 60);
-    const seconds = Math.floor(duration % 60);
-    return `${minutes}:${String(seconds).padStart(2, '0')}`;
-  };
-
-  const sanitizeDownloadName = (name: string) => (
-    name
-      .trim()
-      .replace(/[\\/:*?"<>|]+/g, ' ')
-      .replace(/\s+/g, ' ')
-      .slice(0, 80) || `generated_voiceover_${Date.now()}`
-  );
-
   const updateGeneratedVoiceName = (id: 'A' | 'B', name: string) => {
     const key = id === 'A' ? 'optionA' : 'optionB';
     const current = pendingVoiceOptions[key];
@@ -755,33 +739,6 @@ export default function DubbingStudio({
     }
   };
 
-  const getWaveHeight = (versionId: 'A' | 'B', index: number) => {
-    const seed = versionId === 'A' ? 7 : 17;
-    return 20 + ((index * 37 + seed * 13) % 72);
-  };
-
-  const toggleGeneratedPreview = (id: 'A' | 'B', url: string, speed: number) => {
-    if (!generatedPreviewAudioRef.current) {
-      generatedPreviewAudioRef.current = new Audio();
-    }
-
-    const audio = generatedPreviewAudioRef.current;
-    if (previewPlayingId === id && !audio.paused) {
-      audio.pause();
-      setPreviewPlayingId(null);
-      return;
-    }
-
-    audio.pause();
-    audio.src = url;
-    audio.playbackRate = speed;
-    audio.onended = () => setPreviewPlayingId(null);
-    audio.onpause = () => setPreviewPlayingId(prev => (prev === id ? null : prev));
-    audio.play()
-      .then(() => setPreviewPlayingId(id))
-      .catch(error => console.error('Play generated voice preview failed:', error));
-  };
-
   useEffect(() => {
     if (selectedVoiceObj) {
       setSelectedStandaloneVoice?.(selectedVoiceObj);
@@ -789,24 +746,6 @@ export default function DubbingStudio({
       setSelectedStandaloneVoice?.(null);
     }
   }, [selectedVoiceObj, standaloneVoiceRole, setSelectedStandaloneVoice]);
-
-  useEffect(() => {
-    generatedVoiceOptions.forEach(({ id, option }) => {
-      if (previewDurations[id] != null) return;
-      const audio = new Audio(option.url);
-      audio.onloadedmetadata = () => {
-        const duration = Number.isFinite(audio.duration) ? audio.duration : null;
-        setPreviewDurations(prev => ({ ...prev, [id]: duration }));
-      };
-      audio.onerror = () => setPreviewDurations(prev => ({ ...prev, [id]: null }));
-    });
-  }, [pendingVoiceOptions.optionA?.url, pendingVoiceOptions.optionB?.url]);
-
-  useEffect(() => () => {
-    if (generatedPreviewAudioRef.current) {
-      generatedPreviewAudioRef.current.pause();
-    }
-  }, []);
 
   return (
     <div id="dubbingstudio-view" className="flex-1 flex flex-col md:flex-row bg-slate-50 min-h-screen overflow-hidden">
@@ -1251,62 +1190,24 @@ export default function DubbingStudio({
               </div>
             ) : generatedVoiceOptions.length > 0 ? (
               <div className="space-y-3">
-                {generatedVoiceOptions.map(({ id, label, option }) => {
-                  const isPreviewPlaying = previewPlayingId === id;
-                  return (
-                    <div key={id} className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3 relative overflow-hidden">
-                      <div className="absolute top-0 right-0 w-24 h-24 bg-emerald-500/5 blur-xl pointer-events-none" />
-                      <div className="flex items-center gap-3">
-                        <button
-                          onClick={() => toggleGeneratedPreview(id, option.url, option.speed)}
-                          className={`w-11 h-11 rounded-full flex items-center justify-center shrink-0 border transition-all ${
-                            isPreviewPlaying
-                              ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm shadow-emerald-500/20'
-                              : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100 hover:text-slate-950'
-                          }`}
-                        >
-                          {isPreviewPlaying ? <Pause className="w-4.5 h-4.5 fill-current" /> : <Play className="w-4.5 h-4.5 fill-current ml-0.5" />}
-                        </button>
-
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
-                            <span className="shrink-0 rounded-full bg-emerald-100 px-2 py-0.5 text-[9px] font-black text-emerald-700">{label}</span>
-                            <input
-                              type="text"
-                              value={option.displayName}
-                              onChange={(event) => updateGeneratedVoiceName(id, event.target.value)}
-                              className="min-w-0 flex-1 rounded-md border border-transparent bg-white/70 px-2 py-1 text-xs font-bold text-slate-800 outline-none transition-all hover:border-slate-200 focus:border-emerald-400 focus:bg-white focus:ring-1 focus:ring-emerald-200"
-                              aria-label={`${label} 配音名称`}
-                            />
-                            <span className="text-[10px] font-mono font-bold text-slate-400 shrink-0">{formatDuration(previewDurations[id])}</span>
-                          </div>
-                          <p className="text-[10px] text-slate-500 truncate italic mt-0.5">"{option.processedText}"</p>
-                          <span className="text-[9px] text-emerald-600 font-semibold mt-1 block">
-                            属性：{standaloneVoiceGender === 'male' ? '男声' : '女声'} · {standaloneVoiceLang.toUpperCase()} · {option.speed}x
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center h-10 bg-slate-200/50 p-2 rounded-lg gap-0.5 border border-slate-200 overflow-hidden">
-                        {Array.from({ length: 44 }).map((_, index) => (
-                          <span
-                            key={index}
-                            className={`rounded-full w-1 transition-all ${isPreviewPlaying ? 'bg-emerald-500' : 'bg-emerald-400/70'}`}
-                            style={{ height: `${getWaveHeight(id, index)}%` }}
-                          />
-                        ))}
-                      </div>
-
-                      <button
-                        onClick={() => downloadAudioHelper(option.url, `${sanitizeDownloadName(option.displayName)}.mp3`)}
-                        className="w-full bg-white hover:bg-emerald-50 border border-slate-200 text-slate-700 hover:text-emerald-700 py-2 rounded-xl text-[10px] font-bold text-center transition-all flex items-center justify-center gap-1.5 shadow-sm cursor-pointer"
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                        <span>下载 MP3 配音（{label}）</span>
-                      </button>
-                    </div>
-                  );
-                })}
+                {generatedVoiceOptions.map(({ id, label, option }) => (
+                  <GeneratedAudioPlayer
+                    key={id}
+                    id={`voice-${id}`}
+                    url={option.url}
+                    title={option.displayName}
+                    titleBadge={label}
+                    prompt={option.processedText}
+                    meta={`属性：${standaloneVoiceGender === 'male' ? '男声' : '女声'} · ${standaloneVoiceLang.toUpperCase()} · ${option.speed}x`}
+                    playbackRate={option.speed}
+                    activeId={activeGeneratedVoiceId}
+                    setActiveId={setActiveGeneratedVoiceId}
+                    editableTitle
+                    downloadFileName={`${sanitizeAudioFileName(option.displayName, `generated_voiceover_${id}`)}.mp3`}
+                    downloadLabel={`下载 MP3 配音（${label}）`}
+                    onRename={(title) => updateGeneratedVoiceName(id, title)}
+                  />
+                ))}
               </div>
             ) : (
               <div className="border border-dashed border-slate-200 bg-slate-50 rounded-xl p-10 text-center text-slate-400 text-xs leading-relaxed">

@@ -10,7 +10,6 @@ import {
   Play,
   Pause,
   Download,
-  FileAudio,
   X,
   AlertCircle,
   Sparkles,
@@ -19,6 +18,7 @@ import {
 import { HistoryItem } from '../types';
 import { generateLyricsFromMusicStyle, translateToEnglish } from '../services/geminiService';
 import type { PendingMusicOption } from '../App';
+import GeneratedAudioPlayer from './GeneratedAudioPlayer';
 
 const formatMusicTime = (seconds: number) => {
   if (!Number.isFinite(seconds) || seconds <= 0) return '0:00';
@@ -58,14 +58,14 @@ interface MusicWaveformPlayerProps {
   option: PendingMusicOption;
   activeId: string | null;
   setActiveId: (id: string | null) => void;
+  onRename: (title: string) => void;
   onClear?: () => void;
 }
 
-function MusicWaveformPlayer({ option, activeId, setActiveId, onClear }: MusicWaveformPlayerProps) {
+function MusicWaveformPlayer({ option, activeId, setActiveId, onRename, onClear }: MusicWaveformPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(option.duration || 0);
-  const [dragFile, setDragFile] = useState<File | null>(null);
   const fallbackBars = useMemo(
     () => createWaveformBars(`${option.id}-${option.prompt}-${option.url}`),
     [option.id, option.prompt, option.url],
@@ -75,6 +75,19 @@ function MusicWaveformPlayer({ option, activeId, setActiveId, onClear }: MusicWa
   const safeDuration = duration || option.duration || 0;
   const progress = safeDuration > 0 ? Math.min(1, currentTime / safeDuration) : 0;
   const fileName = useMemo(() => createMusicFileName(option), [option]);
+  const [titleDraft, setTitleDraft] = useState(option.title);
+
+  React.useEffect(() => {
+    setTitleDraft(option.title);
+  }, [option.title]);
+
+  const commitTitle = () => {
+    const nextTitle = titleDraft.trim() || option.title;
+    setTitleDraft(nextTitle);
+    if (nextTitle !== option.title) {
+      onRename(nextTitle);
+    }
+  };
 
   React.useEffect(() => {
     let cancelled = false;
@@ -126,30 +139,6 @@ function MusicWaveformPlayer({ option, activeId, setActiveId, onClear }: MusicWa
     };
   }, [fallbackBars, option.url]);
 
-  React.useEffect(() => {
-    let cancelled = false;
-
-    const prepareDragFile = async () => {
-      try {
-        const response = await fetch(option.url);
-        const blob = await response.blob();
-        if (!cancelled) {
-          setDragFile(new File([blob], fileName, { type: blob.type || 'audio/mpeg' }));
-        }
-      } catch {
-        if (!cancelled) {
-          setDragFile(null);
-        }
-      }
-    };
-
-    prepareDragFile();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [fileName, option.url]);
-
   const togglePlay = () => {
     const audio = audioRef.current;
     if (!audio) return;
@@ -192,24 +181,6 @@ function MusicWaveformPlayer({ option, activeId, setActiveId, onClear }: MusicWa
     return () => window.removeEventListener('music-waveform-stop-others', stopOtherPlayers);
   }, [option.id]);
 
-  const handleExportDragStart = (event: React.DragEvent<HTMLDivElement>) => {
-    const transfer = event.dataTransfer;
-    transfer.effectAllowed = 'copy';
-    transfer.dropEffect = 'copy';
-
-    transfer.setData('DownloadURL', `audio/mpeg:${fileName}:${option.url}`);
-    transfer.setData('text/uri-list', option.url);
-    transfer.setData('text/plain', `${fileName}\n${option.url}`);
-
-    if (dragFile) {
-      try {
-        transfer.items.add(dragFile);
-      } catch {
-        // Some browsers/targets reject file items during drag; DownloadURL/URL data still remain.
-      }
-    }
-  };
-
   return (
     <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-4 space-y-3 shadow-sm">
       <audio
@@ -228,10 +199,27 @@ function MusicWaveformPlayer({ option, activeId, setActiveId, onClear }: MusicWa
       />
 
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="text-[11px] font-black text-slate-800">
-            版本 {option.id} · AI 独立音乐作品
-          </p>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="shrink-0 text-[10px] font-black text-slate-500">版本 {option.id}</span>
+            <input
+              type="text"
+              value={titleDraft}
+              onChange={(event) => setTitleDraft(event.target.value)}
+              onBlur={commitTitle}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.currentTarget.blur();
+                } else if (event.key === 'Escape') {
+                  setTitleDraft(option.title);
+                  event.currentTarget.blur();
+                }
+              }}
+              aria-label={`修改版本 ${option.id} 的音乐命名`}
+              title="修改音乐命名，下载文件名会同步使用这里的名称"
+              className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-black text-slate-800 outline-none transition focus:border-emerald-400 focus:ring-1 focus:ring-emerald-300"
+            />
+          </div>
           <p className="mt-0.5 truncate text-[10px] italic text-slate-500">"{option.prompt}"</p>
           <p className="mt-1 text-[9px] font-bold text-emerald-600">
             {formatMusicTime(currentTime)} / {formatMusicTime(safeDuration)} · {option.type === 'instrumental' ? '纯伴奏' : '歌词人声'}
@@ -244,15 +232,16 @@ function MusicWaveformPlayer({ option, activeId, setActiveId, onClear }: MusicWa
         )}
       </div>
 
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 rounded-[1.4rem] border border-slate-200 bg-white p-3 shadow-sm shadow-slate-200/60">
         <button
           type="button"
           onClick={togglePlay}
           className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border transition-all ${
             isPlaying
-              ? 'border-emerald-500 bg-emerald-600 text-white shadow-sm shadow-emerald-500/20'
-              : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
+              ? 'border-slate-950 bg-slate-950 text-white shadow-md shadow-slate-900/20'
+              : 'border-slate-950 bg-slate-950 text-white shadow-md shadow-slate-900/15 hover:scale-105'
           }`}
+          title={isPlaying ? '暂停' : '播放'}
         >
           {isPlaying ? <Pause className="h-5 w-5 fill-current" /> : <Play className="ml-0.5 h-5 w-5 fill-current" />}
         </button>
@@ -264,34 +253,48 @@ function MusicWaveformPlayer({ option, activeId, setActiveId, onClear }: MusicWa
           aria-valuemax={Math.max(1, Math.round(safeDuration))}
           aria-valuenow={Math.round(currentTime)}
           onPointerDown={seekByPointer}
-          className="relative h-24 flex-1 cursor-pointer overflow-hidden rounded-xl border border-slate-700 bg-slate-950 px-2 py-2 shadow-inner"
+          className="group relative h-16 flex-1 cursor-pointer overflow-hidden rounded-2xl border border-slate-100 bg-gradient-to-b from-white to-slate-50 px-3 py-2"
         >
-          <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_right,rgba(148,163,184,0.12)_1px,transparent_1px),linear-gradient(to_bottom,rgba(148,163,184,0.1)_1px,transparent_1px)] bg-[size:16px_100%,100%_25%]" />
-          <div className="absolute inset-y-4 left-2 right-2 flex items-center gap-px">
+          <div className="pointer-events-none absolute left-3 right-3 top-1/2 h-px -translate-y-1/2 bg-slate-200" />
+          <svg
+            className="absolute inset-y-3 left-3 right-3 h-[calc(100%-1.5rem)] w-[calc(100%-1.5rem)] overflow-visible"
+            viewBox="0 0 1000 100"
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          >
             {bars.map((height, index) => {
+              const gap = 2;
+              const barWidth = Math.max(2.5, (1000 - gap * Math.max(0, bars.length - 1)) / Math.max(1, bars.length));
+              const x = index * (barWidth + gap);
+              const normalizedHeight = Math.max(10, Math.min(92, height));
               const barProgress = index / Math.max(1, bars.length - 1);
               const active = barProgress <= progress;
               return (
-                <span
+                <rect
                   key={index}
-                  className={`flex-1 rounded-sm transition-colors ${active ? 'bg-emerald-300' : 'bg-slate-500'}`}
-                  style={{ height: `${height}%` }}
+                  x={x}
+                  y={(100 - normalizedHeight) / 2}
+                  width={barWidth}
+                  height={normalizedHeight}
+                  rx={barWidth / 2}
+                  fill={active ? '#10b981' : '#0f172a'}
+                  opacity={active ? 0.95 : 0.9}
                 />
               );
             })}
-          </div>
+          </svg>
           <div
-            className="absolute bottom-1 top-1 w-[2px] rounded-full bg-white shadow-[0_0_12px_rgba(255,255,255,0.95)]"
+            className="absolute bottom-2 top-2 w-[2px] rounded-full bg-slate-950 shadow-[0_0_0_3px_rgba(15,23,42,0.08)]"
             style={{ left: `calc(${progress * 100}% - 1px)` }}
           />
-          <div className="pointer-events-none absolute inset-x-2 top-1 flex justify-between text-[8px] font-mono text-slate-400">
-            <span>{formatMusicTime(0)}</span>
+          <div className="pointer-events-none absolute inset-x-3 top-1 flex justify-between text-[8px] font-mono font-bold text-slate-400">
+            <span>{formatMusicTime(currentTime)}</span>
             <span>{formatMusicTime(safeDuration)}</span>
           </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr]">
+      <div className="grid grid-cols-1 gap-2">
         <a
           href={option.url}
           download={fileName}
@@ -300,16 +303,6 @@ function MusicWaveformPlayer({ option, activeId, setActiveId, onClear }: MusicWa
           <Download className="h-3.5 w-3.5" />
           <span>下载 MP3（版本 {option.id}）</span>
         </a>
-
-        <div
-          draggable
-          onDragStart={handleExportDragStart}
-          title="拖到桌面、文件夹或支持浏览器拖拽导入的 DAW 轨道"
-          className="flex w-full cursor-grab select-none items-center justify-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 py-2 text-center text-[10px] font-bold text-emerald-700 shadow-sm transition-all hover:bg-emerald-100 active:cursor-grabbing"
-        >
-          <FileAudio className="h-3.5 w-3.5" />
-          <span>{dragFile ? '拖到桌面 / Cubase' : '准备拖拽文件...'}</span>
-        </div>
       </div>
     </div>
   );
@@ -593,7 +586,7 @@ export default function MusicStudio({
             )}
 
             <div className="rounded-xl border border-emerald-100 bg-emerald-50/70 px-3 py-2 text-[10px] font-semibold leading-relaxed text-emerald-700">
-              直接输入中文也可以。点击生成时会自动翻译成英文再生成；上方“翻译为英文”只用于提前预览和手动微调。
+              直接输入中文也可以。点击生成时会自动改写成英文音乐提示词，尽量避开平台误判；上方“翻译为英文”只用于提前预览和手动微调。
             </div>
 
             <button
@@ -604,7 +597,7 @@ export default function MusicStudio({
               {standaloneMusicLoading ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>正在自动英译并生成两首...</span>
+                  <span>正在改写提示词并生成两首...</span>
                 </>
               ) : (
                 <>
@@ -643,10 +636,25 @@ export default function MusicStudio({
                 </div>
                 {musicOptions.map((option) => (
                   <div key={option.id}>
-                    <MusicWaveformPlayer
-                      option={option}
+                    <GeneratedAudioPlayer
+                      id={option.id}
+                      url={option.url}
+                      title={option.title}
+                      titleBadge={`版本 ${option.id}`}
+                      prompt={option.prompt}
+                      meta={option.type === 'instrumental' ? '纯伴奏' : '歌词人声'}
+                      durationHint={option.duration}
+                      downloadFileName={createMusicFileName(option)}
+                      downloadLabel={`下载 MP3（版本 ${option.id}）`}
                       activeId={activeMusicOptionId}
                       setActiveId={setActiveMusicOptionId}
+                      editableTitle
+                      onRename={(title) => {
+                        setPendingMusicOptions((prev) => ({
+                          optionA: option.id === 'A' && prev.optionA ? { ...prev.optionA, title } : prev.optionA,
+                          optionB: option.id === 'B' && prev.optionB ? { ...prev.optionB, title } : prev.optionB,
+                        }));
+                      }}
                       onClear={() => {
                         URL.revokeObjectURL(option.url);
                         setPendingMusicOptions((prev) => {

@@ -3,6 +3,7 @@ export interface PlatformHealth {
   runtime: 'server';
   services: {
     gemini: boolean;
+    gptText: boolean;
     elevenLabs: boolean;
   };
   timestamp: string;

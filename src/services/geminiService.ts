@@ -1,5 +1,6 @@
 import {
   createFriendlyGeminiNetworkError,
+  GEMINI_PRIMARY_MODEL,
   generateGeminiContent,
   isGeminiNetworkError,
 } from './geminiRetry';
@@ -809,7 +810,7 @@ export async function analyzeAudioDesign(
 
   const { ai, Type } = await getAI();
   const response = await generateGeminiContent(ai, {
-    model: "gemini-3.5-flash",
+    model: GEMINI_PRIMARY_MODEL,
     contents: [{ parts }],
     config: {
       responseMimeType: "application/json",
@@ -985,7 +986,7 @@ export async function regenerateLyrics(
   `;
 
   const response = await generateGeminiContent(ai, {
-    model: "gemini-3.5-flash",
+    model: GEMINI_PRIMARY_MODEL,
     contents: [{ parts: [{ text: prompt }] }],
     config: {
       thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
@@ -1029,7 +1030,7 @@ export async function generateLyricsFromMusicStyle(
   `;
 
   const response = await generateGeminiContent(ai, {
-    model: "gemini-3.5-flash",
+    model: GEMINI_PRIMARY_MODEL,
     contents: [{ parts: [{ text: prompt }] }],
     config: {
       thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
@@ -1294,7 +1295,7 @@ export async function generateSfxRequirements(
   }
 
   const response = await generateGeminiContent(ai, {
-    model: "gemini-3.5-flash",
+    model: GEMINI_PRIMARY_MODEL,
     contents: [{ parts }],
     config: {
       responseMimeType: "application/json",
@@ -1403,7 +1404,7 @@ export async function optimizeImportMetadata(
   `;
 
   const response = await generateGeminiContent(ai, {
-    model: "gemini-3.5-flash",
+    model: GEMINI_PRIMARY_MODEL,
     contents: [{ parts: [{ text: prompt }] }],
     config: {
       responseMimeType: "application/json",
@@ -1445,7 +1446,7 @@ export async function translateToEnglish(text: string): Promise<string> {
 需要翻译的文本: "${text.trim()}"`;
 
     const response = await generateGeminiContent(ai, {
-      model: "gemini-3.5-flash",
+      model: GEMINI_PRIMARY_MODEL,
       contents: [{ parts: [{ text: prompt }] }],
       config: {
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
@@ -1456,6 +1457,137 @@ export async function translateToEnglish(text: string): Promise<string> {
   } catch (err) {
     console.error("Translation to English failed:", err);
     return text.trim();
+  }
+}
+
+const sanitizeMusicPolicyTerms = (text: string) => text
+  .replace(/\bterrifying\b/gi, 'dark intense')
+  .replace(/\bterror\b/gi, 'tense suspense')
+  .replace(/\bhorrifying\b/gi, 'dark suspenseful')
+  .replace(/\bhorror\b/gi, 'dark suspense')
+  .replace(/\bscary\b/gi, 'eerie suspenseful')
+  .replace(/\bfrightening\b/gi, 'eerie tense')
+  .replace(/\bpanic\b/gi, 'urgent tension')
+  .replace(/\bthreatening\b/gi, 'ominous')
+  .replace(/\bviolent\b/gi, 'intense dramatic')
+  .replace(/\bviolence\b/gi, 'dramatic conflict')
+  .replace(/\bblood\b/gi, 'dark dramatic')
+  .replace(/\bgore\b/gi, 'dark dramatic')
+  .replace(/\bweapon\b/gi, 'metallic dramatic accent')
+  .replace(/\bgun\b/gi, 'sharp cinematic accent')
+  .replace(/\bkill(?:ing)?\b/gi, 'dramatic climax');
+
+const createLocalEnglishMusicPromptFallback = (
+  text: string,
+  options: { instrumental?: boolean } = {},
+) => {
+  const normalizedText = text.trim();
+  const lowerText = normalizedText.toLowerCase();
+  const parts: string[] = [];
+  const add = (value: string) => {
+    if (!parts.includes(value)) parts.push(value);
+  };
+
+  if (/(惊悚|惊吓|恐怖|吓人|紧张|悬疑|诡异|阴森|压迫|不安)/.test(normalizedText) || /\b(suspense|eerie|tense|dark|ominous|mysterious|scary|horror|terrifying)\b/i.test(lowerText)) {
+    add('dark suspenseful cinematic underscore');
+    add('eerie tense atmosphere');
+    add('slow tension build');
+  }
+  if (/(弦乐|小提琴|大提琴|提琴|string|strings|violin|cello)/i.test(normalizedText)) {
+    add('tremolo string ensemble');
+    add('low string drones');
+  }
+  if (/(钢琴|piano)/i.test(normalizedText)) add('sparse felt piano');
+  if (/(电子|合成器|赛博|科幻|synth|electronic|cyber|sci-fi)/i.test(normalizedText)) add('dark analog synth textures');
+  if (/(管弦|交响|史诗|orchestral|symphonic|epic)/i.test(normalizedText)) add('cinematic orchestral arrangement');
+  if (/(温馨|治愈|轻松|柔和|warm|gentle|cozy|soft)/i.test(normalizedText)) add('warm gentle emotional tone');
+  if (/(悲伤|忧伤|孤独|sad|melancholy|lonely)/i.test(normalizedText)) add('melancholic emotional harmony');
+  if (/(快乐|明亮|开心|happy|bright|uplifting)/i.test(normalizedText)) add('bright uplifting melody');
+  if (/(不要鼓|无鼓|别加鼓|不要打击乐|无打击乐|no drums|without drums|no percussion)/i.test(normalizedText)) {
+    add('no drums');
+    add('no percussion');
+  }
+  if (/(不要人声|无人声|纯音乐|no vocals|instrumental)/i.test(normalizedText)) {
+    add('no vocals');
+    add('no speech');
+    add('no lyrics');
+  }
+
+  if (/^[\x00-\x7F]+$/.test(normalizedText)) {
+    add(sanitizeMusicPolicyTerms(normalizedText).replace(/[^\w\s,.-]/g, ' ').replace(/\s+/g, ' ').trim());
+  }
+
+  if (parts.length === 0) {
+    add('cinematic background music based on the user mood');
+    add('clear arrangement');
+    add('polished mix');
+  }
+
+  if (options.instrumental !== false) {
+    add('instrumental background music');
+    add('no vocals');
+    add('no speech');
+    add('no lyrics');
+  } else {
+    add('original vocal song style');
+  }
+
+  return parts
+    .join(', ')
+    .split(/\s+/)
+    .slice(0, 45)
+    .join(' ')
+    .replace(/\s+,/g, ',')
+    .trim();
+};
+
+export async function createEnglishMusicPromptForElevenLabs(
+  text: string,
+  options: { instrumental?: boolean } = {},
+): Promise<string> {
+  const normalizedText = text.trim();
+  if (!normalizedText) return '';
+
+  if (isBrowser) {
+    try {
+      const result = await postJson<{ text: string }>('/api/ai/gemini/music-prompt', {
+        text: normalizedText,
+        instrumental: options.instrumental !== false,
+      }, { timeoutMs: 8_000 });
+      return result.text || createLocalEnglishMusicPromptFallback(normalizedText, options);
+    } catch (err) {
+      console.info('Music prompt API rewrite failed, using local fallback:', err);
+      return createLocalEnglishMusicPromptFallback(normalizedText, options);
+    }
+  }
+
+  try {
+    const { ai, ThinkingLevel } = await getAI();
+    const prompt = `你是影视/游戏配乐提示词工程师。请把用户的中文或英文音乐需求改写成适合 ElevenLabs Music 生成的英文 prompt。
+
+要求：
+1. 只返回英文 prompt，不要解释，不要引号。
+2. 使用音乐制作语言描述：mood, instruments, arrangement, tempo, dynamics, mix。
+3. 避免容易触发平台误判的直白惊吓/暴力/威胁/血腥词。遇到“恐怖、惊悚、惊吓、吓人”等需求时，改写成 dark suspenseful, eerie, tense, mysterious, cinematic underscore 等音乐氛围词。
+4. 保留否定需求和限制，例如“不要鼓/无鼓”必须写成 no drums, no percussion。
+5. 不要模仿具体歌手、真实人物或受版权保护的作品。
+6. ${options.instrumental === false ? '可以描述原创人声歌曲风格。' : '必须明确是 instrumental background music, no vocals, no speech, no lyrics。'}
+7. 控制在 45 个英文词以内。
+
+用户需求：${normalizedText}`;
+
+    const response = await generateGeminiContent(ai, {
+      model: GEMINI_PRIMARY_MODEL,
+      contents: [{ parts: [{ text: prompt }] }],
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
+      }
+    });
+
+    return response.text ? response.text.trim() : normalizedText;
+  } catch (err) {
+    console.error("Music prompt rewrite failed:", err);
+    return createLocalEnglishMusicPromptFallback(normalizedText, options);
   }
 }
 
@@ -1491,7 +1623,7 @@ Source dialogue:
 ${normalizedText}`;
 
     const response = await generateGeminiContent(ai, {
-      model: "gemini-3.5-flash",
+      model: GEMINI_PRIMARY_MODEL,
       contents: [{ parts: [{ text: prompt }] }],
       config: {
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
@@ -1548,7 +1680,7 @@ ${JSON.stringify(simplifiedVoices, null, 2)}
 请仅返回最匹配的那个音色的 20 位 ElevenLabs ID，不要包含任何其他字符、标点、前缀、空格或解释。如果完全无法匹配，请返回可选人声列表中的第一个 ID。`;
 
     const response = await generateGeminiContent(ai, {
-      model: "gemini-3.5-flash",
+      model: GEMINI_PRIMARY_MODEL,
       contents: [{ parts: [{ text: prompt }] }],
       config: {
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }

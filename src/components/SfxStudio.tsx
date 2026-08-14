@@ -3,9 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Loader2, Play, Pause, Download, AlertCircle, Sparkles } from 'lucide-react';
 import { HistoryItem } from '../types';
+import GeneratedAudioPlayer, { sanitizeAudioFileName } from './GeneratedAudioPlayer';
 
 interface PendingSfxOption {
   url: string;
@@ -20,6 +21,8 @@ interface SfxStudioProps {
   setStandalonePrompt: (prompt: string) => void;
   standaloneDuration: number;
   setStandaloneDuration: (dur: number) => void;
+  standaloneDurationMode: 'auto' | 'fixed';
+  setStandaloneDurationMode: (mode: 'auto' | 'fixed') => void;
   standaloneLoading: boolean;
   standaloneError: string | null;
   handleStandaloneGenerate: () => void;
@@ -28,127 +31,29 @@ interface SfxStudioProps {
     optionA: PendingSfxOption | null;
     optionB: PendingSfxOption | null;
   };
+  setPendingSfxOptions: React.Dispatch<React.SetStateAction<{
+    optionA: PendingSfxOption | null;
+    optionB: PendingSfxOption | null;
+  }>>;
 }
-
-interface AudioPreviewAnalysis {
-  status: 'idle' | 'loading' | 'ready' | 'error';
-  duration: number | null;
-  peaks: number[];
-}
-
-const EMPTY_AUDIO_PREVIEW: AudioPreviewAnalysis = {
-  status: 'idle',
-  duration: null,
-  peaks: [],
-};
-
-const FALLBACK_WAVEFORM = [
-  0.18, 0.34, 0.24, 0.52, 0.36, 0.72, 0.45, 0.62,
-  0.84, 0.48, 0.74, 0.38, 0.56, 0.28, 0.42, 0.22,
-  0.36, 0.58, 0.78, 0.44, 0.64, 0.32, 0.50, 0.26,
-  0.40, 0.70, 0.92, 0.54, 0.76, 0.36, 0.58, 0.24,
-  0.34, 0.56, 0.42, 0.68, 0.86, 0.46, 0.62, 0.30,
-  0.48, 0.74, 0.52, 0.36, 0.58, 0.82, 0.44, 0.64,
-];
-
-const formatAudioDuration = (duration?: number | null) => {
-  if (!duration || !Number.isFinite(duration)) return '--:--';
-  const totalSeconds = Math.max(0, Math.round(duration));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-};
-
-const buildMonoPeaks = (audioBuffer: AudioBuffer, barCount = 64) => {
-  const channels = Array.from({ length: audioBuffer.numberOfChannels }, (_, index) => audioBuffer.getChannelData(index));
-  const samplesPerBar = Math.max(1, Math.floor(audioBuffer.length / barCount));
-  const peaks = Array.from({ length: barCount }, (_, barIndex) => {
-    const start = barIndex * samplesPerBar;
-    const end = barIndex === barCount - 1
-      ? audioBuffer.length
-      : Math.min(audioBuffer.length, start + samplesPerBar);
-    let peak = 0;
-    for (let sampleIndex = start; sampleIndex < end; sampleIndex += 1) {
-      let mixedSample = 0;
-      for (const channelData of channels) {
-        mixedSample += Math.abs(channelData[sampleIndex] || 0);
-      }
-      peak = Math.max(peak, mixedSample / Math.max(1, channels.length));
-    }
-    return peak;
-  });
-
-  const maxPeak = Math.max(...peaks, 0.001);
-  return peaks.map(peak => Math.min(1, Math.max(0.08, peak / maxPeak)));
-};
 
 export default function SfxStudio({
   standalonePrompt,
   setStandalonePrompt,
   standaloneDuration,
   setStandaloneDuration,
+  standaloneDurationMode,
+  setStandaloneDurationMode,
   standaloneLoading,
   standaloneError,
   handleStandaloneGenerate,
   historyList,
   pendingSfxOptions,
+  setPendingSfxOptions,
 }: SfxStudioProps) {
   const [playingHistoryId, setPlayingHistoryId] = useState<string | null>(null);
-  const [playingOptionId, setPlayingOptionId] = useState<'A' | 'B' | null>(null);
-  const [optionPreviews, setOptionPreviews] = useState<Record<'A' | 'B', AudioPreviewAnalysis>>({
-    A: EMPTY_AUDIO_PREVIEW,
-    B: EMPTY_AUDIO_PREVIEW,
-  });
-  const optionAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [activeSfxOptionId, setActiveSfxOptionId] = useState<string | null>(null);
   const historyAudioRefs = useRef<{ [key: string]: HTMLAudioElement | null }>({});
-
-  useEffect(() => {
-    let cancelled = false;
-    const AudioContextCtor = window.AudioContext || (window as any).webkitAudioContext;
-
-    const analyseOption = async (id: 'A' | 'B', url?: string) => {
-      if (!url || !AudioContextCtor) {
-        setOptionPreviews(prev => ({ ...prev, [id]: EMPTY_AUDIO_PREVIEW }));
-        return;
-      }
-
-      setOptionPreviews(prev => ({
-        ...prev,
-        [id]: { status: 'loading', duration: null, peaks: [] },
-      }));
-
-      try {
-        const response = await fetch(url);
-        const arrayBuffer = await response.arrayBuffer();
-        const audioContext = new AudioContextCtor();
-        const decodedBuffer = await audioContext.decodeAudioData(arrayBuffer.slice(0));
-        await audioContext.close().catch(() => undefined);
-        if (cancelled) return;
-        setOptionPreviews(prev => ({
-          ...prev,
-          [id]: {
-            status: 'ready',
-            duration: decodedBuffer.duration,
-            peaks: buildMonoPeaks(decodedBuffer),
-          },
-        }));
-      } catch (error) {
-        console.warn('Failed to analyse SFX waveform:', error);
-        if (cancelled) return;
-        setOptionPreviews(prev => ({
-          ...prev,
-          [id]: { status: 'error', duration: null, peaks: [] },
-        }));
-      }
-    };
-
-    analyseOption('A', pendingSfxOptions.optionA?.url);
-    analyseOption('B', pendingSfxOptions.optionB?.url);
-
-    return () => {
-      cancelled = true;
-    };
-  }, [pendingSfxOptions.optionA?.url, pendingSfxOptions.optionB?.url]);
 
   const handleHistoryPlayPause = (id: string) => {
     if (playingHistoryId && playingHistoryId !== id && historyAudioRefs.current[playingHistoryId]) {
@@ -168,51 +73,6 @@ export default function SfxStudio({
   };
 
   const sfxHistory = historyList.filter(item => item.type === 'sfx');
-
-  const playSfxOption = (id: 'A' | 'B', url: string) => {
-    if (!optionAudioRef.current) optionAudioRef.current = new Audio();
-
-    if (playingOptionId === id) {
-      optionAudioRef.current.pause();
-      setPlayingOptionId(null);
-      return;
-    }
-
-    optionAudioRef.current.src = url;
-    optionAudioRef.current.play()
-      .then(() => setPlayingOptionId(id))
-      .catch(error => console.error('Play SFX option failed:', error));
-    optionAudioRef.current.onended = () => setPlayingOptionId(null);
-  };
-
-  const renderOptionWaveform = (id: 'A' | 'B') => {
-    const preview = optionPreviews[id];
-    const peaks = preview.peaks.length > 0 ? preview.peaks : FALLBACK_WAVEFORM;
-    const isPlaying = playingOptionId === id;
-    const barColor = id === 'A'
-      ? 'from-emerald-500 to-emerald-700'
-      : 'from-teal-500 to-cyan-700';
-
-    return (
-      <div className="rounded-xl border border-slate-200 bg-slate-950 px-3 py-3 shadow-inner">
-        <div className="flex h-16 items-center gap-[2px]">
-          {peaks.map((peak, index) => {
-            const heightPercent = Math.max(12, Math.round(peak * 100));
-            return (
-              <div
-                key={`${id}-wave-${index}`}
-                className={`flex-1 rounded-full bg-gradient-to-t ${barColor} ${isPlaying ? 'opacity-100' : 'opacity-80'}`}
-                style={{
-                  height: `${heightPercent}%`,
-                  boxShadow: isPlaying ? '0 0 10px rgba(16, 185, 129, 0.35)' : undefined,
-                }}
-              />
-            );
-          })}
-        </div>
-      </div>
-    );
-  };
 
   return (
     <div id="sfxstudio-view" className="flex-1 p-6 space-y-6 max-w-6xl mx-auto w-full">
@@ -238,8 +98,34 @@ export default function SfxStudio({
 
             <div className="space-y-2 pt-2">
               <div className="flex items-center justify-between text-xs font-bold text-slate-700">
-                <span>指定音效长度</span>
-                <span className="text-emerald-600 font-mono">{standaloneDuration}s</span>
+                <span>{standaloneDurationMode === 'auto' ? '音效长度' : '指定音效长度'}</span>
+                <span className="text-emerald-600 font-mono">
+                  {standaloneDurationMode === 'auto' ? '自动' : `${standaloneDuration}s`}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setStandaloneDurationMode('auto')}
+                  className={`rounded-lg border px-3 py-2 text-[11px] font-bold transition-all ${
+                    standaloneDurationMode === 'auto'
+                      ? 'border-emerald-500 bg-emerald-50 text-emerald-700 shadow-sm'
+                      : 'border-slate-200 bg-slate-50 text-slate-500 hover:border-emerald-200 hover:text-emerald-600'
+                  }`}
+                >
+                  自动时长
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setStandaloneDurationMode('fixed')}
+                  className={`rounded-lg border px-3 py-2 text-[11px] font-bold transition-all ${
+                    standaloneDurationMode === 'fixed'
+                      ? 'border-emerald-500 bg-emerald-50 text-emerald-700 shadow-sm'
+                      : 'border-slate-200 bg-slate-50 text-slate-500 hover:border-emerald-200 hover:text-emerald-600'
+                  }`}
+                >
+                  指定秒数
+                </button>
               </div>
               <div className="flex items-center gap-4">
                 <input
@@ -249,10 +135,17 @@ export default function SfxStudio({
                   step="1"
                   value={standaloneDuration}
                   onChange={(e) => setStandaloneDuration(parseInt(e.target.value))}
-                  className="w-full h-1.5 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                  disabled={standaloneDurationMode === 'auto'}
+                  className={`w-full h-1.5 rounded-lg appearance-none accent-emerald-600 ${
+                    standaloneDurationMode === 'auto'
+                      ? 'bg-slate-100 cursor-not-allowed opacity-45'
+                      : 'bg-slate-100 cursor-pointer'
+                  }`}
                 />
               </div>
-              <span className="text-[9px] text-slate-400 block">生成范围支持 1s - 20s，音效通常建议控制在 2s - 8s。</span>
+              <span className="text-[9px] text-slate-400 block">
+                自动时长会让 ElevenLabs 根据描述决定长度；指定秒数支持 1s - 20s，音效通常建议控制在 2s - 8s。
+              </span>
             </div>
 
             {standaloneError && (
@@ -295,52 +188,30 @@ export default function SfxStudio({
 
               <div className="grid grid-cols-1 gap-3">
                 {([
-                  ['A', pendingSfxOptions.optionA, 'bg-emerald-600 hover:bg-emerald-700'],
-                  ['B', pendingSfxOptions.optionB, 'bg-teal-600 hover:bg-teal-700'],
-                ] as const).map(([id, option, buttonClass]) => option && (
-                  <div key={id} className="rounded-2xl border border-emerald-100 bg-white p-3.5 shadow-sm space-y-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="flex items-center gap-1.5 text-[11px] font-black text-slate-800">
-                        <span className={`flex h-4.5 w-4.5 items-center justify-center rounded-full text-[9px] font-black text-white ${id === 'A' ? 'bg-emerald-600' : 'bg-teal-600'}`}>{id}</span>
-                        版本 {id}
-                      </span>
-                      <span className="rounded-full bg-slate-100 px-2 py-0.5 font-mono text-[10px] font-black text-slate-600">
-                        {formatAudioDuration(optionPreviews[id].duration || option.duration)}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-2 rounded-xl border border-slate-100 bg-slate-50 p-2.5">
-                      <button
-                        type="button"
-                        onClick={() => playSfxOption(id, option.url)}
-                        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition-all ${
-                          playingOptionId === id
-                            ? `${id === 'A' ? 'bg-emerald-600 border-emerald-500' : 'bg-teal-600 border-teal-500'} text-white`
-                            : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
-                        }`}
-                        title={playingOptionId === id ? '暂停试听' : '试听'}
-                      >
-                        {playingOptionId === id ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
-                      </button>
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-[11px] font-black text-slate-800">{option.title}</p>
-                        <p className="mt-0.5 truncate text-[9px] text-slate-400">
-                          {optionPreviews[id].status === 'loading' ? '正在读取音波...' : option.details}
-                        </p>
-                      </div>
-                    </div>
-
-                    {renderOptionWaveform(id)}
-
-                    <a
-                      href={option.url}
-                      download={`${option.title}.mp3`}
-                      className={`flex w-full items-center justify-center gap-1 rounded-lg py-1.5 text-[10px] font-bold text-white transition-colors ${buttonClass}`}
-                    >
-                      <Download className="w-3 h-3" />
-                      <span>下载版本 {id}</span>
-                    </a>
-                  </div>
+                  ['A', pendingSfxOptions.optionA],
+                  ['B', pendingSfxOptions.optionB],
+                ] as const).map(([id, option]) => option && (
+                  <GeneratedAudioPlayer
+                    key={id}
+                    id={`sfx-${id}`}
+                    url={option.url}
+                    title={option.title}
+                    titleBadge={`版本 ${id}`}
+                    prompt={option.prompt}
+                    meta={option.details}
+                    durationHint={option.duration}
+                    activeId={activeSfxOptionId}
+                    setActiveId={setActiveSfxOptionId}
+                    editableTitle
+                    downloadFileName={`${sanitizeAudioFileName(option.title, `generated_sfx_${id}`)}.mp3`}
+                    downloadLabel={`下载 MP3 音效（版本 ${id}）`}
+                    onRename={(title) => {
+                      setPendingSfxOptions(prev => ({
+                        optionA: id === 'A' && prev.optionA ? { ...prev.optionA, title } : prev.optionA,
+                        optionB: id === 'B' && prev.optionB ? { ...prev.optionB, title } : prev.optionB,
+                      }));
+                    }}
+                  />
                 ))}
               </div>
             </div>
