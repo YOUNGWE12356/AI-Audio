@@ -1460,6 +1460,230 @@ export async function translateToEnglish(text: string): Promise<string> {
   }
 }
 
+export interface VoiceV3PromptEnhancement {
+  enhancedText: string;
+  addedTags: string[];
+  notes: string;
+}
+
+const stripVoicePerformanceTags = (text: string) => text
+  .replace(/\[[^\]\r\n]{1,48}\]/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const normalizeVoicePromptForCompare = (text: string) => stripVoicePerformanceTags(text)
+  .replace(/\s+/g, '')
+  .replace(/[“”"']/g, '')
+  .trim();
+
+const splitVoicePromptIntoSpeakableChunks = (text: string) => {
+  const chunks: string[] = [];
+  let current = '';
+  for (const char of text) {
+    current += char;
+    if (/[。！？!?；;\n]/.test(char)) {
+      chunks.push(current);
+      current = '';
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks.length > 0 ? chunks : [text];
+};
+
+const collectVoiceV3TagsForSegment = (segment: string) => {
+  const content = stripVoicePerformanceTags(segment);
+  const lowerText = content.toLowerCase();
+  const tags: string[] = [];
+  const addTag = (tag: string) => {
+    if (!tags.includes(tag)) tags.push(tag);
+  };
+
+  if (/(兴奋|激动|开心|高兴|惊喜|太好了|终于|!|！)/.test(content) || /\b(excited|thrilled|happy|joyful|amazed)\b/.test(lowerText)) {
+    addTag('excited');
+  }
+  if (/(大声|喊|吼|急促|紧急|快点|危险|糟了)/.test(content) || /\b(loud|shout|urgent|hurry|danger)\b/.test(lowerText)) {
+    addTag('shouting');
+  }
+  if (/(小声|悄悄|低声|耳语|秘密|别出声)/.test(content) || /\b(whisper|quietly|secret)\b/.test(lowerText)) {
+    addTag('whispers');
+  }
+  if (/(难过|伤心|哭|失望|遗憾|对不起|再也|离开)/.test(content) || /\b(sad|crying|sorry|disappointed|regret)\b/.test(lowerText)) {
+    addTag('sad');
+  }
+  if (/(害怕|恐惧|惊吓|紧张|不安|怎么办|不会吧)/.test(content) || /\b(scared|afraid|nervous|tense|anxious)\b/.test(lowerText)) {
+    addTag('nervous');
+  }
+  if (/(叹气|唉|哎|无奈)/.test(content) || /\b(sigh|sighs)\b/.test(lowerText)) {
+    addTag('sighs');
+  }
+  if (/(笑|哈哈|呵呵|开玩笑)/.test(content) || /\b(laugh|laughs|chuckle|joking)\b/.test(lowerText)) {
+    addTag('laughs');
+  }
+  if (/(冷静|平静|温柔|安慰|慢慢|别怕|没关系)/.test(content) || /\b(calm|gentle|softly|warm|comforting)\b/.test(lowerText)) {
+    addTag('calm');
+  }
+  if (/(严肃|认真|庄重|郑重|注意听)/.test(content) || /\b(serious|solemn|firm)\b/.test(lowerText)) {
+    addTag('serious');
+  }
+  if (/(疑惑|奇怪|为什么|真的吗|难道)/.test(content) || /\b(confused|curious|questioning|really)\b/.test(lowerText)) {
+    addTag('curious');
+  }
+
+  return tags.slice(0, 3);
+};
+
+const mergeVoiceV3TagsIntoSegment = (segment: string, tags: string[]) => {
+  if (!segment.trim() || tags.length === 0) return segment;
+  const leadingWhitespace = segment.match(/^\s*/)?.[0] || '';
+  const rest = segment.slice(leadingWhitespace.length);
+  const existingTags = Array.from(rest.matchAll(/^\s*(?:\[([^\]\r\n]{1,48})\]\s*)+/g))[0]?.[0] || '';
+  const existingTagNames = new Set(
+    Array.from(existingTags.matchAll(/\[([^\]\r\n]{1,48})\]/g)).map(match => match[1].trim().toLowerCase()),
+  );
+  const tagsToAdd = tags.filter(tag => !existingTagNames.has(tag.toLowerCase())).slice(0, Math.max(0, 3 - existingTagNames.size));
+  if (tagsToAdd.length === 0) return segment;
+  return `${leadingWhitespace}${tagsToAdd.map(tag => `[${tag}]`).join(' ')} ${rest}`;
+};
+
+const collapseDuplicateAdjacentVoiceTags = (text: string) => text.replace(
+  /(\[[^\]\r\n]{1,48}\])(?:\s+\1)+/gi,
+  '$1',
+);
+
+const createLocalVoiceV3EnhancementFallback = (text: string): VoiceV3PromptEnhancement => {
+  const normalizedText = text.trim();
+  const chunks = splitVoicePromptIntoSpeakableChunks(normalizedText);
+  const addedTagsInOrder: string[] = [];
+  let taggedChunkCount = 0;
+
+  const enhancedText = collapseDuplicateAdjacentVoiceTags(chunks.map(chunk => {
+    const tags = collectVoiceV3TagsForSegment(chunk);
+    if (tags.length > 0) {
+      taggedChunkCount += 1;
+      addedTagsInOrder.push(...tags);
+    }
+    return mergeVoiceV3TagsIntoSegment(chunk, tags);
+  }).join(''));
+
+  const addedTags = Array.from(new Set(addedTagsInOrder));
+
+  return {
+    enhancedText,
+    addedTags,
+    notes: addedTags.length > 0
+      ? `已按 ${taggedChunkCount} 个句段添加分段 v3 语气标签；每个句段最多 3 个。`
+      : '未检测到明确情绪关键词，保留原文。',
+  };
+};
+
+const parseVoiceV3EnhancementResponse = (rawText: string, originalText: string): VoiceV3PromptEnhancement => {
+  const cleaned = rawText
+    .trim()
+    .replace(/^```(?:json)?/i, '')
+    .replace(/```$/i, '')
+    .trim();
+
+  let parsed: any = null;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    parsed = { enhancedText: cleaned };
+  }
+
+  const enhancedText = collapseDuplicateAdjacentVoiceTags(String(parsed?.enhancedText || '').trim());
+  if (!enhancedText) {
+    throw new Error('AI 未返回增强文本。');
+  }
+
+  const originalComparable = normalizeVoicePromptForCompare(originalText);
+  const enhancedComparable = normalizeVoicePromptForCompare(enhancedText);
+  if (originalComparable && enhancedComparable !== originalComparable) {
+    throw new Error('AI 增强结果改变了原台词内容，已拒绝使用。');
+  }
+
+  const rawTags = (Array.isArray(parsed?.addedTags) ? parsed.addedTags : enhancedText.match(/\[([^\]\r\n]{1,48})\]/g) || [])
+    .map((tag: unknown) => String(tag).replace(/^\[/, '').replace(/\]$/, '').trim())
+    .filter((tag: string) => Boolean(tag))
+    .slice(0, 12);
+  const addedTags: string[] = Array.from(new Set<string>(rawTags));
+
+  return {
+    enhancedText,
+    addedTags,
+    notes: String(parsed?.notes || '已按 ElevenLabs v3 audio tags 方式增强文本。').trim(),
+  };
+};
+
+export async function enhanceVoicePromptForElevenV3(
+  text: string,
+  options: { voiceName?: string; voiceDescription?: string; language?: string } = {},
+): Promise<VoiceV3PromptEnhancement> {
+  const normalizedText = text.trim();
+  if (!normalizedText) {
+    throw new Error('请先输入要增强的配音台词。');
+  }
+
+  if (isBrowser) {
+    try {
+      return await postJson<VoiceV3PromptEnhancement>('/api/ai/gemini/voice-v3-enhance', {
+        text: normalizedText,
+        voiceName: options.voiceName || '',
+        voiceDescription: options.voiceDescription || '',
+        language: options.language || '',
+      }, { timeoutMs: 20_000 });
+    } catch (error) {
+      console.info('Voice v3 enhancement API failed, using local fallback:', error);
+      return createLocalVoiceV3EnhancementFallback(normalizedText);
+    }
+  }
+
+  try {
+    const { ai, Type, ThinkingLevel } = await getAI();
+    const prompt = `You are preparing text for ElevenLabs eleven_v3 text-to-speech.
+Enhance the script by adding sparse, audible performance tags in square brackets, similar to ElevenLabs v3 audio tags.
+
+Rules:
+1. Preserve the spoken dialogue exactly. Do not translate, rewrite, delete, reorder, or add spoken words.
+2. You may only add short English bracket tags such as [excited], [calm], [whispers], [laughs], [sighs], [nervous], [sarcastic], [sad], [shouting], [pauses].
+3. Tags must describe vocal delivery or vocalized reactions only. Do not add music, sound effects, camera, scene, or physical action tags.
+4. Analyze every sentence/paragraph independently. Insert tags before the sentence or phrase where the performance changes, not only at the beginning of the whole script.
+5. A longer script should usually have several tag positions across different paragraphs or sentences when the emotion changes.
+6. Use at most 1-3 tags per sentence/phrase and only where useful. Multiple tags may be combined for one sentence, for example [excited] [shouting].
+7. Avoid duplicate adjacent tags such as [excited] [excited].
+8. Keep any existing user bracket tags unless they are clearly non-vocal.
+9. Return JSON only. In notes, briefly mention how many sentence/paragraph positions were tagged.
+
+Voice context: ${options.voiceName || 'unknown voice'} ${options.voiceDescription || ''}
+Language hint: ${options.language || 'auto'}
+
+Source script:
+${normalizedText}`;
+
+    const response = await generateGeminiContent(ai, {
+      model: GEMINI_PRIMARY_MODEL,
+      contents: [{ parts: [{ text: prompt }] }],
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          required: ['enhancedText', 'addedTags', 'notes'],
+          properties: {
+            enhancedText: { type: Type.STRING },
+            addedTags: { type: Type.ARRAY, items: { type: Type.STRING } },
+            notes: { type: Type.STRING },
+          },
+        },
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      },
+    });
+
+    return parseVoiceV3EnhancementResponse(String(response.text || ''), normalizedText);
+  } catch (error) {
+    console.error('Voice v3 prompt enhancement failed:', error);
+    return createLocalVoiceV3EnhancementFallback(normalizedText);
+  }
+}
+
 const sanitizeMusicPolicyTerms = (text: string) => text
   .replace(/\bterrifying\b/gi, 'dark intense')
   .replace(/\bterror\b/gi, 'tense suspense')

@@ -22,6 +22,15 @@ type GptResponse = {
   }>;
 };
 
+type GptInputContentPart =
+  | { type: 'input_text'; text: string }
+  | { type: 'input_image'; image_url: string };
+
+type GptCompatibleInput = {
+  hasImage: boolean;
+  input: string | Array<{ role: 'user'; content: GptInputContentPart[] }>;
+};
+
 // Interactive HTML5 requests should recover quickly instead of leaving the UI
 // waiting through a long retry chain. Try the primary model once more, then
 // switch to the lightweight fallback.
@@ -80,34 +89,60 @@ const getGptGatewayConfig = (): GptGatewayConfig | null => {
 
 export const isGptTextConfigured = () => Boolean(getGptGatewayConfig());
 
-const collectTextOnlyContent = (value: unknown, textParts: string[]): boolean => {
+const collectGptCompatibleContent = (value: unknown, parts: GptInputContentPart[]): boolean => {
   if (typeof value === 'string') {
-    if (value.trim()) textParts.push(value);
+    if (value.trim()) parts.push({ type: 'input_text', text: value });
     return true;
   }
   if (Array.isArray(value)) {
-    return value.every(item => collectTextOnlyContent(item, textParts));
+    return value.every(item => collectGptCompatibleContent(item, parts));
   }
   if (!value || typeof value !== 'object') return false;
 
   const part = value as Record<string, unknown>;
-  if ('inlineData' in part || 'fileData' in part || 'inline_data' in part || 'file_data' in part) {
+  const inlineData = (part.inlineData || part.inline_data) as Record<string, unknown> | undefined;
+  if (inlineData) {
+    const data = typeof inlineData.data === 'string' ? inlineData.data : '';
+    const mimeType = typeof inlineData.mimeType === 'string'
+      ? inlineData.mimeType
+      : typeof inlineData.mime_type === 'string'
+        ? inlineData.mime_type
+        : 'image/jpeg';
+    if (!data || !mimeType.startsWith('image/')) return false;
+    parts.push({ type: 'input_image', image_url: `data:${mimeType};base64,${data}` });
+    return true;
+  }
+
+  if ('fileData' in part || 'file_data' in part || 'videoMetadata' in part || 'video_metadata' in part) {
     return false;
   }
   if (typeof part.text === 'string') {
-    if (part.text.trim()) textParts.push(part.text);
+    if (part.text.trim()) parts.push({ type: 'input_text', text: part.text });
     return true;
   }
   if (Array.isArray(part.parts)) {
-    return collectTextOnlyContent(part.parts, textParts);
+    return collectGptCompatibleContent(part.parts, parts);
   }
   return false;
 };
 
-const getTextOnlyPrompt = (contents: unknown) => {
-  const textParts: string[] = [];
-  if (!collectTextOnlyContent(contents, textParts) || textParts.length === 0) return null;
-  return textParts.join('\n\n');
+const getGptCompatibleInput = (contents: unknown): GptCompatibleInput | null => {
+  const parts: GptInputContentPart[] = [];
+  if (!collectGptCompatibleContent(contents, parts)) return null;
+
+  const textParts = parts
+    .filter((part): part is { type: 'input_text'; text: string } => part.type === 'input_text')
+    .map(part => part.text.trim())
+    .filter(Boolean);
+  if (textParts.length === 0) return null;
+
+  const hasImage = parts.some(part => part.type === 'input_image');
+  return {
+    hasImage,
+    input: hasImage
+      ? [{ role: 'user', content: parts }]
+      : textParts.join('\n\n'),
+  };
 };
 
 const normalizeJsonSchema = (value: unknown): unknown => {
@@ -144,7 +179,7 @@ const extractGptText = (response: GptResponse) => {
 
 const generateGptText = async (
   gateway: GptGatewayConfig,
-  prompt: string,
+  input: GptCompatibleInput,
   request: GenerateContentRequest,
 ): Promise<GenerateContentResponse> => {
   const config = (request.config || {}) as Record<string, unknown>;
@@ -154,7 +189,7 @@ const generateGptText = async (
     : undefined;
   const body: Record<string, unknown> = {
     model: gateway.model,
-    input: prompt,
+    input: input.input,
     reasoning: { effort: getGptReasoningEffort() },
   };
 
@@ -193,7 +228,7 @@ const generateGptText = async (
     const text = extractGptText(result);
     if (!text) throw new Error('GPT gateway returned no text output.');
     if (responseSchema) JSON.parse(text);
-    console.info(`[ai-router] Text request completed with ${result.model || gateway.model} via ${gateway.provider}.`);
+    console.info(`[ai-router] ${input.hasImage ? 'Vision' : 'Text'} request completed with ${result.model || gateway.model} via ${gateway.provider}.`);
     return { text, modelVersion: result.model || gateway.model } as GenerateContentResponse;
   } finally {
     clearTimeout(timeoutId);
@@ -236,6 +271,16 @@ const getErrorText = (error: unknown) => {
   return parts.join(' ');
 };
 
+export const isGeminiUnsupportedLocationError = (error: unknown) => (
+  /User location is not supported for the API use|location is not supported|FAILED_PRECONDITION/i
+    .test(getErrorText(error))
+);
+
+export const createFriendlyGeminiUnsupportedLocationError = (error: unknown) => Object.assign(
+  new Error('当前 Gemini API 所在地区不支持此分析请求。请切换到支持 Gemini API 的网络/地区，或在服务端配置可用的 ARK_API_KEY / OPENAI_API_KEY 视觉模型后重试关键帧分析。'),
+  { status: 400, cause: error },
+);
+
 const getErrorStatus = (error: unknown) => {
   if (error && typeof error === 'object') {
     const candidate = error as { code?: unknown; status?: unknown };
@@ -270,6 +315,7 @@ export const createFriendlyGeminiNetworkError = (error: unknown) => Object.assig
 );
 
 const createFriendlyGeminiError = (error: unknown) => {
+  if (isGeminiUnsupportedLocationError(error)) return createFriendlyGeminiUnsupportedLocationError(error);
   if (isGeminiNetworkError(error)) return createFriendlyGeminiNetworkError(error);
 
   const status = getErrorStatus(error);
@@ -284,13 +330,13 @@ export async function generateGeminiContent(
   request: GenerateContentRequest,
 ): Promise<GenerateContentResponse> {
   const gateway = getGptGatewayConfig();
-  const textOnlyPrompt = getTextOnlyPrompt(request.contents);
-  if (gateway && textOnlyPrompt) {
+  const gptCompatibleInput = gateway ? getGptCompatibleInput(request.contents) : null;
+  if (gateway && gptCompatibleInput) {
     try {
-      return await generateGptText(gateway, textOnlyPrompt, request);
+      return await generateGptText(gateway, gptCompatibleInput, request);
     } catch (error) {
       console.warn(
-        `[ai-router] GPT text route failed via ${gateway.provider}; falling back to Gemini.`,
+        `[ai-router] GPT ${gptCompatibleInput.hasImage ? 'vision' : 'text'} route failed via ${gateway.provider}; falling back to Gemini.`,
         getErrorText(error),
       );
     }
@@ -305,6 +351,9 @@ export async function generateGeminiContent(
         model: GEMINI_PRIMARY_MODEL,
       });
     } catch (error) {
+      if (isGeminiUnsupportedLocationError(error)) {
+        throw createFriendlyGeminiUnsupportedLocationError(error);
+      }
       if (!isRetryableGeminiError(error)) throw error;
       lastTransientError = error;
 

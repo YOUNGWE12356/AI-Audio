@@ -563,7 +563,8 @@ export async function generateSpeechToSpeech(
   voiceId: string,
   stability: number = 0.5,
   similarity: number = 0.75,
-  style: number = 0.05
+  style: number = 0.05,
+  options?: Pick<ElevenLabsGenerationOptions, 'voiceSource' | 'publicOwnerId' | 'voiceName'>
 ): Promise<Blob> {
   if (isBrowser) {
     const proxyFormData = new FormData();
@@ -572,6 +573,9 @@ export async function generateSpeechToSpeech(
     proxyFormData.append('stability', String(stability));
     proxyFormData.append('similarity', String(similarity));
     proxyFormData.append('style', String(style));
+    if (options?.voiceSource) proxyFormData.append('voiceSource', options.voiceSource);
+    if (options?.publicOwnerId) proxyFormData.append('publicOwnerId', options.publicOwnerId);
+    if (options?.voiceName) proxyFormData.append('voiceName', options.voiceName);
     return requestBlob('/api/ai/elevenlabs/speech-to-speech', {
       method: 'POST',
       body: proxyFormData,
@@ -684,7 +688,23 @@ export async function transcribeSpeech(
   audioFile: File | Blob,
   languageCode?: string,
   tagAudioEvents: boolean = true
-): Promise<{ text: string; language_code?: string; language_probability?: number }> {
+): Promise<{
+  text: string;
+  language_code?: string;
+  language_probability?: number;
+  words?: Array<{
+    text?: string;
+    word?: string;
+    start?: number;
+    end?: number;
+    type?: string;
+  }>;
+  segments?: Array<{
+    text?: string;
+    start?: number;
+    end?: number;
+  }>;
+}> {
   if (isBrowser) {
     const proxyFormData = new FormData();
     proxyFormData.append('audio', audioFile, audioFile instanceof File ? audioFile.name : 'audio.wav');

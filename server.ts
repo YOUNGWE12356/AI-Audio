@@ -17,6 +17,7 @@ import {
   generateSfxRequirements,
   generateLyricsFromMusicStyle,
   createEnglishMusicPromptForElevenLabs,
+  enhanceVoicePromptForElevenV3,
   matchBestVoice,
   optimizeImportMetadata,
   regenerateLyrics,
@@ -25,8 +26,10 @@ import {
 } from './src/services/geminiService';
 import {
   GEMINI_PRIMARY_MODEL,
+  createFriendlyGeminiUnsupportedLocationError,
   generateGeminiContent,
   isGptTextConfigured,
+  isGeminiUnsupportedLocationError,
 } from './src/services/geminiRetry';
 import {
   fetchAvailableVoices,
@@ -733,6 +736,102 @@ async function startServer() {
       },
     );
   });
+
+  const getVideoStreamSummary = (filePath: string) => new Promise<string>((resolve, reject) => {
+    execFile(
+      FFMPEG_BINARY,
+      ['-hide_banner', '-i', filePath],
+      { timeout: 30_000, maxBuffer: 1024 * 1024 },
+      (error, _stdout, stderr) => {
+        const output = String(stderr || error?.message || '');
+        const videoLine = output.split(/\r?\n/).find(line => /Video:/i.test(line));
+        if (!videoLine) {
+          reject(new Error(output || 'Unable to inspect video stream'));
+          return;
+        }
+        resolve(videoLine);
+      },
+    );
+  });
+
+  const isBrowserFriendlyVideo = (fileName: string, videoSummary: string) => {
+    const extension = path.extname(fileName).toLowerCase();
+    return ['.mp4', '.m4v'].includes(extension)
+      && /Video:\s*h264\b/i.test(videoSummary)
+      && /yuv420p/i.test(videoSummary);
+  };
+
+  const ensureBrowserCompatiblePreview = async (fileName: string) => {
+    const safeName = parseSafeVideoFilename(fileName);
+    if (!safeName) {
+      throw Object.assign(new Error('Invalid video file name.'), { status: 400 });
+    }
+
+    const { videoPath } = await resolveValidatedUploadedVideo(fileName);
+    const sourceSummary = await getVideoStreamSummary(videoPath);
+
+    if (isBrowserFriendlyVideo(fileName, sourceSummary)) {
+      return {
+        previewUrl: `/uploads/${fileName}`,
+        reusedSource: true,
+        sourceSummary,
+      };
+    }
+
+    const previewFileName = `preview_${safeName.base}_h264.mp4`;
+    const previewPath = path.resolve(uploadsDir, previewFileName);
+    if (!isPathInside(uploadsDir, previewPath)) {
+      throw Object.assign(new Error('Invalid preview video path.'), { status: 500 });
+    }
+
+    try {
+      const existingPreview = await fs.promises.stat(previewPath);
+      if (existingPreview.isFile() && existingPreview.size > 0) {
+        return {
+          previewUrl: `/uploads/${previewFileName}`,
+          reusedSource: false,
+          sourceSummary,
+        };
+      }
+    } catch (error: any) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      execFile(
+        FFMPEG_BINARY,
+        [
+          '-y',
+          '-i', videoPath,
+          '-map', '0:v:0',
+          '-map', '0:a?',
+          '-c:v', 'libx264',
+          '-preset', 'veryfast',
+          '-crf', '20',
+          '-pix_fmt', 'yuv420p',
+          '-c:a', 'aac',
+          '-b:a', '128k',
+          '-movflags', '+faststart',
+          previewPath,
+        ],
+        { timeout: 10 * 60_000, maxBuffer: 4 * 1024 * 1024 },
+        async (error, _stdout, stderr) => {
+          if (error) {
+            await safeUnlink(previewPath);
+            reject(new Error(stderr || error.message));
+            return;
+          }
+          resolve();
+        },
+      );
+    });
+
+    return {
+      previewUrl: `/uploads/${previewFileName}`,
+      reusedSource: false,
+      sourceSummary,
+    };
+  };
 
   const buildTranslatedDubbingAtempoFilter = (tempo: number) => {
     const parts: number[] = [];
@@ -1981,6 +2080,18 @@ async function startServer() {
     return res.json({ text });
   }));
 
+  app.post('/api/ai/gemini/voice-v3-enhance', asyncRoute(async (req, res) => {
+    const text = String(req.body?.text || '').trim();
+    if (!text) return res.status(400).json({ error: '请先输入要增强的配音台词。' });
+    if (text.length > 5000) return res.status(400).json({ error: '配音台词过长，请精简后再使用 V3 增强。' });
+    const result = await enhanceVoicePromptForElevenV3(text, {
+      voiceName: String(req.body?.voiceName || ''),
+      voiceDescription: String(req.body?.voiceDescription || ''),
+      language: String(req.body?.language || ''),
+    });
+    return res.json(result);
+  }));
+
   app.post('/api/ai/gemini/match-voice', asyncRoute(async (req, res) => {
     const { description = '', gender, voices } = req.body || {};
     if ((gender !== 'male' && gender !== 'female') || !Array.isArray(voices)) {
@@ -2262,6 +2373,16 @@ ${JSON.stringify(normalizedVoices)}
     });
   }));
 
+  app.post('/api/video/preview-compatible', asyncRoute(async (req, res) => {
+    const { videoFileName } = req.body || {};
+    if (typeof videoFileName !== 'string' || !videoFileName) {
+      return res.status(400).json({ error: 'videoFileName is required' });
+    }
+
+    const preview = await ensureBrowserCompatiblePreview(videoFileName);
+    return res.json(preview);
+  }));
+
   app.post('/api/ai/elevenlabs/sound-effect', asyncRoute(async (req, res) => {
     const text = String(req.body?.text || '').trim();
     if (!text) return res.status(400).json({ error: 'text is required' });
@@ -2326,13 +2447,23 @@ ${JSON.stringify(normalizedVoices)}
   app.post('/api/ai/elevenlabs/speech-to-speech', aiUpload.single('audio'), asyncRoute(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'audio is required' });
     const audio = new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype });
-    return sendAudioBlob(res, await generateSpeechToSpeech(
-      audio,
-      validateVoiceId(req.body?.voiceId),
-      parseNumber(req.body?.stability, 0.5, 0, 1),
-      parseNumber(req.body?.similarity, 0.75, 0, 1),
-      parseNumber(req.body?.style, 0.05, 0, 1),
-    ));
+    const voiceId = validateVoiceId(req.body?.voiceId);
+    return sendAudioBlob(res, await runVoiceGenerationQueued(voiceId, async () => {
+      if (String(req.body?.voiceSource || '').trim() === 'voice_library') {
+        await ensureSharedVoiceAvailable(
+          voiceId,
+          String(req.body?.publicOwnerId || '').trim(),
+          String(req.body?.voiceName || '').trim(),
+        );
+      }
+      return generateSpeechToSpeech(
+        audio,
+        voiceId,
+        parseNumber(req.body?.stability, 0.5, 0, 1),
+        parseNumber(req.body?.similarity, 0.75, 0, 1),
+        parseNumber(req.body?.style, 0.05, 0, 1),
+      );
+    }));
   }));
 
   app.post('/api/ai/elevenlabs/audio-isolation', aiUpload.single('audio'), asyncRoute(async (req, res) => {
@@ -2745,7 +2876,17 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
 - 当 lipSyncConfidence 较高且口型与字幕的交集有效时，dubbing 的 startTime=max(subtitleStartTime, lipStartTime)，结束时间=min(subtitleEndTime, lipEndTime)，duration 等于二者之差。
 - 当置信度低、没有可见人脸、属于画外音或口型交集无效时，startTime=subtitleStartTime，duration=subtitleEndTime-subtitleStartTime。
 - lipSyncConfidence 为 0 到 1；timingSource 只能说明依据，例如 "subtitle+lip"、"subtitle"、"speech+subtitle" 或 "visual-estimate"。
-- 保留视频中每一条可辨识字幕，不限制为少数重点片段。字幕持续多久，整句话后续就会按该区间统一调整语速。` : ''}
+- 保留视频中每一条可辨识字幕，不限制为少数重点片段。字幕持续多久，整句话后续就会按该区间统一调整语速。
+
+CRITICAL SUBTITLE OCR PASS:
+- First scan the entire video chronologically for on-screen subtitles, captions, speech bubbles, lyrics, and dialogue text.
+- Every distinct visible subtitle/caption text MUST become one dubbing clip, even if it is very short, appears only once, or is not visually important.
+- Do not summarize subtitles. Do not skip "minor" captions. Do not merge adjacent captions when the visible text is different.
+- If one subtitle is split across two visual lines, combine both lines into the same text field in natural reading order.
+- If multiple subtitle areas are visible at the same time, return separate clips only when they represent different spoken lines; otherwise combine the lines for the same speaker.
+- Use best-effort OCR for partially occluded or stylized text, but keep the original language and punctuation as close as possible.
+- subtitleStartTime is when the exact visible text first appears. subtitleEndTime is when that exact text disappears or changes to the next text.
+- For dubbing clips, coverage is more important than being concise: return all readable subtitle changes, not just key moments.` : ''}
 
 返回的 JSON 必须包含一个 \`clips\` 数组，每项符合以下定义：
 {
@@ -2854,7 +2995,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
         // Sparse keyframes cannot reveal subtitle boundaries or mouth motion.
         // Dubbing analysis therefore always uses the complete uploaded video.
         try {
-          await prepareNativeVideoAnalysis(4, 'Dubbing is enabled;');
+          await prepareNativeVideoAnalysis(8, 'Dubbing is enabled;');
         } catch (nativeVideoError) {
           if (!bgmEnabled && !sfxEnabled) {
             throw nativeVideoError;
@@ -3192,8 +3333,11 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       
     } catch (err: any) {
       console.error('Error analyzing video:', err);
-      return res.status(err.status || 500).json({
-        error: err.message || '视频分析暂时失败，请稍后重试。',
+      const clientError = isGeminiUnsupportedLocationError(err)
+        ? createFriendlyGeminiUnsupportedLocationError(err)
+        : err;
+      return res.status(clientError.status || 500).json({
+        error: clientError.message || '视频分析暂时失败，请稍后重试。',
       });
     } finally {
       if (ai && temporaryGeminiFileName) {
@@ -3224,33 +3368,59 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
       if (resolvedType === 'dubbing') {
         // Text to Speech
         const targetVoice = validateVoiceId(voiceId);
-        console.log(`ElevenLabs server TTS: text="${text}" voiceId=${targetVoice}`);
-        const apiResponse = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${targetVoice}`, {
-          method: "POST",
-          headers: {
-            "xi-api-key": apiKey,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            text: text,
-            model_id: "eleven_v3",
-            voice_settings: {
-              stability: isProQuality ? 0.45 : 0.5,
-              similarity_boost: isProQuality ? 0.82 : 0.75,
-              style: isProQuality ? 0.14 : 0.05,
-              use_speaker_boost: true,
-            },
-          }),
-        });
-        
-        if (!apiResponse.ok) {
-          const errJson = await apiResponse.json().catch(() => ({}));
-          throw new Error(`ElevenLabs TTS Error: ${errJson.detail?.message || apiResponse.statusText}`);
+        const requestedTargetLanguage = String(req.body?.targetLanguage || '').trim();
+        const shouldTranslateDubbingText = Boolean(
+          requestedTargetLanguage
+          && !['source', 'auto', 'original', 'same'].includes(requestedTargetLanguage.toLowerCase()),
+        );
+        const sourceText = String(text || '').trim();
+        let generationText = sourceText;
+        if (shouldTranslateDubbingText) {
+          generationText = await translateTextToLanguage(sourceText, requestedTargetLanguage, { preserveTone: true });
+          const normalizedGeneratedText = normalizeTextForLanguageCheck(generationText);
+          if (!normalizedGeneratedText) {
+            throw Object.assign(new Error('目标语种翻译结果为空，已停止生成。'), { status: 502 });
+          }
+          if (/english|en\b|英文|英语/i.test(requestedTargetLanguage) && !/[a-zA-Z]{2,}/.test(generationText)) {
+            throw Object.assign(new Error('目标语言选择为英文，但翻译结果不是英文，已停止生成。'), { status: 502 });
+          }
         }
-        
-        const buffer = Buffer.from(await apiResponse.arrayBuffer());
+        const buffer = await runVoiceGenerationQueued(targetVoice, async () => {
+          if (String(req.body?.voiceSource || '').trim() === 'voice_library') {
+            await ensureSharedVoiceAvailable(
+              targetVoice,
+              String(req.body?.publicOwnerId || '').trim(),
+              String(req.body?.voiceName || '').trim(),
+            );
+          }
+          console.log(`ElevenLabs server TTS: text="${generationText}" voiceId=${targetVoice}`);
+          const apiResponse = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${targetVoice}`, {
+            method: "POST",
+            headers: {
+              "xi-api-key": apiKey,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              text: generationText,
+              model_id: "eleven_v3",
+              voice_settings: {
+                stability: isProQuality ? 0.45 : 0.5,
+                similarity_boost: isProQuality ? 0.82 : 0.75,
+                style: isProQuality ? 0.14 : 0.05,
+                use_speaker_boost: true,
+              },
+            }),
+          });
+
+          if (!apiResponse.ok) {
+            const errJson = await apiResponse.json().catch(() => ({}));
+            throw new Error(`ElevenLabs TTS Error: ${errJson.detail?.message || apiResponse.statusText}`);
+          }
+
+          return Buffer.from(await apiResponse.arrayBuffer());
+        });
         fs.writeFileSync(filePath, buffer);
-        
+
       } else if (resolvedType === 'bgm') {
         // Background music (Sound generation)
         const sfxPrompt = isProQuality
@@ -3258,7 +3428,7 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
           : `AI Music, full background instrumental track, no vocals, no speech: ${prompt}`;
         const elevenLabsDuration = Math.min(22, duration || 20);
         console.log(`ElevenLabs server Music Gen: prompt="${sfxPrompt}" elevenLabsDuration=${elevenLabsDuration}, targetDuration=${duration}`);
-        
+
         const apiResponse = await fetch("https://api.elevenlabs.io/v1/sound-generation", {
           method: "POST",
           headers: {

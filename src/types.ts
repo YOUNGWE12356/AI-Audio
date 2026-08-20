@@ -38,6 +38,7 @@ export interface TimelineClip {
   name: string;
   prompt: string;
   text?: string; // For dubbing TTS
+  targetLanguage?: string; // Optional target language for dubbing regeneration
   voiceId?: string; // Voice used by generated audio, or the inherited voice before generation
   startTime: number; // in seconds
   duration: number; // in seconds

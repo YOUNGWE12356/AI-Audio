@@ -375,10 +375,10 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
   const [templateType, setTemplateType] = useState<TemplateType>('game_sfx_general');
   const [inputText, setInputText] = useState('');
   const [rowsByTemplate, setRowsByTemplate] = useState<Record<TemplateType, any[]>>(() => ({
-    game_sfx_general: DEMO_ROWS.game_sfx_general.map(row => ({ ...row })),
-    game_sfx_middleware: DEMO_ROWS.game_sfx_middleware.map(row => ({ ...row })),
-    voiceover_general: DEMO_ROWS.voiceover_general.map(row => ({ ...row })),
-    voiceover_multilang: DEMO_ROWS.voiceover_multilang.map(row => ({ ...row })),
+    game_sfx_general: [],
+    game_sfx_middleware: [],
+    voiceover_general: [],
+    voiceover_multilang: [],
   }));
   const [draftByTemplate, setDraftByTemplate] = useState<Record<TemplateType, boolean>>({
     game_sfx_general: false,

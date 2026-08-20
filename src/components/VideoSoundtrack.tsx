@@ -48,7 +48,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { TimelineClip } from '../types';
 import { ELEVENLABS_VOICES, VoiceItem } from '../data/voices';
-import { fetchAvailableVoices, transcribeSpeech } from '../services/elevenLabsService';
+import { fetchAvailableVoices, generateSpeechToSpeech, transcribeSpeech } from '../services/elevenLabsService';
 import { extractVideoKeyframes } from '../utils/mediaPreparation';
 import { getElevenLabsQualityMode } from '../utils/elevenLabsQuality';
 
@@ -69,6 +69,60 @@ const MAX_VOLUME_FADER = 1;
 const DEFAULT_TRACK_HEIGHT = 48;
 const MIN_TRACK_HEIGHT = 40;
 const MAX_TRACK_HEIGHT = 160;
+
+const getCompatiblePreviewCandidateUrl = (fileName: string) => {
+  const extensionIndex = fileName.lastIndexOf('.');
+  const rawBase = extensionIndex > 0 ? fileName.slice(0, extensionIndex) : fileName;
+  const safeBase = rawBase
+    .replace(/[^a-zA-Z0-9_\u4e00-\u9fa5-]/g, '_')
+    .slice(0, 160);
+  if (!safeBase) return '';
+  return `/uploads/${encodeURIComponent(`preview_${safeBase}_h264.mp4`)}`;
+};
+
+const getUploadedVideoUrl = (fileName: string) => `/uploads/${encodeURIComponent(fileName)}`;
+
+const DUBBING_TARGET_LANGUAGE_OPTIONS = [
+  { value: 'source', label: '原语言 / 自动' },
+  { value: 'English', label: '英文' },
+  { value: 'Chinese Mandarin', label: '中文' },
+  { value: 'Japanese', label: '日文' },
+  { value: 'Korean', label: '韩文' },
+  { value: 'French', label: '法文' },
+  { value: 'German', label: '德文' },
+  { value: 'Spanish', label: '西班牙文' },
+  { value: 'Portuguese', label: '葡萄牙文' },
+  { value: 'Italian', label: '意大利文' },
+  { value: 'Russian', label: '俄文' },
+  { value: 'Hindi', label: '印地文' },
+  { value: 'Indonesian', label: '印尼文' },
+  { value: 'Vietnamese', label: '越南文' },
+  { value: 'Thai', label: '泰文' },
+  { value: 'Arabic', label: '阿拉伯文' },
+  { value: 'Turkish', label: '土耳其文' },
+  { value: 'Dutch', label: '荷兰文' },
+  { value: 'Polish', label: '波兰文' },
+  { value: 'Swedish', label: '瑞典文' },
+  { value: 'Danish', label: '丹麦文' },
+  { value: 'Finnish', label: '芬兰文' },
+  { value: 'Norwegian', label: '挪威文' },
+  { value: 'Greek', label: '希腊文' },
+  { value: 'Czech', label: '捷克文' },
+  { value: 'Romanian', label: '罗马尼亚文' },
+  { value: 'Hungarian', label: '匈牙利文' },
+  { value: 'Ukrainian', label: '乌克兰文' },
+  { value: 'Hebrew', label: '希伯来文' },
+  { value: 'Malay', label: '马来文' },
+  { value: 'Filipino', label: '菲律宾文' },
+  { value: 'Bengali', label: '孟加拉文' },
+  { value: 'Urdu', label: '乌尔都文' },
+  { value: 'Tamil', label: '泰米尔文' },
+];
+
+const isPassthroughDubbingLanguage = (value?: string) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return !normalized || ['source', 'auto', 'original', 'same'].includes(normalized);
+};
 
 const createToolCursor = (label: string, fallback: string) => {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28"><rect x="1" y="1" width="26" height="26" rx="7" fill="rgba(15,23,42,0.92)" stroke="rgba(56,189,248,0.95)" stroke-width="2"/><text x="14" y="18" text-anchor="middle" font-size="14" font-family="Arial, sans-serif" font-weight="700" fill="white">${label}</text></svg>`;
@@ -216,6 +270,281 @@ const clampNumber = (value: number, min: number, max: number) => (
   Math.max(min, Math.min(max, value))
 );
 
+type SpeechTimingSegment = {
+  id: string;
+  start: number;
+  end: number;
+  text: string;
+  timingSource: 'stt-word-timing' | 'stt-segment-timing' | 'audio-silence-detection';
+};
+
+type SpeechTimingToken = {
+  text?: unknown;
+  word?: unknown;
+  start?: unknown;
+  end?: unknown;
+  type?: unknown;
+};
+
+const appendSpeechTimingToken = (currentText: string, tokenText: string) => {
+  const token = tokenText.trim();
+  if (!token) return currentText;
+  if (!currentText) return token;
+  if (/^[,.;:!?，。！？、；：）)\]}、]/.test(token)) return `${currentText}${token}`;
+  if (/[\u3040-\u30ff\u3400-\u9fff]$/.test(currentText) || /^[\u3040-\u30ff\u3400-\u9fff]/.test(token)) {
+    return `${currentText}${token}`;
+  }
+  return `${currentText} ${token}`;
+};
+
+const normalizeSpeechTimingText = (value: unknown) => (
+  String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+);
+
+const splitRecognizedTextIntoChunks = (text: string, count: number) => {
+  const normalized = normalizeSpeechTimingText(text);
+  if (count <= 1 || !normalized) return [normalized];
+
+  const sentenceChunks = normalized
+    .split(/(?<=[。！？!?；;.!?])\s*/u)
+    .map(chunk => chunk.trim())
+    .filter(Boolean);
+
+  const baseChunks = sentenceChunks.length >= count
+    ? sentenceChunks
+    : normalized.split(/\s+/).filter(Boolean);
+
+  if (baseChunks.length <= count) {
+    return Array.from({ length: count }, (_, index) => baseChunks[index] || normalized);
+  }
+
+  const chunks: string[] = [];
+  const wordsPerChunk = Math.ceil(baseChunks.length / count);
+  for (let index = 0; index < count; index += 1) {
+    const start = index * wordsPerChunk;
+    const end = index === count - 1 ? baseChunks.length : Math.min(baseChunks.length, start + wordsPerChunk);
+    chunks.push(baseChunks.slice(start, end).join(' ').trim() || normalized);
+  }
+  return chunks;
+};
+
+const assignTextToSpeechSegments = (
+  segments: Array<Omit<SpeechTimingSegment, 'text'>>,
+  recognizedText: string,
+) => {
+  const textChunks = splitRecognizedTextIntoChunks(recognizedText, segments.length);
+  return segments.map((segment, index) => ({
+    ...segment,
+    text: normalizeSpeechTimingText(textChunks[index] || recognizedText),
+  })).filter(segment => segment.text);
+};
+
+const normalizeSpeechTimingSegments = (
+  segments: SpeechTimingSegment[],
+  maxDuration: number,
+) => {
+  const boundedSegments = segments
+    .map(segment => {
+      const start = clampNumber(segment.start, 0, maxDuration);
+      const end = clampNumber(segment.end, 0, maxDuration);
+      return {
+        ...segment,
+        start: Number(start.toFixed(3)),
+        end: Number(end.toFixed(3)),
+        text: normalizeSpeechTimingText(segment.text),
+      };
+    })
+    .filter(segment => segment.text && segment.end - segment.start >= 0.08)
+    .sort((left, right) => left.start - right.start);
+
+  return boundedSegments.map((segment, index) => ({
+    ...segment,
+    id: segment.id || `speech-${index + 1}`,
+  }));
+};
+
+const extractSpeechSegmentsFromTranscription = (
+  transcription: unknown,
+  recognizedText: string,
+  maxDuration: number,
+) => {
+  const typedTranscription = transcription as {
+    segments?: Array<{ text?: unknown; start?: unknown; end?: unknown }>;
+    words?: SpeechTimingToken[];
+  };
+
+  const timedSegments = Array.isArray(typedTranscription.segments)
+    ? typedTranscription.segments
+        .map((segment, index) => ({
+          id: `stt-segment-${index + 1}`,
+          start: normalizeOptionalTime(segment.start) ?? -1,
+          end: normalizeOptionalTime(segment.end) ?? -1,
+          text: normalizeSpeechTimingText(segment.text),
+          timingSource: 'stt-segment-timing' as const,
+        }))
+        .filter(segment => segment.start >= 0 && segment.end > segment.start && segment.text)
+    : [];
+  if (timedSegments.length > 0) {
+    return normalizeSpeechTimingSegments(timedSegments, maxDuration);
+  }
+
+  const words = Array.isArray(typedTranscription.words)
+    ? typedTranscription.words
+        .map((word, index) => {
+          const tokenText = normalizeSpeechTimingText(word.text ?? word.word);
+          const tokenType = String(word.type || '').toLowerCase();
+          const start = normalizeOptionalTime(word.start);
+          const end = normalizeOptionalTime(word.end);
+          return {
+            id: `stt-word-${index + 1}`,
+            text: tokenText,
+            type: tokenType,
+            start,
+            end,
+          };
+        })
+        .filter(word => (
+          word.text
+          && word.start !== undefined
+          && word.end !== undefined
+          && word.end > word.start
+          && !['spacing', 'audio_event'].includes(word.type)
+          && !/^\[[^\]]+\]$/.test(word.text)
+        ))
+    : [];
+
+  if (words.length === 0) return [];
+
+  const groupedSegments: SpeechTimingSegment[] = [];
+  let currentGroup: SpeechTimingSegment | null = null;
+  words.forEach((word) => {
+    if (!currentGroup || (word.start as number) - currentGroup.end > 0.65) {
+      if (currentGroup) groupedSegments.push(currentGroup);
+      currentGroup = {
+        id: `stt-word-group-${groupedSegments.length + 1}`,
+        start: word.start as number,
+        end: word.end as number,
+        text: word.text,
+        timingSource: 'stt-word-timing',
+      };
+      return;
+    }
+
+    currentGroup.end = word.end as number;
+    currentGroup.text = appendSpeechTimingToken(currentGroup.text, word.text);
+  });
+  if (currentGroup) groupedSegments.push(currentGroup);
+  return normalizeSpeechTimingSegments(groupedSegments, maxDuration);
+};
+
+const detectSpeechSegmentsFromAudioFile = async (
+  audioFile: File | Blob,
+  recognizedText: string,
+  maxDuration: number,
+) => {
+  const AudioContextCtor = window.AudioContext || (window as any).webkitAudioContext;
+  if (!AudioContextCtor) return [];
+
+  let audioContext: AudioContext | null = null;
+  try {
+    const arrayBuffer = await audioFile.arrayBuffer();
+    audioContext = new AudioContextCtor();
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+    const duration = Math.min(maxDuration, audioBuffer.duration || maxDuration);
+    if (!duration || duration <= 0) return [];
+
+    const sampleRate = audioBuffer.sampleRate;
+    const windowSeconds = 0.05;
+    const samplesPerWindow = Math.max(1, Math.floor(sampleRate * windowSeconds));
+    const windowCount = Math.max(1, Math.ceil(audioBuffer.length / samplesPerWindow));
+    const rmsLevels = Array.from({ length: windowCount }, (_, windowIndex) => {
+      const startSample = windowIndex * samplesPerWindow;
+      const endSample = Math.min(audioBuffer.length, startSample + samplesPerWindow);
+      let sumSquares = 0;
+      let sampleCount = 0;
+
+      for (let channelIndex = 0; channelIndex < audioBuffer.numberOfChannels; channelIndex += 1) {
+        const channel = audioBuffer.getChannelData(channelIndex);
+        for (let sampleIndex = startSample; sampleIndex < endSample; sampleIndex += 1) {
+          const value = channel[sampleIndex] || 0;
+          sumSquares += value * value;
+          sampleCount += 1;
+        }
+      }
+
+      return sampleCount > 0 ? Math.sqrt(sumSquares / sampleCount) : 0;
+    });
+
+    const sortedLevels = [...rmsLevels].sort((left, right) => left - right);
+    const percentile = (ratio: number) => sortedLevels[Math.min(sortedLevels.length - 1, Math.max(0, Math.floor(sortedLevels.length * ratio)))] || 0;
+    const noiseFloor = percentile(0.2);
+    const highLevel = percentile(0.92);
+    const threshold = Math.max(0.012, noiseFloor * 3.2, highLevel * 0.18);
+    const minSpeechWindows = Math.max(2, Math.round(0.16 / windowSeconds));
+    const maxSilenceGapWindows = Math.max(3, Math.round(0.32 / windowSeconds));
+    const preRollSeconds = 0.08;
+    const postRollSeconds = 0.16;
+
+    const rawSegments: Array<Omit<SpeechTimingSegment, 'text'>> = [];
+    let activeStart: number | null = null;
+    let lastSpeechWindow = -1;
+
+    rmsLevels.forEach((level, index) => {
+      const isSpeech = level >= threshold;
+      if (isSpeech) {
+        if (activeStart === null) activeStart = index;
+        lastSpeechWindow = index;
+      } else if (
+        activeStart !== null
+        && lastSpeechWindow >= 0
+        && index - lastSpeechWindow > maxSilenceGapWindows
+      ) {
+        if (lastSpeechWindow - activeStart + 1 >= minSpeechWindows) {
+          rawSegments.push({
+            id: `audio-speech-${rawSegments.length + 1}`,
+            start: Math.max(0, activeStart * windowSeconds - preRollSeconds),
+            end: Math.min(duration, (lastSpeechWindow + 1) * windowSeconds + postRollSeconds),
+            timingSource: 'audio-silence-detection',
+          });
+        }
+        activeStart = null;
+        lastSpeechWindow = -1;
+      }
+    });
+
+    if (activeStart !== null && lastSpeechWindow >= activeStart && lastSpeechWindow - activeStart + 1 >= minSpeechWindows) {
+      rawSegments.push({
+        id: `audio-speech-${rawSegments.length + 1}`,
+        start: Math.max(0, activeStart * windowSeconds - preRollSeconds),
+        end: Math.min(duration, (lastSpeechWindow + 1) * windowSeconds + postRollSeconds),
+        timingSource: 'audio-silence-detection',
+      });
+    }
+
+    const mergedSegments = rawSegments.reduce<Array<Omit<SpeechTimingSegment, 'text'>>>((segments, segment) => {
+      const previous = segments[segments.length - 1];
+      if (previous && segment.start - previous.end <= 0.28) {
+        previous.end = Math.max(previous.end, segment.end);
+        return segments;
+      }
+      segments.push({ ...segment, id: `audio-speech-${segments.length + 1}` });
+      return segments;
+    }, []);
+
+    return normalizeSpeechTimingSegments(
+      assignTextToSpeechSegments(mergedSegments, recognizedText),
+      duration,
+    );
+  } catch (error) {
+    console.warn('Failed to detect speech segments from selected audio clip:', error);
+    return [];
+  } finally {
+    await audioContext?.close?.().catch(() => undefined);
+  }
+};
+
 const normalizeSourceAudioDuration = (
   clip: TimelineClip,
   audioDuration?: number,
@@ -305,6 +634,7 @@ const preserveAudioPitch = (audio: HTMLAudioElement) => {
 
 const getDubbingTimingSignature = (clip: TimelineClip) => JSON.stringify([
   clip.text || '',
+  clip.targetLanguage || 'source',
   clip.startTime,
   clip.duration,
   clip.subtitleStartTime,
@@ -653,6 +983,9 @@ export default function VideoSoundtrack() {
   const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [isUploadingToServer, setIsUploadingToServer] = useState<boolean>(false);
   const [videoLoadFailed, setVideoLoadFailed] = useState<boolean>(false);
+  const [isPreparingVideoPreview, setIsPreparingVideoPreview] = useState<boolean>(false);
+  const videoPreviewRequestRef = useRef(0);
+  const lastFailedVideoUrlRef = useRef<string | null>(null);
   
   // AI Generation configuration options
   const [bgmEnabled, setBgmEnabled] = useState<boolean>(true);
@@ -836,7 +1169,9 @@ export default function VideoSoundtrack() {
             category: category,
             tags,
             description: av.labels?.description || `ElevenLabs ${category} · 已适配 eleven_v3`,
-            previewUrl: av.preview_url || ''
+            previewUrl: av.preview_url || '',
+            source: av.source,
+            publicOwnerId: av.public_owner_id,
           };
         });
         setFetchedVoices(mapped);
@@ -1676,6 +2011,106 @@ export default function VideoSoundtrack() {
       setShowSyncSuccess(false);
     }
   }, [videoFile?.isUploaded, videoFile?.name]);
+
+  const requestBrowserCompatibleVideoPreview = async (
+    fileName: string,
+    options: { signal?: AbortSignal; failedUrl?: string; markFailedOnError?: boolean } = {},
+  ) => {
+    if (!fileName) return false;
+
+    const requestId = videoPreviewRequestRef.current + 1;
+    videoPreviewRequestRef.current = requestId;
+    const serverVideoUrl = getUploadedVideoUrl(fileName);
+
+    setIsPreparingVideoPreview(true);
+    try {
+      const response = await fetch('/api/video/preview-compatible', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ videoFileName: fileName }),
+        signal: options.signal,
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body?.error || `Preview conversion failed (${response.status})`);
+      }
+
+      const data = await response.json();
+      const previewUrl = typeof data?.previewUrl === 'string' && data.previewUrl
+        ? data.previewUrl
+        : serverVideoUrl;
+      if (videoPreviewRequestRef.current !== requestId) return false;
+      if (options.failedUrl && previewUrl === options.failedUrl) {
+        throw new Error('Compatible preview resolved to the same URL that failed playback.');
+      }
+
+      setVideoFile(prev => (
+        prev?.name === fileName && prev.url !== previewUrl
+          ? { ...prev, url: previewUrl, isUploaded: true }
+          : prev
+      ));
+      lastFailedVideoUrlRef.current = null;
+      setVideoLoadFailed(false);
+      return true;
+    } catch (previewError: any) {
+      if (options.signal?.aborted) return false;
+      const fallbackPreviewUrl = getCompatiblePreviewCandidateUrl(fileName);
+      if (fallbackPreviewUrl && fallbackPreviewUrl !== options.failedUrl) {
+        try {
+          const fallbackResponse = await fetch(fallbackPreviewUrl, {
+            method: 'HEAD',
+            signal: options.signal,
+          });
+          if (fallbackResponse.ok && videoPreviewRequestRef.current === requestId) {
+            setVideoFile(prev => (
+              prev?.name === fileName && prev.url !== fallbackPreviewUrl
+                ? { ...prev, url: fallbackPreviewUrl, isUploaded: true }
+                : prev
+            ));
+            lastFailedVideoUrlRef.current = null;
+            setVideoLoadFailed(false);
+            return true;
+          }
+        } catch (fallbackError) {
+          if (options.signal?.aborted) return false;
+          console.warn('Failed to use existing browser-compatible video preview:', fallbackError);
+        }
+      }
+      console.warn('Failed to prepare browser-compatible video preview:', previewError);
+      if (options.markFailedOnError && videoPreviewRequestRef.current === requestId) {
+        setVideoLoadFailed(true);
+      }
+      return false;
+    } finally {
+      if (videoPreviewRequestRef.current === requestId) {
+        setIsPreparingVideoPreview(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (!isProjectActive || !videoFile?.isUploaded || !videoFile.name) {
+      setIsPreparingVideoPreview(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    const serverVideoUrl = getUploadedVideoUrl(videoFile.name);
+
+    if (videoFile.url.startsWith('blob:')) {
+      setVideoFile(prev => (
+        prev?.name === videoFile.name && prev.url.startsWith('blob:')
+          ? { ...prev, url: serverVideoUrl }
+          : prev
+      ));
+    }
+
+    void requestBrowserCompatibleVideoPreview(videoFile.name, { signal: controller.signal });
+
+    return () => {
+      controller.abort();
+    };
+  }, [isProjectActive, videoFile?.isUploaded, videoFile?.name]);
 
   // 2. Timeline height resize pointer events
   useEffect(() => {
@@ -3310,6 +3745,7 @@ export default function VideoSoundtrack() {
         return {
           ...clip,
           audioSource,
+          voiceId,
           voiceDirty: isGeneratedVoiceStale({ ...clip, audioSource }, voiceId),
         };
       }
@@ -3745,6 +4181,7 @@ export default function VideoSoundtrack() {
   }, [selectedClipId, selectedClipIds, selectedTrackId, clips, copiedClip, currentTime, safeDuration, isPlaying, videoLoadFailed, togglePlay, undoStack, redoStack]);
 
   const handleVideoLoaded = () => {
+    lastFailedVideoUrlRef.current = null;
     if (videoRef.current) {
       const d = videoRef.current.duration;
       if (typeof d === 'number' && !isNaN(d) && isFinite(d) && d > 0) {
@@ -3758,12 +4195,31 @@ export default function VideoSoundtrack() {
 
   // Automatic fallback in case the local object URL fails inside iframe sandbox
   const handleVideoError = () => {
-    if (videoFile && videoFile.url.startsWith('blob:')) {
+    if (!videoFile) return;
+
+    const failedUrl = videoFile.url;
+    if (lastFailedVideoUrlRef.current === failedUrl) {
+      setVideoLoadFailed(true);
+      return;
+    }
+    lastFailedVideoUrlRef.current = failedUrl;
+
+    if (videoFile.isUploaded && videoFile.name) {
+      console.warn('Video playback failed, requesting browser-compatible preview.');
+      void requestBrowserCompatibleVideoPreview(videoFile.name, {
+        failedUrl,
+        markFailedOnError: true,
+      });
+      return;
+    }
+
+    if (videoFile.url.startsWith('blob:')) {
+      const serverUrl = getUploadedVideoUrl(videoFile.name);
       console.warn('Blob URL playback failed, falling back to server URL.');
-      upsertOriginalAudioTrack(videoFile.name, `/uploads/${videoFile.name}`, videoDuration);
+      upsertOriginalAudioTrack(videoFile.name, serverUrl, videoDuration);
       setVideoFile({
         name: videoFile.name,
-        url: `/uploads/${videoFile.name}`,
+        url: serverUrl,
         isUploaded: videoFile.isUploaded
       });
     } else {
@@ -3873,15 +4329,17 @@ export default function VideoSoundtrack() {
             const data = JSON.parse(xhr.responseText);
             if (data.completed) {
               // Entire file uploaded and assembled successfully!
+              const uploadedUrl = getUploadedVideoUrl(data.fileName);
               setUploadProgress(100);
               setIsUploadingToServer(false);
               setIsUploading(false);
-              upsertOriginalAudioTrack(data.fileName, `/uploads/${data.fileName}`, videoDuration);
+              upsertOriginalAudioTrack(data.fileName, uploadedUrl, videoDuration);
               setVideoFile(prev => {
                 if (!prev) return null;
                 return {
                   ...prev,
                   name: data.fileName, // Map to server's unique safe filename for API calls
+                  url: uploadedUrl,
                   isUploaded: true
                 };
               });
@@ -3941,13 +4399,15 @@ export default function VideoSoundtrack() {
         if (xhr.status >= 200 && xhr.status < 300) {
           try {
             const data = JSON.parse(xhr.responseText);
+            const uploadedUrl = getUploadedVideoUrl(data.fileName);
             console.log('Fallback upload success:', data);
-            upsertOriginalAudioTrack(data.fileName, `/uploads/${data.fileName}`, videoDuration);
+            upsertOriginalAudioTrack(data.fileName, uploadedUrl, videoDuration);
             setVideoFile(prev => {
               if (!prev) return null;
               return {
                 ...prev,
                 name: data.fileName,
+                url: uploadedUrl,
                 isUploaded: true
               };
             });
@@ -4055,15 +4515,17 @@ export default function VideoSoundtrack() {
           try {
             const data = JSON.parse(xhr.responseText);
             if (data.completed) {
+              const uploadedUrl = getUploadedVideoUrl(data.fileName);
               setUploadProgress(100);
               setIsUploadingToServer(false);
               setIsUploading(false);
-              upsertOriginalAudioTrack(data.fileName, `/uploads/${data.fileName}`, videoDuration);
+              upsertOriginalAudioTrack(data.fileName, uploadedUrl, videoDuration);
               setVideoFile(prev => {
                 if (!prev) return null;
                 return {
                   ...prev,
                   name: data.fileName,
+                  url: uploadedUrl,
                   isUploaded: true
                 };
               });
@@ -4118,12 +4580,14 @@ export default function VideoSoundtrack() {
         if (xhr.status >= 200 && xhr.status < 300) {
           try {
             const data = JSON.parse(xhr.responseText);
-            upsertOriginalAudioTrack(data.fileName, `/uploads/${data.fileName}`, videoDuration);
+            const uploadedUrl = getUploadedVideoUrl(data.fileName);
+            upsertOriginalAudioTrack(data.fileName, uploadedUrl, videoDuration);
             setVideoFile(prev => {
               if (!prev) return null;
               return {
                 ...prev,
                 name: data.fileName,
+                url: uploadedUrl,
                 isUploaded: true
               };
             });
@@ -4509,6 +4973,96 @@ export default function VideoSoundtrack() {
       const effectiveVoiceId = trackType === 'dubbing'
         ? clip.voiceId || clipTrack?.defaultVoiceId || DEFAULT_DUBBING_VOICE_ID
         : clip.voiceId;
+      const voiceMetadata = getVoiceGenerationMetadata(effectiveVoiceId);
+
+      if (
+        trackType === 'dubbing'
+        && clip.voiceDirty
+        && !clip.timingDirty
+        && clip.audioUrl
+        && effectiveVoiceId
+      ) {
+        const conversionSourceFile = await fetchAudioUrlAsFile(
+          clip.audioUrl,
+          `voice-conversion-${clip.id}.mp3`,
+        );
+        const convertedBlob = await generateSpeechToSpeech(
+          conversionSourceFile,
+          effectiveVoiceId,
+          0.45,
+          0.82,
+          0.08,
+          {
+            voiceSource: voiceMetadata.voiceSource,
+            publicOwnerId: voiceMetadata.publicOwnerId,
+            voiceName: voiceMetadata.voiceName,
+          },
+        );
+        const convertedAudioUrl = await uploadGeneratedConversionAudio(
+          convertedBlob,
+          `${clip.name || 'dubbing-clip'}-voice-converted.mp3`,
+        );
+        const convertedDuration = await getAudioDuration(convertedAudioUrl).catch(() => (
+          normalizePositiveNumber(clip.sourceAudioDuration, clip.duration)
+        ));
+        const latestClip = clipsRef.current.find(item => item.id === clipId) || clip;
+        const latestTrack = tracksRef.current.find(track => track.id === clip.trackId);
+        const latestVoiceId = latestTrack?.type === 'dubbing'
+          ? latestClip.voiceId || latestTrack.defaultVoiceId || DEFAULT_DUBBING_VOICE_ID
+          : undefined;
+        const voiceChangedDuringGeneration = latestVoiceId !== effectiveVoiceId;
+        const timingChangedDuringGeneration = getDubbingTimingSignature(latestClip) !== generationTimingSignature;
+        const nextAutoSpeed = calculateDubbingAutoSpeed(convertedDuration, latestClip.duration);
+        const cachedClip: TimelineClip = {
+          ...latestClip,
+          audioUrl: convertedAudioUrl,
+          audioSource: 'generated',
+          sourceAudioDuration: convertedDuration,
+          autoSpeed: nextAutoSpeed,
+          speed: normalizeManualSpeed(latestClip.speed),
+          voiceId: effectiveVoiceId,
+          voiceDirty: voiceChangedDuringGeneration,
+          timingDirty: timingChangedDuringGeneration,
+        };
+
+        setClips(prev => prev.map(c => {
+          if (c.id !== clipId) return c;
+          const didTimingChange = getDubbingTimingSignature(c) !== generationTimingSignature;
+          return {
+            ...c,
+            audioUrl: convertedAudioUrl,
+            audioSource: 'generated',
+            isGenerating: false,
+            sourceAudioDuration: convertedDuration,
+            autoSpeed: calculateDubbingAutoSpeed(convertedDuration, c.duration),
+            speed: normalizeManualSpeed(c.speed),
+            voiceId: effectiveVoiceId,
+            voiceDirty: voiceChangedDuringGeneration,
+            timingDirty: didTimingChange,
+          };
+        }));
+
+        invalidateTrackOutputs('dubbing');
+        replaceCachedClipAudio(
+          clipId,
+          convertedAudioUrl,
+          latestClip.volume,
+          getEffectiveClipSpeed(cachedClip),
+          latestClip.trackId,
+        );
+        setToast({
+          message: voiceChangedDuringGeneration
+            ? `“${clip.name}”已完成声音转换，但轨道声音在转换期间又发生变化，请再转换一次。`
+            : timingChangedDuringGeneration
+              ? `“${clip.name}”已完成声音转换，但台词/语种/时间在转换期间发生变化，请重新合成。`
+              : `“${clip.name}”已用新的轨道声音完成转换，已尽量保留原语气、语速和停顿。`,
+          type: voiceChangedDuringGeneration || timingChangedDuringGeneration ? 'info' : 'success',
+        });
+        setTimeout(() => {
+          setToast(current => current?.message.includes(clip.name) ? null : current);
+        }, 3500);
+        return;
+      }
 
       const res = await fetch('/api/video/generate-clip', {
         method: 'POST',
@@ -4527,6 +5081,10 @@ export default function VideoSoundtrack() {
           lipEndTime: clip.lipEndTime,
           lipSyncConfidence: clip.lipSyncConfidence,
           timingSource: clip.timingSource,
+          targetLanguage: isPassthroughDubbingLanguage(clip.targetLanguage) ? undefined : clip.targetLanguage,
+          voiceSource: voiceMetadata.voiceSource,
+          publicOwnerId: voiceMetadata.publicOwnerId,
+          voiceName: voiceMetadata.voiceName,
           qualityMode: getElevenLabsQualityMode(),
         })
       });
@@ -4622,7 +5180,7 @@ export default function VideoSoundtrack() {
         message: voiceChangedDuringGeneration
           ? `“${clip.name}”已完成合成，但轨道声音已在生成期间变更，请重新合成一次。`
           : timingChangedDuringGeneration
-            ? `“${clip.name}”已完成合成，但台词或时间在生成期间发生变化，请重新合成。`
+            ? `“${clip.name}”已完成合成，但台词/语种/时间在生成期间发生变化，请重新合成。`
             : durationReadFailed
               ? `“${clip.name}”已完成合成，但未能读取自然时长，请重新合成或手动微调。`
               : trackType === 'dubbing'
@@ -4936,6 +5494,61 @@ export default function VideoSoundtrack() {
     return new File([blob], fileName, { type: blob.type || 'audio/wav' });
   };
 
+  const extractAudioSubSegmentForConversion = async (
+    audioUrl: string,
+    sourceOffset: number,
+    duration: number,
+  ) => {
+    const response = await fetch('/api/video/extract-audio-clip', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        audioUrl,
+        sourceOffset: Number(Math.max(0, sourceOffset).toFixed(3)),
+        duration: Number(Math.max(0.05, duration).toFixed(3)),
+        speed: 1,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.error || '抽取人声小段失败，请稍后重试。');
+    }
+    if (!data.audioUrl) {
+      throw new Error('抽取人声小段后没有返回音频地址。');
+    }
+    return String(data.audioUrl);
+  };
+
+  const uploadGeneratedConversionAudio = async (audioBlob: Blob, fileName: string) => {
+    const safeFileName = fileName
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+      .replace(/\s+/g, '_')
+      .slice(0, 120) || `converted_dubbing_${Date.now()}.mp3`;
+    const formData = new FormData();
+    formData.append('file', new File([audioBlob], safeFileName, {
+      type: audioBlob.type || 'audio/mpeg',
+    }));
+    const response = await fetch('/api/sfx/upload', {
+      method: 'POST',
+      body: formData,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.url) {
+      throw new Error(data.error || '保存声音转换音频失败。');
+    }
+    return String(data.url);
+  };
+
+  const getVoiceGenerationMetadata = (voiceId?: string) => {
+    const voice = displayVoices.find(item => item.id === voiceId);
+    return {
+      voice,
+      voiceSource: voice?.source,
+      publicOwnerId: voice?.publicOwnerId,
+      voiceName: voice?.name,
+    };
+  };
+
   const handleLipFriendlyRewriteWorkflow = async () => {
     if (subtitleSegmentStatus === 'running') return;
     const sourceClip = selectedClipId
@@ -5021,6 +5634,246 @@ export default function VideoSoundtrack() {
 
       setSubtitleSegmentProgress(78);
       setSubtitleSegmentStage('正在把当前片段台词写入配音轨...');
+
+      setSubtitleSegmentProgress(70);
+      setSubtitleSegmentStage('正在检测原素材里真正有人声的时间段，静音处会保留为空白...');
+      const sourceClipDuration = Number(Math.max(0.05, sourceClip.duration).toFixed(3));
+      let speechSegments = extractSpeechSegmentsFromTranscription(
+        transcription,
+        recognizedText,
+        sourceClipDuration,
+      );
+      let speechTimingSource = speechSegments[0]?.timingSource || 'stt-word-timing';
+
+      if (speechSegments.length === 0) {
+        speechSegments = await detectSpeechSegmentsFromAudioFile(
+          selectedClipAudioFile,
+          recognizedText,
+          sourceClipDuration,
+        );
+        speechTimingSource = speechSegments[0]?.timingSource || 'audio-silence-detection';
+      }
+
+      if (subtitleSegmentRunRef.current !== runId) return;
+
+      if (speechSegments.length === 0) {
+        throw new Error('当前选中音频片段里没有检测到清晰的人声区间，请换一段人声更明显的音频再试。');
+      }
+
+      setSubtitleSegmentProgress(78);
+      setSubtitleSegmentStage(`正在按 ${speechSegments.length} 段有人声区间写入配音轨，静音区间保持空白...`);
+
+      const existingTargetClipsForSegments = clipsRef.current.filter(clip => clip.trackId === targetTrack.id);
+      const sourceTimelineStart = Number(Math.min(safeDuration, Math.max(0, sourceClip.startTime)).toFixed(3));
+      const sourceTimelineEnd = Number(Math.min(safeDuration, sourceTimelineStart + sourceClipDuration).toFixed(3));
+      const sourceSubtitlePrefix = `selected-audio-${sourceClip.id}`;
+      const assignedVoiceIdForSegments = matchedVoiceId || targetTrack.defaultVoiceId || DEFAULT_DUBBING_VOICE_ID;
+      if (!assignedVoiceIdForSegments) {
+        throw new Error('还没有可用的目标声音：请先在配音轨选择一个声音，或先使用“匹配相近声音”。');
+      }
+      const assignedVoiceMetadataForSegments = getVoiceGenerationMetadata(assignedVoiceIdForSegments);
+      const assignedPerformancePromptForSegments = performancePrompt.trim()
+        ? `语气情绪：${performancePrompt.trim()}`
+        : '语气情绪：参考当前选中音频片段的原始语气、语速、停顿和情绪自然演绎。';
+
+      const convertedSegmentAudioById = new Map<string, {
+        audioUrl: string;
+        sourceAudioDuration: number;
+        autoSpeed: number;
+      }>();
+
+      for (let index = 0; index < speechSegments.length; index += 1) {
+        if (subtitleSegmentRunRef.current !== runId) return;
+        const segment = speechSegments[index];
+        const segmentDuration = Number(Math.max(0.05, segment.end - segment.start).toFixed(3));
+        const segmentSubtitleId = `${sourceSubtitlePrefix}-${index + 1}`;
+        const segmentStartTime = Number(Math.min(sourceTimelineEnd, sourceTimelineStart + segment.start).toFixed(3));
+        const reusableConvertedClip = existingTargetClipsForSegments.find(clip => clip.subtitleId === segmentSubtitleId);
+        const reusableConvertedAudioSource = reusableConvertedClip
+          ? resolveClipAudioSource(reusableConvertedClip)
+          : undefined;
+        if (
+          reusableConvertedClip?.audioUrl
+          && reusableConvertedAudioSource === 'generated'
+          && normalizeSpeechTimingText(reusableConvertedClip.text) === segment.text
+          && (reusableConvertedClip.voiceId || DEFAULT_DUBBING_VOICE_ID) === assignedVoiceIdForSegments
+          && Math.abs((normalizeOptionalTime(reusableConvertedClip.startTime) ?? 0) - segmentStartTime) < 0.05
+          && Math.abs(normalizePositiveNumber(reusableConvertedClip.duration, 0) - segmentDuration) < 0.05
+        ) {
+          convertedSegmentAudioById.set(segmentSubtitleId, {
+            audioUrl: reusableConvertedClip.audioUrl,
+            sourceAudioDuration: reusableConvertedClip.sourceAudioDuration || segmentDuration,
+            autoSpeed: reusableConvertedClip.autoSpeed || 1,
+          });
+          continue;
+        }
+        const conversionProgress = 78 + Math.round((index / Math.max(1, speechSegments.length)) * 14);
+        setSubtitleSegmentProgress(conversionProgress);
+        setSubtitleSegmentStage(`正在转换第 ${index + 1}/${speechSegments.length} 段人声：保留原语气、语速和停顿，只替换音色...`);
+
+        const segmentAudioUrl = await extractAudioSubSegmentForConversion(
+          selectedClipAudioUrl,
+          segment.start,
+          segmentDuration,
+        );
+        const segmentAudioFile = await fetchAudioUrlAsFile(
+          segmentAudioUrl,
+          `voice-conversion-source-${sourceClip.id}-${index + 1}.wav`,
+        );
+        const convertedBlob = await generateSpeechToSpeech(
+          segmentAudioFile,
+          assignedVoiceIdForSegments,
+          0.45,
+          0.82,
+          0.08,
+          {
+            voiceSource: assignedVoiceMetadataForSegments.voiceSource,
+            publicOwnerId: assignedVoiceMetadataForSegments.publicOwnerId,
+            voiceName: assignedVoiceMetadataForSegments.voiceName,
+          },
+        );
+        const convertedAudioUrl = await uploadGeneratedConversionAudio(
+          convertedBlob,
+          `${sourceClip.name || 'selected-clip'}-converted-${index + 1}.mp3`,
+        );
+        const convertedDuration = await getAudioDuration(convertedAudioUrl).catch(() => segmentDuration);
+        convertedSegmentAudioById.set(segmentSubtitleId, {
+          audioUrl: convertedAudioUrl,
+          sourceAudioDuration: convertedDuration,
+          autoSpeed: calculateDubbingAutoSpeed(convertedDuration, segmentDuration),
+        });
+      }
+
+      const sourceRelatedTargetClipIds = new Set<string>(
+        existingTargetClipsForSegments
+          .filter(clip => (
+            clip.subtitleId === sourceSubtitlePrefix
+            || String(clip.subtitleId || '').startsWith(`${sourceSubtitlePrefix}-`)
+          ))
+          .map(clip => clip.id),
+      );
+
+      const subtitleClips = speechSegments.map((segment, index) => {
+        const segmentStartTime = Number(Math.min(sourceTimelineEnd, sourceTimelineStart + segment.start).toFixed(3));
+        const segmentEndTime = Number(Math.min(sourceTimelineEnd, sourceTimelineStart + segment.end).toFixed(3));
+        const segmentDuration = Number(Math.max(0.05, segmentEndTime - segmentStartTime).toFixed(3));
+        const segmentSubtitleId = `${sourceSubtitlePrefix}-${index + 1}`;
+        const reusableSegmentClip = existingTargetClipsForSegments.find(clip => clip.subtitleId === segmentSubtitleId)
+          || existingTargetClipsForSegments.find(clip => {
+            if (sourceRelatedTargetClipIds.has(clip.id)) return false;
+            const clipStart = normalizeOptionalTime(clip.startTime) ?? 0;
+            const clipDuration = normalizePositiveNumber(clip.duration, 0);
+            const clipEnd = clipStart + clipDuration;
+            const overlap = Math.max(0, Math.min(segmentEndTime, clipEnd) - Math.max(segmentStartTime, clipStart));
+            const overlapRatio = overlap / Math.max(segmentDuration, clipDuration, 0.001);
+            return overlapRatio >= 0.55;
+          });
+        if (reusableSegmentClip?.id) sourceRelatedTargetClipIds.add(reusableSegmentClip.id);
+
+        const reusableAudioSource = reusableSegmentClip ? resolveClipAudioSource(reusableSegmentClip) : undefined;
+        const shouldKeepReusableSegmentAudio = Boolean(
+          reusableSegmentClip?.audioUrl
+          && reusableAudioSource === 'generated'
+          && normalizeSpeechTimingText(reusableSegmentClip.text) === segment.text
+          && (reusableSegmentClip.voiceId || DEFAULT_DUBBING_VOICE_ID) === assignedVoiceIdForSegments
+          && Math.abs((normalizeOptionalTime(reusableSegmentClip.startTime) ?? 0) - segmentStartTime) < 0.05
+          && Math.abs(normalizePositiveNumber(reusableSegmentClip.duration, 0) - segmentDuration) < 0.05
+        );
+        const convertedSegmentAudio = convertedSegmentAudioById.get(segmentSubtitleId);
+
+        return {
+          ...reusableSegmentClip,
+          id: reusableSegmentClip?.id || `clip-selected-dubbing-${sourceClip.id}-${index + 1}-${Date.now().toString(36)}`,
+          trackId: targetTrack.id,
+          name: `${sourceClip.name || '选中片段'} 配音 ${index + 1}`,
+          prompt: `${assignedPerformancePromptForSegments} 只重配这一句，保持原始语速、停顿和时间长度。`,
+          text: segment.text,
+          voiceId: assignedVoiceIdForSegments,
+          startTime: segmentStartTime,
+          duration: segmentDuration,
+          volume: reusableSegmentClip?.volume ?? DEFAULT_VOLUME_FADER,
+          origin: 'ai' as const,
+          isGenerating: false,
+          error: undefined,
+          speed: normalizeManualSpeed(reusableSegmentClip?.speed),
+          autoSpeed: normalizeAutoSpeed(
+            convertedSegmentAudio?.autoSpeed
+            ?? reusableSegmentClip?.autoSpeed,
+          ),
+          sourceAudioDuration: convertedSegmentAudio?.sourceAudioDuration
+            ?? reusableSegmentClip?.sourceAudioDuration
+            ?? segmentDuration,
+          audioUrl: convertedSegmentAudio?.audioUrl
+            ?? (shouldKeepReusableSegmentAudio ? reusableSegmentClip?.audioUrl : undefined),
+          audioSource: convertedSegmentAudio?.audioUrl
+            ? 'generated'
+            : (shouldKeepReusableSegmentAudio ? reusableSegmentClip?.audioSource : undefined),
+          speaker: reusableSegmentClip?.speaker || sourceClip.speaker || `selected-clip-${index + 1}`,
+          subtitleId: segmentSubtitleId,
+          subtitleStartTime: segmentStartTime,
+          subtitleEndTime: segmentEndTime,
+          lipStartTime: segmentStartTime,
+          lipEndTime: segmentEndTime,
+          lipSyncConfidence: normalizeUnitVolume(sourceClip.lipSyncConfidence, 0),
+          timingSource: segment.timingSource,
+          timingDirty: false,
+          voiceDirty: Boolean(
+            shouldKeepReusableSegmentAudio
+            && (reusableSegmentClip?.voiceId || DEFAULT_DUBBING_VOICE_ID) !== assignedVoiceIdForSegments
+          ),
+        } satisfies TimelineClip;
+      });
+
+      setSubtitleSegmentProgress(88);
+      const subtitleClipIds = new Set(subtitleClips.map(clip => clip.id));
+      sourceRelatedTargetClipIds.forEach((clipId) => {
+        if (subtitleClipIds.has(clipId)) return;
+        const cachedAudio = audioInstancesRef.current[clipId];
+        if (cachedAudio) {
+          cachedAudio.pause();
+          disconnectClipAudioRouting(clipId);
+          delete audioInstancesRef.current[clipId];
+        }
+      });
+
+      const nextSegmentedClips = [
+        ...clipsRef.current.filter(clip => (
+          !sourceRelatedTargetClipIds.has(clip.id)
+          && !subtitleClipIds.has(clip.id)
+        )),
+        ...subtitleClips,
+      ].sort((left, right) => left.startTime - right.startTime);
+      pushUndoSnapshot('按有人声区间转换选中音频片段');
+      clipsRef.current = nextSegmentedClips;
+      setClips(nextSegmentedClips);
+      subtitleClips.forEach((subtitleClip) => {
+        if (subtitleClip.audioUrl) {
+          replaceCachedClipAudio(
+            subtitleClip.id,
+            subtitleClip.audioUrl,
+            subtitleClip.volume,
+            getEffectiveClipSpeed(subtitleClip),
+            subtitleClip.trackId,
+          );
+        }
+      });
+      setSelectedTrackId(null);
+      setSelectedClipId(subtitleClips[0]?.id || null);
+      setSelectedClipIds(subtitleClips.map(clip => clip.id));
+
+      const timingLabel = speechTimingSource === 'audio-silence-detection'
+        ? '本地静音检测'
+        : '转写时间戳';
+      setSubtitleSegmentCount(subtitleClips.length);
+      setSubtitleSegmentProgress(100);
+      setSubtitleSegmentStatus('completed');
+      setSubtitleSegmentStage(`已根据原素材有人声区间转换 ${subtitleClips.length} 个配音片段，并写入“${targetTrack.name}”轨；无声区间已保留为空白。时间来源：${timingLabel}。${voiceMatchNote}`);
+      setToast({
+        message: `已转换 ${subtitleClips.length} 个配音片段；原素材无声位置保持空白。${voiceMatchNote}`,
+        type: 'success',
+      });
+      window.setTimeout(() => setToast(null), 4_000);
+      return;
 
       const existingTargetClips = clipsRef.current.filter(clip => clip.trackId === targetTrack.id);
       const startTime = Number(Math.min(safeDuration, Math.max(0, sourceClip.startTime)).toFixed(3));
@@ -5148,7 +6001,7 @@ export default function VideoSoundtrack() {
         && isTrackExportable(clip.trackId);
     });
     if (staleDubbingClips.length > 0) {
-      setError(`有 ${staleDubbingClips.length} 个配音片段的声音、台词或时间已变化，请先选中对应片段并重新合成。`);
+      setError(`有 ${staleDubbingClips.length} 个配音片段的声音、台词/语种/时间已变化，请先选中对应片段并重新合成。`);
       return;
     }
 
@@ -5233,7 +6086,7 @@ export default function VideoSoundtrack() {
     });
     if (staleDubbingClips.length > 0) {
       setToast({
-        message: `有 ${staleDubbingClips.length} 个配音片段的声音、台词或时间已变化，请先重新合成。`,
+        message: `有 ${staleDubbingClips.length} 个配音片段的声音、台词/语种/时间已变化，请先重新合成。`,
         type: 'info',
       });
       window.setTimeout(() => setToast(null), 4_000);
@@ -5458,6 +6311,7 @@ export default function VideoSoundtrack() {
     const isDubbingClip = targetTrack?.type === 'dubbing';
     const timingFields: Array<keyof TimelineClip> = [
       'text',
+      'targetLanguage',
       'startTime',
       'duration',
       'subtitleStartTime',
@@ -6910,10 +7764,17 @@ export default function VideoSoundtrack() {
                 ) : videoLoadFailed ? (
                   <div className="absolute inset-0 bg-slate-950/95 flex flex-col items-center justify-center p-6 text-center z-20">
                     <AlertCircle className="w-12 h-12 text-amber-500 mb-3" />
-                    <h3 className="text-sm font-bold text-slate-200 mb-1">视频无法加载播放</h3>
+                    <h3 className="text-sm font-bold text-slate-200 mb-1">
+                      {isPreparingVideoPreview ? '正在准备兼容预览' : '视频无法加载播放'}
+                    </h3>
                     <p className="text-xs text-slate-400 max-w-sm mb-4">
-                      这可能是因为本地临时缓存已失效、浏览器被清理、或服务器已重启。
+                      {isPreparingVideoPreview
+                        ? '正在把服务器上的视频转换为浏览器更稳定支持的 H.264 预览版本。'
+                        : '这可能是因为本地临时缓存已失效、浏览器被清理、或服务器已重启。'}
                     </p>
+                    {isPreparingVideoPreview && (
+                      <Loader2 className="w-5 h-5 text-indigo-300 animate-spin mb-4" />
+                    )}
                     <label className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs px-4 py-2 rounded-xl shadow-lg shadow-indigo-600/20 cursor-pointer transition-colors">
                       <Upload className="w-4 h-4" />
                       <span>重新关联并再次上传本地视频</span>
@@ -6939,6 +7800,9 @@ export default function VideoSoundtrack() {
                 {/* 视频浮动控制条 (已去掉播放按键，仅显示进度时间) */}
                 {videoFile && !videoLoadFailed && (
                   <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-slate-950/90 border border-slate-800/80 px-4 py-1.5 rounded-full shadow-2xl">
+                    {isPreparingVideoPreview && (
+                      <Loader2 className="w-3 h-3 animate-spin text-indigo-300" />
+                    )}
                     <div className="text-xs font-mono text-slate-300 select-none">
                       {currentTime.toFixed(2)}s / {safeDuration.toFixed(2)}s
                     </div>
@@ -7538,12 +8402,27 @@ export default function VideoSoundtrack() {
                             className="w-full h-16 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 resize-none custom-scrollbar"
                           />
                         </div>
+                        <div>
+                          <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">目标语种</label>
+                          <select
+                            value={selectedClip.targetLanguage || 'source'}
+                            onChange={(e) => updateClipField(selectedClip.id, 'targetLanguage', e.target.value)}
+                            className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+                          >
+                            {DUBBING_TARGET_LANGUAGE_OPTIONS.map(option => (
+                              <option key={option.value} value={option.value}>{option.label}</option>
+                            ))}
+                          </select>
+                          <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
+                            保持“原语言 / 自动”时只按当前台词生成；选择其他语种后，重新合成会先把台词翻译到目标语种再生成。
+                          </p>
+                        </div>
                         <div className="rounded-xl border border-cyan-500/25 bg-cyan-950/20 p-3">
                           <div className="flex items-start justify-between gap-3">
                             <div>
-                              <p className="text-[10px] font-bold uppercase tracking-wider text-cyan-200">台词识别 / 自动配音轨</p>
+                              <p className="text-[10px] font-bold uppercase tracking-wider text-cyan-200">保留语气 / 声音转换轨</p>
                               <p className="mt-1 text-[10px] leading-relaxed text-slate-400">
-                                识别台词、语气提示词、匹配相似声音，并按时间线生成配音片段。
+                                自动检测原素材有人声的位置，匹配相近声音后逐段转换；静音处保持空白，尽量保留原语速、停顿和情绪。
                               </p>
                             </div>
                             <Gauge className="h-5 w-5 shrink-0 text-cyan-300" />
@@ -7559,7 +8438,7 @@ export default function VideoSoundtrack() {
                             ) : (
                               <Sparkles className="h-3.5 w-3.5" />
                             )}
-                            <span>{subtitleSegmentStatus === 'running' ? '正在生成配音轨...' : '识别台词并生成配音轨'}</span>
+                            <span>{subtitleSegmentStatus === 'running' ? '正在转换声音...' : '匹配声音并转换配音轨'}</span>
                           </button>
                           {subtitleSegmentStatus !== 'idle' && (
                             <div className={`mt-3 rounded-lg border px-2.5 py-2 ${
@@ -7629,6 +8508,7 @@ export default function VideoSoundtrack() {
                           const inheritedVoiceId = dubbingTrack?.defaultVoiceId || DEFAULT_DUBBING_VOICE_ID;
                           const effectiveVoiceId = selectedClip.voiceId || inheritedVoiceId;
                           const effectiveVoice = displayVoices.find(voice => voice.id === effectiveVoiceId);
+                          const inheritedVoice = displayVoices.find(voice => voice.id === inheritedVoiceId);
                           const hasClipMatchedVoice = Boolean(selectedClip.voiceId && selectedClip.voiceId !== inheritedVoiceId);
                           const similarVoiceOptions = activeSimilarVoiceRecommendations
                             .map(recommendation => {
@@ -7666,6 +8546,16 @@ export default function VideoSoundtrack() {
                                 <div className="mt-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-2 text-[10px] leading-relaxed text-amber-300">
                                   轨道声音已变更，请重新合成此片段后再导出。
                                 </div>
+                              )}
+                              {hasClipMatchedVoice && inheritedVoiceId && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleClipVoiceChange(selectedClip.id, inheritedVoiceId)}
+                                  className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg border border-purple-500/30 bg-purple-500/10 py-2 text-[10px] font-bold text-purple-200 transition-colors hover:bg-purple-500/20 hover:text-white"
+                                >
+                                  <RotateCcw className="h-3.5 w-3.5" />
+                                  <span>改用轨道声音：{inheritedVoice?.name || '轨道默认声音'}</span>
+                                </button>
                               )}
                               {similarVoiceOptions.length > 0 && (
                                 <div className="mt-3 space-y-2 rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-2">
@@ -7800,7 +8690,7 @@ export default function VideoSoundtrack() {
 
                               {selectedClip.timingDirty ? (
                                 <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-2 text-[10px] leading-relaxed text-amber-300">
-                                  台词或时间已发生变化，需要重新合成后才能混音或导出。
+                                  台词/语种/时间已发生变化，需要重新合成后才能混音或导出。
                                 </div>
                               ) : isAtAutoLimit ? (
                                 <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-2 text-[10px] leading-relaxed text-amber-300">
@@ -7931,8 +8821,8 @@ export default function VideoSoundtrack() {
                                 ? '视频原声已关联'
                                 : selectedClip.voiceDirty || selectedClip.timingDirty
                                 ? selectedClip.timingDirty
-                                  ? '台词或时间已变化，等待重新合成'
-                                  : '等待应用新的轨道声音'
+                                  ? '台词/语种/时间已变化，等待重新合成'
+                                  : '等待用新声音转换'
                                 : resolveClipAudioSource(selectedClip) === 'uploaded'
                                   ? '本地音频已关联'
                                   : '音频已成功生成'}
@@ -7957,9 +8847,9 @@ export default function VideoSoundtrack() {
                                 {selectedClip.isGenerating
                                   ? '合成音轨中...'
                                   : selectedClip.timingDirty
-                                    ? '按新台词和时间重新合成'
+                                    ? '按新台词 / 目标语种重新合成'
                                     : selectedClip.voiceDirty
-                                      ? '应用轨道声音并重新合成'
+                                      ? '用新声音转换此片段'
                                     : '重新合成此片段'}
                               </span>
                             </button>

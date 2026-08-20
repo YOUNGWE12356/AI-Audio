@@ -61,13 +61,21 @@ interface FactoryLoudnessInfo {
 
 type FactoryAudioFormat = 'mp3' | 'wav' | 'ogg' | 'flac' | 'aac' | 'm4a';
 
-type RenameRuleType = 'remove' | 'replace';
+type RenameRuleType = 'remove' | 'replace' | 'prefix' | 'suffix' | 'number' | 'case' | 'removeRange' | 'regexReplace';
+type RenameCaseMode = 'lower' | 'upper' | 'title';
 
 interface RenameOperation {
   id: string;
   type: RenameRuleType;
   findText: string;
   replaceText: string;
+  insertText?: string;
+  numberStart?: number;
+  numberPadding?: number;
+  numberSeparator?: string;
+  caseMode?: RenameCaseMode;
+  rangeStart?: number;
+  rangeCount?: number;
 }
 
 interface RenameRules {
@@ -627,6 +635,7 @@ export default function AudioTools() {
   // ==========================================================
   const [renameFiles, setRenameFiles] = useState<File[]>([]);
   const [renameRules, setRenameRules] = useState<RenameRules>(DEFAULT_RENAME_RULES);
+  const [renameRuleHistory, setRenameRuleHistory] = useState<RenameRules[]>([]);
   const [renameManualNames, setRenameManualNames] = useState<Record<string, string>>({});
   const [renameDragActive, setRenameDragActive] = useState<boolean>(false);
   const [renameStatus, setRenameStatus] = useState<string>('');
@@ -967,39 +976,123 @@ export default function AudioTools() {
     replaceText: '',
   });
 
-  const addRenameOperation = React.useCallback((type: RenameRuleType) => {
-    setRenameRules((prev) => ({
-      ...prev,
-      operations: [...prev.operations, createRenameOperation(type)],
-    }));
+  const createEnhancedRenameOperation = (type: RenameRuleType): RenameOperation => ({
+    ...createRenameOperation(type),
+    insertText: type === 'prefix' ? 'SFX_' : type === 'suffix' ? '_v1' : '',
+    numberStart: 1,
+    numberPadding: 3,
+    numberSeparator: '_',
+    caseMode: 'lower',
+    rangeStart: 1,
+    rangeCount: 1,
+  });
+
+  const getEnhancedRenameOperationLabel = (operation: RenameOperation) => {
+    if (operation.type === 'remove') return `删除「${operation.findText || '未填写'}」`;
+    if (operation.type === 'replace') return `把「${operation.findText || '未填写'}」替换成「${operation.replaceText || '空'}」`;
+    if (operation.type === 'prefix') return `添加前缀「${operation.insertText || '未填写'}」`;
+    if (operation.type === 'suffix') return `添加后缀「${operation.insertText || '未填写'}」`;
+    if (operation.type === 'number') return `自动编号 ${operation.numberSeparator || '_'}${String(operation.numberStart || 1).padStart(operation.numberPadding || 3, '0')}`;
+    if (operation.type === 'case') return `大小写：${operation.caseMode === 'upper' ? '全部大写' : operation.caseMode === 'title' ? '首字母大写' : '全部小写'}`;
+    if (operation.type === 'removeRange') return `删除第 ${operation.rangeStart || 1} 位起 ${operation.rangeCount || 1} 个字符`;
+    if (operation.type === 'regexReplace') return `正则替换 /${operation.findText || 'pattern'}/`;
+    return '命名规则';
+  };
+
+  const titleCaseRenameText = (value: string): string => (
+    value.replace(/(^|[\s_\-]+)([\p{L}\p{N}])/gu, (match, separator, char) => `${separator}${String(char).toUpperCase()}`)
+  );
+
+  const commitRenameRules = React.useCallback((updater: (prev: RenameRules) => RenameRules) => {
+    setRenameRules((prev) => {
+      const next = updater(prev);
+      setRenameRuleHistory((history) => [prev, ...history].slice(0, 20));
+      return next;
+    });
   }, []);
 
+  const undoRenameRules = React.useCallback(() => {
+    setRenameRuleHistory((history) => {
+      const [previous, ...rest] = history;
+      if (!previous) return history;
+      setRenameRules(previous);
+      setRenameStatus('已撤回上一次命名规则修改，右侧预览已同步更新。');
+      return rest;
+    });
+  }, []);
+
+  const addRenameOperation = React.useCallback((type: RenameRuleType) => {
+    commitRenameRules((prev) => ({
+      ...prev,
+      operations: [...prev.operations, createEnhancedRenameOperation(type)],
+    }));
+  }, [commitRenameRules]);
+
   const updateRenameOperation = React.useCallback((id: string, patch: Partial<RenameOperation>) => {
-    setRenameRules((prev) => ({
+    commitRenameRules((prev) => ({
       ...prev,
       operations: prev.operations.map((operation) => (
         operation.id === id ? { ...operation, ...patch } : operation
       )),
     }));
-  }, []);
+  }, [commitRenameRules]);
 
   const removeRenameOperation = React.useCallback((id: string) => {
-    setRenameRules((prev) => ({
+    commitRenameRules((prev) => ({
       ...prev,
       operations: prev.operations.filter((operation) => operation.id !== id),
     }));
-  }, []);
+  }, [commitRenameRules]);
 
-  const applyRenameRulesToBase = (sourceBase: string): string => {
+  const applyRenameRulesToBase = (sourceBase: string, fileIndex: number): string => {
     let processedBase = sourceBase;
 
     renameRules.operations.forEach((operation) => {
-      if (!operation.findText) return;
-      const pattern = new RegExp(escapeRegExp(operation.findText), 'g');
-      processedBase = processedBase.replace(
-        pattern,
-        operation.type === 'remove' ? '' : operation.replaceText,
-      );
+      if (operation.type === 'remove') {
+        if (!operation.findText) return;
+        processedBase = processedBase.replace(new RegExp(escapeRegExp(operation.findText), 'g'), '');
+        return;
+      }
+      if (operation.type === 'replace') {
+        if (!operation.findText) return;
+        processedBase = processedBase.replace(new RegExp(escapeRegExp(operation.findText), 'g'), operation.replaceText);
+        return;
+      }
+      if (operation.type === 'regexReplace') {
+        if (!operation.findText) return;
+        try {
+          processedBase = processedBase.replace(new RegExp(operation.findText, 'g'), operation.replaceText);
+        } catch {
+          // Invalid regex is ignored so preview/export never crashes.
+        }
+        return;
+      }
+      if (operation.type === 'prefix') {
+        processedBase = `${operation.insertText || ''}${processedBase}`;
+        return;
+      }
+      if (operation.type === 'suffix') {
+        processedBase = `${processedBase}${operation.insertText || ''}`;
+        return;
+      }
+      if (operation.type === 'number') {
+        const start = Number.isFinite(operation.numberStart) ? Number(operation.numberStart) : 1;
+        const padding = Math.max(1, Math.min(8, Number(operation.numberPadding) || 3));
+        const separator = operation.numberSeparator ?? '_';
+        processedBase = `${processedBase}${separator}${String(start + fileIndex).padStart(padding, '0')}`;
+        return;
+      }
+      if (operation.type === 'case') {
+        if (operation.caseMode === 'upper') processedBase = processedBase.toUpperCase();
+        else if (operation.caseMode === 'title') processedBase = titleCaseRenameText(processedBase.toLowerCase());
+        else processedBase = processedBase.toLowerCase();
+        return;
+      }
+      if (operation.type === 'removeRange') {
+        const start = Math.max(1, Number(operation.rangeStart) || 1) - 1;
+        const count = Math.max(1, Number(operation.rangeCount) || 1);
+        processedBase = `${processedBase.slice(0, start)}${processedBase.slice(start + count)}`;
+      }
     });
 
     return renameRules.normalizeFileName
@@ -1056,7 +1149,7 @@ export default function AudioTools() {
 
       const { base, extension } = splitFileName(sourceName);
       const manualName = renameManualNames[id]?.trim();
-      let outputName = manualName || `${applyRenameRulesToBase(base)}${extension}`;
+      let outputName = manualName || `${applyRenameRulesToBase(base, renameFiles.indexOf(file))}${extension}`;
       if (manualName && !splitFileName(manualName).extension) outputName = `${manualName}${extension}`;
       outputName = sanitizeArchiveName(outputName);
 
@@ -1558,8 +1651,9 @@ export default function AudioTools() {
                   <button
                     type="button"
                     onClick={() => {
-                      setRenameRules(DEFAULT_RENAME_RULES);
+                      commitRenameRules(() => DEFAULT_RENAME_RULES);
                       setRenameManualNames({});
+                      setRenameStatus('已重置规则，右侧实时预览已恢复基础清理结果。');
                     }}
                     className="shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-1 text-[10px] font-bold text-slate-500 hover:text-emerald-700"
                   >
@@ -1584,6 +1678,26 @@ export default function AudioTools() {
                   </button>
                 </div>
 
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { type: 'prefix' as const, label: '+ 前缀', className: 'border-indigo-100 bg-indigo-50 text-indigo-700 hover:border-indigo-200 hover:bg-indigo-100' },
+                    { type: 'suffix' as const, label: '+ 后缀', className: 'border-violet-100 bg-violet-50 text-violet-700 hover:border-violet-200 hover:bg-violet-100' },
+                    { type: 'number' as const, label: '+ 自动编号', className: 'border-amber-100 bg-amber-50 text-amber-700 hover:border-amber-200 hover:bg-amber-100' },
+                    { type: 'case' as const, label: '+ 大小写', className: 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100' },
+                    { type: 'removeRange' as const, label: '+ 删除位置', className: 'border-rose-100 bg-rose-50 text-rose-700 hover:border-rose-200 hover:bg-rose-100' },
+                    { type: 'regexReplace' as const, label: '+ 正则替换', className: 'border-cyan-100 bg-cyan-50 text-cyan-700 hover:border-cyan-200 hover:bg-cyan-100' },
+                  ].map((option) => (
+                    <button
+                      key={option.type}
+                      type="button"
+                      onClick={() => addRenameOperation(option.type)}
+                      className={`rounded-full border px-3 py-1.5 text-[10px] font-black ${option.className}`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+
                 {renameRules.operations.length === 0 ? (
                   <div className="rounded-2xl border border-dashed border-slate-200 bg-white px-4 py-5 text-center">
                     <p className="text-[11px] font-black text-slate-700">暂无命名规则</p>
@@ -1604,7 +1718,7 @@ export default function AudioTools() {
                               {operationIndex + 1}
                             </span>
                             <p className="truncate text-[11px] font-bold text-slate-700">
-                              {getRenameOperationLabel(operation)}
+                              {getEnhancedRenameOperationLabel(operation)}
                             </p>
                           </div>
                           <button
@@ -1629,26 +1743,38 @@ export default function AudioTools() {
                             >
                               <option value="remove">删除文本</option>
                               <option value="replace">替换文本</option>
+                              <option value="prefix">添加前缀</option>
+                              <option value="suffix">添加后缀</option>
+                              <option value="number">自动编号</option>
+                              <option value="case">大小写转换</option>
+                              <option value="removeRange">删除指定位置</option>
+                              <option value="regexReplace">正则替换</option>
                             </select>
                           </label>
 
-                          <label className="space-y-1.5">
-                            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">查找内容</span>
-                            <input
-                              value={operation.findText}
-                              onChange={(e) => updateRenameOperation(operation.id, { findText: e.target.value })}
-                              placeholder={operation.type === 'remove' ? '要删除的文字/符号，例如：copy' : '要查找的文字/符号，例如：空格'}
-                              className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
-                            />
-                          </label>
+                          {operation.type === 'remove' || operation.type === 'replace' || operation.type === 'regexReplace' ? (
+                            <label className="space-y-1.5">
+                              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
+                                {operation.type === 'regexReplace' ? '正则表达式' : '查找内容'}
+                              </span>
+                              <input
+                                value={operation.findText}
+                                onChange={(e) => updateRenameOperation(operation.id, { findText: e.target.value })}
+                                placeholder={operation.type === 'regexReplace' ? '例如：\\s+|copy' : operation.type === 'remove' ? '要删除的文字/符号，例如：copy' : '要查找的文字/符号，例如：空格'}
+                                className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
+                              />
+                            </label>
+                          ) : (
+                            <div className="hidden md:block" />
+                          )}
 
-                          {operation.type === 'replace' ? (
+                          {operation.type === 'replace' || operation.type === 'regexReplace' ? (
                             <label className="space-y-1.5">
                               <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">替换成</span>
                               <input
                                 value={operation.replaceText}
                                 onChange={(e) => updateRenameOperation(operation.id, { replaceText: e.target.value })}
-                                placeholder="替换成，例如：_"
+                                placeholder={operation.type === 'regexReplace' ? '正则替换结果，例如：_' : '替换成，例如：_'}
                                 className="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all"
                               />
                             </label>
@@ -1656,6 +1782,94 @@ export default function AudioTools() {
                             <div className="hidden md:block" />
                           )}
                         </div>
+
+                        {(operation.type === 'prefix' || operation.type === 'suffix') && (
+                          <label className="block space-y-1.5">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                              {operation.type === 'prefix' ? '前缀内容' : '后缀内容'}
+                            </span>
+                            <input
+                              value={operation.insertText || ''}
+                              onChange={(e) => updateRenameOperation(operation.id, { insertText: e.target.value })}
+                              placeholder={operation.type === 'prefix' ? '例如：SFX_' : '例如：_v1'}
+                              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none transition-all focus:ring-1 focus:ring-emerald-500"
+                            />
+                          </label>
+                        )}
+
+                        {operation.type === 'number' && (
+                          <div className="grid grid-cols-3 gap-3">
+                            <label className="space-y-1.5">
+                              <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-500">起始编号</span>
+                              <input
+                                type="number"
+                                value={operation.numberStart ?? 1}
+                                onChange={(e) => updateRenameOperation(operation.id, { numberStart: Number(e.target.value) || 1 })}
+                                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none transition-all focus:ring-1 focus:ring-emerald-500"
+                              />
+                            </label>
+                            <label className="space-y-1.5">
+                              <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-500">编号位数</span>
+                              <input
+                                type="number"
+                                min={1}
+                                max={8}
+                                value={operation.numberPadding ?? 3}
+                                onChange={(e) => updateRenameOperation(operation.id, { numberPadding: Number(e.target.value) || 3 })}
+                                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none transition-all focus:ring-1 focus:ring-emerald-500"
+                              />
+                            </label>
+                            <label className="space-y-1.5">
+                              <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-500">分隔符</span>
+                              <input
+                                value={operation.numberSeparator ?? '_'}
+                                onChange={(e) => updateRenameOperation(operation.id, { numberSeparator: e.target.value })}
+                                placeholder="_"
+                                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none transition-all focus:ring-1 focus:ring-emerald-500"
+                              />
+                            </label>
+                          </div>
+                        )}
+
+                        {operation.type === 'case' && (
+                          <label className="block space-y-1.5">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">大小写模式</span>
+                            <select
+                              value={operation.caseMode || 'lower'}
+                              onChange={(e) => updateRenameOperation(operation.id, { caseMode: e.target.value as RenameCaseMode })}
+                              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 outline-none transition-all focus:ring-1 focus:ring-emerald-500"
+                            >
+                              <option value="lower">全部小写</option>
+                              <option value="upper">全部大写</option>
+                              <option value="title">首字母大写</option>
+                            </select>
+                          </label>
+                        )}
+
+                        {operation.type === 'removeRange' && (
+                          <div className="grid grid-cols-2 gap-3">
+                            <label className="space-y-1.5">
+                              <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-500">从第几位开始</span>
+                              <input
+                                type="number"
+                                min={1}
+                                value={operation.rangeStart ?? 1}
+                                onChange={(e) => updateRenameOperation(operation.id, { rangeStart: Number(e.target.value) || 1 })}
+                                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none transition-all focus:ring-1 focus:ring-emerald-500"
+                              />
+                            </label>
+                            <label className="space-y-1.5">
+                              <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-500">删除几个字符</span>
+                              <input
+                                type="number"
+                                min={1}
+                                value={operation.rangeCount ?? 1}
+                                onChange={(e) => updateRenameOperation(operation.id, { rangeCount: Number(e.target.value) || 1 })}
+                                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none transition-all focus:ring-1 focus:ring-emerald-500"
+                              />
+                            </label>
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -1665,11 +1879,32 @@ export default function AudioTools() {
                   <input
                     type="checkbox"
                     checked={renameRules.normalizeFileName}
-                    onChange={(e) => setRenameRules((prev) => ({ ...prev, normalizeFileName: e.target.checked }))}
+                    onChange={(e) => commitRenameRules((prev) => ({ ...prev, normalizeFileName: e.target.checked }))}
                     className="accent-emerald-600"
                   />
                   自动清理空格、重复下划线和非法字符
                 </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const changedCount = renamePreviewItems.filter((item) => item.status !== 'ready').length;
+                      setRenameStatus(`已生成预览：${renamePreviewItems.length} 个文件，${changedCount} 个将改名。右侧可实时查看并手动覆盖单个文件名。`);
+                    }}
+                    disabled={renamePreviewItems.length === 0}
+                    className="h-10 rounded-xl bg-emerald-600 text-[11px] font-black text-white shadow-sm transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    生成预览
+                  </button>
+                  <button
+                    type="button"
+                    onClick={undoRenameRules}
+                    disabled={renameRuleHistory.length === 0}
+                    className="h-10 rounded-xl border border-slate-200 bg-white text-[11px] font-black text-slate-600 transition-colors hover:bg-slate-50 hover:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    撤回规则
+                  </button>
+                </div>
               </div>
 
             </div>

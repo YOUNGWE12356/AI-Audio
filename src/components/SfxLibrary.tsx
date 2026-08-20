@@ -79,6 +79,20 @@ interface AudioAssetLibraryStats {
   indexedAt: string;
 }
 
+type FolderContextMenuState = {
+  x: number;
+  y: number;
+  kind: 'group' | 'sub';
+  groupId: string;
+  groupName: string;
+  groupIndex: number;
+  totalGroups: number;
+  subId?: string;
+  subName?: string;
+  subIndex?: number;
+  totalSubs?: number;
+};
+
 const SFX_DIRECTORY_TREE_VERSION = 'custom-empty-directory-tree-v2';
 const LEGACY_DIRECTORY_IDS = new Set([
   'music_all',
@@ -553,7 +567,7 @@ export default function SfxLibrary() {
   const checkOwnerPermission = (): boolean => {
     const authorized = localStorage.getItem('OWNER_AUTHORIZED') === 'true';
     if (!authorized) {
-      showCustomAlert("需要验证", "此修改操作需要所有者身份验证。请前往“设置”面板并输入您的管理邮箱解锁全部高级权限。");
+      showCustomAlert("需要验证", "此修改操作需要所有者或指定协作者权限。请前往“设置”面板完成管理身份验证后再操作。");
       return false;
     }
     return true;
@@ -626,7 +640,62 @@ export default function SfxLibrary() {
   const [isAddingGroup, setIsAddingGroup] = useState<boolean>(false);
   const [newGroupNameInput, setNewGroupNameInput] = useState<string>('');
   const [isDirectoryManageMode, setIsDirectoryManageMode] = useState<boolean>(false);
-  const canManageDirectories = isDirectoryManageMode;
+  const canModifyLibrary = isAuthorized;
+  const canManageDirectories = canModifyLibrary && isDirectoryManageMode;
+  const [folderContextMenu, setFolderContextMenu] = useState<FolderContextMenuState | null>(null);
+
+  const closeFolderContextMenu = () => setFolderContextMenu(null);
+
+  const openFolderContextMenu = (
+    event: React.MouseEvent,
+    menu: Omit<FolderContextMenuState, 'x' | 'y'>,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const menuWidth = 220;
+    const menuHeight = 300;
+    setFolderContextMenu({
+      ...menu,
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+    });
+  };
+
+  const runFolderContextAction = (action: () => void) => {
+    closeFolderContextMenu();
+    action();
+  };
+
+  const handleToggleDirectoryManageMode = () => {
+    if (isDirectoryManageMode) {
+      setIsDirectoryManageMode(false);
+      setEditingCategoryId(null);
+      setEditingSubCategoryId(null);
+      setIsAddingSubToId(null);
+      setIsAddingGroup(false);
+      return;
+    }
+
+    if (!checkOwnerPermission()) return;
+    setIsDirectoryManageMode(true);
+  };
+
+  const startAddSubCategory = (groupId: string) => {
+    if (!checkOwnerPermission()) return;
+    setIsAddingSubToId(groupId);
+    setNewSubNameInput('');
+    setExpandedGroups(prev => ({ ...prev, [groupId]: true }));
+  };
+
+  useEffect(() => {
+    if (isAuthorized) return;
+    setIsDirectoryManageMode(false);
+    setEditingCategoryId(null);
+    setEditingSubCategoryId(null);
+    setIsAddingSubToId(null);
+    setIsAddingGroup(false);
+    closeFolderContextMenu();
+  }, [isAuthorized]);
 
   useEffect(() => {
     if (!isDirectoryManageMode) return;
@@ -636,6 +705,24 @@ export default function SfxLibrary() {
       ...categories.reduce((acc, group) => ({ ...acc, [group.id]: true }), {}),
     }));
   }, [categories, isDirectoryManageMode]);
+
+  useEffect(() => {
+    if (!folderContextMenu) return;
+    const handleClose = () => closeFolderContextMenu();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeFolderContextMenu();
+    };
+    window.addEventListener('click', handleClose);
+    window.addEventListener('scroll', handleClose, true);
+    window.addEventListener('resize', handleClose);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('click', handleClose);
+      window.removeEventListener('scroll', handleClose, true);
+      window.removeEventListener('resize', handleClose);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [folderContextMenu]);
 
   // Multidimensional Filters
   const [filterDuration, setFilterDuration] = useState<string>('全部'); // 全部, <1s, 1-3s, >3s
@@ -1141,12 +1228,14 @@ export default function SfxLibrary() {
   };
 
   const handleSaveEditSound = (updated: SoundEffect) => {
+    if (!checkOwnerPermission()) return;
     setSounds(prev => prev.map(s => s.id === updated.id ? updated : s));
     setEditingSound(null);
     showCustomAlert("保存成功", `已成功更新 "${updated.name}" 的元数据信息。`);
   };
 
   const handleAddSound = () => {
+    if (!checkOwnerPermission()) return;
     if (!addSoundForm.name.trim()) {
       showCustomAlert("输入错误", "请输入资产显示名称！");
       return;
@@ -1171,6 +1260,7 @@ export default function SfxLibrary() {
 
   // --- Category / Directory Tree Management Functions ---
   const moveCategory = (catId: string, direction: 'up' | 'down') => {
+    if (!checkOwnerPermission()) return;
     const sectionCats = categories;
     const idx = sectionCats.findIndex(c => c.id === catId);
     if (idx === -1) return;
@@ -1191,6 +1281,7 @@ export default function SfxLibrary() {
   };
 
   const moveSubCategory = (groupId: string, subId: string, direction: 'up' | 'down') => {
+    if (!checkOwnerPermission()) return;
     setCategories(prev => {
       return prev.map(group => {
         if (group.id !== groupId) return group;
@@ -1210,6 +1301,7 @@ export default function SfxLibrary() {
   };
 
   const handleAddSubCategory = (groupId: string) => {
+    if (!checkOwnerPermission()) return;
     if (!newSubNameInput.trim()) return;
     const newSubName = newSubNameInput.trim();
     const newSub = {
@@ -1230,6 +1322,7 @@ export default function SfxLibrary() {
   };
 
   const handleAddGroup = () => {
+    if (!checkOwnerPermission()) return;
     if (!newGroupNameInput.trim()) return;
     const newGroup: CategoryGroup = {
       id: `custom_group_${Date.now()}`,
@@ -1243,6 +1336,7 @@ export default function SfxLibrary() {
   };
 
   const handleDeleteCategory = (catId: string, catName: string) => {
+    if (!checkOwnerPermission()) return;
     const affectedSoundsCount = sounds.filter(s => s.category === catName).length;
     showCustomConfirm(
       `确定要删除整个目录分类 "${catName}" 吗？`,
@@ -1258,6 +1352,7 @@ export default function SfxLibrary() {
   };
 
   const handleDeleteSubCategory = (groupId: string, subId: string, subName: string) => {
+    if (!checkOwnerPermission()) return;
     const affectedSoundsCount = sounds.filter(s => s.subcategory === subName).length;
     showCustomConfirm(
       `确定要删除子文件夹 "${subName}" 吗？`,
@@ -1279,11 +1374,13 @@ export default function SfxLibrary() {
   };
 
   const startRenameCategory = (catId: string, name: string) => {
+    if (!checkOwnerPermission()) return;
     setEditingCategoryId(catId);
     setEditNameInput(name);
   };
 
   const confirmRenameCategory = (catId: string, oldName: string) => {
+    if (!checkOwnerPermission()) return;
     if (!editNameInput.trim()) return;
     const newName = editNameInput.trim();
     setCategories(prev => prev.map(c => c.id === catId ? { ...c, name: newName } : c));
@@ -1295,11 +1392,13 @@ export default function SfxLibrary() {
   };
 
   const startRenameSubCategory = (subId: string, name: string) => {
+    if (!checkOwnerPermission()) return;
     setEditingSubCategoryId(subId);
     setEditNameInput(name);
   };
 
   const confirmRenameSubCategory = (groupId: string, subId: string, oldName: string) => {
+    if (!checkOwnerPermission()) return;
     if (!editNameInput.trim()) return;
     const newName = editNameInput.trim();
     setCategories(prev => prev.map(group => {
@@ -1376,6 +1475,7 @@ export default function SfxLibrary() {
   };
 
   const handleNamingStrategyChange = (strategy: 'smart' | 'original' | 'standard') => {
+    if (!checkOwnerPermission()) return;
     setNamingStrategy(strategy);
     setImportItems(prev => prev.map(item => {
       const file = item.originalFile;
@@ -1446,6 +1546,7 @@ export default function SfxLibrary() {
   };
 
   const handleApplyBatchCategory = () => {
+    if (!checkOwnerPermission()) return;
     if (!batchMainCategory) return;
     setImportItems(prev => prev.map(item => {
       const file = item.originalFile;
@@ -1799,6 +1900,7 @@ export default function SfxLibrary() {
 
   const toggleFavorite = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    if (!checkOwnerPermission()) return;
     setSounds(prev => prev.map(s => s.id === id ? { ...s, isFavorite: !s.isFavorite } : s));
   };
 
@@ -1894,6 +1996,10 @@ export default function SfxLibrary() {
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!checkOwnerPermission()) {
+      e.target.value = '';
+      return;
+    }
     const files = e.target.files;
     if (files && files.length > 0) {
       processFilesForImport(Array.from(files) as File[]);
@@ -1901,6 +2007,10 @@ export default function SfxLibrary() {
   };
 
   const handleFolderSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!checkOwnerPermission()) {
+      e.target.value = '';
+      return;
+    }
     const files = e.target.files;
     if (files && files.length > 0) {
       const filesArray = Array.from(files) as File[];
@@ -2154,6 +2264,7 @@ export default function SfxLibrary() {
   };
 
   const processFilesForImport = async (files: File[]) => {
+    if (!checkOwnerPermission()) return;
     const audioFiles = files.filter(f => {
       const ext = f.name.split('.').pop()?.toLowerCase();
       return ['wav', 'ogg', 'mp3', 'flac', 'm4a', 'aac'].includes(ext || '');
@@ -2209,6 +2320,7 @@ export default function SfxLibrary() {
   };
 
   const handleConfirmImport = async () => {
+    if (!checkOwnerPermission()) return;
     if (importItems.length === 0) return;
     setIsUploading(true);
 
@@ -2347,6 +2459,7 @@ export default function SfxLibrary() {
   };
 
   const handleAiBatchOptimize = async () => {
+    if (!checkOwnerPermission()) return;
     if (importItems.length === 0) return;
     setIsAiBatchOptimizing(true);
     try {
@@ -2453,8 +2566,20 @@ export default function SfxLibrary() {
           
           <div className="hidden lg:flex items-center gap-1.5 ml-6 border-l border-slate-200 pl-6 text-xs text-slate-400">
             <span className="hover:text-emerald-600 cursor-pointer transition-colors" onClick={() => showCustomAlert("模拟清单导出", "已成功为您模拟并导出当前的音效/音乐资产完整数据清单（JSON 格式）。")}>导出清单</span>
-            <span className="text-slate-200">·</span>
-            <span className="hover:text-emerald-600 cursor-pointer transition-colors" onClick={() => setIsImportModalOpen(true)}>资产导入</span>
+            {canModifyLibrary && (
+              <>
+                <span className="text-slate-200">·</span>
+                <span
+                  className="hover:text-emerald-600 cursor-pointer transition-colors"
+                  onClick={() => {
+                    if (!checkOwnerPermission()) return;
+                    setIsImportModalOpen(true);
+                  }}
+                >
+                  资产导入
+                </span>
+              </>
+            )}
             <span className="text-slate-200">·</span>
             <span className="hover:text-emerald-600 cursor-pointer transition-colors" onClick={() => showCustomAlert("引擎 & DAW 同步通道已开启", "⚙️ 音频引擎资产同步通道(Unity / Unreal Integration)与DAW工作流(Reaper Link)集成服务已被唤醒并建立桥接。")}>同步通道</span>
           </div>
@@ -2541,13 +2666,15 @@ export default function SfxLibrary() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => setIsDirectoryManageMode(prev => !prev)}
+                  onClick={handleToggleDirectoryManageMode}
                   className={`rounded-full border px-2 py-0.5 text-[9px] font-black transition-all ${
                     isDirectoryManageMode
                       ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                      : !canModifyLibrary
+                      ? 'border-slate-200 bg-slate-50 text-slate-300 hover:text-slate-500'
                       : 'border-slate-200 bg-white text-slate-400 hover:text-slate-700'
                   }`}
-                  title="开启后可重命名、上下移动、删除和新增目录"
+                  title={canModifyLibrary ? '开启后可重命名、上下移动、删除和新增目录' : '只有所有者和被指定的协作者可以管理目录'}
                 >
                   {isDirectoryManageMode ? '管理中' : '管理'}
                 </button>
@@ -2558,25 +2685,6 @@ export default function SfxLibrary() {
                 </div>
               )}
               <nav className="space-y-2">
-                {/* 1. 全部 */}
-                <button
-                  onClick={() => {
-                    setSelectedCategory('全部');
-                    setSelectedTag(null);
-                  }}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-semibold transition-all ${
-                    selectedCategory === '全部' 
-                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-100 font-bold' 
-                      : 'text-slate-600 hover:text-slate-800 hover:bg-slate-50 border border-transparent'
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    <Folder className="w-3.5 h-3.5 text-slate-400" />
-                    <span>全部音效</span>
-                  </div>
-                  <span className="text-[10px] font-mono text-slate-450 bg-slate-100 px-1.5 py-0.2 rounded">{sounds.length}</span>
-                </button>
-
                 {/* ----------------- PARENT GROUP A: 公司游戏音效 ----------------- */}
                 <div className="hidden">
                   <div 
@@ -2596,7 +2704,7 @@ export default function SfxLibrary() {
                     <div className="space-y-1 pl-0.5">
                       {categories
                         .filter(c => c.id === 'company_sfx')
-                        .map((group) => {
+                        .map((group, sectionIdx) => {
                           const isExpanded = !!expandedGroups[group.id];
                           const isGroupActive = selectedCategory === group.name;
                           const groupCount = sounds.filter(s => {
@@ -2612,6 +2720,13 @@ export default function SfxLibrary() {
                                   setSelectedCategory(group.name);
                                   setSelectedTag(null);
                                 }}
+                                onContextMenu={(event) => openFolderContextMenu(event, {
+                                  kind: 'group',
+                                  groupId: group.id,
+                                  groupName: group.name,
+                                  groupIndex: sectionIdx,
+                                  totalGroups: categories.length,
+                                })}
                                 className={`group flex items-center justify-between px-1.5 py-1 rounded text-xs font-semibold cursor-pointer transition-all ${
                                   isGroupActive
                                     ? 'bg-emerald-50 text-emerald-700'
@@ -2680,8 +2795,7 @@ export default function SfxLibrary() {
                                           <button
                                             onClick={(e) => {
                                               e.stopPropagation();
-                                              setIsAddingSubToId(group.id);
-                                              setNewSubNameInput('');
+                                              startAddSubCategory(group.id);
                                             }}
                                             className="p-0.5 text-slate-400 hover:text-blue-600 hover:bg-slate-150 rounded"
                                             title="新建子文件夹"
@@ -2758,7 +2872,7 @@ export default function SfxLibrary() {
                                     <div className="text-[9.5px] text-slate-400 italic py-1 px-1 flex items-center gap-1">
                                       <span>空文件夹目录</span>
                                       {canManageDirectories && (
-                                        <span onClick={() => { setIsAddingSubToId(group.id); setNewSubNameInput(''); }} className="text-indigo-600 font-bold underline cursor-pointer">添加</span>
+                                        <span onClick={() => startAddSubCategory(group.id)} className="text-indigo-600 font-bold underline cursor-pointer">添加</span>
                                       )}
                                     </div>
                                   ) : (
@@ -2769,6 +2883,17 @@ export default function SfxLibrary() {
                                       return (
                                         <div
                                           key={sub.id}
+                                          onContextMenu={(event) => openFolderContextMenu(event, {
+                                            kind: 'sub',
+                                            groupId: group.id,
+                                            groupName: group.name,
+                                            groupIndex: sectionIdx,
+                                            totalGroups: categories.length,
+                                            subId: sub.id,
+                                            subName: sub.name,
+                                            subIndex: subIdx,
+                                            totalSubs: group.subCategories.length,
+                                          })}
                                           className="group/sub flex items-center justify-between py-0.5 rounded transition-all hover:bg-slate-50"
                                         >
                                           {editingSubCategoryId === sub.id ? (
@@ -2811,61 +2936,6 @@ export default function SfxLibrary() {
                                             >
                                               <span className="truncate text-left shrink" title={sub.description}>📄 {sub.name}</span>
                                             </button>
-                                          )}
-
-                                          {/* Hover tools for subfolders */}
-                                          {editingSubCategoryId !== sub.id && (
-                                            <div className={`${canManageDirectories ? 'flex' : 'hidden group-hover/sub:flex'} items-center gap-0.5 bg-slate-50 border border-slate-150 p-0.5 rounded shadow-sm mr-1`}>
-                                              {/* Download Subfolder */}
-                                              <button
-                                                onClick={(e) => {
-                                                  e.stopPropagation();
-                                                  downloadFolderAsZip(sub.name, false);
-                                                }}
-                                                className="p-0.5 text-slate-400 hover:text-indigo-650 hover:bg-slate-150 rounded cursor-pointer"
-                                                title="一键打包下载当前子目录下全部音效"
-                                              >
-                                                <Download className="w-2 h-2" />
-                                              </button>
-                                              {canManageDirectories && (
-                                                <>
-                                                  {/* Move Up */}
-                                                  <button
-                                                    onClick={() => moveSubCategory(group.id, sub.id, 'up')}
-                                                    disabled={subIdx === 0}
-                                                    className="p-0.5 text-slate-400 hover:text-slate-700 hover:bg-slate-150 rounded disabled:opacity-30"
-                                                    title="向上移动"
-                                                  >
-                                                    <ArrowUp className="w-2 h-2" />
-                                                  </button>
-                                                  {/* Move Down */}
-                                                  <button
-                                                    onClick={() => moveSubCategory(group.id, sub.id, 'down')}
-                                                    disabled={subIdx === group.subCategories.length - 1}
-                                                    className="p-0.5 text-slate-400 hover:text-slate-700 hover:bg-slate-150 rounded disabled:opacity-30"
-                                                    title="向下移动"
-                                                  >
-                                                    <ArrowDown className="w-2 h-2" />
-                                                  </button>
-                                                  {/* Rename */}
-                                                  <button
-                                                    onClick={() => startRenameSubCategory(sub.id, sub.name)}
-                                                    className="p-0.5 text-slate-400 hover:text-emerald-600 hover:bg-slate-150 rounded"
-                                                    title="重命名子目录"
-                                                  >
-                                                    <Edit2 className="w-2.5 h-2.5" />
-                                                  </button>
-                                                  {/* Delete */}
-                                                  <button
-                                                    onClick={() => handleDeleteSubCategory(group.id, sub.id, sub.name)}
-                                                    className="p-0.5 text-slate-400 hover:text-red-600 hover:bg-slate-150 rounded"
-                                                    title="删除子目录"
-                                                  >
-                                                    <Trash2 className="w-2.5 h-2.5" />
-                                                  </button>
-                                                </>
-                                              )}
-                                            </div>
                                           )}
 
                                           {editingSubCategoryId !== sub.id && (
@@ -2905,7 +2975,7 @@ export default function SfxLibrary() {
                     <div className="space-y-1 pl-0.5">
                       {categories
                         .filter(c => c.id === 'music_all')
-                        .map((group) => {
+                        .map((group, sectionIdx) => {
                           const isExpanded = !!expandedGroups[group.id];
                           const isGroupActive = selectedCategory === group.name;
                           const groupCount = sounds.filter(s => {
@@ -2921,6 +2991,13 @@ export default function SfxLibrary() {
                                   setSelectedCategory(group.name);
                                   setSelectedTag(null);
                                 }}
+                                onContextMenu={(event) => openFolderContextMenu(event, {
+                                  kind: 'group',
+                                  groupId: group.id,
+                                  groupName: group.name,
+                                  groupIndex: sectionIdx,
+                                  totalGroups: categories.length,
+                                })}
                                 className={`group flex items-center justify-between px-1.5 py-1 rounded text-xs font-semibold cursor-pointer transition-all ${
                                   isGroupActive
                                     ? 'bg-emerald-50 text-emerald-700'
@@ -2989,8 +3066,7 @@ export default function SfxLibrary() {
                                           <button
                                             onClick={(e) => {
                                               e.stopPropagation();
-                                              setIsAddingSubToId(group.id);
-                                              setNewSubNameInput('');
+                                              startAddSubCategory(group.id);
                                             }}
                                             className="p-0.5 text-slate-400 hover:text-blue-600 hover:bg-slate-150 rounded"
                                             title="新建子文件夹"
@@ -3067,7 +3143,7 @@ export default function SfxLibrary() {
                                     <div className="text-[9.5px] text-slate-400 italic py-1 px-1 flex items-center gap-1">
                                       <span>空文件夹目录</span>
                                       {canManageDirectories && (
-                                        <span onClick={() => { setIsAddingSubToId(group.id); setNewSubNameInput(''); }} className="text-indigo-600 font-bold underline cursor-pointer">添加</span>
+                                        <span onClick={() => startAddSubCategory(group.id)} className="text-indigo-600 font-bold underline cursor-pointer">添加</span>
                                       )}
                                     </div>
                                   ) : (
@@ -3078,6 +3154,17 @@ export default function SfxLibrary() {
                                       return (
                                         <div
                                           key={sub.id}
+                                          onContextMenu={(event) => openFolderContextMenu(event, {
+                                            kind: 'sub',
+                                            groupId: group.id,
+                                            groupName: group.name,
+                                            groupIndex: sectionIdx,
+                                            totalGroups: categories.length,
+                                            subId: sub.id,
+                                            subName: sub.name,
+                                            subIndex: subIdx,
+                                            totalSubs: group.subCategories.length,
+                                          })}
                                           className="group/sub flex items-center justify-between py-0.5 rounded transition-all hover:bg-slate-50"
                                         >
                                           {editingSubCategoryId === sub.id ? (
@@ -3120,61 +3207,6 @@ export default function SfxLibrary() {
                                             >
                                               <span className="truncate text-left shrink" title={sub.description}>📄 {sub.name}</span>
                                             </button>
-                                          )}
-
-                                          {/* Hover tools for subfolders */}
-                                          {editingSubCategoryId !== sub.id && (
-                                            <div className={`${canManageDirectories ? 'flex' : 'hidden group-hover/sub:flex'} items-center gap-0.5 bg-slate-50 border border-slate-150 p-0.5 rounded shadow-sm mr-1`}>
-                                              {/* Download Subfolder */}
-                                              <button
-                                                onClick={(e) => {
-                                                  e.stopPropagation();
-                                                  downloadFolderAsZip(sub.name, false);
-                                                }}
-                                                className="p-0.5 text-slate-400 hover:text-indigo-650 hover:bg-slate-150 rounded cursor-pointer"
-                                                title="一键打包下载当前子目录下全部音效"
-                                              >
-                                                <Download className="w-2 h-2" />
-                                              </button>
-                                              {canManageDirectories && (
-                                                <>
-                                                  {/* Move Up */}
-                                                  <button
-                                                    onClick={() => moveSubCategory(group.id, sub.id, 'up')}
-                                                    disabled={subIdx === 0}
-                                                    className="p-0.5 text-slate-400 hover:text-slate-700 hover:bg-slate-150 rounded disabled:opacity-30"
-                                                    title="向上移动"
-                                                  >
-                                                    <ArrowUp className="w-2 h-2" />
-                                                  </button>
-                                                  {/* Move Down */}
-                                                  <button
-                                                    onClick={() => moveSubCategory(group.id, sub.id, 'down')}
-                                                    disabled={subIdx === group.subCategories.length - 1}
-                                                    className="p-0.5 text-slate-400 hover:text-slate-700 hover:bg-slate-150 rounded disabled:opacity-30"
-                                                    title="向下移动"
-                                                  >
-                                                    <ArrowDown className="w-2 h-2" />
-                                                  </button>
-                                                  {/* Rename */}
-                                                  <button
-                                                    onClick={() => startRenameSubCategory(sub.id, sub.name)}
-                                                    className="p-0.5 text-slate-400 hover:text-emerald-600 hover:bg-slate-150 rounded"
-                                                    title="重命名子目录"
-                                                  >
-                                                    <Edit2 className="w-2.5 h-2.5" />
-                                                  </button>
-                                                  {/* Delete */}
-                                                  <button
-                                                    onClick={() => handleDeleteSubCategory(group.id, sub.id, sub.name)}
-                                                    className="p-0.5 text-slate-400 hover:text-red-600 hover:bg-slate-150 rounded"
-                                                    title="删除子目录"
-                                                  >
-                                                    <Trash2 className="w-2.5 h-2.5" />
-                                                  </button>
-                                                </>
-                                              )}
-                                            </div>
                                           )}
 
                                           {editingSubCategoryId !== sub.id && (
@@ -3235,6 +3267,13 @@ export default function SfxLibrary() {
                                   setSelectedCategory(group.name);
                                   setSelectedTag(null);
                                 }}
+                                onContextMenu={(event) => openFolderContextMenu(event, {
+                                  kind: 'group',
+                                  groupId: group.id,
+                                  groupName: group.name,
+                                  groupIndex: sectionIdx,
+                                  totalGroups: categories.length,
+                                })}
                                 className={`group flex items-center justify-between px-1.5 py-1 rounded text-xs font-semibold cursor-pointer transition-all ${
                                   isGroupActive
                                     ? 'bg-emerald-50 text-emerald-700'
@@ -3271,86 +3310,8 @@ export default function SfxLibrary() {
                                   )}
                                 </div>
                                 
-                                {/* Edit tools overlay */}
+                                {/* Count / inline rename controls. Folder actions live in the right-click menu. */}
                                 <div className="flex items-center gap-0.5 shrink-0">
-                                  {editingCategoryId !== group.id && (
-                                    <div className={`${canManageDirectories ? 'flex' : 'hidden group-hover:flex'} items-center gap-0.5 bg-slate-50 border border-slate-150 p-0.5 rounded shadow-sm mr-1`}>
-                                      {/* Download Folder */}
-                                      <button
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          downloadFolderAsZip(group.name, true);
-                                        }}
-                                        className="p-0.5 text-slate-400 hover:text-indigo-650 hover:bg-slate-150 rounded cursor-pointer"
-                                        title="一键打包下载当前目录下全部音效"
-                                      >
-                                        <Download className="w-2.5 h-2.5" />
-                                      </button>
-                                      {canManageDirectories && (
-                                        <>
-                                          {/* Move Up */}
-                                          <button
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              moveCategory(group.id, 'up');
-                                            }}
-                                            disabled={sectionIdx === 0}
-                                            className="p-0.5 text-slate-400 hover:text-slate-700 hover:bg-slate-150 rounded disabled:opacity-30"
-                                            title="向上移动"
-                                          >
-                                            <ArrowUp className="w-2.5 h-2.5" />
-                                          </button>
-                                          {/* Move Down */}
-                                          <button
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              moveCategory(group.id, 'down');
-                                            }}
-                                            disabled={sectionIdx === categories.filter(c => c.id !== 'music_all' && c.id !== 'company_sfx').length - 1}
-                                            className="p-0.5 text-slate-400 hover:text-slate-700 hover:bg-slate-150 rounded disabled:opacity-30"
-                                            title="向下移动"
-                                          >
-                                            <ArrowDown className="w-2.5 h-2.5" />
-                                          </button>
-                                          {/* Rename */}
-                                          <button
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              startRenameCategory(group.id, group.name);
-                                            }}
-                                            className="p-0.5 text-slate-400 hover:text-emerald-600 hover:bg-slate-150 rounded"
-                                            title="重命名目录"
-                                          >
-                                            <Edit2 className="w-2.5 h-2.5" />
-                                          </button>
-                                          {/* Add subfolder */}
-                                          <button
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              setIsAddingSubToId(group.id);
-                                              setNewSubNameInput('');
-                                            }}
-                                            className="p-0.5 text-slate-400 hover:text-blue-600 hover:bg-slate-150 rounded"
-                                            title="新建子文件夹"
-                                          >
-                                            <Plus className="w-2.5 h-2.5" />
-                                          </button>
-                                          {/* Delete */}
-                                          <button
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              handleDeleteCategory(group.id, group.name);
-                                            }}
-                                            className="p-0.5 text-slate-400 hover:text-red-600 hover:bg-slate-150 rounded"
-                                            title="删除目录"
-                                          >
-                                            <Trash2 className="w-2.5 h-2.5" />
-                                          </button>
-                                        </>
-                                      )}
-                                    </div>
-                                  )}
-
                                   {editingCategoryId === group.id ? (
                                     <div className="flex items-center gap-0.5 mr-1 shrink-0">
                                       <button 
@@ -3405,7 +3366,7 @@ export default function SfxLibrary() {
                                     <div className="text-[9.5px] text-slate-400 italic py-1 px-1 flex items-center gap-1">
                                       <span>空文件夹目录</span>
                                       {canManageDirectories && (
-                                        <span onClick={() => { setIsAddingSubToId(group.id); setNewSubNameInput(''); }} className="text-indigo-600 font-bold underline cursor-pointer">添加</span>
+                                        <span onClick={() => startAddSubCategory(group.id)} className="text-indigo-600 font-bold underline cursor-pointer">添加</span>
                                       )}
                                     </div>
                                   ) : (
@@ -3416,6 +3377,17 @@ export default function SfxLibrary() {
                                       return (
                                         <div
                                           key={sub.id}
+                                          onContextMenu={(event) => openFolderContextMenu(event, {
+                                            kind: 'sub',
+                                            groupId: group.id,
+                                            groupName: group.name,
+                                            groupIndex: sectionIdx,
+                                            totalGroups: categories.length,
+                                            subId: sub.id,
+                                            subName: sub.name,
+                                            subIndex: subIdx,
+                                            totalSubs: group.subCategories.length,
+                                          })}
                                           className="group/sub flex items-center justify-between py-0.5 rounded transition-all hover:bg-slate-50"
                                         >
                                           {editingSubCategoryId === sub.id ? (
@@ -3458,61 +3430,6 @@ export default function SfxLibrary() {
                                             >
                                               <span className="truncate text-left shrink" title={sub.description}>📄 {sub.name}</span>
                                             </button>
-                                          )}
-
-                                          {/* Hover tools for subfolders */}
-                                          {editingSubCategoryId !== sub.id && (
-                                            <div className={`${canManageDirectories ? 'flex' : 'hidden group-hover/sub:flex'} items-center gap-0.5 bg-slate-50 border border-slate-150 p-0.5 rounded shadow-sm mr-1`}>
-                                              {/* Download Subfolder */}
-                                              <button
-                                                onClick={(e) => {
-                                                  e.stopPropagation();
-                                                  downloadFolderAsZip(sub.name, false);
-                                                }}
-                                                className="p-0.5 text-slate-400 hover:text-indigo-650 hover:bg-slate-150 rounded cursor-pointer"
-                                                title="一键打包下载当前子目录下全部音效"
-                                              >
-                                                <Download className="w-2 h-2" />
-                                              </button>
-                                              {canManageDirectories && (
-                                                <>
-                                                  {/* Move Up */}
-                                                  <button
-                                                    onClick={() => moveSubCategory(group.id, sub.id, 'up')}
-                                                    disabled={subIdx === 0}
-                                                    className="p-0.5 text-slate-400 hover:text-slate-700 hover:bg-slate-150 rounded disabled:opacity-30"
-                                                    title="向上移动"
-                                                  >
-                                                    <ArrowUp className="w-2 h-2" />
-                                                  </button>
-                                                  {/* Move Down */}
-                                                  <button
-                                                    onClick={() => moveSubCategory(group.id, sub.id, 'down')}
-                                                    disabled={subIdx === group.subCategories.length - 1}
-                                                    className="p-0.5 text-slate-400 hover:text-slate-700 hover:bg-slate-150 rounded disabled:opacity-30"
-                                                    title="向下移动"
-                                                  >
-                                                    <ArrowDown className="w-2 h-2" />
-                                                  </button>
-                                                  {/* Rename */}
-                                                  <button
-                                                    onClick={() => startRenameSubCategory(sub.id, sub.name)}
-                                                    className="p-0.5 text-slate-400 hover:text-emerald-600 hover:bg-slate-150 rounded"
-                                                    title="重命名子目录"
-                                                  >
-                                                    <Edit2 className="w-2.5 h-2.5" />
-                                                  </button>
-                                                  {/* Delete */}
-                                                  <button
-                                                    onClick={() => handleDeleteSubCategory(group.id, sub.id, sub.name)}
-                                                    className="p-0.5 text-slate-400 hover:text-red-600 hover:bg-slate-150 rounded"
-                                                    title="删除子目录"
-                                                  >
-                                                    <Trash2 className="w-2.5 h-2.5" />
-                                                  </button>
-                                                </>
-                                              )}
-                                            </div>
                                           )}
 
                                           {editingSubCategoryId !== sub.id && (
@@ -3559,6 +3476,7 @@ export default function SfxLibrary() {
                       ) : (
                         <button
                           onClick={() => {
+                            if (!checkOwnerPermission()) return;
                             setIsAddingGroup(true);
                             setNewGroupNameInput('');
                           }}
@@ -3598,44 +3516,46 @@ export default function SfxLibrary() {
 
           </div>
 
-          {/* Quick Import Box at Bottom left */}
-          <div className="p-4 border-t border-slate-200 bg-white space-y-2">
-            <span className="text-[9px] font-bold text-slate-400 block uppercase tracking-wider">批量资产入库</span>
-            <div 
-              className="border border-dashed border-slate-300 hover:border-emerald-500 bg-slate-50 hover:bg-slate-100 rounded-xl p-3.5 text-center cursor-default transition-all flex flex-col items-center gap-1.5 group"
-            >
-              <UploadCloud className="w-5.5 h-5.5 text-slate-400 group-hover:text-emerald-600 transition-colors" />
-              <p className="text-[10px] font-bold text-slate-500 group-hover:text-slate-850">拖拽文件或文件夹至此</p>
-              <div className="flex gap-2 w-full justify-center mt-1">
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (!checkOwnerPermission()) {
-                      return;
-                    }
-                    fileInputRef.current?.click();
-                  }}
-                  className="px-2 py-1 bg-emerald-50 border border-emerald-200 text-emerald-700 hover:bg-emerald-600 hover:text-white rounded-md text-[9px] font-bold transition-all"
-                >
-                  + 选文件
-                </button>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (!checkOwnerPermission()) {
-                      return;
-                    }
-                    folderInputRef.current?.click();
-                  }}
-                  className="px-2 py-1 bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-600 hover:text-white rounded-md text-[9px] font-bold transition-all"
-                >
-                  + 选文件夹
-                </button>
+          {canModifyLibrary && (
+            /* Quick Import Box at Bottom left */
+            <div className="p-4 border-t border-slate-200 bg-white space-y-2">
+              <span className="text-[9px] font-bold text-slate-400 block uppercase tracking-wider">批量资产入库</span>
+              <div
+                className="border border-dashed border-slate-300 hover:border-emerald-500 bg-slate-50 hover:bg-slate-100 rounded-xl p-3.5 text-center cursor-default transition-all flex flex-col items-center gap-1.5 group"
+              >
+                <UploadCloud className="w-5.5 h-5.5 text-slate-400 group-hover:text-emerald-600 transition-colors" />
+                <p className="text-[10px] font-bold text-slate-500 group-hover:text-slate-850">拖拽文件或文件夹至此</p>
+                <div className="flex gap-2 w-full justify-center mt-1">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!checkOwnerPermission()) {
+                        return;
+                      }
+                      fileInputRef.current?.click();
+                    }}
+                    className="px-2 py-1 bg-emerald-50 border border-emerald-200 text-emerald-700 hover:bg-emerald-600 hover:text-white rounded-md text-[9px] font-bold transition-all"
+                  >
+                    + 选文件
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!checkOwnerPermission()) {
+                        return;
+                      }
+                      folderInputRef.current?.click();
+                    }}
+                    className="px-2 py-1 bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-600 hover:text-white rounded-md text-[9px] font-bold transition-all"
+                  >
+                    + 选文件夹
+                  </button>
+                </div>
               </div>
             </div>
-          </div>
+          )}
         </aside>
 
         {/* ==================== MIDDLE COLUMN: Search & Results List ==================== */}
@@ -3913,19 +3833,21 @@ export default function SfxLibrary() {
                         </div>
 
                         <div className="flex items-center gap-1">
-                          <button
-                            onClick={(e) => toggleFavorite(sound.id, e)}
-                            className={`p-1.5 rounded-lg border transition-colors ${
-                              sound.isFavorite 
-                                ? 'bg-red-50 border-red-100 text-red-500' 
-                                : 'bg-slate-50 border-slate-200 text-slate-400 hover:text-red-600 hover:bg-red-50'
-                            }`}
-                            title="加入收藏"
-                          >
-                            <Heart className={`w-3.5 h-3.5 ${sound.isFavorite ? 'fill-current' : ''}`} />
-                          </button>
-                          
-                          {isAuthorized && (
+                          {canModifyLibrary && (
+                            <button
+                              onClick={(e) => toggleFavorite(sound.id, e)}
+                              className={`p-1.5 rounded-lg border transition-colors ${
+                                sound.isFavorite
+                                  ? 'bg-red-50 border-red-100 text-red-500'
+                                  : 'bg-slate-50 border-slate-200 text-slate-400 hover:text-red-600 hover:bg-red-50'
+                              }`}
+                              title="加入收藏"
+                            >
+                              <Heart className={`w-3.5 h-3.5 ${sound.isFavorite ? 'fill-current' : ''}`} />
+                            </button>
+                          )}
+
+                          {canModifyLibrary && (
                             <button
                               onClick={(e) => removeSound(sound.id, e)}
                               className="p-1.5 bg-slate-50 hover:bg-red-50 hover:text-red-600 border border-slate-200 rounded-lg text-slate-400 transition-colors"
@@ -4618,6 +4540,141 @@ export default function SfxLibrary() {
             </div>
 
           </div>
+        </div>
+      )}
+
+      {/* Folder context menu */}
+      {folderContextMenu && (
+        <div
+          className="fixed z-[9000] w-56 overflow-hidden rounded-2xl border border-slate-200 bg-white p-1.5 text-xs shadow-2xl shadow-slate-900/15"
+          style={{ left: folderContextMenu.x, top: folderContextMenu.y }}
+          role="menu"
+          onClick={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <div className="border-b border-slate-100 px-3 py-2">
+            <p className="text-[10px] font-bold text-slate-400">
+              {folderContextMenu.kind === 'group' ? '母文件夹' : '子文件夹'}
+            </p>
+            <p className="mt-0.5 truncate text-xs font-black text-slate-800">
+              {folderContextMenu.kind === 'group' ? folderContextMenu.groupName : folderContextMenu.subName}
+            </p>
+          </div>
+
+          {!canModifyLibrary && (
+            <div className="mt-1 rounded-xl bg-slate-50 px-3 py-2 text-[10px] font-bold leading-relaxed text-slate-400">
+              只读权限：可查看、试听和下载；目录和音效入库由所有者或指定协作者管理。
+            </div>
+          )}
+
+          {canModifyLibrary && (
+            <>
+              {folderContextMenu.kind === 'group' && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => runFolderContextAction(() => startAddSubCategory(folderContextMenu.groupId))}
+                  className="mt-1 flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left font-bold text-slate-600 hover:bg-blue-50 hover:text-blue-700"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  新增子文件夹
+                </button>
+              )}
+
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => runFolderContextAction(() => {
+                  if (folderContextMenu.kind === 'group') {
+                    startRenameCategory(folderContextMenu.groupId, folderContextMenu.groupName);
+                  } else if (folderContextMenu.subId && folderContextMenu.subName) {
+                    startRenameSubCategory(folderContextMenu.subId, folderContextMenu.subName);
+                  }
+                })}
+                className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left font-bold text-slate-600 hover:bg-emerald-50 hover:text-emerald-700"
+              >
+                <Edit2 className="h-3.5 w-3.5" />
+                重命名
+              </button>
+
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => runFolderContextAction(() => {
+                  if (folderContextMenu.kind === 'group') {
+                    moveCategory(folderContextMenu.groupId, 'up');
+                  } else if (folderContextMenu.subId) {
+                    moveSubCategory(folderContextMenu.groupId, folderContextMenu.subId, 'up');
+                  }
+                })}
+                disabled={folderContextMenu.kind === 'group'
+                  ? folderContextMenu.groupIndex === 0
+                  : (folderContextMenu.subIndex ?? 0) === 0}
+                className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left font-bold text-slate-600 hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:text-slate-300 disabled:hover:bg-white"
+              >
+                <ArrowUp className="h-3.5 w-3.5" />
+                向上移动
+              </button>
+
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => runFolderContextAction(() => {
+                  if (folderContextMenu.kind === 'group') {
+                    moveCategory(folderContextMenu.groupId, 'down');
+                  } else if (folderContextMenu.subId) {
+                    moveSubCategory(folderContextMenu.groupId, folderContextMenu.subId, 'down');
+                  }
+                })}
+                disabled={folderContextMenu.kind === 'group'
+                  ? folderContextMenu.groupIndex >= folderContextMenu.totalGroups - 1
+                  : (folderContextMenu.subIndex ?? 0) >= (folderContextMenu.totalSubs ?? 1) - 1}
+                className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left font-bold text-slate-600 hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:text-slate-300 disabled:hover:bg-white"
+              >
+                <ArrowDown className="h-3.5 w-3.5" />
+                向下移动
+              </button>
+
+              <div className="my-1 border-t border-slate-100" />
+            </>
+          )}
+
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => runFolderContextAction(() => {
+              if (folderContextMenu.kind === 'group') {
+                void downloadFolderAsZip(folderContextMenu.groupName, true);
+              } else if (folderContextMenu.subName) {
+                void downloadFolderAsZip(folderContextMenu.subName, false);
+              }
+            })}
+            className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left font-bold text-slate-600 hover:bg-indigo-50 hover:text-indigo-700"
+          >
+            <Download className="h-3.5 w-3.5" />
+            打包下载目录
+          </button>
+
+          {canModifyLibrary && (
+            <>
+              <div className="my-1 border-t border-slate-100" />
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => runFolderContextAction(() => {
+                  if (folderContextMenu.kind === 'group') {
+                    handleDeleteCategory(folderContextMenu.groupId, folderContextMenu.groupName);
+                  } else if (folderContextMenu.subId && folderContextMenu.subName) {
+                    handleDeleteSubCategory(folderContextMenu.groupId, folderContextMenu.subId, folderContextMenu.subName);
+                  }
+                })}
+                className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left font-bold text-rose-600 hover:bg-rose-50"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                删除
+              </button>
+            </>
+          )}
         </div>
       )}
 

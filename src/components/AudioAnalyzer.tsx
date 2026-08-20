@@ -61,9 +61,22 @@ interface AnalyzerResult {
   productionNotes: string[];
 }
 
+type AnalysisItemStatus = 'pending' | 'analyzing' | 'done' | 'error';
+
+interface AnalysisQueueItem {
+  id: string;
+  file: File;
+  status: AnalysisItemStatus;
+  progress: number;
+  result?: AnalyzerResult;
+  error?: string;
+}
+
 const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 const MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
 const MINOR_PROFILE = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+
+const AUDIO_FILE_EXTENSION_REGEX = /\.(mp3|wav|m4a|aac|ogg|oga|flac|webm|opus|aif|aiff|caf)$/i;
 
 const formatTime = (seconds: number) => {
   const minutes = Math.floor(seconds / 60);
@@ -482,39 +495,127 @@ const ConfidencePill = ({ value }: { value: Confidence }) => (
 
 export default function AudioAnalyzer() {
   const inputRef = useRef<HTMLInputElement>(null);
-  const [file, setFile] = useState<File | null>(null);
+  const [analysisItems, setAnalysisItems] = useState<AnalysisQueueItem[]>([]);
+  const [selectedResultId, setSelectedResultId] = useState<string | null>(null);
   const [result, setResult] = useState<AnalyzerResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
 
-  const handleFile = (nextFile: File) => {
-    if (!nextFile.type.startsWith('audio/')) {
+  const totalSelectedSize = analysisItems.reduce((sum, item) => sum + item.file.size, 0);
+  const completedCount = analysisItems.filter(item => item.status === 'done').length;
+  const failedCount = analysisItems.filter(item => item.status === 'error').length;
+  const selectedItem = analysisItems.find(item => item.id === selectedResultId);
+
+  const isSupportedAudioFile = (nextFile: File) => (
+    nextFile.type.startsWith('audio/') || AUDIO_FILE_EXTENSION_REGEX.test(nextFile.name)
+  );
+
+  const handleFiles = (nextFiles: FileList | File[]) => {
+    if (loading) return;
+    const incomingFiles = Array.from(nextFiles);
+    if (!incomingFiles.length) return;
+
+    const supportedFiles = incomingFiles.filter(isSupportedAudioFile);
+    const ignoredCount = incomingFiles.length - supportedFiles.length;
+
+    if (!supportedFiles.length) {
       setError('请上传音乐或音频文件，当前分析器暂不处理视频容器。');
       return;
     }
-    setFile(nextFile);
+
+    const nextItems = supportedFiles.map((nextFile, index) => ({
+      id: `${nextFile.name}-${nextFile.size}-${nextFile.lastModified}-${index}`,
+      file: nextFile,
+      status: 'pending' as AnalysisItemStatus,
+      progress: 0,
+    }));
+
+    setAnalysisItems(nextItems);
+    setSelectedResultId(null);
     setResult(null);
+    setProgress(0);
+    setError(ignoredCount ? `已忽略 ${ignoredCount} 个非音频文件。` : null);
+  };
+
+  const clearQueue = () => {
+    if (loading) return;
+    setAnalysisItems([]);
+    setSelectedResultId(null);
+    setResult(null);
+    setProgress(0);
     setError(null);
   };
 
   const handleAnalyze = async () => {
-    if (!file) return;
+    if (!analysisItems.length || loading) return;
     setLoading(true);
     setError(null);
-    setProgress(12);
+    setProgress(0);
+    setResult(null);
+    setSelectedResultId(null);
+    setAnalysisItems(previous => previous.map(item => ({
+      ...item,
+      status: 'pending',
+      progress: 0,
+      result: undefined,
+      error: undefined,
+    })));
+
+    const queueSnapshot = analysisItems;
+    let finished = 0;
+    let failed = 0;
+
     try {
-      const timer = window.setInterval(() => {
-        setProgress(previous => Math.min(previous + 12, 86));
-      }, 260);
-      const nextResult = await analyzeAudioFile(file);
-      window.clearInterval(timer);
-      setProgress(100);
-      setResult(nextResult);
-    } catch (err: any) {
-      setError(err?.message || '音频分析失败，请确认文件格式可被浏览器解码。');
-      setProgress(0);
+      for (const item of queueSnapshot) {
+        setAnalysisItems(previous => previous.map(queueItem => (
+          queueItem.id === item.id
+            ? { ...queueItem, status: 'analyzing', progress: 12, error: undefined, result: undefined }
+            : queueItem
+        )));
+
+        const timer = window.setInterval(() => {
+          setAnalysisItems(previous => previous.map(queueItem => (
+            queueItem.id === item.id && queueItem.status === 'analyzing'
+              ? { ...queueItem, progress: Math.min(queueItem.progress + 12, 86) }
+              : queueItem
+          )));
+        }, 260);
+
+        try {
+          const nextResult = await analyzeAudioFile(item.file);
+          window.clearInterval(timer);
+          finished += 1;
+          setProgress(Math.round((finished / queueSnapshot.length) * 100));
+          setResult(nextResult);
+          setSelectedResultId(item.id);
+          setAnalysisItems(previous => previous.map(queueItem => (
+            queueItem.id === item.id
+              ? { ...queueItem, status: 'done', progress: 100, result: nextResult, error: undefined }
+              : queueItem
+          )));
+        } catch (err: any) {
+          window.clearInterval(timer);
+          finished += 1;
+          failed += 1;
+          setProgress(Math.round((finished / queueSnapshot.length) * 100));
+          setAnalysisItems(previous => previous.map(queueItem => (
+            queueItem.id === item.id
+              ? {
+                  ...queueItem,
+                  status: 'error',
+                  progress: 0,
+                  error: err?.message || '音频分析失败，请确认文件格式可被浏览器解码。',
+                }
+              : queueItem
+          )));
+        }
+      }
+
+      if (failed) {
+        setError(`已完成 ${queueSnapshot.length - failed} 个音频，${failed} 个文件分析失败；请检查失败文件的格式或重新导出后再试。`);
+      }
     } finally {
       setLoading(false);
     }
@@ -527,17 +628,17 @@ export default function AudioAnalyzer() {
           <div>
             <h2 className="text-2xl font-black tracking-tight text-slate-900">音频测速 / 测调 / 乐器和弦分析</h2>
             <p className="mt-2 max-w-2xl text-sm leading-relaxed text-slate-500">
-              上传一首音乐后，本地解析音频并估算 BPM、调性、主要和弦、乐器/音色倾向、响度、动态范围、底噪 RMS、SNR 信噪比、频段分布和立体声宽度。
+              上传一首或多首音乐后，本地逐个解析音频并估算 BPM、调性、主要和弦、乐器/音色倾向、响度、动态范围、底噪 RMS、SNR 信噪比、频段分布和立体声宽度。
             </p>
           </div>
           <button
             type="button"
-            disabled={!file || loading}
+            disabled={!analysisItems.length || loading}
             onClick={handleAnalyze}
             className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-5 text-xs font-black text-white shadow-lg shadow-emerald-600/15 transition-all hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"
           >
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <BarChart3 className="h-4 w-4" />}
-            {loading ? `分析中 ${progress}%` : '开始分析'}
+            {loading ? `批量分析中 ${progress}%` : analysisItems.length > 1 ? `分析 ${analysisItems.length} 个音频` : '开始分析'}
           </button>
         </div>
 
@@ -551,14 +652,13 @@ export default function AudioAnalyzer() {
           onDrop={(event) => {
             event.preventDefault();
             setDragActive(false);
-            const droppedFile = event.dataTransfer.files?.[0];
-            if (droppedFile) handleFile(droppedFile);
+            if (event.dataTransfer.files?.length) handleFiles(event.dataTransfer.files);
           }}
           onClick={() => inputRef.current?.click()}
           className={`mt-6 flex min-h-40 cursor-pointer flex-col items-center justify-center rounded-3xl border-2 border-dashed p-8 text-center transition-all ${
             dragActive
               ? 'border-emerald-400 bg-emerald-50'
-              : file
+              : analysisItems.length
               ? 'border-emerald-100 bg-emerald-50/40'
               : 'border-slate-200 bg-slate-50 hover:border-emerald-300 hover:bg-emerald-50/40'
           }`}
@@ -567,24 +667,45 @@ export default function AudioAnalyzer() {
             ref={inputRef}
             type="file"
             accept="audio/*"
+            multiple
             className="hidden"
             onChange={(event) => {
-              const selected = event.target.files?.[0];
-              if (selected) handleFile(selected);
+              if (event.target.files?.length) handleFiles(event.target.files);
+              event.currentTarget.value = '';
             }}
           />
           <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl border border-slate-200 bg-white text-emerald-600 shadow-sm">
-            {file ? <FileAudio className="h-6 w-6" /> : <Upload className="h-6 w-6" />}
+            {analysisItems.length ? <FileAudio className="h-6 w-6" /> : <Upload className="h-6 w-6" />}
           </div>
-          {file ? (
+          {analysisItems.length ? (
             <>
-              <p className="max-w-xl truncate text-sm font-black text-slate-800">{file.name}</p>
-              <p className="mt-1 text-xs text-slate-500">{formatBytes(file.size)} · {file.type || '未知格式'}</p>
-              <p className="mt-3 text-[11px] font-bold text-emerald-700">点击可重新选择，或直接点右上角“开始分析”。</p>
+              <p className="max-w-xl truncate text-sm font-black text-slate-800">
+                {analysisItems.length === 1 ? analysisItems[0].file.name : `已选择 ${analysisItems.length} 个音频`}
+              </p>
+              <p className="mt-1 text-xs text-slate-500">
+                {analysisItems.length === 1
+                  ? `${formatBytes(analysisItems[0].file.size)} · ${analysisItems[0].file.type || '未知格式'}`
+                  : `合计 ${formatBytes(totalSelectedSize)} · 将按顺序逐个分析`}
+              </p>
+              {analysisItems.length > 1 && (
+                <div className="mt-3 flex max-w-2xl flex-wrap justify-center gap-1.5">
+                  {analysisItems.slice(0, 5).map(item => (
+                    <span key={item.id} className="max-w-[180px] truncate rounded-full border border-emerald-100 bg-white px-2.5 py-1 text-[10px] font-bold text-emerald-700">
+                      {item.file.name}
+                    </span>
+                  ))}
+                  {analysisItems.length > 5 && (
+                    <span className="rounded-full border border-emerald-100 bg-white px-2.5 py-1 text-[10px] font-bold text-emerald-700">
+                      +{analysisItems.length - 5}
+                    </span>
+                  )}
+                </div>
+              )}
+              <p className="mt-3 text-[11px] font-bold text-emerald-700">点击可重新选择，或直接点右上角开始分析。</p>
             </>
           ) : (
             <>
-              <p className="text-sm font-black text-slate-800">点击上传或把音乐拖到这里</p>
+              <p className="text-sm font-black text-slate-800">点击上传或把一首/多首音乐拖到这里</p>
               <p className="mt-1 text-xs text-slate-500">支持 MP3 / WAV / M4A / OGG 等浏览器可解码音频。</p>
             </>
           )}
@@ -607,10 +728,121 @@ export default function AudioAnalyzer() {
             </div>
           </div>
         )}
+
+        {analysisItems.length > 0 && (
+          <div className="mt-5 rounded-3xl border border-slate-200 bg-slate-50/70 p-4">
+            <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-sm font-black text-slate-900">批量分析队列</p>
+                <p className="mt-0.5 text-[11px] text-slate-500">
+                  {analysisItems.length} 个音频 · 已完成 {completedCount} 个{failedCount ? ` · 失败 ${failedCount} 个` : ''}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={clearQueue}
+                disabled={loading}
+                className="inline-flex h-8 items-center justify-center rounded-xl border border-slate-200 bg-white px-3 text-[11px] font-black text-slate-500 hover:border-rose-200 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                清空列表
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              {analysisItems.map((item, index) => {
+                const isActive = item.id === selectedResultId;
+                const statusText = item.status === 'pending'
+                  ? '等待分析'
+                  : item.status === 'analyzing'
+                  ? '分析中'
+                  : item.status === 'done'
+                  ? '已完成'
+                  : '失败';
+                const statusClass = item.status === 'done'
+                  ? 'border-emerald-100 bg-emerald-50 text-emerald-700'
+                  : item.status === 'analyzing'
+                  ? 'border-blue-100 bg-blue-50 text-blue-700'
+                  : item.status === 'error'
+                  ? 'border-rose-100 bg-rose-50 text-rose-700'
+                  : 'border-slate-200 bg-white text-slate-500';
+
+                return (
+                  <div
+                    key={item.id}
+                    className={`rounded-2xl border bg-white p-3 transition-all ${
+                      isActive ? 'border-emerald-300 shadow-sm shadow-emerald-600/10' : 'border-slate-200'
+                    }`}
+                  >
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[10px] font-black text-slate-500">
+                            {index + 1}
+                          </span>
+                          <p className="truncate text-xs font-black text-slate-800">{item.file.name}</p>
+                        </div>
+                        <p className="mt-1 pl-8 text-[10px] text-slate-400">{formatBytes(item.file.size)} · {item.file.type || '未知格式'}</p>
+                        {(item.status === 'analyzing' || item.status === 'error') && (
+                          <div className="mt-2 pl-8">
+                            {item.status === 'analyzing' ? (
+                              <div className="h-1.5 overflow-hidden rounded-full bg-slate-100">
+                                <div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${item.progress}%` }} />
+                              </div>
+                            ) : (
+                              <p className="text-[10px] font-bold text-rose-600">{item.error}</p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 text-[10px] sm:grid-cols-5 lg:min-w-[520px]">
+                        <div className={`flex items-center justify-center rounded-xl border px-2 py-1.5 font-black ${statusClass}`}>
+                          {item.status === 'analyzing' && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+                          {statusText}
+                        </div>
+                        <div className="rounded-xl border border-slate-100 bg-slate-50 px-2 py-1.5 text-center">
+                          <p className="font-bold text-slate-400">BPM</p>
+                          <p className="font-black text-slate-800">{item.result?.bpm.value || '-'}</p>
+                        </div>
+                        <div className="rounded-xl border border-slate-100 bg-slate-50 px-2 py-1.5 text-center">
+                          <p className="font-bold text-slate-400">Key</p>
+                          <p className="truncate font-black text-slate-800">{item.result?.key.name || '-'}</p>
+                        </div>
+                        <div className="rounded-xl border border-slate-100 bg-slate-50 px-2 py-1.5 text-center">
+                          <p className="font-bold text-slate-400">时长</p>
+                          <p className="font-black text-slate-800">{item.result ? formatTime(item.result.duration) : '-'}</p>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={!item.result}
+                          onClick={() => {
+                            if (!item.result) return;
+                            setResult(item.result);
+                            setSelectedResultId(item.id);
+                          }}
+                          className="rounded-xl bg-slate-900 px-3 py-1.5 font-black text-white transition hover:bg-emerald-600 disabled:bg-slate-200 disabled:text-slate-400"
+                        >
+                          查看详情
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
 
       {result && (
         <div className="space-y-6">
+          {analysisItems.length > 1 && (
+            <div className="rounded-2xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-xs text-emerald-800">
+              <span className="font-black">详细分析：</span>
+              {selectedItem?.file.name || result.fileName}
+            </div>
+          )}
+
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <MetricCard label="速度 BPM" value={`${result.bpm.value}`} hint={`备选：${result.bpm.alternatives.join(' / ') || '-'} · ${result.bpm.confidence}置信`} />
             <MetricCard label="调性 Key" value={result.key.name} hint={`${result.key.mode === 'Major' ? '大调' : '小调'}倾向 · ${result.key.confidence}置信`} />
@@ -627,8 +859,8 @@ export default function AudioAnalyzer() {
                 <h3 className="text-sm font-black text-slate-900">和弦段落倾向</h3>
               </div>
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                {result.chords.map((item) => (
-                  <div key={item.section} className="flex items-center justify-between rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">
+                {result.chords.map((item, index) => (
+                  <div key={`${item.section}-${item.chord}-${index}`} className="flex items-center justify-between rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">
                     <div>
                       <p className="text-[10px] font-bold text-slate-400">{item.section}</p>
                       <p className="mt-0.5 text-base font-black text-slate-900">{item.chord}</p>
