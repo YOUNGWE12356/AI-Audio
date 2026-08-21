@@ -32,6 +32,10 @@ import {
   isGeminiUnsupportedLocationError,
 } from './src/services/geminiRetry';
 import {
+  ELEVENLABS_MUSIC_MODEL,
+  ELEVENLABS_MUSIC_OUTPUT_FORMAT,
+  ELEVENLABS_SOUND_MODEL,
+  ELEVENLABS_SOUND_OUTPUT_FORMAT,
   fetchAvailableVoices,
   generateMusic,
   generateSoundEffect,
@@ -39,6 +43,7 @@ import {
   generateVoice,
   isolateAudio,
   transcribeSpeech,
+  wrapElevenLabsPcmAsWav,
 } from './src/services/elevenLabsService';
 import { normalizeElevenLabsQualityMode } from './src/utils/elevenLabsQuality';
 
@@ -61,6 +66,13 @@ async function startServer() {
   // Directories paths
   const dataDir = path.join(process.cwd(), 'data');
   const uploadsDir = path.join(process.cwd(), 'uploads');
+  // Keep the private sound library outside the application upload directory so
+  // application cleanup or deployment cannot remove company audio assets.
+  const libraryDir = process.env.SFX_LIBRARY_DIR
+    ? path.resolve(process.env.SFX_LIBRARY_DIR)
+    : path.join(dataDir, 'sfx-library');
+  const libraryOriginalsDir = path.join(libraryDir, 'originals');
+  const libraryTempDir = path.join(libraryDir, 'temp');
   const geminiTempDir = path.join(dataDir, '.gemini-upload');
   const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
   const MAX_INLINE_MEDIA_BYTES = 24 * 1024 * 1024;
@@ -157,6 +169,9 @@ async function startServer() {
   if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
   }
+  for (const directory of [libraryDir, libraryOriginalsDir, libraryTempDir]) {
+    if (!fs.existsSync(directory)) fs.mkdirSync(directory, { recursive: true });
+  }
   if (!fs.existsSync(geminiTempDir)) {
     fs.mkdirSync(geminiTempDir, { recursive: true });
   }
@@ -168,6 +183,41 @@ async function startServer() {
       && !relative.startsWith(`..${path.sep}`)
       && !path.isAbsolute(relative);
   };
+
+  const resolveLibraryPath = (storageKey: unknown) => {
+    if (typeof storageKey !== 'string' || !storageKey.trim()) return null;
+    const normalizedKey = storageKey.replace(/\\/g, '/').replace(/^\/+/, '');
+    const candidate = path.resolve(libraryDir, normalizedKey);
+    return isPathInside(libraryDir, candidate) ? candidate : null;
+  };
+
+  const streamRequestToFile = (req: express.Request, filePath: string) => new Promise<number>((resolve, reject) => {
+    const output = fs.createWriteStream(filePath, { flags: 'wx' });
+    let byteCount = 0;
+    let settled = false;
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      output.destroy();
+      reject(error);
+    };
+
+    req.on('data', (chunk: Buffer) => {
+      byteCount += chunk.length;
+      if (byteCount > MAX_UPLOAD_BYTES) {
+        req.destroy();
+        fail(Object.assign(new Error('文件超过 100MB 上传限制。'), { status: 413 }));
+      }
+    });
+    req.on('error', fail);
+    output.on('error', fail);
+    output.on('finish', () => {
+      if (settled) return;
+      settled = true;
+      resolve(byteCount);
+    });
+    req.pipe(output);
+  });
 
   const safeUnlink = async (filePath?: string) => {
     if (!filePath) return;
@@ -272,6 +322,212 @@ async function startServer() {
   const categoriesFile = path.join(dataDir, 'categories.json');
   const soundsFile = path.join(dataDir, 'sounds.json');
 
+  // Older library exports were written with a lossy encoding conversion. Some
+  // values can still be repaired from their file names; values persisted as
+  // literal question marks cannot be decoded, so they receive explicit,
+  // human-readable fallback names instead of leaking mojibake into the UI.
+  const isLostLibraryText = (value: unknown) => (
+    typeof value === 'string' && /\?/.test(value)
+  );
+
+  const legacyFileStem = (sound: any) => {
+    const raw = String(sound?.fileName || sound?.name || '音频素材');
+    return raw
+      .replace(/\.[a-z0-9]+$/i, '')
+      .replace(/[_-]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 120) || '音频素材';
+  };
+
+  const inferLegacyPlacement = (sound: any) => {
+    const text = `${sound?.fileName || ''} ${sound?.name || ''} ${sound?.path || ''}`.toLowerCase();
+    const music = /(^|[\\/_\s-])(bgm|music)([\\/_\s-]|$)/.test(text) || text.includes('/music/');
+    if (music) {
+      if (/combat|tension|battle|metal/.test(text)) return { category: '历史导入音乐', subcategory: '战斗/史诗' };
+      if (/cyber|neon|synth|electro/.test(text)) return { category: '历史导入音乐', subcategory: '赛博电子' };
+      if (/chinese|xianxia|traditional/.test(text)) return { category: '历史导入音乐', subcategory: '国风/传统' };
+      if (/casual|lobby|happy|puzzle/.test(text)) return { category: '历史导入音乐', subcategory: '轻松/休闲' };
+      if (/suspense|horror|tension|dark/.test(text)) return { category: '历史导入音乐', subcategory: '悬疑/恐怖' };
+      return { category: '历史导入音乐', subcategory: '未分类音乐' };
+    }
+
+    if (/ui|popup|pageflip|countdown|alert|notification|menu|click/.test(text)) {
+      return { category: '历史导入音效', subcategory: '界面/UI' };
+    }
+    if (/explosion|impact|weapon|sword|gun|firearm|melee|boom/.test(text)) {
+      return { category: '历史导入音效', subcategory: '武器/战斗' };
+    }
+    if (/foot|foley|step|movement/.test(text)) {
+      return { category: '历史导入音效', subcategory: '脚步/拟音' };
+    }
+    if (/magic|spell|laser|shield|sci-fi/.test(text)) {
+      return { category: '历史导入音效', subcategory: '魔法/科幻' };
+    }
+    if (/creature|monster|wolf|goose|vocal|growl/.test(text)) {
+      return { category: '历史导入音效', subcategory: '生物/怪物' };
+    }
+    if (/ambient|nature|fountain|wind|rain|water/.test(text)) {
+      return { category: '历史导入音效', subcategory: '环境/自然' };
+    }
+    return { category: '历史导入音效', subcategory: '未分类音效' };
+  };
+
+  const ensureRecoveredGroup = (categories: any[], groupId: string, groupName: string, subcategories: string[]) => {
+    let group = categories.find(item => item?.id === groupId);
+    if (!group) {
+      group = {
+        id: groupId,
+        name: groupName,
+        english: groupName,
+        subCategories: [],
+      };
+      categories.push(group);
+    }
+    group.name = groupName;
+    group.english = groupName;
+    if (!Array.isArray(group.subCategories)) group.subCategories = [];
+    subcategories.forEach((name, index) => {
+      const existing = group.subCategories.find((item: any) => item?.name === name || item?.id === `recovered-${groupId}-${index}`);
+      if (existing) {
+        existing.name = name;
+        existing.english = name;
+      } else {
+        group.subCategories.push({
+          id: `recovered-${groupId}-${index}`,
+          name,
+          english: name,
+          description: name,
+        });
+      }
+    });
+    return group;
+  };
+
+  const repairLibraryMetadata = (rawCategories: any[], rawSounds: any[]) => {
+    const categories = Array.isArray(rawCategories) ? rawCategories : [];
+    const sounds = Array.isArray(rawSounds) ? rawSounds : [];
+    const touched = { categories: false, sounds: false };
+    const hadLostMetadata = categories.some((group: any) => (
+      isLostLibraryText(group?.name)
+      || (Array.isArray(group?.subCategories) && group.subCategories.some((sub: any) => isLostLibraryText(sub?.name)))
+    )) || sounds.some((sound: any) => (
+      isLostLibraryText(sound?.category)
+      || isLostLibraryText(sound?.subcategory)
+      || isLostLibraryText(sound?.name)
+    ));
+
+    categories.forEach((group: any, groupIndex: number) => {
+      if (!group || typeof group !== 'object') return;
+      if (isLostLibraryText(group.name) || (
+        String(group.id || '').startsWith('custom_group_')
+        && group.name === '历史导入音效'
+      )) {
+        group.name = `历史目录 ${Math.max(1, groupIndex)}`;
+        touched.categories = true;
+      }
+      if (!Array.isArray(group.subCategories)) {
+        group.subCategories = [];
+        touched.categories = true;
+      }
+      group.subCategories.forEach((sub: any, subIndex: number) => {
+        if (isLostLibraryText(sub?.name)) {
+          sub.name = `历史子目录 ${subIndex + 1}`;
+          touched.categories = true;
+        }
+        if (isLostLibraryText(sub?.description)) {
+          sub.description = sub.name || '历史导入素材';
+          touched.categories = true;
+        }
+      });
+    });
+
+    if (hadLostMetadata) {
+      ensureRecoveredGroup(categories, 'recovered_imported_sfx', '历史导入音效', [
+        '界面/UI', '武器/战斗', '脚步/拟音', '魔法/科幻', '生物/怪物', '环境/自然', '未分类音效',
+      ]);
+      ensureRecoveredGroup(categories, 'recovered_imported_music', '历史导入音乐', [
+        '战斗/史诗', '赛博电子', '国风/传统', '轻松/休闲', '悬疑/恐怖', '未分类音乐',
+      ]);
+    }
+
+    sounds.forEach((sound: any) => {
+      if (!sound || typeof sound !== 'object') return;
+      const placement = (isLostLibraryText(sound.category) || isLostLibraryText(sound.subcategory))
+        ? inferLegacyPlacement(sound)
+        : { category: String(sound.category || ''), subcategory: String(sound.subcategory || '') };
+      if (placement.category && (sound.category !== placement.category || sound.subcategory !== placement.subcategory)) {
+        sound.category = placement.category;
+        sound.subcategory = placement.subcategory;
+        touched.sounds = true;
+      }
+      if (isLostLibraryText(sound.name)) {
+        sound.name = legacyFileStem(sound);
+        touched.sounds = true;
+      }
+      if (isLostLibraryText(sound.designer)) {
+        const designer = String(sound.designer);
+        sound.designer = designer.includes('Kevin')
+          ? 'AD_Design / Kevin'
+          : designer.includes('Milly')
+            ? 'AD_Design / Milly'
+            : 'AD_Design';
+        touched.sounds = true;
+      }
+      if (Array.isArray(sound.tags)) {
+        const nextTags = sound.tags.filter((tag: unknown) => typeof tag === 'string' && !isLostLibraryText(tag));
+        if (nextTags.length === 0) nextTags.push(sound.subcategory || '历史导入');
+        if (JSON.stringify(nextTags) !== JSON.stringify(sound.tags)) {
+          sound.tags = nextTags;
+          touched.sounds = true;
+        }
+      }
+    });
+
+    return { categories, sounds, touched };
+  };
+
+  const loadAndRepairLibraryMetadata = () => {
+    let categories: any[] = [];
+    let sounds: any[] = [];
+    try {
+      if (fs.existsSync(categoriesFile)) {
+        const parsed = JSON.parse(fs.readFileSync(categoriesFile, 'utf-8'));
+        if (Array.isArray(parsed)) categories = parsed;
+      }
+    } catch (error) {
+      console.warn('Unable to parse library categories; rebuilding a readable index:', error);
+    }
+    try {
+      if (fs.existsSync(soundsFile)) {
+        const parsed = JSON.parse(fs.readFileSync(soundsFile, 'utf-8'));
+        if (Array.isArray(parsed)) sounds = parsed;
+      }
+    } catch (error) {
+      console.warn('Unable to parse library sounds; keeping the readable fallback index:', error);
+    }
+
+    const beforeCategories = JSON.stringify(categories);
+    const beforeSounds = JSON.stringify(sounds);
+    const repaired = repairLibraryMetadata(categories, sounds);
+    const categoriesChanged = JSON.stringify(repaired.categories) !== beforeCategories;
+    const soundsChanged = JSON.stringify(repaired.sounds) !== beforeSounds;
+    if (categoriesChanged || !fs.existsSync(categoriesFile)) {
+      fs.writeFileSync(categoriesFile, JSON.stringify(repaired.categories, null, 2), 'utf-8');
+    }
+    if (soundsChanged || !fs.existsSync(soundsFile)) {
+      fs.writeFileSync(soundsFile, JSON.stringify(repaired.sounds, null, 2), 'utf-8');
+    }
+    return repaired;
+  };
+
+  // Repair legacy metadata before the library is first read.
+  try {
+    loadAndRepairLibraryMetadata();
+  } catch (error) {
+    console.warn('Unable to repair library metadata:', error);
+  }
+
   type AudioAssetSource = 'uploaded' | 'generated' | 'external' | 'library';
   type AudioAssetKind = 'music' | 'sfx';
   type IndexedAudioAsset = SoundEffect & {
@@ -297,6 +553,9 @@ async function startServer() {
   const normalizeSearchText = (value: unknown) => String(value || '').trim().toLowerCase();
 
   const inferAudioAssetSource = (sound: SoundEffect): AudioAssetSource => {
+    const tags = (sound.tags || []).map(tag => normalizeSearchText(tag));
+    if (sound.source === 'generated' || tags.includes('自动入库') || tags.includes('ai生成')) return 'generated';
+    if (sound.storageKey) return 'uploaded';
     const url = normalizeSearchText(sound.url);
     const fileName = normalizeSearchText(sound.fileName);
     const designer = normalizeSearchText(sound.designer);
@@ -314,6 +573,7 @@ async function startServer() {
   };
 
   const inferAudioAssetKind = (sound: SoundEffect): AudioAssetKind => {
+    if (sound.generatedKind) return sound.generatedKind;
     const text = normalizeSearchText(`${sound.category} ${sound.subcategory || ''} ${sound.fileName} ${sound.path}`);
     return text.includes('music')
       || text.includes('bgm')
@@ -346,7 +606,7 @@ async function startServer() {
       ...sound,
       source,
       assetKind,
-      downloadUrl: sound.url || '',
+      downloadUrl: sound.downloadUrl || sound.url || '',
       searchableText,
     };
   };
@@ -425,6 +685,80 @@ async function startServer() {
   // Serve uploaded files statically
   app.use('/uploads', express.static(uploadsDir));
 
+  // Private company-library media endpoints. The browser streams these files
+  // directly from the server with HTTP Range support instead of proxying audio
+  // through the React app or storing large uploads in browser IndexedDB.
+  app.post('/api/sfx/library/upload', asyncRoute(async (req, res) => {
+    const rawName = Array.isArray(req.headers['x-filename'])
+      ? req.headers['x-filename'][0]
+      : req.headers['x-filename'];
+    let originalName = 'audio-asset';
+    try {
+      originalName = decodeURIComponent(String(rawName || 'audio-asset'));
+    } catch {
+      originalName = String(rawName || 'audio-asset');
+    }
+    const extension = getSafeUploadExtension(originalName, req.headers['content-type'], '.wav');
+    const storageName = `${randomUUID()}${extension}`;
+    const storageKey = path.posix.join('originals', storageName);
+    const finalPath = resolveLibraryPath(storageKey);
+    if (!finalPath) return res.status(400).json({ error: 'Invalid library storage path.' });
+
+    const tempPath = path.join(libraryTempDir, `${randomUUID()}.upload`);
+    try {
+      const contentLength = Number(req.headers['content-length'] || 0);
+      if (contentLength > MAX_UPLOAD_BYTES) {
+        return res.status(413).json({ error: '文件超过 100MB 上传限制。' });
+      }
+      const byteCount = await streamRequestToFile(req, tempPath);
+      if (byteCount <= 0) return res.status(400).json({ error: '未收到音频文件。' });
+      await fs.promises.rename(tempPath, finalPath);
+
+      const encodedKey = encodeURIComponent(storageKey);
+      const streamUrl = `/api/sfx/library/stream?key=${encodedKey}`;
+      return res.json({
+        success: true,
+        fileName: storageName,
+        originalName: normalizeUploadDisplayName(originalName, storageName),
+        storageKey,
+        sizeBytes: byteCount,
+        url: streamUrl,
+        previewUrl: streamUrl,
+        downloadUrl: `${streamUrl}&download=1`,
+        processingStatus: 'ready',
+      });
+    } catch (error: any) {
+      await safeUnlink(tempPath);
+      return res.status(error?.status || 500).json({
+        error: error?.message || '音效库文件上传失败。',
+      });
+    }
+  }));
+
+  app.get('/api/sfx/library/stream', (req, res) => {
+    const filePath = resolveLibraryPath(req.query.key);
+    if (!filePath || !fs.existsSync(filePath)) {
+      return res.status(404).json({ error: '音效文件不存在。' });
+    }
+    const download = String(req.query.download || '') === '1';
+    const disposition = download ? 'attachment' : 'inline';
+    res.setHeader('Content-Disposition', `${disposition}; filename="${encodeURIComponent(path.basename(filePath))}"`);
+    return res.sendFile(filePath, {
+      acceptRanges: true,
+      cacheControl: true,
+      maxAge: '1h',
+    });
+  });
+
+  app.delete('/api/sfx/library/file', asyncRoute(async (req, res) => {
+    const filePath = resolveLibraryPath(req.query.key);
+    if (!filePath) return res.status(400).json({ error: 'Invalid library storage path.' });
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Library file not found.' });
+
+    await fs.promises.unlink(filePath);
+    return res.json({ success: true });
+  }));
+
   // --- API Endpoints ---
 
   // HTML5 client bootstrapping and deployment diagnostics.
@@ -462,11 +796,7 @@ async function startServer() {
   // 1. Get Categories
   app.get('/api/sfx/categories', (req, res) => {
     try {
-      if (fs.existsSync(categoriesFile)) {
-        const content = fs.readFileSync(categoriesFile, 'utf-8');
-        return res.json(JSON.parse(content));
-      }
-      return res.json([]);
+      return res.json(loadAndRepairLibraryMetadata().categories);
     } catch (err: any) {
       console.error('Error reading categories:', err);
       return res.status(500).json({ error: err.message });
@@ -480,7 +810,14 @@ async function startServer() {
       if (!Array.isArray(categories)) {
         return res.status(400).json({ error: 'Invalid categories format' });
       }
-      fs.writeFileSync(categoriesFile, JSON.stringify(categories, null, 2), 'utf-8');
+      const existingSounds = fs.existsSync(soundsFile)
+        ? JSON.parse(fs.readFileSync(soundsFile, 'utf-8'))
+        : [];
+      const repaired = repairLibraryMetadata(categories, Array.isArray(existingSounds) ? existingSounds : []);
+      fs.writeFileSync(categoriesFile, JSON.stringify(repaired.categories, null, 2), 'utf-8');
+      if (repaired.touched.sounds) {
+        fs.writeFileSync(soundsFile, JSON.stringify(repaired.sounds, null, 2), 'utf-8');
+      }
       return res.json({ success: true });
     } catch (err: any) {
       console.error('Error saving categories:', err);
@@ -491,11 +828,8 @@ async function startServer() {
   // 3. Get Sound Effects
   app.get('/api/sfx/sounds', (req, res) => {
     try {
-      if (fs.existsSync(soundsFile)) {
-        const content = fs.readFileSync(soundsFile, 'utf-8');
-        return res.json(JSON.parse(content));
-      }
-      return res.json(INITIAL_SOUNDS);
+      const repaired = loadAndRepairLibraryMetadata();
+      return res.json(fs.existsSync(soundsFile) ? repaired.sounds : INITIAL_SOUNDS);
     } catch (err: any) {
       console.error('Error reading sounds:', err);
       return res.status(500).json({ error: err.message });
@@ -509,7 +843,15 @@ async function startServer() {
       if (!Array.isArray(sounds)) {
         return res.status(400).json({ error: 'Invalid sounds format' });
       }
-      fs.writeFileSync(soundsFile, JSON.stringify(sounds, null, 2), 'utf-8');
+      const existingCategories = fs.existsSync(categoriesFile)
+        ? JSON.parse(fs.readFileSync(categoriesFile, 'utf-8'))
+        : [];
+      const repaired = repairLibraryMetadata(
+        Array.isArray(existingCategories) ? existingCategories : [],
+        sounds,
+      );
+      fs.writeFileSync(soundsFile, JSON.stringify(repaired.sounds, null, 2), 'utf-8');
+      fs.writeFileSync(categoriesFile, JSON.stringify(repaired.categories, null, 2), 'utf-8');
       return res.json({ success: true });
     } catch (err: any) {
       console.error('Error saving sounds:', err);
@@ -528,6 +870,8 @@ async function startServer() {
       const kind = normalizeSearchText(req.query.kind);
       const limitValue = Number.parseInt(String(req.query.limit || '120'), 10);
       const limit = Number.isFinite(limitValue) ? Math.min(Math.max(limitValue, 1), 500) : 120;
+      const offsetValue = Number.parseInt(String(req.query.offset || '0'), 10);
+      const offset = Number.isFinite(offsetValue) ? Math.max(offsetValue, 0) : 0;
 
       const assets = getIndexedAudioAssets()
         .map(asset => ({ ...asset, score: scoreAudioAsset(asset, query) }))
@@ -549,9 +893,11 @@ async function startServer() {
         });
 
       return res.json({
-        assets: assets.slice(0, limit),
+        assets: assets.slice(offset, offset + limit),
         total: assets.length,
         limit,
+        offset,
+        nextOffset: offset + limit < assets.length ? offset + limit : null,
         indexedAt: new Date().toISOString(),
       });
     } catch (err: any) {
@@ -1451,11 +1797,14 @@ async function startServer() {
   const extractServerVideoKeyframes = async (
     fileName: unknown,
     requestedDuration: unknown,
+    options: { dense?: boolean } = {},
   ): Promise<Array<{ timestamp: number; base64: string }>> => {
     const { videoPath } = await resolveValidatedUploadedVideo(fileName);
 
     const duration = parseNumber(requestedDuration, 30, 1, 3_600);
-    const frameCount = 6;
+    const frameCount = options.dense
+      ? Math.min(48, Math.max(12, Math.ceil(duration)))
+      : 6;
     const firstTimestamp = duration / (frameCount * 2);
     const temporaryDirectory = await fs.promises.mkdtemp(path.join(uploadsDir, '.video-analysis-'));
     if (!isPathInside(uploadsDir, temporaryDirectory)) {
@@ -2389,7 +2738,7 @@ ${JSON.stringify(normalizedVoices)}
     const rawDuration = req.body?.duration;
     const duration = rawDuration === undefined || rawDuration === null || rawDuration === ''
       ? undefined
-      : parseNumber(rawDuration, 10, 0.5, 60);
+      : parseNumber(rawDuration, 10, 0.5, 30);
     const qualityMode = normalizeElevenLabsQualityMode(req.body?.qualityMode);
     const englishText = /[^\x00-\x7F]/.test(text)
       ? await translateToEnglish(text)
@@ -2839,6 +3188,80 @@ ${JSON.stringify(normalizedVoices)}
     }
   });
 
+  const buildLocalVideoAnalysisFallback = ({
+    videoDuration,
+    bgmEnabled,
+    sfxEnabled,
+    dubbingEnabled,
+    reason,
+  }: {
+    videoDuration: unknown;
+    bgmEnabled: boolean;
+    sfxEnabled: boolean;
+    dubbingEnabled: boolean;
+    reason?: unknown;
+  }) => {
+    const durationLimit = parseNumber(videoDuration, 30, 1, 3_600);
+    const clips: any[] = [];
+    const pushClip = (clip: any) => {
+      const startTime = parseNumber(clip.startTime, 0, 0, Math.max(0, durationLimit - 0.1));
+      const maxDuration = Math.max(0.1, durationLimit - startTime);
+      clips.push({
+        ...clip,
+        startTime,
+        duration: Number(parseNumber(clip.duration, maxDuration, 0.1, maxDuration).toFixed(3)),
+      });
+    };
+
+    if (bgmEnabled) {
+      pushClip({
+        id: 'fallback-bgm-1',
+        trackId: 'bgm',
+        name: '本地兜底背景音乐',
+        prompt: 'adaptive cinematic background music bed that follows the full video pacing, neutral mood, clean mix, no vocals',
+        startTime: 0,
+        duration: durationLimit,
+      });
+    }
+
+    if (sfxEnabled) {
+      const cueTimes = durationLimit < 8
+        ? [Math.max(0.2, durationLimit * 0.35)]
+        : [
+          Math.max(0.2, durationLimit * 0.18),
+          Math.max(0.4, durationLimit * 0.5),
+          Math.max(0.6, durationLimit * 0.82),
+        ];
+      cueTimes.forEach((startTime, index) => {
+        pushClip({
+          id: `fallback-sfx-${index + 1}`,
+          trackId: 'sfx',
+          name: index === 0 ? '关键动作提示音' : index === 1 ? '画面转场提示音' : '结尾强调音效',
+          prompt: index === 0
+            ? 'short clean action accent sound effect, game UI friendly, punchy but not harsh'
+            : index === 1
+              ? 'short transition whoosh sound effect, modern game trailer style, clean high frequency sweep'
+              : 'short positive ending accent sound effect, light impact, polished game audio',
+          startTime,
+          duration: Math.min(2.2, Math.max(0.6, durationLimit * 0.04)),
+        });
+      });
+    }
+
+    const warning = isGeminiUnsupportedLocationError(reason)
+      ? '当前 Gemini API 地区不可用，系统已自动改用本地兜底分析；配乐/音效会生成基础时间线，字幕配音需要可用的视觉 AI 服务后再精确识别。'
+      : 'AI 画面分析暂时不可用，系统已自动改用本地兜底分析；你可以先继续手动调整时间线，稍后再重试 AI 分析。';
+
+    return {
+      clips,
+      analysisSource: 'local-fallback',
+      analysisPartial: true,
+      dubbingCueCount: 0,
+      dubbingStatus: dubbingEnabled ? 'unavailable' : 'disabled',
+      warning,
+    };
+  };
+
   // 7. Video AI Multi-modal Analysis
   app.post('/api/video/analyze', async (req, res) => {
     let ai: ReturnType<typeof getGoogleAI> | undefined;
@@ -2848,10 +3271,28 @@ ${JSON.stringify(normalizedVoices)}
         fileName,
         keyframes,
         videoDuration,
-        bgmEnabled,
-        sfxEnabled,
-        dubbingEnabled,
+        bgmEnabled: requestedBgmEnabled,
+        sfxEnabled: requestedSfxEnabled,
+        dubbingEnabled: requestedDubbingEnabled,
+        analysisTrack,
       } = req.body;
+
+      // A track re-analysis must use the same analyzer as the full workflow,
+      // while limiting both the prompt and the returned clips to one track.
+      const scopedAnalysisTrack = analysisTrack === 'bgm'
+        || analysisTrack === 'sfx'
+        || analysisTrack === 'dubbing'
+        ? analysisTrack
+        : 'all';
+      const bgmEnabled = scopedAnalysisTrack === 'all'
+        ? Boolean(requestedBgmEnabled)
+        : scopedAnalysisTrack === 'bgm';
+      const sfxEnabled = scopedAnalysisTrack === 'all'
+        ? Boolean(requestedSfxEnabled)
+        : scopedAnalysisTrack === 'sfx';
+      const dubbingEnabled = scopedAnalysisTrack === 'all'
+        ? Boolean(requestedDubbingEnabled)
+        : scopedAnalysisTrack === 'dubbing';
       
       const aiClient = getGoogleAI();
       ai = aiClient;
@@ -2904,7 +3345,7 @@ CRITICAL SUBTITLE OCR PASS:
   lipSyncConfidence?: number (仅 dubbing，口型与字幕时间判断置信度，0 到 1),
   timingSource?: string (仅 dubbing，时间依据，如 "subtitle+lip"),
   startTime: number (在时间轴上的起始时间，单位为秒，必须大于等于 0 且小于视频时长),
-  duration: number (该音频块的时长，单位秒，BGM通常在10-30s，SFX通常在2-4s；Dubbing必须位于字幕硬边界内，高可信口型时使用口型交集，否则使用整段字幕)
+  duration: number (该音频块的时长，单位秒；BGM必须从0秒开始并覆盖完整视频，SFX通常为2-4s；Dubbing必须位于字幕硬边界内，高可信口型时使用口型交集，否则使用整段字幕)
 }
 
 请确保 clips 数组中只包含启用的轨道类型：
@@ -2920,7 +3361,7 @@ CRITICAL SUBTITLE OCR PASS:
       const contents: any[] = [prompt];
 
       let analysisKeyframes: Array<{ timestamp: number; base64: string }> = [];
-      let analysisSource: 'client-keyframes' | 'server-ffmpeg' | 'server-native-video' = 'client-keyframes';
+      let analysisSource: 'client-keyframes' | 'server-ffmpeg' | 'server-native-video' | 'local-fallback' = 'client-keyframes';
       let nativeVideoFps: number | undefined;
       let dubbingAnalysisUnavailable = false;
 
@@ -2997,12 +3438,29 @@ CRITICAL SUBTITLE OCR PASS:
         try {
           await prepareNativeVideoAnalysis(8, 'Dubbing is enabled;');
         } catch (nativeVideoError) {
-          if (!bgmEnabled && !sfxEnabled) {
+          const canUseVisualGatewayFallback = isGptTextConfigured();
+          if (!canUseVisualGatewayFallback && !bgmEnabled && !sfxEnabled) {
+            if (isGeminiUnsupportedLocationError(nativeVideoError)) {
+              return res.json(buildLocalVideoAnalysisFallback({
+                videoDuration,
+                bgmEnabled: Boolean(bgmEnabled),
+                sfxEnabled: Boolean(sfxEnabled),
+                dubbingEnabled: Boolean(dubbingEnabled),
+                reason: nativeVideoError,
+              }));
+            }
             throw nativeVideoError;
           }
-          dubbingAnalysisUnavailable = true;
-          console.warn('Native dubbing analysis failed; falling back to keyframe-only BGM/SFX analysis:', nativeVideoError);
-          analysisKeyframes = await extractServerVideoKeyframes(fileName, videoDuration);
+          dubbingAnalysisUnavailable = !canUseVisualGatewayFallback;
+          console.warn(
+            'Native video analysis failed; falling back to dense server keyframes through the configured visual gateway:',
+            nativeVideoError,
+          );
+          analysisKeyframes = await extractServerVideoKeyframes(
+            fileName,
+            videoDuration,
+            { dense: canUseVisualGatewayFallback },
+          );
           analysisSource = 'server-ffmpeg';
         }
       } else if (Array.isArray(keyframes) && keyframes.length > 0) {
@@ -3059,44 +3517,58 @@ CRITICAL SUBTITLE OCR PASS:
       }
 
       console.log(`Sending content generation request to Gemini (models/${GEMINI_PRIMARY_MODEL})...`);
-      const response = await generateGeminiContent(ai, {
-        model: GEMINI_PRIMARY_MODEL,
-        contents,
-        config: {
-          responseMimeType: "application/json",
-          maxOutputTokens: dubbingEnabled ? 65_536 : 8_192,
-          responseSchema: {
-            type: Type.OBJECT,
-            required: ["clips"],
-            properties: {
-              clips: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  required: ["id", "trackId", "name", "prompt", "startTime", "duration"],
-                  properties: {
-                    id: { type: Type.STRING },
-                    trackId: { type: Type.STRING },
-                    name: { type: Type.STRING },
-                    prompt: { type: Type.STRING },
-                    text: { type: Type.STRING },
-                    subtitleId: { type: Type.STRING },
-                    speaker: { type: Type.STRING },
-                    subtitleStartTime: { type: Type.NUMBER },
-                    subtitleEndTime: { type: Type.NUMBER },
-                    lipStartTime: { type: Type.NUMBER },
-                    lipEndTime: { type: Type.NUMBER },
-                    lipSyncConfidence: { type: Type.NUMBER },
-                    timingSource: { type: Type.STRING },
-                    startTime: { type: Type.NUMBER },
-                    duration: { type: Type.NUMBER }
+      let response: Awaited<ReturnType<typeof generateGeminiContent>>;
+      try {
+        response = await generateGeminiContent(ai, {
+          model: GEMINI_PRIMARY_MODEL,
+          contents,
+          config: {
+            responseMimeType: "application/json",
+            maxOutputTokens: dubbingEnabled ? 65_536 : 8_192,
+            responseSchema: {
+              type: Type.OBJECT,
+              required: ["clips"],
+              properties: {
+                clips: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    required: ["id", "trackId", "name", "prompt", "startTime", "duration"],
+                    properties: {
+                      id: { type: Type.STRING },
+                      trackId: { type: Type.STRING },
+                      name: { type: Type.STRING },
+                      prompt: { type: Type.STRING },
+                      text: { type: Type.STRING },
+                      subtitleId: { type: Type.STRING },
+                      speaker: { type: Type.STRING },
+                      subtitleStartTime: { type: Type.NUMBER },
+                      subtitleEndTime: { type: Type.NUMBER },
+                      lipStartTime: { type: Type.NUMBER },
+                      lipEndTime: { type: Type.NUMBER },
+                      lipSyncConfidence: { type: Type.NUMBER },
+                      timingSource: { type: Type.STRING },
+                      startTime: { type: Type.NUMBER },
+                      duration: { type: Type.NUMBER }
+                    }
                   }
                 }
               }
             }
           }
+        });
+      } catch (contentGenerationError) {
+        if (isGeminiUnsupportedLocationError(contentGenerationError)) {
+          return res.json(buildLocalVideoAnalysisFallback({
+            videoDuration,
+            bgmEnabled: Boolean(bgmEnabled),
+            sfxEnabled: Boolean(sfxEnabled),
+            dubbingEnabled: Boolean(dubbingEnabled),
+            reason: contentGenerationError,
+          }));
         }
-      });
+        throw contentGenerationError;
+      }
 
       if (!response.text) {
         throw new Error("AI did not return text");
@@ -3141,6 +3613,14 @@ CRITICAL SUBTITLE OCR PASS:
           const startTime = parseNumber(clip.startTime, 0, 0, Math.max(0, durationLimit - 0.1));
           const maxDuration = Math.max(0.1, durationLimit - startTime);
           if (clip.trackId !== 'dubbing') {
+            if (clip.trackId === 'bgm') {
+              return {
+                ...clip,
+                id: String(clip.id || `clip-${index + 1}`),
+                startTime: 0,
+                duration: durationLimit,
+              };
+            }
             return {
               ...clip,
               id: String(clip.id || `clip-${index + 1}`),
@@ -3210,6 +3690,10 @@ CRITICAL SUBTITLE OCR PASS:
           return normalizedClip;
         })
         .filter((clip: any) => clip.trackId !== 'dubbing' || clip.text.length > 0)
+        .filter((clip: any, index: number, allClips: any[]) => (
+          clip.trackId !== 'bgm'
+          || allClips.findIndex(candidate => candidate.trackId === 'bgm') === index
+        ))
         .sort((left: any, right: any) => left.startTime - right.startTime);
 
       // Models can repeat the same visible caption across adjacent samples.
@@ -3360,10 +3844,9 @@ CRITICAL SUBTITLE OCR PASS:
         return res.status(400).json({ error: 'ElevenLabs API Key is not configured on the server. Please configure it in Settings.' });
       }
       
-      const cleanFilename = `el_${trackId}_${Date.now()}.mp3`;
-      const filePath = path.join(uploadsDir, cleanFilename);
-      
       const resolvedType = trackType || (trackId === 'dubbing' ? 'dubbing' : trackId === 'bgm' ? 'bgm' : 'sfx');
+      const cleanFilename = `el_${trackId}_${Date.now()}.${resolvedType === 'sfx' ? 'wav' : 'mp3'}`;
+      const filePath = path.join(uploadsDir, cleanFilename);
       
       if (resolvedType === 'dubbing') {
         // Text to Speech
@@ -3422,59 +3905,21 @@ CRITICAL SUBTITLE OCR PASS:
         fs.writeFileSync(filePath, buffer);
 
       } else if (resolvedType === 'bgm') {
-        // Background music (Sound generation)
-        const sfxPrompt = isProQuality
+        const musicPrompt = isProQuality
           ? `Broadcast-ready professional background instrumental music, high fidelity, polished mix, wide stereo image, no vocals, no speech: ${prompt}`
           : `AI Music, full background instrumental track, no vocals, no speech: ${prompt}`;
-        const elevenLabsDuration = Math.min(22, duration || 20);
-        console.log(`ElevenLabs server Music Gen: prompt="${sfxPrompt}" elevenLabsDuration=${elevenLabsDuration}, targetDuration=${duration}`);
-
-        const apiResponse = await fetch("https://api.elevenlabs.io/v1/sound-generation", {
-          method: "POST",
-          headers: {
-            "xi-api-key": apiKey,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model_id: "eleven_text_to_sound_v2",
-            text: sfxPrompt,
-            duration_seconds: elevenLabsDuration,
-            prompt_influence: isProQuality ? 0.5 : 0.4,
-          }),
-        });
-        
-        if (!apiResponse.ok) {
-          const errJson = await apiResponse.json().catch(() => ({}));
-          throw new Error(`ElevenLabs Music Gen Error: ${errJson.detail?.message || apiResponse.statusText}`);
-        }
-        
-        const buffer = Buffer.from(await apiResponse.arrayBuffer());
-        
-        if (duration && duration > 22) {
-          // Write ElevenLabs response to a temporary file, then loop it using FFmpeg
-          const tempFileName = `temp_el_bgm_${Date.now()}.mp3`;
-          const tempPath = path.join(uploadsDir, tempFileName);
-          fs.writeFileSync(tempPath, buffer);
-          
-          console.log(`Looping BGM to ${duration}s using bundled FFmpeg.`);
-          
-          await new Promise<void>((resolve) => {
-            execFile(FFMPEG_BINARY, ['-y', '-stream_loop', '-1', '-i', tempPath, '-t', String(duration), filePath], (err, stdout, stderr) => {
-              // Delete temp file
-              try { fs.unlinkSync(tempPath); } catch (e) {}
-              if (err) {
-                console.error('Failed to loop BGM with ffmpeg, falling back to original segment:', err);
-                // Fallback: write original buffer directly
-                fs.writeFileSync(filePath, buffer);
-              } else {
-                console.log(`Successfully generated looped BGM at ${filePath}`);
-              }
-              resolve();
-            });
-          });
-        } else {
-          fs.writeFileSync(filePath, buffer);
-        }
+        const targetDuration = parseNumber(duration, 30, 3, 600);
+        console.log(
+          `ElevenLabs server Music: provider=ElevenLabs Music model=${ELEVENLABS_MUSIC_MODEL} format=${ELEVENLABS_MUSIC_OUTPUT_FORMAT} targetDuration=${targetDuration}s`,
+        );
+        const musicBlob = await generateMusic(
+          musicPrompt,
+          targetDuration,
+          true,
+          undefined,
+          { qualityMode },
+        );
+        fs.writeFileSync(filePath, Buffer.from(await musicBlob.arrayBuffer()));
         
       } else {
         // Sound effect (Sound generation)
@@ -3483,31 +3928,45 @@ CRITICAL SUBTITLE OCR PASS:
           : `Sound effect, realistic texture: ${prompt}`;
         console.log(`ElevenLabs server SFX Gen: prompt="${sfxPrompt}" duration=${duration}`);
         
-        const apiResponse = await fetch("https://api.elevenlabs.io/v1/sound-generation", {
-          method: "POST",
-          headers: {
-            "xi-api-key": apiKey,
-            "Content-Type": "application/json",
+        const apiResponse = await fetch(
+          `https://api.elevenlabs.io/v1/sound-generation?output_format=${ELEVENLABS_SOUND_OUTPUT_FORMAT}`,
+          {
+            method: "POST",
+            headers: {
+              "xi-api-key": apiKey,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              model_id: ELEVENLABS_SOUND_MODEL,
+              text: sfxPrompt,
+              duration_seconds: Math.min(30, Math.max(0.5, duration || 4)),
+              prompt_influence: isProQuality ? 0.45 : 0.3,
+            }),
           },
-          body: JSON.stringify({
-            model_id: "eleven_text_to_sound_v2",
-            text: sfxPrompt,
-            duration_seconds: duration || 4,
-            prompt_influence: isProQuality ? 0.45 : 0.3,
-          }),
-        });
+        );
         
         if (!apiResponse.ok) {
           const errJson = await apiResponse.json().catch(() => ({}));
           throw new Error(`ElevenLabs SFX Gen Error: ${errJson.detail?.message || apiResponse.statusText}`);
         }
         
-        const buffer = Buffer.from(await apiResponse.arrayBuffer());
+        const wavBlob = wrapElevenLabsPcmAsWav(await apiResponse.arrayBuffer());
+        const buffer = Buffer.from(await wavBlob.arrayBuffer());
         fs.writeFileSync(filePath, buffer);
       }
       
       return res.json({
-        audioUrl: `/uploads/${cleanFilename}`
+        audioUrl: `/uploads/${cleanFilename}`,
+        ...(resolvedType === 'bgm' ? {
+          provider: 'ElevenLabs Music',
+          model: ELEVENLABS_MUSIC_MODEL,
+          outputFormat: ELEVENLABS_MUSIC_OUTPUT_FORMAT,
+          requestedDuration: parseNumber(duration, 30, 3, 600),
+        } : resolvedType === 'sfx' ? {
+          provider: 'ElevenLabs Sound Effects',
+          model: ELEVENLABS_SOUND_MODEL,
+          outputFormat: ELEVENLABS_SOUND_OUTPUT_FORMAT,
+        } : {}),
       });
       
     } catch (err: any) {
@@ -3830,6 +4289,9 @@ CRITICAL SUBTITLE OCR PASS:
         const inputArgs = ['-i', inputVideoPath];
         validClips.forEach((clip: any) => {
           const clipPath = path.join(uploadsDir, path.basename(clip.audioUrl));
+          if (clip?.trackType === 'bgm' || clip?.trackId === 'bgm') {
+            inputArgs.push('-stream_loop', '-1');
+          }
           inputArgs.push('-i', clipPath);
         });
 
@@ -3934,6 +4396,9 @@ CRITICAL SUBTITLE OCR PASS:
       validClips.forEach((clip: any) => {
         const clipFileName = path.basename(clip.audioUrl);
         const clipPath = path.join(uploadsDir, clipFileName);
+        if (clip?.trackType === 'bgm' || clip?.trackId === 'bgm') {
+          inputArgs.push('-stream_loop', '-1');
+        }
         inputArgs.push('-i', clipPath);
       });
 
@@ -3943,7 +4408,7 @@ CRITICAL SUBTITLE OCR PASS:
       });
 
       const mixInputs = validClips.map((_, idx) => `[aud${idx}]`).join('');
-      filterParts.push(`${mixInputs}amix=inputs=${validClips.length}:duration=longest:dropout_transition=0[aout]`);
+      filterParts.push(`${mixInputs}amix=inputs=${validClips.length}:duration=longest:normalize=0:dropout_transition=0,alimiter=limit=0.95[aout]`);
 
       const filterComplexString = filterParts.join('; ');
       const ffmpegArgs = [
@@ -3986,12 +4451,16 @@ CRITICAL SUBTITLE OCR PASS:
       bitrate: string;
       bitDepth: number;
       channelMode: AudioExportChannelMode;
+      timelineDuration?: number;
     },
   ) => new Promise<void>((resolve, reject) => {
     const inputArgs: string[] = [];
     targetClips.forEach((clip: any) => {
       const clipFileName = path.basename(String(clip.audioUrl || ''));
       const clipPath = path.join(uploadsDir, clipFileName);
+      if (clip?.trackType === 'bgm' || clip?.trackId === 'bgm') {
+        inputArgs.push('-stream_loop', '-1');
+      }
       inputArgs.push('-i', clipPath);
     });
 
@@ -4001,7 +4470,22 @@ CRITICAL SUBTITLE OCR PASS:
     });
 
     const mixInputs = targetClips.map((_, idx) => `[aud${idx}]`).join('');
-    filterParts.push(`${mixInputs}amix=inputs=${targetClips.length}:duration=longest:dropout_transition=0,alimiter=limit=0.95[aout]`);
+    const inferredTimelineDuration = Math.max(
+      0.01,
+      ...targetClips.map((clip: any) => (
+        parseNumber(clip?.startTime, 0, 0, 3_600)
+        + parseNumber(clip?.duration, 0.01, 0.01, 3_600)
+      )),
+    );
+    const timelineDuration = parseNumber(
+      options.timelineDuration,
+      inferredTimelineDuration,
+      0.01,
+      3_600,
+    );
+    filterParts.push(
+      `${mixInputs}amix=inputs=${targetClips.length}:duration=longest:normalize=0:dropout_transition=0,alimiter=limit=0.95,apad,atrim=duration=${Number(timelineDuration.toFixed(3))}[aout]`,
+    );
 
     const ffmpegArgs = [
       '-y',
@@ -4037,6 +4521,7 @@ CRITICAL SUBTITLE OCR PASS:
       bitrate,
       bitDepth,
       channelMode,
+      timelineDuration,
     } = req.body;
     const normalizedTrackId = typeof trackId === 'string' && trackId.length > 0
       ? trackId
@@ -4078,6 +4563,7 @@ CRITICAL SUBTITLE OCR PASS:
       bitrate: normalizedBitrate,
       bitDepth: normalizedBitDepth,
       channelMode: normalizedChannelMode,
+      timelineDuration,
     });
     return res.json({ audioUrl: `/uploads/${outputFileName}` });
   }));
@@ -4091,6 +4577,7 @@ CRITICAL SUBTITLE OCR PASS:
       bitrate,
       bitDepth,
       channelMode,
+      timelineDuration,
     } = req.body;
 
     const normalizedAudioFormat = normalizeAudioExportFormat(audioFormat);
@@ -4131,6 +4618,7 @@ CRITICAL SUBTITLE OCR PASS:
         bitrate: normalizedBitrate,
         bitDepth: normalizedBitDepth,
         channelMode: normalizedChannelMode,
+        timelineDuration,
       });
       tempStemPaths.push(stemPath);
       zip.file(stemFileName, fs.readFileSync(stemPath));

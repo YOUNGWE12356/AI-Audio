@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { lazy, Suspense, useState, useRef, useEffect } from 'react';
+import React, { lazy, Suspense, useState, useRef, useEffect, useCallback } from 'react';
 import { Menu } from 'lucide-react';
 import {
   analyzeAudioDesign,
@@ -31,6 +31,17 @@ export interface PendingMusicOption {
   duration: number;
   type: 'instrumental' | 'vocal';
 }
+
+const GENERATED_MEDIA_HISTORY_LIMIT = 10;
+
+const limitGeneratedMediaHistory = (items: HistoryItem[]) => {
+  let generatedMediaCount = 0;
+  return items.filter((item) => {
+    if (item.type !== 'music' && item.type !== 'sfx') return true;
+    generatedMediaCount += 1;
+    return generatedMediaCount <= GENERATED_MEDIA_HISTORY_LIMIT;
+  });
+};
 
 // Modular Components
 import Sidebar from './components/Sidebar';
@@ -95,7 +106,7 @@ export default function App() {
   }, [currentTab]);
 
   // Pre-filled sample historic creations for a complete look on first load
-  const [historyList, setHistoryList] = useState<HistoryItem[]>([
+  const [historyList, setHistoryListState] = useState<HistoryItem[]>([
     {
       id: 'h-1',
       type: 'music',
@@ -124,6 +135,12 @@ export default function App() {
       details: '12秒 · 平静自然'
     }
   ]);
+  const setHistoryList = useCallback<React.Dispatch<React.SetStateAction<HistoryItem[]>>>((action) => {
+    setHistoryListState((previous) => limitGeneratedMediaHistory(
+      typeof action === 'function' ? action(previous) : action,
+    ));
+  }, []);
+  const previousHistoryListRef = useRef(historyList);
 
   // Audio Director States
   const [files, setFiles] = useState<FileItem[]>([]);
@@ -216,6 +233,16 @@ export default function App() {
     previousFilesRef.current = files;
   }, [files]);
 
+  useEffect(() => {
+    const retainedUrls = new Set(historyList.map(item => item.url));
+    previousHistoryListRef.current.forEach((item) => {
+      if (item.url.startsWith('blob:') && !retainedUrls.has(item.url)) {
+        URL.revokeObjectURL(item.url);
+      }
+    });
+    previousHistoryListRef.current = historyList;
+  }, [historyList]);
+
   // Cleanup object URLs on unmount
   useEffect(() => {
     return () => {
@@ -227,6 +254,9 @@ export default function App() {
       if (latestUrls.pendingMusicOptionBUrl) URL.revokeObjectURL(latestUrls.pendingMusicOptionBUrl);
       if (latestUrls.pendingVoiceOptionAUrl) URL.revokeObjectURL(latestUrls.pendingVoiceOptionAUrl);
       if (latestUrls.pendingVoiceOptionBUrl) URL.revokeObjectURL(latestUrls.pendingVoiceOptionBUrl);
+      previousHistoryListRef.current.forEach((item) => {
+        if (item.url.startsWith('blob:')) URL.revokeObjectURL(item.url);
+      });
     };
   }, []);
 
@@ -584,9 +614,6 @@ export default function App() {
     setStandaloneLoading(true);
     setStandaloneError(null);
     try {
-      if (pendingSfxOptions.optionA?.url) URL.revokeObjectURL(pendingSfxOptions.optionA.url);
-      if (pendingSfxOptions.optionB?.url) URL.revokeObjectURL(pendingSfxOptions.optionB.url);
-
       const prompt = standalonePrompt.trim();
       const englishPrompt = await translateToEnglish(prompt);
       const generationPrompt = englishPrompt.trim() || prompt;
@@ -626,6 +653,27 @@ export default function App() {
           duration: requestedDuration || 0,
         },
       });
+      setHistoryList(prev => [
+        {
+          id: `sfx-${Date.now()}-A`,
+          type: 'sfx',
+          title: `${baseTitle}（版本 A）`,
+          prompt,
+          url: urlA,
+          timestamp,
+          details,
+        },
+        {
+          id: `sfx-${Date.now()}-B`,
+          type: 'sfx',
+          title: `${baseTitle}（版本 B）`,
+          prompt,
+          url: urlB,
+          timestamp,
+          details,
+        },
+        ...prev,
+      ]);
       
       // Auto play option A
     } catch (err: any) {
@@ -648,9 +696,6 @@ export default function App() {
 
     setStandaloneMusicLoading(true);
     setStandaloneMusicError(null);
-    if (standaloneMusicAudioUrl) URL.revokeObjectURL(standaloneMusicAudioUrl);
-    if (pendingMusicOptions.optionA?.url) URL.revokeObjectURL(pendingMusicOptions.optionA.url);
-    if (pendingMusicOptions.optionB?.url) URL.revokeObjectURL(pendingMusicOptions.optionB.url);
     setStandaloneMusicAudioUrl(null);
     setPendingMusicOptions({ optionA: null, optionB: null });
     try {

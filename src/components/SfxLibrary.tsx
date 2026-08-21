@@ -62,8 +62,12 @@ interface ImportItem {
   size: string;
   type: string;
   duration: number;
-  status?: 'pending' | 'uploading' | 'success' | 'error';
+  status?: 'pending' | 'uploading' | 'success' | 'error' | 'skipped';
 }
+
+type DuplicateImportResolution = 'replace' | 'skip' | 'keep';
+
+const normalizeAudioFileName = (value: string) => value.trim().normalize('NFC').toLocaleLowerCase();
 
 interface AudioAssetLibraryStats {
   total: number;
@@ -93,7 +97,16 @@ type FolderContextMenuState = {
   totalSubs?: number;
 };
 
+type ImportTarget = {
+  category: string;
+  subcategory: string;
+};
+
 const SFX_DIRECTORY_TREE_VERSION = 'custom-empty-directory-tree-v2';
+const LIBRARY_ADMIN_PASSWORD = String(
+  (import.meta as ImportMeta & { env?: { VITE_SFX_LIBRARY_ADMIN_PASSWORD?: string } }).env
+    ?.VITE_SFX_LIBRARY_ADMIN_PASSWORD || '',
+).trim();
 const LEGACY_DIRECTORY_IDS = new Set([
   'music_all',
   'company_sfx',
@@ -110,12 +123,14 @@ const isLegacyDirectoryTree = (categories: CategoryGroup[]) => (
 );
 
 const isUploadedAudioAsset = (sound: SoundEffect) => {
+  if (sound.storageKey) return true;
   const url = (sound.url || '').toLowerCase();
   const fileName = (sound.fileName || '').toLowerCase();
   return url.startsWith('/uploads/') || fileName.startsWith('upload_') || fileName.startsWith('audio_');
 };
 
 const inferAudioAssetKind = (sound: SoundEffect): 'music' | 'sfx' => {
+  if (sound.generatedKind) return sound.generatedKind;
   const text = `${sound.category || ''} ${sound.subcategory || ''} ${sound.fileName || ''} ${sound.path || ''}`.toLowerCase();
   return text.includes('music') || text.includes('bgm') || text.includes('配乐') || text.includes('音乐') || text.includes('闊充箰')
     ? 'music'
@@ -566,8 +581,8 @@ export default function SfxLibrary() {
 
   const checkOwnerPermission = (): boolean => {
     const authorized = localStorage.getItem('OWNER_AUTHORIZED') === 'true';
-    if (!authorized) {
-      showCustomAlert("需要验证", "此修改操作需要所有者或指定协作者权限。请前往“设置”面板完成管理身份验证后再操作。");
+    if (!authorized || !isDirectoryManageMode) {
+      showCustomAlert("需要开启管理", "请点击左侧目录上方的“管理”，输入管理密码并进入管理模式后再操作。");
       return false;
     }
     return true;
@@ -603,7 +618,6 @@ export default function SfxLibrary() {
   // Custom expandable parent sections
   const [isCompanySfxParentExpanded, setIsCompanySfxParentExpanded] = useState<boolean>(true);
   const [isMusicParentExpanded, setIsMusicParentExpanded] = useState<boolean>(true);
-  const [isStandardSfxParentExpanded, setIsStandardSfxParentExpanded] = useState<boolean>(true);
 
   // Dynamic Categories state
   const [categories, setCategories] = useState<CategoryGroup[]>(() => {
@@ -640,8 +654,11 @@ export default function SfxLibrary() {
   const [isAddingGroup, setIsAddingGroup] = useState<boolean>(false);
   const [newGroupNameInput, setNewGroupNameInput] = useState<string>('');
   const [isDirectoryManageMode, setIsDirectoryManageMode] = useState<boolean>(false);
-  const canModifyLibrary = isAuthorized;
-  const canManageDirectories = canModifyLibrary && isDirectoryManageMode;
+  const [isManageUnlockOpen, setIsManageUnlockOpen] = useState<boolean>(false);
+  const [managePasswordInput, setManagePasswordInput] = useState<string>('');
+  const [managePasswordError, setManagePasswordError] = useState<string | null>(null);
+  const canModifyLibrary = isAuthorized && isDirectoryManageMode;
+  const canManageDirectories = canModifyLibrary;
   const [folderContextMenu, setFolderContextMenu] = useState<FolderContextMenuState | null>(null);
 
   const closeFolderContextMenu = () => setFolderContextMenu(null);
@@ -676,8 +693,24 @@ export default function SfxLibrary() {
       return;
     }
 
-    if (!checkOwnerPermission()) return;
+    setManagePasswordInput('');
+    setManagePasswordError(null);
+    setIsManageUnlockOpen(true);
+  };
+
+  const handleUnlockDirectoryManageMode = () => {
+    if (!LIBRARY_ADMIN_PASSWORD || managePasswordInput.trim() !== LIBRARY_ADMIN_PASSWORD) {
+      setManagePasswordError('密码错误，请重新输入。');
+      return;
+    }
+
+    localStorage.setItem('OWNER_AUTHORIZED', 'true');
+    window.dispatchEvent(new Event('security-state-changed'));
+    setIsAuthorized(true);
     setIsDirectoryManageMode(true);
+    setIsManageUnlockOpen(false);
+    setManagePasswordInput('');
+    setManagePasswordError(null);
   };
 
   const startAddSubCategory = (groupId: string) => {
@@ -694,12 +727,14 @@ export default function SfxLibrary() {
     setEditingSubCategoryId(null);
     setIsAddingSubToId(null);
     setIsAddingGroup(false);
+    setIsManageUnlockOpen(false);
+    setManagePasswordInput('');
+    setManagePasswordError(null);
     closeFolderContextMenu();
   }, [isAuthorized]);
 
   useEffect(() => {
     if (!isDirectoryManageMode) return;
-    setIsStandardSfxParentExpanded(true);
     setExpandedGroups(prev => ({
       ...prev,
       ...categories.reduce((acc, group) => ({ ...acc, [group.id]: true }), {}),
@@ -766,7 +801,9 @@ export default function SfxLibrary() {
     const tagCounts: Record<string, number> = {};
 
     sounds.forEach(sound => {
-      const source = isUploadedAudioAsset(sound)
+      const source = sound.source === 'generated' || sound.tags?.includes('自动入库') || sound.generatedKind
+        ? 'generated'
+        : isUploadedAudioAsset(sound)
         ? 'uploaded'
         : (sound.url || '').startsWith('http')
           ? 'external'
@@ -849,7 +886,10 @@ export default function SfxLibrary() {
         if (Array.isArray(catData)) {
           const treeVersion = localStorage.getItem('sfx_library_directory_tree_version');
           const shouldResetLegacyTree = treeVersion !== SFX_DIRECTORY_TREE_VERSION || isLegacyDirectoryTree(catData);
-          const nextCategories = shouldResetLegacyTree ? [] : catData;
+          // Migrate the old built-in tree without deleting user-created folders.
+          const nextCategories = shouldResetLegacyTree
+            ? catData.filter(category => !LEGACY_DIRECTORY_IDS.has(category.id))
+            : catData;
           setCategories(nextCategories);
           localStorage.setItem('sfx_library_directory_tree_version', SFX_DIRECTORY_TREE_VERSION);
           localStorage.setItem('sfx_library_categories', JSON.stringify(nextCategories));
@@ -1001,6 +1041,7 @@ export default function SfxLibrary() {
 
   const getAudioSourceUrl = (sound: SoundEffect) => {
     if (!sound) return '';
+    if (sound.previewUrl) return sound.previewUrl;
     const localFile = uploadedFilesRef.current[sound.fileName] || uploadedFilesRef.current[sound.name];
     if (localFile) {
       const cacheKey = localFile.name + '-' + sound.id;
@@ -1015,9 +1056,13 @@ export default function SfxLibrary() {
     return 'https://assets.mixkit.co/active_storage/sfx/2568/2568-84.wav';
   };
 
+  const getAudioDownloadUrl = (sound: SoundEffect) => (
+    sound.downloadUrl || sound.url || getAudioSourceUrl(sound)
+  );
+
   const handleDownloadSingleSound = (sound: SoundEffect) => {
     if (!sound) return;
-    const url = getAudioSourceUrl(sound);
+    const url = getAudioDownloadUrl(sound);
     const link = document.createElement('a');
     link.href = url;
     link.download = sound.fileName || `${sound.name}.${sound.format.toLowerCase()}`;
@@ -1061,7 +1106,7 @@ export default function SfxLibrary() {
         folderSounds.map(async (sound) => {
           try {
             let fileBlob: Blob;
-            const resolvedUrl = getAudioSourceUrl(sound);
+            const resolvedUrl = getAudioDownloadUrl(sound);
 
             if (resolvedUrl.startsWith('blob:')) {
               const localFile = uploadedFilesRef.current[sound.fileName] || uploadedFilesRef.current[sound.name];
@@ -1143,7 +1188,7 @@ export default function SfxLibrary() {
         filteredSounds.map(async (sound) => {
           try {
             let fileBlob: Blob;
-            const resolvedUrl = getAudioSourceUrl(sound);
+            const resolvedUrl = getAudioDownloadUrl(sound);
 
             if (resolvedUrl.startsWith('blob:')) {
               const localFile = uploadedFilesRef.current[sound.fileName] || uploadedFilesRef.current[sound.name];
@@ -1435,6 +1480,32 @@ export default function SfxLibrary() {
   const [isAiBatchOptimizing, setIsAiBatchOptimizing] = useState<boolean>(false);
   const [importItems, setImportItems] = useState<ImportItem[]>([]);
   const [isUploading, setIsUploading] = useState<boolean>(false);
+  const [duplicateImportDialog, setDuplicateImportDialog] = useState<{
+    names: string[];
+    resolve: (resolution: DuplicateImportResolution | null) => void;
+  } | null>(null);
+
+  const duplicateImportFileNameKeys = useMemo(() => {
+    const seen = new Set(sounds.map(sound => normalizeAudioFileName(sound.fileName)).filter(Boolean));
+    const duplicates = new Set<string>();
+    importItems.forEach(item => {
+      const key = normalizeAudioFileName(item.fileName);
+      if (!key) return;
+      if (seen.has(key)) duplicates.add(key);
+      seen.add(key);
+    });
+    return duplicates;
+  }, [importItems, sounds]);
+
+  const requestDuplicateImportResolution = (names: string[]) => new Promise<DuplicateImportResolution | null>((resolve) => {
+    setDuplicateImportDialog({ names, resolve });
+  });
+
+  const finishDuplicateImportResolution = (resolution: DuplicateImportResolution | null) => {
+    const pendingDialog = duplicateImportDialog;
+    setDuplicateImportDialog(null);
+    pendingDialog?.resolve(resolution);
+  };
 
   // Batch upload naming and category states
   const [namingStrategy, setNamingStrategy] = useState<'smart' | 'original' | 'standard'>('smart');
@@ -1458,6 +1529,62 @@ export default function SfxLibrary() {
       }
     }
   }, [batchMainCategory, categories, batchSubCategory]);
+
+  const getImportTarget = (): ImportTarget | null => {
+    const selectedGroup = categories.find(group => group.name === selectedCategory);
+    if (selectedGroup) {
+      return {
+        category: selectedGroup.name,
+        subcategory: selectedGroup.subCategories[0]?.name || '',
+      };
+    }
+
+    const selectedSubGroup = categories.find(group => (
+      group.subCategories.some(sub => sub.name === selectedCategory)
+    ));
+    if (selectedSubGroup) {
+      return {
+        category: selectedSubGroup.name,
+        subcategory: selectedCategory,
+      };
+    }
+
+    const batchGroup = categories.find(group => group.name === batchMainCategory) || categories[0];
+    if (!batchGroup) return null;
+
+    const batchSubcategory = batchGroup.subCategories.some(sub => sub.name === batchSubCategory)
+      ? batchSubCategory
+      : (batchGroup.subCategories[0]?.name || '');
+    return {
+      category: batchGroup.name,
+      subcategory: batchSubcategory,
+    };
+  };
+
+  const applyImportTarget = (target: ImportTarget) => {
+    setBatchMainCategory(target.category);
+    setBatchSubCategory(target.subcategory);
+    setImportItems(prev => prev.map(item => ({
+      ...item,
+      category: target.category,
+      subcategory: target.subcategory,
+    })));
+  };
+
+  const handleBatchMainCategoryChange = (category: string) => {
+    const group = categories.find(item => item.name === category);
+    applyImportTarget({
+      category,
+      subcategory: group?.subCategories[0]?.name || '',
+    });
+  };
+
+  const handleBatchSubCategoryChange = (subcategory: string) => {
+    applyImportTarget({
+      category: batchMainCategory,
+      subcategory,
+    });
+  };
 
   const isRegularNaming = (filename: string): boolean => {
     const nameWithoutExt = filename.replace(/\.[^/.]+$/, "");
@@ -2279,6 +2406,11 @@ export default function SfxLibrary() {
 
     setIsImportModalOpen(true);
     setIsAnalyzing(true);
+    const importTarget = getImportTarget();
+    if (importTarget) {
+      setBatchMainCategory(importTarget.category);
+      setBatchSubCategory(importTarget.subcategory);
+    }
 
     try {
       const items = await Promise.all(
@@ -2305,6 +2437,10 @@ export default function SfxLibrary() {
           });
           return {
             ...analyzed,
+            ...(importTarget ? {
+              category: importTarget.category,
+              subcategory: importTarget.subcategory,
+            } : {}),
             duration: parseFloat(duration.toFixed(2))
           };
         })
@@ -2312,7 +2448,16 @@ export default function SfxLibrary() {
       setImportItems(items);
     } catch (err) {
       console.error("Error processing import files:", err);
-      const items = audioFiles.map(file => analyzeSingleFile(file));
+      const items = audioFiles.map(file => {
+        const analyzed = analyzeSingleFile(file);
+        return importTarget
+          ? {
+              ...analyzed,
+              category: importTarget.category,
+              subcategory: importTarget.subcategory,
+            }
+          : analyzed;
+      });
       setImportItems(items);
     } finally {
       setIsAnalyzing(false);
@@ -2322,14 +2467,66 @@ export default function SfxLibrary() {
   const handleConfirmImport = async () => {
     if (!checkOwnerPermission()) return;
     if (importItems.length === 0) return;
+
+    const itemsToUpload = importItems.map(item => ({ ...item }));
+    const pendingGroups = new Map<string, ImportItem[]>();
+    itemsToUpload
+      .filter(item => item.status !== 'success' && item.status !== 'skipped')
+      .forEach(item => {
+        const key = normalizeAudioFileName(item.fileName);
+        if (!key) return;
+        const group = pendingGroups.get(key) || [];
+        group.push(item);
+        pendingGroups.set(key, group);
+      });
+
+    const existingFileNameKeys = new Set(
+      sounds.map(sound => normalizeAudioFileName(sound.fileName)).filter(Boolean),
+    );
+    const duplicateKeys = new Set(
+      Array.from(pendingGroups.entries())
+        .filter(([key, items]) => existingFileNameKeys.has(key) || items.length > 1)
+        .map(([key]) => key),
+    );
+
+    let duplicateResolution: DuplicateImportResolution = 'keep';
+    if (duplicateKeys.size > 0) {
+      const duplicateNames = Array.from(duplicateKeys).map(key => pendingGroups.get(key)?.[0]?.fileName || key);
+      const resolution = await requestDuplicateImportResolution(duplicateNames);
+      if (!resolution) return;
+      duplicateResolution = resolution;
+    }
+
+    const uploadItemIds = new Set<string>();
+    pendingGroups.forEach((items, key) => {
+      if (!duplicateKeys.has(key) || duplicateResolution === 'keep') {
+        items.forEach(item => uploadItemIds.add(item.id));
+        return;
+      }
+
+      if (duplicateResolution === 'replace') {
+        uploadItemIds.add(items[items.length - 1].id);
+        return;
+      }
+
+      if (!existingFileNameKeys.has(key)) {
+        uploadItemIds.add(items[0].id);
+      }
+    });
+
+    itemsToUpload.forEach(item => {
+      if (item.status !== 'success' && item.status !== 'skipped' && !uploadItemIds.has(item.id)) {
+        item.status = 'skipped';
+      }
+    });
+    setImportItems([...itemsToUpload]);
     setIsUploading(true);
 
-    const itemsToUpload = [...importItems];
     const soundsToAdd: SoundEffect[] = [];
 
     for (let i = 0; i < itemsToUpload.length; i++) {
       const item = itemsToUpload[i];
-      if (item.status === 'success') {
+      if (item.status === 'success' || item.status === 'skipped') {
         continue;
       }
 
@@ -2341,10 +2538,14 @@ export default function SfxLibrary() {
       let isSuccess = false;
       let finalFileUrl = '';
       let cleanFilenameOnServer = '';
+      let originalFilenameOnServer = '';
+      let storageKey = '';
+      let previewUrl = '';
+      let downloadUrl = '';
 
       if (item.originalFile) {
         try {
-          const response = await fetch('/api/sfx/upload', {
+          const response = await fetch('/api/sfx/library/upload', {
             method: 'POST',
             headers: {
               'Content-Type': item.originalFile.type || 'application/octet-stream',
@@ -2356,6 +2557,10 @@ export default function SfxLibrary() {
             const uploadRes = await response.json();
             finalFileUrl = uploadRes.url;
             cleanFilenameOnServer = uploadRes.fileName;
+            originalFilenameOnServer = uploadRes.originalName || '';
+            storageKey = uploadRes.storageKey || '';
+            previewUrl = uploadRes.previewUrl || uploadRes.url || '';
+            downloadUrl = uploadRes.downloadUrl || uploadRes.url || '';
             isSuccess = true;
           }
         } catch (uploadErr) {
@@ -2382,7 +2587,7 @@ export default function SfxLibrary() {
         const newSound: SoundEffect = {
           id: `sfx-${Date.now()}-${i}-${Math.random().toString(36).substr(2, 5)}`,
           name: item.name.trim() || (item.originalFile ? item.originalFile.name : 'Unknown'),
-          fileName: cleanFilenameOnServer || item.fileName.trim() || (item.originalFile ? item.originalFile.name : 'Unknown'),
+          fileName: originalFilenameOnServer || item.fileName.trim() || cleanFilenameOnServer || (item.originalFile ? item.originalFile.name : 'Unknown'),
           category: item.category,
           subcategory: item.subcategory,
           tags: item.tags,
@@ -2394,9 +2599,13 @@ export default function SfxLibrary() {
           designer: 'AD_Design (音效师)',
           path: item.category === '全部音乐' ? `assets/music/${slug}/${cleanFilenameOnServer || item.fileName}` : `assets/sfx/${slug}/${cleanFilenameOnServer || item.fileName}`,
           url: fileUrl,
+          storageKey: storageKey || undefined,
+          previewUrl: previewUrl || undefined,
+          downloadUrl: downloadUrl || undefined,
+          processingStatus: storageKey ? 'ready' : undefined,
         };
 
-        if (item.originalFile) {
+        if (item.originalFile && !storageKey) {
           uploadedFilesRef.current[newSound.fileName] = item.originalFile;
           uploadedFilesRef.current[newSound.name] = item.originalFile;
           saveFileToDB(newSound.fileName, item.originalFile);
@@ -2415,37 +2624,45 @@ export default function SfxLibrary() {
 
     // Add successful ones to library
     if (soundsToAdd.length > 0) {
-      // Deduplicate inside the newly added list first (keep the last one if duplicates exist in the same batch)
-      const uniqueSoundsToAdd: SoundEffect[] = [];
-      for (let i = soundsToAdd.length - 1; i >= 0; i--) {
-        const sound = soundsToAdd[i];
-        const isDup = uniqueSoundsToAdd.some(s => 
-          s.fileName.toLowerCase() === sound.fileName.toLowerCase() ||
-          s.name.toLowerCase() === sound.name.toLowerCase()
-        );
-        if (!isDup) {
-          uniqueSoundsToAdd.unshift(sound);
-        }
+      const newFileNameKeys = new Set(soundsToAdd.map(sound => normalizeAudioFileName(sound.fileName)));
+
+      if (duplicateResolution === 'replace') {
+        const replacedStorageKeys = sounds
+          .filter(sound => newFileNameKeys.has(normalizeAudioFileName(sound.fileName)))
+          .map(sound => sound.storageKey)
+          .filter((storageKey): storageKey is string => Boolean(storageKey));
+
+        const cleanupResults = await Promise.allSettled(replacedStorageKeys.map(async (storageKey) => {
+          const response = await fetch(`/api/sfx/library/file?key=${encodeURIComponent(storageKey)}`, {
+            method: 'DELETE',
+          });
+          if (!response.ok && response.status !== 404) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+        }));
+        cleanupResults.forEach((result, index) => {
+          if (result.status === 'rejected') {
+            console.warn(`Failed to remove replaced library file ${replacedStorageKeys[index]}:`, result.reason);
+          }
+        });
       }
 
       setSounds(prev => {
-        // Filter out any existing library sounds that match the name or fileName of any newly uploaded sound
-        const filteredPrev = prev.filter(existingSound => 
-          !uniqueSoundsToAdd.some(newSound => 
-            newSound.fileName.toLowerCase() === existingSound.fileName.toLowerCase() ||
-            newSound.name.toLowerCase() === existingSound.name.toLowerCase()
-          )
-        );
-        return [...uniqueSoundsToAdd, ...filteredPrev];
+        const retainedSounds = duplicateResolution === 'replace'
+          ? prev.filter(existingSound => !newFileNameKeys.has(normalizeAudioFileName(existingSound.fileName)))
+          : prev;
+        return [...soundsToAdd, ...retainedSounds];
       });
-      setSelectedSoundId(uniqueSoundsToAdd[0].id);
+      setSelectedSoundId(soundsToAdd[0].id);
     }
 
     const failedCount = itemsToUpload.filter(item => item.status === 'error').length;
     const successCount = itemsToUpload.filter(item => item.status === 'success').length;
+    const skippedCount = itemsToUpload.filter(item => item.status === 'skipped').length;
 
     if (failedCount === 0) {
-      showCustomAlert("🎉 批量导入成功", `共 ${successCount} 个音效资产已全部成功上传并入库分类！`);
+      const skippedMessage = skippedCount > 0 ? `，已跳过 ${skippedCount} 个同名文件` : '';
+      showCustomAlert("导入完成", `已成功上传并入库 ${successCount} 个音频${skippedMessage}。`);
       setTimeout(() => {
         setIsImportModalOpen(false);
         setImportItems([]);
@@ -2453,7 +2670,7 @@ export default function SfxLibrary() {
     } else {
       showCustomAlert(
         "⚠️ 导入未全部完成",
-        `已成功上传并导入 ${successCount} 个音效资产。其中有 ${failedCount} 个项目由于网络抖动或格式校验导致上传失败。\n\n您可尝试重新上传失败项，或者直接关闭窗口。`
+        `已成功上传并导入 ${successCount} 个音效资产，跳过 ${skippedCount} 个同名文件。其中有 ${failedCount} 个项目由于网络抖动或格式校验导致上传失败。\n\n您可尝试重新上传失败项，或者直接关闭窗口。`
       );
     }
   };
@@ -2493,22 +2710,6 @@ export default function SfxLibrary() {
     } finally {
       setIsAiBatchOptimizing(false);
     }
-  };
-
-  const removeSound = (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (!checkOwnerPermission()) return;
-    showCustomConfirm(
-      "确定要移除此文件吗？",
-      "此操作将从音效资产库中永久删除此文件元数据，此操作不可撤销。",
-      () => {
-        const remaining = sounds.filter(s => s.id !== id);
-        setSounds(remaining);
-        if (selectedSoundId === id && remaining.length > 0) {
-          setSelectedSoundId(remaining[0].id);
-        }
-      }
-    );
   };
 
   const handleExportSelected = () => {
@@ -2624,7 +2825,7 @@ export default function SfxLibrary() {
               </div>
 
               <p className="mt-1.5 truncate text-[10px] text-slate-500">
-                上传自动入库，可按分类、标签、文件名检索。
+                上传后可按分类、标签、文件名检索。
               </p>
 
               <div className="mt-2 grid grid-cols-4 gap-1 text-center text-[9px]">
@@ -2674,7 +2875,7 @@ export default function SfxLibrary() {
                       ? 'border-slate-200 bg-slate-50 text-slate-300 hover:text-slate-500'
                       : 'border-slate-200 bg-white text-slate-400 hover:text-slate-700'
                   }`}
-                  title={canModifyLibrary ? '开启后可重命名、上下移动、删除和新增目录' : '只有所有者和被指定的协作者可以管理目录'}
+                  title={isDirectoryManageMode ? '退出管理并恢复只读模式' : '输入管理密码后开启编辑功能'}
                 >
                   {isDirectoryManageMode ? '管理中' : '管理'}
                 </button>
@@ -3227,23 +3428,8 @@ export default function SfxLibrary() {
                   )}
                 </div>
 
-                {/* ----------------- CUSTOM DIRECTORY TREE ----------------- */}
-                <div className="border border-slate-150 rounded-xl bg-slate-50/50 p-1.5 space-y-1">
-                  <div 
-                    onClick={() => setIsStandardSfxParentExpanded(!isStandardSfxParentExpanded)}
-                    className="flex items-center justify-between px-2 py-1.5 rounded-lg text-[10.5px] font-black text-slate-500 uppercase tracking-wider cursor-pointer hover:bg-slate-100/50 transition-all"
-                  >
-                    <span className="flex items-center gap-1">
-                      {isStandardSfxParentExpanded ? <ChevronDown className="w-3 h-3 text-slate-400" /> : <ChevronRight className="w-3 h-3 text-slate-400" />}
-                      自定义文件夹
-                    </span>
-                    <span className="text-[9px] bg-emerald-50 text-emerald-600 border border-emerald-100 px-1.5 py-0.2 rounded font-bold font-mono">
-                      {categories.reduce((acc, c) => acc + sounds.filter(s => s.category === c.name || c.subCategories.map(sub => sub.name).includes(s.category) || (s.subcategory && c.subCategories.map(sub => sub.name).includes(s.subcategory))).length, 0)}
-                    </span>
-                  </div>
-
-                  {isStandardSfxParentExpanded && (
-                    <div className="space-y-1 pl-0.5">
+                {/* Directory groups sit directly under the tree heading. */}
+                <div className="space-y-1">
                       {categories.length === 0 && (
                         <div className="rounded-lg border border-dashed border-slate-200 bg-white px-3 py-3 text-center">
                           <p className="text-[10px] font-bold text-slate-500">还没有文件夹</p>
@@ -3446,9 +3632,6 @@ export default function SfxLibrary() {
                             </div>
                           );
                         })}
-                    </div>
-                  )}
-
                   {/* Add parent folder */}
                   {isDirectoryManageMode && (
                     <div className="pt-2 px-1 border-t border-slate-100">
@@ -3754,7 +3937,7 @@ export default function SfxLibrary() {
                       }`}
                     >
                       {/* Left Block: Audio trigger & Names */}
-                      <div className="flex items-center gap-3 min-w-0 flex-1">
+                      <div className="flex items-center gap-3 min-w-0 flex-1 sm:min-w-[210px]">
                         <button
                           type="button"
                           onClick={(e) => {
@@ -3792,7 +3975,7 @@ export default function SfxLibrary() {
                       </div>
 
                       {/* Middle Block: Simplified wave progress display */}
-                      <div className="flex-1 max-w-xs px-2 hidden md:block">
+                      <div className="hidden w-36 shrink-0 px-1.5 md:block">
                         <div className="h-6 flex items-center gap-0.5 bg-slate-100/70 rounded px-1.5 relative overflow-hidden">
                           {/* Simulated mini waveform heights */}
                           {[40, 60, 20, 80, 50, 70, 90, 40, 30, 60, 80, 20, 50, 60, 80, 30, 50, 40].map((h, i) => {
@@ -3814,19 +3997,8 @@ export default function SfxLibrary() {
                         </div>
                       </div>
 
-                      {/* Right Block: Attributes, Tags & Actions */}
+                      {/* Right Block: Attributes & Actions */}
                       <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0">
-                        <div className="flex items-center gap-1">
-                          {sound.tags.slice(0, 2).map((tag, idx) => (
-                            <span key={idx} className="text-[8px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded-md font-bold">
-                              #{tag}
-                            </span>
-                          ))}
-                          {sound.tags.length > 2 && (
-                            <span className="text-[8px] text-slate-400">+{sound.tags.length - 2}</span>
-                          )}
-                        </div>
-
                         <div className="text-right font-mono text-[10px] text-slate-400 hidden sm:block shrink-0 min-w-[50px]">
                           <p className="font-bold text-slate-700">{sound.duration}s</p>
                           <p className="text-[8px] text-slate-400">{sound.size}</p>
@@ -3847,15 +4019,6 @@ export default function SfxLibrary() {
                             </button>
                           )}
 
-                          {canModifyLibrary && (
-                            <button
-                              onClick={(e) => removeSound(sound.id, e)}
-                              className="p-1.5 bg-slate-50 hover:bg-red-50 hover:text-red-600 border border-slate-200 rounded-lg text-slate-400 transition-colors"
-                              title="移除资产"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
                         </div>
                       </div>
                     </div>
@@ -4213,7 +4376,7 @@ export default function SfxLibrary() {
                           <label className="text-[10px] text-slate-500 font-bold block">批量入库目标主分类</label>
                           <select
                             value={batchMainCategory}
-                            onChange={(e) => setBatchMainCategory(e.target.value)}
+                            onChange={(e) => handleBatchMainCategoryChange(e.target.value)}
                             className="w-full bg-white border border-slate-200 hover:border-slate-300 focus:border-emerald-500 rounded-lg px-2 py-1.5 text-xs text-slate-750 outline-none transition-all font-medium"
                           >
                             {categories.map(g => (
@@ -4225,7 +4388,7 @@ export default function SfxLibrary() {
                           <label className="text-[10px] text-slate-500 font-bold block">二级子分类</label>
                           <select
                             value={batchSubCategory}
-                            onChange={(e) => setBatchSubCategory(e.target.value)}
+                            onChange={(e) => handleBatchSubCategoryChange(e.target.value)}
                             className="w-full bg-white border border-slate-200 hover:border-slate-300 focus:border-emerald-500 rounded-lg px-2 py-1.5 text-xs text-slate-750 outline-none transition-all font-medium"
                           >
                             {(() => {
@@ -4353,16 +4516,19 @@ export default function SfxLibrary() {
                                   正在上传...
                                 </span>
                               )}
+                              {item.status === 'skipped' && (
+                                <span className="inline-flex items-center gap-1 bg-slate-100 text-slate-600 border border-slate-200 px-2.5 py-1 rounded-md text-[10px] font-bold">
+                                  <Check className="w-3 h-3 shrink-0" />
+                                  已跳过
+                                </span>
+                              )}
                               {(!item.status || item.status === 'pending') && (
                                 <div className="flex flex-col items-center gap-1">
-                                  {sounds.some(s => 
-                                    s.fileName.toLowerCase() === item.fileName.toLowerCase() || 
-                                    s.name.toLowerCase() === item.name.toLowerCase()
-                                  ) ? (
+                                  {duplicateImportFileNameKeys.has(normalizeAudioFileName(item.fileName)) ? (
                                     <>
-                                      <span className="inline-flex items-center gap-1 bg-amber-50 text-amber-700 border border-amber-200 px-2.5 py-1.5 rounded-md text-[10px] font-bold" title="检测到同名音效资产，上传后将覆盖并只保留一份">
+                                      <span className="inline-flex items-center gap-1 bg-amber-50 text-amber-700 border border-amber-200 px-2.5 py-1.5 rounded-md text-[10px] font-bold" title="检测到同名音频，开始上传时可选择替换、跳过或全部保留">
                                         <Info className="w-3 h-3 text-amber-600 shrink-0" />
-                                        同名覆盖
+                                        发现同名
                                       </span>
                                       <span className="text-[9px] text-amber-600 font-medium scale-90">已有同名文件</span>
                                     </>
@@ -4543,6 +4709,155 @@ export default function SfxLibrary() {
         </div>
       )}
 
+      {duplicateImportDialog && (
+        <div
+          className="fixed inset-0 z-[10000] flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="duplicate-audio-title"
+        >
+          <div className="w-full max-w-md overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-950/25">
+            <div className="flex items-start gap-3 border-b border-slate-100 px-5 py-4">
+              <div className="rounded-xl bg-amber-50 p-2 text-amber-700">
+                <Info className="h-4 w-4" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h3 id="duplicate-audio-title" className="text-sm font-black text-slate-900">发现同名音频</h3>
+                <p className="mt-1 text-xs leading-5 text-slate-500">
+                  本次上传有 {duplicateImportDialog.names.length} 个文件名与音效库或当前批次重复。
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => finishDuplicateImportResolution(null)}
+                className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+                title="取消上传"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3 px-5 py-4">
+              <div className="max-h-36 space-y-1 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                {duplicateImportDialog.names.slice(0, 8).map(name => (
+                  <div key={name} className="truncate font-mono text-[11px] text-slate-700" title={name}>
+                    {name}
+                  </div>
+                ))}
+                {duplicateImportDialog.names.length > 8 && (
+                  <div className="text-[11px] font-bold text-slate-400">
+                    另有 {duplicateImportDialog.names.length - 8} 个同名文件
+                  </div>
+                )}
+              </div>
+              <p className="text-[11px] leading-5 text-slate-500">此选择将应用于本次上传中的全部同名文件。</p>
+            </div>
+
+            <div className="grid grid-cols-1 gap-2 border-t border-slate-100 bg-slate-50 px-5 py-4 sm:grid-cols-3">
+              <button
+                type="button"
+                onClick={() => finishDuplicateImportResolution('skip')}
+                className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-xs font-bold text-slate-700 transition-colors hover:bg-slate-100"
+              >
+                跳过重复项
+              </button>
+              <button
+                type="button"
+                onClick={() => finishDuplicateImportResolution('keep')}
+                className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2.5 text-xs font-bold text-indigo-700 transition-colors hover:bg-indigo-100"
+              >
+                两个都保留
+              </button>
+              <button
+                type="button"
+                onClick={() => finishDuplicateImportResolution('replace')}
+                className="rounded-lg bg-rose-600 px-3 py-2.5 text-xs font-bold text-white transition-colors hover:bg-rose-500"
+              >
+                替换旧文件
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Library management password */}
+      {isManageUnlockOpen && (
+        <div
+          className="fixed inset-0 z-[9500] flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="sfx-library-management-title"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setIsManageUnlockOpen(false);
+          }}
+        >
+          <div className="w-full max-w-sm overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-950/20">
+            <div className="flex items-start gap-3 border-b border-slate-100 px-5 py-4">
+              <div className="rounded-xl bg-emerald-50 p-2 text-emerald-700">
+                <Lock className="h-4 w-4" />
+              </div>
+              <div className="min-w-0">
+                <h3 id="sfx-library-management-title" className="text-sm font-black text-slate-900">打开音效库管理</h3>
+                <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
+                  验证后才会显示新增、重命名、移动和删除功能。
+                </p>
+              </div>
+            </div>
+
+            <form
+              className="space-y-3 px-5 py-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                handleUnlockDirectoryManageMode();
+              }}
+            >
+              <label htmlFor="sfx-library-management-password" className="block text-[10px] font-bold text-slate-500">
+                管理密码
+              </label>
+              <input
+                id="sfx-library-management-password"
+                type="password"
+                value={managePasswordInput}
+                onChange={(event) => {
+                  setManagePasswordInput(event.target.value);
+                  if (managePasswordError) setManagePasswordError(null);
+                }}
+                placeholder="请输入管理密码"
+                autoFocus
+                className={`w-full rounded-xl border bg-white px-3 py-2.5 text-sm text-slate-900 outline-none transition ${
+                  managePasswordError
+                    ? 'border-rose-300 focus:border-rose-500'
+                    : 'border-slate-200 focus:border-emerald-500'
+                }`}
+              />
+              {managePasswordError && (
+                <p className="text-[11px] font-bold text-rose-600">{managePasswordError}</p>
+              )}
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsManageUnlockOpen(false);
+                    setManagePasswordInput('');
+                    setManagePasswordError(null);
+                  }}
+                  className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-bold text-slate-600 transition hover:bg-slate-50"
+                >
+                  取消
+                </button>
+                <button
+                  type="submit"
+                  className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white transition hover:bg-emerald-500"
+                >
+                  <LockOpen className="h-3.5 w-3.5" />
+                  验证并打开
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Folder context menu */}
       {folderContextMenu && (
         <div
@@ -4563,7 +4878,7 @@ export default function SfxLibrary() {
 
           {!canModifyLibrary && (
             <div className="mt-1 rounded-xl bg-slate-50 px-3 py-2 text-[10px] font-bold leading-relaxed text-slate-400">
-              只读权限：可查看、试听和下载；目录和音效入库由所有者或指定协作者管理。
+              当前为只读模式。点击左侧“管理”并输入密码后，才可新增、重命名、移动或删除。
             </div>
           )}
 

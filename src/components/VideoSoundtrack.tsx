@@ -260,6 +260,51 @@ const normalizePositiveNumber = (value: unknown, fallback: number) => (
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
 );
 
+const getFriendlyVideoAnalysisErrorMessage = (value: unknown): string => {
+  const collectText = (input: unknown, depth = 0): string[] => {
+    if (input == null || depth > 4) return [];
+    if (typeof input === 'string') {
+      const trimmed = input.trim();
+      if (!trimmed) return [];
+      try {
+        const parsed = JSON.parse(trimmed);
+        return [trimmed, ...collectText(parsed, depth + 1)];
+      } catch {
+        return [trimmed];
+      }
+    }
+    if (typeof input !== 'object') return [String(input)];
+
+    const candidate = input as {
+      message?: unknown;
+      error?: unknown;
+      code?: unknown;
+      status?: unknown;
+      cause?: unknown;
+      errors?: unknown;
+    };
+    return [
+      ...collectText(candidate.message, depth + 1),
+      ...collectText(candidate.error, depth + 1),
+      ...collectText(candidate.code, depth + 1),
+      ...collectText(candidate.status, depth + 1),
+      ...collectText(candidate.cause, depth + 1),
+      ...(Array.isArray(candidate.errors)
+        ? candidate.errors.flatMap(item => collectText(item, depth + 1))
+        : []),
+    ];
+  };
+
+  const joined = collectText(value).join(' ');
+  if (/User location is not supported|location is not supported|FAILED_PRECONDITION/i.test(joined)) {
+    return '当前 AI 画面分析服务所在地区不可用，系统会自动改用本地兜底分析；如需精确字幕/口型识别，请切换可用网络或配置可用的 ARK/OpenAI 视觉模型。';
+  }
+  if (/timeout|timed out|aborted|超时/i.test(joined)) {
+    return '画面分析超时，请稍后重试；如果视频较长，建议先剪短或分段分析。';
+  }
+  return joined || '视频分析生成失败，请重试';
+};
+
 const normalizeOptionalTime = (value: unknown) => (
   typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
 );
@@ -994,11 +1039,13 @@ export default function VideoSoundtrack() {
   
   // AI analysis and mixing status
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
+  const [analyzingTrackId, setAnalyzingTrackId] = useState<'bgm' | 'sfx' | 'dubbing' | null>(null);
   const [analysisStage, setAnalysisStage] = useState<string>('准备解析画面...');
   const analysisAbortRef = useRef<AbortController | null>(null);
   const analysisLockRef = useRef(false);
   const [isMixing, setIsMixing] = useState<boolean>(false);
   const [mixedVideoUrl, setMixedVideoUrl] = useState<string | null>(null);
+  const [dismissedMixedVideoUrl, setDismissedMixedVideoUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [originalAudioSplitStatus, setOriginalAudioSplitStatus] = useState<OriginalAudioSplitStatus>('idle');
   const [originalAudioSplitProgress, setOriginalAudioSplitProgress] = useState<number>(0);
@@ -4747,14 +4794,17 @@ export default function VideoSoundtrack() {
           bgmEnabled: analysisBgmEnabled,
           sfxEnabled: analysisSfxEnabled,
           dubbingEnabled: analysisDubbingEnabled,
+          analysisTrack: 'all',
           analysisMode: usingFullVideoDubbingAnalysis ? 'full-video-dubbing-sync' : 'keyframes',
           dubbingSyncMode: usingFullVideoDubbingAnalysis ? 'subtitle-and-lip' : undefined,
         })
       });
 
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || '视频分析生成失败，请重试');
+        const errData = await res.json().catch(async () => ({
+          error: await res.text().catch(() => ''),
+        }));
+        throw new Error(getFriendlyVideoAnalysisErrorMessage(errData?.error || errData));
       }
 
       const data = await res.json();
@@ -4868,6 +4918,8 @@ export default function VideoSoundtrack() {
           : '';
         const usedNativeVideo = analysisSource === 'server-native-video';
         const usedServerFrames = analysisSource === 'server-ffmpeg';
+        const usedLocalFallback = analysisSource === 'local-fallback';
+        const serverWarning = typeof data.warning === 'string' ? data.warning.trim() : '';
         setToast({
           message: usingFullVideoDubbingAnalysis && dubbingCueCount === 0
             ? 'AI 分析完成，但没有识别到可配音字幕。'
@@ -4884,6 +4936,12 @@ export default function VideoSoundtrack() {
             ? 'success'
             : usedNativeVideo || usedServerFrames || usingServerFallback ? 'info' : 'success',
         });
+        if (serverWarning || usedLocalFallback) {
+          setToast({
+            message: serverWarning || 'AI 画面分析服务暂不可用，已自动生成本地兜底时间线；可先试听并手动微调。',
+            type: 'info',
+          });
+        }
         window.setTimeout(() => setToast(null), 4_000);
       } else {
         throw new Error('AI 未返回合适的时间轴配置，请重新尝试。');
@@ -4906,6 +4964,163 @@ export default function VideoSoundtrack() {
         analysisAbortRef.current = null;
         analysisLockRef.current = false;
         setIsAnalyzing(false);
+      }
+    }
+  };
+
+  const handleAnalyzeTrack = async (trackId: 'bgm' | 'sfx' | 'dubbing') => {
+    if (!videoFile || analysisLockRef.current) return;
+
+    if (trackId === 'dubbing' && (isUploadingToServer || !videoFile.isUploaded)) {
+      const message = '配音轨重新分析需要先完成视频上传，请稍后再试。';
+      setError(message);
+      setToast({ message, type: 'info' });
+      window.setTimeout(() => setToast(null), 4_000);
+      return;
+    }
+
+    const controller = new AbortController();
+    analysisLockRef.current = true;
+    analysisAbortRef.current = controller;
+    const timeoutId = window.setTimeout(() => controller.abort('timeout'), 240_000);
+    setIsAnalyzing(true);
+    setAnalyzingTrackId(trackId);
+    setError(null);
+
+    try {
+      let keyframes: any[] = [];
+      const requiresFullVideo = trackId === 'dubbing';
+      if (requiresFullVideo) {
+        setAnalysisStage('正在重新分析完整视频中的字幕、对白与口型...');
+      } else if (selectedFile) {
+        setAnalysisStage('正在提取关键画面...');
+        keyframes = await extractVideoKeyframes(selectedFile, {
+          maxFrames: 6,
+          maxDimension: 512,
+          jpegQuality: 0.68,
+          signal: controller.signal,
+        });
+      }
+
+      if (!requiresFullVideo && keyframes.length === 0 && (isUploadingToServer || !videoFile.isUploaded)) {
+        throw new Error('视频仍在同步到服务器，请等待上传完成后再试。');
+      }
+      setAnalysisStage(trackId === 'bgm'
+        ? 'AI 正在重新规划配乐轨...'
+        : trackId === 'sfx' ? 'AI 正在重新规划音效轨...' : 'AI 正在重新识别配音轨...');
+
+      const res = await fetch('/api/video/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          fileName: videoFile.name,
+          keyframes: requiresFullVideo ? undefined : keyframes.length > 0 ? keyframes : undefined,
+          videoDuration,
+          bgmEnabled: trackId === 'bgm',
+          sfxEnabled: trackId === 'sfx',
+          dubbingEnabled: trackId === 'dubbing',
+          analysisTrack: trackId,
+          analysisMode: `single-track-${trackId}`,
+          dubbingSyncMode: requiresFullVideo ? 'subtitle-and-lip' : undefined,
+        }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(async () => ({ error: await res.text().catch(() => '') }));
+        throw new Error(getFriendlyVideoAnalysisErrorMessage(errData?.error || errData));
+      }
+
+      const data = await res.json();
+      const analysisTracks = ensureStandardAudioTracks([trackId]);
+      const analysisRunId = Date.now().toString(36);
+      const mappedClips: TimelineClip[] = (Array.isArray(data.clips) ? data.clips : [])
+        .filter((clip: any) => String(clip.trackId || '') === trackId)
+        .map((clip: any, clipIndex: number) => {
+          const sourceClipId = String(clip.subtitleId || clip.id || '');
+          const clipTrack = analysisTracks.find(track => track.id === trackId);
+          const isDubbingClip = trackId === 'dubbing';
+          const clipStartTime = normalizeOptionalTime(clip.startTime) ?? 0;
+          const clipDuration = normalizePositiveNumber(clip.duration, 3);
+          const subtitleStartTime = normalizeOptionalTime(clip.subtitleStartTime ?? clip.subtitleStart) ?? clipStartTime;
+          const subtitleEndTime = normalizeOptionalTime(clip.subtitleEndTime ?? clip.subtitleEnd) ?? subtitleStartTime + clipDuration;
+          const timelineStartTime = isDubbingClip ? subtitleStartTime : clipStartTime;
+          const timelineDuration = isDubbingClip
+            ? Math.max(0.05, subtitleEndTime - subtitleStartTime)
+            : clipDuration;
+          return {
+            ...clip,
+            id: `clip-ai-${trackId}-${analysisRunId}-${clipIndex}`,
+            origin: 'ai' as const,
+            startTime: timelineStartTime,
+            duration: timelineDuration,
+            voiceId: isDubbingClip ? clipTrack?.defaultVoiceId || DEFAULT_DUBBING_VOICE_ID : clip.voiceId,
+            speed: 1,
+            autoSpeed: 1,
+            sourceAudioDuration: undefined,
+            speaker: isDubbingClip && typeof clip.speaker === 'string' ? clip.speaker.trim() : undefined,
+            subtitleId: isDubbingClip ? sourceClipId : undefined,
+            subtitleStartTime: isDubbingClip ? subtitleStartTime : undefined,
+            subtitleEndTime: isDubbingClip ? subtitleEndTime : undefined,
+            lipStartTime: isDubbingClip ? normalizeOptionalTime(clip.lipStartTime ?? clip.lipStart) : undefined,
+            lipEndTime: isDubbingClip ? normalizeOptionalTime(clip.lipEndTime ?? clip.lipEnd) : undefined,
+            lipSyncConfidence: isDubbingClip ? normalizeUnitVolume(clip.lipSyncConfidence ?? clip.syncConfidence, 0) : undefined,
+            timingSource: isDubbingClip && typeof clip.timingSource === 'string' ? clip.timingSource : isDubbingClip ? 'full-video' : undefined,
+            volume: DEFAULT_VOLUME_FADER,
+            isGenerating: false,
+            voiceDirty: false,
+            timingDirty: false,
+          };
+        });
+
+      if (mappedClips.length === 0) {
+        const message = trackId === 'bgm'
+          ? '重新分析完成，但没有返回可用的配乐片段。'
+          : trackId === 'sfx' ? '重新分析完成，但没有返回可用的音效片段。' : '重新分析完成，但没有识别到可用的字幕或对白。';
+        setToast({ message, type: 'info' });
+        window.setTimeout(() => setToast(null), 4_000);
+        return;
+      }
+
+      // Stop and remove only the selected track's old clips. Other tracks keep
+      // both their timeline clips and already generated audio instances.
+      clipsRef.current
+        .filter(clip => clip.trackId === trackId)
+        .forEach(clip => {
+          const audio = audioInstancesRef.current[clip.id];
+          if (audio) {
+            audio.pause();
+            disconnectClipAudioRouting(clip.id);
+            delete audioInstancesRef.current[clip.id];
+          }
+        });
+      const nextClips = [
+        ...clipsRef.current.filter(clip => clip.trackId !== trackId),
+        ...mappedClips,
+      ].sort((a, b) => a.startTime - b.startTime || a.trackId.localeCompare(b.trackId));
+      clipsRef.current = nextClips;
+      setClips(nextClips);
+      invalidateTrackOutputs(trackId);
+      setSelectedTrackId(trackId);
+      setSelectedClipId(mappedClips[0].id);
+      setSelectedClipIds([mappedClips[0].id]);
+      const message = trackId === 'bgm'
+        ? `配乐轨重新分析完成，已生成 ${mappedClips.length} 个片段。`
+        : trackId === 'sfx' ? `音效轨重新分析完成，已生成 ${mappedClips.length} 个片段。` : `配音轨重新分析完成，已识别 ${mappedClips.length} 个片段。`;
+      setToast({ message, type: 'success' });
+      window.setTimeout(() => setToast(null), 4_000);
+    } catch (err: any) {
+      if (controller.signal.aborted) {
+        if (controller.signal.reason === 'timeout') setError('轨道重新分析超过 4 分钟，已自动停止，请稍后重试。');
+      } else {
+        setError(err?.message || '轨道重新分析失败，请稍后重试。');
+      }
+    } finally {
+      window.clearTimeout(timeoutId);
+      if (analysisAbortRef.current === controller) {
+        analysisAbortRef.current = null;
+        analysisLockRef.current = false;
+        setIsAnalyzing(false);
+        setAnalyzingTrackId(null);
       }
     }
   };
@@ -4974,6 +5189,9 @@ export default function VideoSoundtrack() {
         ? clip.voiceId || clipTrack?.defaultVoiceId || DEFAULT_DUBBING_VOICE_ID
         : clip.voiceId;
       const voiceMetadata = getVoiceGenerationMetadata(effectiveVoiceId);
+      const targetGenerationDuration = trackType === 'bgm'
+        ? Math.max(3, safeDuration - clip.startTime)
+        : clip.duration;
 
       if (
         trackType === 'dubbing'
@@ -5073,8 +5291,8 @@ export default function VideoSoundtrack() {
           trackType: trackType,
           text: clip.text,
           voiceId: effectiveVoiceId,
-          duration: clip.duration,
-          targetDuration: clip.duration,
+          duration: targetGenerationDuration,
+          targetDuration: targetGenerationDuration,
           subtitleStartTime: clip.subtitleStartTime,
           subtitleEndTime: clip.subtitleEndTime,
           lipStartTime: clip.lipStartTime,
@@ -5097,19 +5315,20 @@ export default function VideoSoundtrack() {
       const data = await res.json();
       let sourceAudioDuration: number | undefined;
       let durationReadFailed = false;
-      if (trackType === 'dubbing') {
-        try {
-          sourceAudioDuration = await getAudioDuration(data.audioUrl);
-        } catch (durationError) {
-          const serverDuration = normalizePositiveNumber(
-            data.sourceAudioDuration ?? data.sourceDuration ?? data.naturalDuration,
-            0,
-          );
-          if (serverDuration > 0) {
-            sourceAudioDuration = serverDuration;
-          } else {
-            durationReadFailed = true;
-          }
+      try {
+        sourceAudioDuration = await getAudioDuration(data.audioUrl);
+      } catch (durationError) {
+        const serverDuration = normalizePositiveNumber(
+          data.sourceAudioDuration
+            ?? data.sourceDuration
+            ?? data.naturalDuration
+            ?? data.requestedDuration,
+          0,
+        );
+        if (serverDuration > 0) {
+          sourceAudioDuration = serverDuration;
+        } else if (trackType === 'dubbing') {
+          durationReadFailed = true;
         }
       }
       const latestClip = clipsRef.current.find(item => item.id === clipId) || clip;
@@ -5126,6 +5345,7 @@ export default function VideoSoundtrack() {
         : 1;
       const cachedClip: TimelineClip = {
         ...latestClip,
+        duration: trackType === 'bgm' ? targetGenerationDuration : latestClip.duration,
         audioUrl: data.audioUrl,
         audioSource: 'generated',
         sourceAudioDuration,
@@ -5145,6 +5365,7 @@ export default function VideoSoundtrack() {
           && getDubbingTimingSignature(c) !== generationTimingSignature;
         return {
           ...c,
+          duration: trackType === 'bgm' ? targetGenerationDuration : c.duration,
           audioUrl: data.audioUrl,
           audioSource: 'generated',
           isGenerating: false,
@@ -5185,7 +5406,9 @@ export default function VideoSoundtrack() {
               ? `“${clip.name}”已完成合成，但未能读取自然时长，请重新合成或手动微调。`
               : trackType === 'dubbing'
                 ? `“${clip.name}”已按 ${nextAutoSpeed.toFixed(2)}x 自动匹配字幕时长。`
-                : `成功为“${clip.name}”合成 ${displayTypeLabel}！`,
+                : trackType === 'bgm'
+                  ? `“${clip.name}”已使用 ElevenLabs Music ${data.model || 'music_v2'} 生成，并匹配到视频结尾。`
+                  : `成功为“${clip.name}”合成 ${displayTypeLabel}！`,
         type: voiceChangedDuringGeneration || timingChangedDuringGeneration || durationReadFailed
           ? 'info'
           : 'success'
@@ -6046,6 +6269,7 @@ export default function VideoSoundtrack() {
           bitrate: exportBitrate,
           bitDepth: exportBitDepth,
           channelMode: exportChannelMode,
+          timelineDuration: safeDuration,
         })
       });
 
@@ -6144,6 +6368,7 @@ export default function VideoSoundtrack() {
           bitrate: exportBitrate,
           bitDepth: exportBitDepth,
           channelMode: exportChannelMode,
+          timelineDuration: safeDuration,
         })
       });
 
@@ -6237,6 +6462,7 @@ export default function VideoSoundtrack() {
           bitrate: exportBitrate,
           bitDepth: exportBitDepth,
           channelMode: exportChannelMode,
+          timelineDuration: safeDuration,
         }),
       });
 
@@ -7811,7 +8037,7 @@ export default function VideoSoundtrack() {
               </div>
  
               {/* 导出混音视频后的播放展示 */}
-              {mixedVideoUrl && (
+              {mixedVideoUrl && dismissedMixedVideoUrl !== mixedVideoUrl && (
                 <motion.div 
                   initial={{ opacity: 0, y: 15 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -7822,13 +8048,24 @@ export default function VideoSoundtrack() {
                       <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
                       <span className="text-xs font-bold text-emerald-400">已混音视频生成完毕！</span>
                     </div>
-                    <a 
-                      href={`/api/sfx/download-file?path=${encodeURIComponent(mixedVideoUrl)}&name=${encodeURIComponent(`mixed_${(videoFile?.name || 'video').replace(/\.[^/.]+$/, '')}_${exportChannelMode}.${getUrlFileExtension(mixedVideoUrl, 'mp4')}`)}`}
-                      className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold px-2.5 py-1 rounded-md transition-colors"
-                    >
-                      <Download className="w-3 h-3" />
-                      下载最终视频
-                    </a>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <a
+                        href={`/api/sfx/download-file?path=${encodeURIComponent(mixedVideoUrl)}&name=${encodeURIComponent(`mixed_${(videoFile?.name || 'video').replace(/\.[^/.]+$/, '')}_${exportChannelMode}.${getUrlFileExtension(mixedVideoUrl, 'mp4')}`)}`}
+                        className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold px-2.5 py-1 rounded-md transition-colors"
+                      >
+                        <Download className="w-3 h-3" />
+                        下载最终视频
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => setDismissedMixedVideoUrl(mixedVideoUrl)}
+                        className="flex h-7 w-7 items-center justify-center rounded-md border border-emerald-500/20 text-emerald-300 transition-colors hover:border-emerald-400/40 hover:bg-emerald-500/10 hover:text-emerald-100"
+                        aria-label="关闭混音结果"
+                        title="关闭"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
                   </div>
                   <video 
                     controls 
@@ -8020,6 +8257,17 @@ export default function VideoSoundtrack() {
 
                     {selectedTrack.type === 'bgm' && (
                       <div className="space-y-2 rounded-xl border border-emerald-500/25 bg-emerald-950/15 p-3">
+                        <button
+                          type="button"
+                          onClick={() => void handleAnalyzeTrack('bgm')}
+                          disabled={isAnalyzing}
+                          aria-label="重新分析配乐轨"
+                          title="只重新分析配乐轨，保留其他轨道"
+                          className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[10px] font-bold text-emerald-200 transition-colors hover:bg-emerald-500/20 hover:text-white disabled:cursor-wait disabled:opacity-60"
+                        >
+                          {analyzingTrackId === 'bgm' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
+                          <span>{analyzingTrackId === 'bgm' ? '正在重新分析配乐轨...' : '重新分析配乐轨'}</span>
+                        </button>
                         <div className="flex items-center justify-between gap-3">
                           <p className="text-[10px] font-bold uppercase tracking-wider text-emerald-300">音乐替换分析</p>
                           <Music className="h-5 w-5 shrink-0 text-emerald-400" />
@@ -8035,8 +8283,51 @@ export default function VideoSoundtrack() {
                       </div>
                     )}
 
+                    {selectedTrack.type === 'sfx' && (
+                      <div className="space-y-2 rounded-xl border border-sky-500/25 bg-sky-950/15 p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-[10px] font-bold uppercase tracking-wider text-sky-300">音效轨分析</p>
+                            <p className="mt-1 text-[10px] leading-relaxed text-slate-500">只重新分析画面中的音效需求，保留配乐和配音轨。</p>
+                          </div>
+                          <Waves className="h-5 w-5 shrink-0 text-sky-400" />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void handleAnalyzeTrack('sfx')}
+                          disabled={isAnalyzing}
+                          aria-label="重新分析音效轨"
+                          title="只重新分析音效轨，保留其他轨道"
+                          className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-[10px] font-bold text-sky-200 transition-colors hover:bg-sky-500/20 hover:text-white disabled:cursor-wait disabled:opacity-60"
+                        >
+                          {analyzingTrackId === 'sfx' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
+                          <span>{analyzingTrackId === 'sfx' ? '正在重新分析音效轨...' : '重新分析音效轨'}</span>
+                        </button>
+                      </div>
+                    )}
+
                     {selectedTrackShowsVoiceLibrary ? (
                       <div className="space-y-3 border-t border-slate-800 pt-4">
+                        <div className="rounded-xl border border-purple-500/25 bg-purple-950/15 p-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <p className="text-[10px] font-bold uppercase tracking-wider text-purple-300">配音轨分析</p>
+                              <p className="mt-1 text-[10px] leading-relaxed text-slate-500">只重新识别字幕、对白与口型，保留配乐和音效轨。</p>
+                            </div>
+                            <RotateCcw className="h-5 w-5 shrink-0 text-purple-400" />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => void handleAnalyzeTrack('dubbing')}
+                            disabled={isAnalyzing}
+                            aria-label="重新分析配音轨"
+                            title="只重新识别配音轨字幕、对白与口型"
+                            className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg border border-purple-500/30 bg-purple-500/10 px-3 py-2 text-[10px] font-bold text-purple-200 transition-colors hover:bg-purple-500/20 hover:text-white disabled:cursor-wait disabled:opacity-60"
+                          >
+                            {analyzingTrackId === 'dubbing' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
+                            <span>{analyzingTrackId === 'dubbing' ? '正在重新分析配音轨...' : '重新分析配音轨'}</span>
+                          </button>
+                        </div>
                         <div className="space-y-3 rounded-xl border border-purple-500/25 bg-purple-950/20 p-3">
                           <div className="flex items-start justify-between gap-3">
                             <div>

@@ -32,6 +32,12 @@ export interface SoundEffect {
   designer: string;
   path: string;
   url: string;
+  storageKey?: string;
+  previewUrl?: string;
+  downloadUrl?: string;
+  processingStatus?: 'ready' | 'processing' | 'error';
+  source?: 'uploaded' | 'generated' | 'external' | 'library';
+  generatedKind?: 'music' | 'sfx';
   isFavorite?: boolean;
 }
 

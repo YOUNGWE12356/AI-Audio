@@ -46,6 +46,41 @@ const resolveQualityMode = (options?: ElevenLabsGenerationOptions): ElevenLabsQu
 
 const ELEVENLABS_PROMPT_POLICY_ERROR = /violated our Terms of Service|prompt appears to have violated|policy|safety/i;
 const MUSIC_PROMPT_POLICY_MESSAGE = '音乐提示词被 ElevenLabs 安全策略拦截了。我已经会在生成前自动改写成更音乐化的英文描述；如果仍失败，请避开“恐怖、惊吓、暴力、血腥、武器、模仿某歌手”等直白词，改写成“阴暗悬疑、紧张弦乐、诡异氛围、无鼓点”等配乐语言。';
+export const ELEVENLABS_MUSIC_MODEL = 'music_v2';
+// Officially documented high-quality v2 output format.
+export const ELEVENLABS_MUSIC_OUTPUT_FORMAT = 'mp3_48000_192';
+// Sound Effects currently exposes one model. Request the highest-quality
+// uncompressed format and wrap the raw PCM response as WAV for playback.
+export const ELEVENLABS_SOUND_MODEL = 'eleven_text_to_sound_v2';
+export const ELEVENLABS_SOUND_OUTPUT_FORMAT = 'pcm_48000';
+
+export const wrapElevenLabsPcmAsWav = (pcm: ArrayBuffer | Uint8Array, sampleRate = 48000, channels = 1): Blob => {
+  const pcmBytes = pcm instanceof Uint8Array ? pcm : new Uint8Array(pcm);
+  const wav = new ArrayBuffer(44 + pcmBytes.byteLength);
+  const view = new DataView(wav);
+  const writeAscii = (offset: number, value: string) => {
+    for (let index = 0; index < value.length; index += 1) {
+      view.setUint8(offset + index, value.charCodeAt(index));
+    }
+  };
+  const blockAlign = channels * 2;
+  const byteRate = sampleRate * blockAlign;
+  writeAscii(0, 'RIFF');
+  view.setUint32(4, 36 + pcmBytes.byteLength, true);
+  writeAscii(8, 'WAVE');
+  writeAscii(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, channels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, 16, true);
+  writeAscii(36, 'data');
+  view.setUint32(40, pcmBytes.byteLength, true);
+  new Uint8Array(wav, 44).set(pcmBytes);
+  return new Blob([wav], { type: 'audio/wav' });
+};
 
 const makeMusicPromptPolicyFriendly = (value: string) => {
   const replacements: Array<[RegExp, string]> = [
@@ -150,27 +185,30 @@ export async function generateSoundEffect(text: string, duration?: number, optio
   console.log("Generating sound effect with English prompt:", sfxPrompt);
 
   const requestBody = {
-    model_id: "eleven_text_to_sound_v2",
+    model_id: ELEVENLABS_SOUND_MODEL,
     text: sfxPrompt,
     ...(normalizedDuration ? { duration_seconds: normalizedDuration } : {}),
     prompt_influence: isProQuality ? 0.45 : 0.3,
   };
 
-  const response = await fetch("https://api.elevenlabs.io/v1/sound-generation", {
+  const response = await fetch(
+    `https://api.elevenlabs.io/v1/sound-generation?output_format=${ELEVENLABS_SOUND_OUTPUT_FORMAT}`,
+    {
     method: "POST",
     headers: {
       "xi-api-key": apiKey,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(requestBody),
-  });
+    },
+  );
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({ detail: { message: "Unknown error" } }));
     throw new Error(`ElevenLabs API error: ${errorData.detail?.message || response.statusText}`);
   }
 
-  return await response.blob();
+  return wrapElevenLabsPcmAsWav(await response.arrayBuffer());
 }
 
 export async function generateMusic(
@@ -225,9 +263,14 @@ export async function generateMusic(
         : `${proQualityPrefix}AI Music, complete song with expressive vocals and lyrics, vocal track, full mix: ${cleanText}`);
   const limitedMusicPrompt = musicPrompt.slice(0, 4100);
 
-  console.log(`Generating music (instrumental=${isInstrumental}, duration=${normalizedDurationSeconds}s) with ElevenLabs Music API prompt:`, limitedMusicPrompt);
+  console.log(
+    `Generating music with ElevenLabs Music API (model=${ELEVENLABS_MUSIC_MODEL}, format=${ELEVENLABS_MUSIC_OUTPUT_FORMAT}, instrumental=${isInstrumental}, duration=${normalizedDurationSeconds}s):`,
+    limitedMusicPrompt,
+  );
 
-  const response = await fetch("https://api.elevenlabs.io/v1/music", {
+  const response = await fetch(
+    `https://api.elevenlabs.io/v1/music?output_format=${ELEVENLABS_MUSIC_OUTPUT_FORMAT}`,
+    {
     method: "POST",
     headers: {
       "xi-api-key": apiKey,
@@ -236,9 +279,11 @@ export async function generateMusic(
     body: JSON.stringify({
       prompt: limitedMusicPrompt,
       music_length_ms: musicLengthMs,
+      model_id: ELEVENLABS_MUSIC_MODEL,
       force_instrumental: isInstrumental,
     }),
-  });
+    },
+  );
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({ detail: { message: "Unknown error" } }));

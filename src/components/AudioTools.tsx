@@ -1460,7 +1460,7 @@ export default function AudioTools() {
           {/* Subtab Button 1: 音频转换 */}
           <button
             onClick={() => setActiveSubTab('factory')}
-            title="音频转换/压缩"
+            title="格式/压缩/音量"
             className={`w-full flex items-center rounded-xl text-xs font-semibold transition-all duration-200 ${
               isSubNavCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
             } ${
@@ -1470,7 +1470,7 @@ export default function AudioTools() {
             }`}
           >
             <RefreshCw className={`w-4 h-4 transition-colors ${activeSubTab === 'factory' ? 'text-emerald-600' : 'text-slate-400'}`} />
-            <span className={isSubNavCompact ? 'hidden' : ''}>音频转换/压缩</span>
+            <span className={isSubNavCompact ? 'hidden' : ''}>格式/压缩/音量</span>
           </button>
 
           {/* Subtab Button: 批量命名 */}
@@ -2138,7 +2138,7 @@ export default function AudioTools() {
 
                 <div className="rounded-xl border border-emerald-100 bg-emerald-50/70 px-3 py-2 text-[10px] font-semibold text-emerald-800 flex items-center gap-2">
                   <Sparkles className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                  <span>推荐压缩参数：<strong className="font-black">32kHz / 96kbps</strong>，适合人声批量压缩。</span>
+                  <span>推荐最低压缩参数：<strong className="font-black">32kHz / 96kbps</strong></span>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

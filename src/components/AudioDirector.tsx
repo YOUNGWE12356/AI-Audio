@@ -65,7 +65,7 @@ const ElevenLabsPlayer = ({
       const blob = type === 'music' 
         ? await generateMusic(text, duration)
         : await generateSoundEffect(text, duration);
-      
+
       const url = URL.createObjectURL(blob);
       setAudioUrl(url);
       

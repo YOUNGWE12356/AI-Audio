@@ -27,7 +27,9 @@ import {
   Copy,
   Maximize2,
   Minimize2,
-  Magnet
+  Magnet,
+  Gauge,
+  Timer
 } from 'lucide-react';
 import { encodeMp3, encodeWav, resampleAudioBuffer } from '../services/audioEncoderService';
 
@@ -44,6 +46,7 @@ interface AudioClip {
   gain?: number;     // event gain, 0 to 200
   muted?: boolean;   // event mute
   transposeSemitones?: number;
+  playbackRate?: number; // 0.5x to 2x timeline playback speed
 }
 
 interface AudioTrack {
@@ -100,6 +103,8 @@ const MIN_TEMPO_BPM = 40;
 const MAX_TEMPO_BPM = 240;
 const DEFAULT_RULER_MODE: RulerMode = 'time';
 const DEFAULT_TIME_SIGNATURE: TimeSignature = '4/4';
+const MIN_CLIP_PLAYBACK_RATE = 0.5;
+const MAX_CLIP_PLAYBACK_RATE = 2;
 const TIME_SIGNATURE_OPTIONS: TimeSignature[] = ['2/4', '3/4', '4/4', '5/4', '6/8', '7/8', '12/8'];
 
 const createToolCursor = (label: string, fallback: string) => {
@@ -144,6 +149,8 @@ export default function AudioWorkstation() {
   const [showExportSetup, setShowExportSetup] = useState<boolean>(false);
   const [copiedClip, setCopiedClip] = useState<ClipClipboard | null>(null);
   const [transposeSemitones, setTransposeSemitones] = useState<number>(0);
+  const [clipPlaybackRate, setClipPlaybackRate] = useState<number>(1);
+  const [isMetronomeEnabled, setIsMetronomeEnabled] = useState<boolean>(false);
   const [isPitchShifting, setIsPitchShifting] = useState<boolean>(false);
   const [isFileDragActive, setIsFileDragActive] = useState<boolean>(false);
   const [isWorkstationExpanded, setIsWorkstationExpanded] = useState<boolean>(false);
@@ -181,6 +188,7 @@ export default function AudioWorkstation() {
   
   // Audio sources keeping track of what's playing in real time
   const activeSourcesRef = useRef<{ source: AudioBufferSourceNode; gainNode: GainNode }[]>([]);
+  const activeMetronomeSourcesRef = useRef<OscillatorNode[]>([]);
   const playbackStartTimeRef = useRef<number>(0);
   const playbackStartPlayheadRef = useRef<number>(0);
   const animationFrameRef = useRef<number | null>(null);
@@ -410,12 +418,14 @@ export default function AudioWorkstation() {
   useEffect(() => {
     if (!selectedClip) {
       setTransposeSemitones(0);
+      setClipPlaybackRate(1);
       return;
     }
 
     const track = tracksRef.current.find(t => t.id === selectedClip.trackId);
     const clip = track?.clips.find(c => c.id === selectedClip.clipId);
     setTransposeSemitones(clip?.transposeSemitones ?? 0);
+    setClipPlaybackRate(clip?.playbackRate ?? 1);
   }, [selectedClip?.trackId, selectedClip?.clipId]);
 
   // Drag and Drop clip states
@@ -449,6 +459,7 @@ export default function AudioWorkstation() {
     originalStartTime: number;
     originalDuration: number;
     originalBuffer: AudioBuffer;
+    originalPlaybackRate: number;
   } | null>(null);
 
   const clampFade = (value: number, duration: number) => (
@@ -491,6 +502,12 @@ export default function AudioWorkstation() {
 
   const clampSemitoneValue = (value: number) => (
     Number.isFinite(value) ? Math.max(-12, Math.min(12, Math.round(value))) : 0
+  );
+
+  const clampPlaybackRate = (value: number) => (
+    Number.isFinite(value)
+      ? Math.max(MIN_CLIP_PLAYBACK_RATE, Math.min(MAX_CLIP_PLAYBACK_RATE, Math.round(value * 100) / 100))
+      : 1
   );
 
   const getTrackHeight = (trackId: string) => (
@@ -543,6 +560,101 @@ export default function AudioWorkstation() {
       audioCtxRef.current.resume();
     }
     return audioCtxRef.current;
+  };
+
+  const getProjectEndTime = (snapshotTracks: AudioTrack[] = tracksRef.current) => {
+    let endTime = 10;
+    snapshotTracks.forEach(track => {
+      track.clips.forEach(clip => {
+        endTime = Math.max(endTime, clip.startTime + clip.duration);
+      });
+    });
+    return endTime;
+  };
+
+  const stopMetronomePlayback = () => {
+    activeMetronomeSourcesRef.current.forEach(source => {
+      try {
+        source.stop();
+      } catch {
+        // The click has already finished.
+      }
+    });
+    activeMetronomeSourcesRef.current = [];
+  };
+
+  const scheduleMetronome = (
+    ctx: AudioContext,
+    playheadTime: number,
+    bpm: number = tempoBpm,
+    signature: TimeSignature = timeSignature,
+  ) => {
+    stopMetronomePlayback();
+
+    const [rawBeatsPerBar, rawBeatUnit] = signature.split('/').map(Number);
+    const scheduledBeatsPerBar = Number.isFinite(rawBeatsPerBar) ? rawBeatsPerBar : 4;
+    const scheduledBeatUnit = Number.isFinite(rawBeatUnit) ? rawBeatUnit : 4;
+    const scheduledBeatDuration = (60 / clampTempoBpm(bpm)) * (4 / scheduledBeatUnit);
+    const firstBeatIndex = Math.max(0, Math.ceil((playheadTime - 0.001) / scheduledBeatDuration));
+    const projectEndTime = getProjectEndTime();
+
+    for (
+      let beatIndex = firstBeatIndex;
+      beatIndex * scheduledBeatDuration <= projectEndTime;
+      beatIndex += 1
+    ) {
+      const beatTimelineTime = beatIndex * scheduledBeatDuration;
+      const startAt = ctx.currentTime + Math.max(0, beatTimelineTime - playheadTime);
+      const isDownbeat = beatIndex % scheduledBeatsPerBar === 0;
+      const oscillator = ctx.createOscillator();
+      const clickGain = ctx.createGain();
+
+      oscillator.type = 'square';
+      oscillator.frequency.setValueAtTime(isDownbeat ? 1320 : 880, startAt);
+      clickGain.gain.setValueAtTime(isDownbeat ? 0.14 : 0.075, startAt);
+      clickGain.gain.exponentialRampToValueAtTime(0.001, startAt + 0.045);
+      oscillator.connect(clickGain);
+      clickGain.connect(ctx.destination);
+      oscillator.start(startAt);
+      oscillator.stop(startAt + 0.05);
+      activeMetronomeSourcesRef.current.push(oscillator);
+    }
+  };
+
+  const getLivePlayheadTime = () => {
+    if (!isPlayingRef.current || !audioCtxRef.current) return currentTime;
+    return playbackStartPlayheadRef.current + (
+      audioCtxRef.current.currentTime - playbackStartTimeRef.current
+    );
+  };
+
+  const rescheduleActiveMetronome = (bpm: number, signature: TimeSignature) => {
+    if (!isMetronomeEnabled || !isPlayingRef.current) return;
+    const ctx = getAudioContext();
+    scheduleMetronome(ctx, getLivePlayheadTime(), bpm, signature);
+  };
+
+  const handleToggleMetronome = () => {
+    const nextEnabled = !isMetronomeEnabled;
+    setIsMetronomeEnabled(nextEnabled);
+    if (!isPlayingRef.current) return;
+    if (nextEnabled) {
+      const ctx = getAudioContext();
+      scheduleMetronome(ctx, getLivePlayheadTime());
+    } else {
+      stopMetronomePlayback();
+    }
+  };
+
+  const handleTempoBpmChange = (value: number) => {
+    const nextBpm = clampTempoBpm(value);
+    setTempoBpm(nextBpm);
+    rescheduleActiveMetronome(nextBpm, timeSignature);
+  };
+
+  const handleTimeSignatureChange = (signature: TimeSignature) => {
+    setTimeSignature(signature);
+    rescheduleActiveMetronome(tempoBpm, signature);
   };
 
   // Stop playback when component unmounts
@@ -648,6 +760,7 @@ export default function AudioWorkstation() {
   // Stop playback and clean up source nodes
   const stopAllPlayback = () => {
     isPlayingRef.current = false;
+    stopMetronomePlayback();
     activeSourcesRef.current.forEach(item => {
       try {
         item.source.stop();
@@ -701,6 +814,8 @@ export default function AudioWorkstation() {
         if (clipEnd > currentTime) {
           const source = ctx.createBufferSource();
           source.buffer = clip.buffer;
+          const playbackRate = clampPlaybackRate(clip.playbackRate ?? 1);
+          source.playbackRate.setValueAtTime(playbackRate, ctx.currentTime);
 
           // Clip level gain node for fades
           const clipGain = ctx.createGain();
@@ -711,8 +826,12 @@ export default function AudioWorkstation() {
 
           // Calculate timing variables in seconds
           const delay = Math.max(0, clip.startTime - currentTime);
-          const offset = Math.max(0, currentTime - clip.startTime);
-          const duration = clip.duration - offset;
+          const timelineOffset = Math.max(0, currentTime - clip.startTime);
+          const offset = Math.min(clip.buffer.duration, timelineOffset * playbackRate);
+          const duration = Math.min(
+            Math.max(0, clip.buffer.duration - offset),
+            Math.max(0, (clip.duration - timelineOffset) * playbackRate),
+          );
 
           try {
             source.start(ctx.currentTime + delay, offset, duration);
@@ -723,6 +842,10 @@ export default function AudioWorkstation() {
         }
       });
     });
+
+    if (isMetronomeEnabled) {
+      scheduleMetronome(ctx, currentTime);
+    }
 
     setIsPlaying(true);
     isPlayingRef.current = true;
@@ -839,10 +962,12 @@ export default function AudioWorkstation() {
     if (splitTime > clip.startTime && splitTime < clip.startTime + clip.duration) {
       const ctx = getAudioContext();
       const splitOffset = splitTime - clip.startTime; // offset inside clip
+      const playbackRate = clampPlaybackRate(clip.playbackRate ?? 1);
+      const bufferSplitOffset = splitOffset * playbackRate;
       
       try {
-        const buffer1 = sliceAudioBuffer(ctx, clip.buffer, 0, splitOffset);
-        const buffer2 = sliceAudioBuffer(ctx, clip.buffer, splitOffset, clip.duration);
+        const buffer1 = sliceAudioBuffer(ctx, clip.buffer, 0, bufferSplitOffset);
+        const buffer2 = sliceAudioBuffer(ctx, clip.buffer, bufferSplitOffset, clip.buffer.duration);
 
         const clip1Id = `clip-${Date.now()}-a`;
         const clip2Id = `clip-${Date.now()}-b`;
@@ -859,7 +984,8 @@ export default function AudioWorkstation() {
           fadeOut: 0,
           gain: clip.gain ?? 100,
           muted: clip.muted,
-          transposeSemitones: 0
+          transposeSemitones: 0,
+          playbackRate
         };
 
         const clip2: AudioClip = {
@@ -874,7 +1000,8 @@ export default function AudioWorkstation() {
           fadeOut: clip.fadeOut ? Math.min(clip.fadeOut, clip.duration - splitOffset) : 0,
           gain: clip.gain ?? 100,
           muted: clip.muted,
-          transposeSemitones: 0
+          transposeSemitones: 0,
+          playbackRate
         };
 
         const updatedTracks = tracks.map(t => {
@@ -946,6 +1073,22 @@ export default function AudioWorkstation() {
       handlePause();
       setTimeout(() => handlePlay(), 50);
     }
+  };
+
+  const handleClipPlaybackRateChange = (value: number) => {
+    if (!selectedClip) return;
+    const nextRate = clampPlaybackRate(value);
+    setClipPlaybackRate(nextRate);
+    updateSelectedClip(clip => {
+      const nextDuration = clip.buffer.duration / nextRate;
+      return {
+        ...clip,
+        playbackRate: nextRate,
+        duration: nextDuration,
+        fadeIn: clampFade(clip.fadeIn || 0, nextDuration),
+        fadeOut: clampFade(clip.fadeOut || 0, nextDuration),
+      };
+    });
   };
 
   const handleDuplicateClip = () => {
@@ -1269,9 +1412,9 @@ export default function AudioWorkstation() {
                       ...c,
                       buffer: transposedBuffer,
                       sourceBuffer,
-                      duration: transposedBuffer.duration,
-                      fadeIn: clampFade(c.fadeIn || 0, transposedBuffer.duration),
-                      fadeOut: clampFade(c.fadeOut || 0, transposedBuffer.duration),
+                      duration: transposedBuffer.duration / clampPlaybackRate(c.playbackRate ?? 1),
+                      fadeIn: clampFade(c.fadeIn || 0, transposedBuffer.duration / clampPlaybackRate(c.playbackRate ?? 1)),
+                      fadeOut: clampFade(c.fadeOut || 0, transposedBuffer.duration / clampPlaybackRate(c.playbackRate ?? 1)),
                       transposeSemitones: nextSemitones
                     }
                   : c
@@ -1342,7 +1485,8 @@ export default function AudioWorkstation() {
           fadeOut: 0,
           gain: 100,
           muted: false,
-          transposeSemitones: 0
+          transposeSemitones: 0,
+          playbackRate: 1
         };
         targetTrack.clips.push(newClip);
         nextStartTime += item.buffer.duration;
@@ -1552,7 +1696,8 @@ export default function AudioWorkstation() {
       startX: e.clientX,
       originalStartTime: clip.startTime,
       originalDuration: clip.duration,
-      originalBuffer: clip.buffer
+      originalBuffer: clip.buffer,
+      originalPlaybackRate: clampPlaybackRate(clip.playbackRate ?? 1)
     });
   };
 
@@ -1620,11 +1765,21 @@ export default function AudioWorkstation() {
         nextStart = snapTime(resizeDrag.originalStartTime + trimStart);
         const effectiveTrim = Math.max(0, nextStart - resizeDrag.originalStartTime);
         nextDuration = Math.max(0.1, resizeDrag.originalDuration - effectiveTrim);
-        nextBuffer = sliceAudioBuffer(ctx, resizeDrag.originalBuffer, effectiveTrim, resizeDrag.originalDuration);
+        nextBuffer = sliceAudioBuffer(
+          ctx,
+          resizeDrag.originalBuffer,
+          effectiveTrim * resizeDrag.originalPlaybackRate,
+          resizeDrag.originalBuffer.duration,
+        );
       } else {
         const rawDuration = resizeDrag.originalDuration + Math.min(0, rawDelta);
         nextDuration = Math.max(0.1, Math.min(resizeDrag.originalDuration, snapTime(rawDuration)));
-        nextBuffer = sliceAudioBuffer(ctx, resizeDrag.originalBuffer, 0, nextDuration);
+        nextBuffer = sliceAudioBuffer(
+          ctx,
+          resizeDrag.originalBuffer,
+          0,
+          nextDuration * resizeDrag.originalPlaybackRate,
+        );
       }
 
       setTracks(prev => prev.map(track => (
@@ -1794,6 +1949,10 @@ export default function AudioWorkstation() {
         if (clip.muted) return;
         const source = offlineCtx.createBufferSource();
         source.buffer = clip.buffer;
+        source.playbackRate.setValueAtTime(
+          clampPlaybackRate(clip.playbackRate ?? 1),
+          clip.startTime,
+        );
 
         // Clip-level gain node for fades during offline mixing export
         const clipGain = offlineCtx.createGain();
@@ -2090,6 +2249,33 @@ export default function AudioWorkstation() {
               <span className="font-mono text-[9px] font-bold text-violet-300">st</span>
             </div>
 
+            <div
+              className={`flex h-8 items-center gap-1 rounded-md border px-1.5 ${
+                selectedClip
+                  ? 'border-cyan-500/40 bg-[#10151c]'
+                  : 'border-slate-800 bg-[#10151c] opacity-55'
+              }`}
+              title="改变选中片段的播放速度与时间线长度（0.50x - 2.00x）"
+            >
+              <Gauge className="h-3.5 w-3.5 text-cyan-300" />
+              <span className="text-[9px] font-black leading-none text-cyan-300">拉伸</span>
+              <input
+                type="number"
+                min={MIN_CLIP_PLAYBACK_RATE}
+                max={MAX_CLIP_PLAYBACK_RATE}
+                step="0.05"
+                value={Number(clipPlaybackRate.toFixed(2))}
+                disabled={!selectedClip}
+                onChange={(e) => {
+                  const value = parseFloat(e.target.value);
+                  if (Number.isFinite(value)) handleClipPlaybackRateChange(value);
+                }}
+                aria-label="片段拉伸速度"
+                className="h-6 w-11 border-0 bg-transparent px-0 text-center font-mono text-[11px] font-black text-cyan-100 outline-none disabled:text-slate-500"
+              />
+              <span className="font-mono text-[9px] font-bold text-cyan-300">x</span>
+            </div>
+
             <div className="flex h-8 items-center gap-1 rounded-md border border-slate-800 bg-[#10151c] px-1.5" title="工程速度 BPM，默认 120">
               <Music className="h-3.5 w-3.5 text-amber-300" />
               <input
@@ -2098,12 +2284,28 @@ export default function AudioWorkstation() {
                 max={MAX_TEMPO_BPM}
                 step="1"
                 value={tempoBpm}
-                onChange={(e) => setTempoBpm(clampTempoBpm(parseFloat(e.target.value)))}
+                onChange={(e) => handleTempoBpmChange(parseFloat(e.target.value))}
                 aria-label="工程速度 BPM"
                 className="h-6 w-11 border-0 bg-transparent text-center font-mono text-[11px] font-black text-amber-100 outline-none"
               />
               <span className="text-[9px] font-black text-amber-300">BPM</span>
             </div>
+
+            <button
+              type="button"
+              onClick={handleToggleMetronome}
+              className={`flex h-8 shrink-0 items-center gap-1 rounded-md border px-2 text-[9px] font-black shadow-sm transition-all cursor-pointer ${
+                isMetronomeEnabled
+                  ? 'border-amber-300 bg-amber-400 text-slate-950 shadow-amber-950/30'
+                  : 'border-slate-800 bg-[#10151c] text-slate-500 hover:border-amber-500/60 hover:text-amber-300'
+              }`}
+              title={isMetronomeEnabled ? '节拍器已开启，播放时按当前 BPM 发声' : '开启节拍器'}
+              aria-label={isMetronomeEnabled ? '关闭节拍器' : '开启节拍器'}
+              aria-pressed={isMetronomeEnabled}
+            >
+              <Timer className="h-3.5 w-3.5" />
+              <span>节拍</span>
+            </button>
 
             <label
               className="relative flex h-8 items-center rounded-md border border-slate-800 bg-[#10151c]"
@@ -2112,7 +2314,7 @@ export default function AudioWorkstation() {
               <span className="sr-only">工程拍号</span>
               <select
                 value={timeSignature}
-                onChange={(e) => setTimeSignature(e.target.value as TimeSignature)}
+                onChange={(e) => handleTimeSignatureChange(e.target.value as TimeSignature)}
                 aria-label="工程拍号"
                 className="h-full cursor-pointer appearance-none border-0 bg-transparent py-0 pl-2.5 pr-6 font-mono text-[11px] font-black text-slate-100 outline-none hover:text-emerald-200 focus:text-emerald-200"
               >
@@ -2518,8 +2720,15 @@ export default function AudioWorkstation() {
                               <span className="text-[10px] font-bold truncate pr-1 text-slate-800/90 leading-tight">
                                 {clip.name}
                               </span>
-                              <span className="text-[9px] font-mono font-medium shrink-0 bg-slate-900/10 px-1 rounded">
-                                {formatTimelineDuration(clip.duration)}
+                              <span className="flex shrink-0 items-center gap-1">
+                                {Math.abs((clip.playbackRate ?? 1) - 1) > 0.001 && (
+                                  <span className="rounded bg-cyan-900/15 px-1 font-mono text-[8px] font-black text-cyan-900/75">
+                                    {(clip.playbackRate ?? 1).toFixed(2)}x
+                                  </span>
+                                )}
+                                <span className="rounded bg-slate-900/10 px-1 font-mono text-[9px] font-medium">
+                                  {formatTimelineDuration(clip.duration)}
+                                </span>
                               </span>
                             </div>
 

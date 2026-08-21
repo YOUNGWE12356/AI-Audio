@@ -42,6 +42,11 @@ const wait = (delayMs: number) => new Promise<void>((resolve) => {
 
 const trimTrailingSlashes = (value: string) => value.replace(/\/+$/, '');
 
+const normalizeTokenHubModel = (value: string | undefined) => {
+  const model = value?.trim() || 'gpt-5.6-sol';
+  return model.includes('/') ? model : `ark/${model}`;
+};
+
 const getGptGatewayConfig = (): GptGatewayConfig | null => {
   if (typeof window !== 'undefined' || process.env.AI_TEXT_PROVIDER === 'gemini') return null;
 
@@ -68,7 +73,9 @@ const getGptGatewayConfig = (): GptGatewayConfig | null => {
           || process.env.GPT_BASE_URL?.trim()
           || 'https://tokenhub.piegateway.me/v1',
       ),
-      model: process.env.TOKENHUB_MODEL?.trim() || process.env.GPT_MODEL?.trim() || 'gpt-5.6-sol',
+      model: normalizeTokenHubModel(
+        process.env.TOKENHUB_MODEL || process.env.GPT_MODEL,
+      ),
       provider: 'tokenhub',
     };
   }
@@ -256,11 +263,23 @@ const getErrorText = (error: unknown) => {
       code?: unknown;
       cause?: unknown;
       errors?: unknown;
+      error?: unknown;
+      response?: unknown;
+      data?: unknown;
+      status?: unknown;
+      statusText?: unknown;
     };
     if (typeof candidate.message === 'string') parts.push(candidate.message);
     if (typeof candidate.code === 'string' || typeof candidate.code === 'number') {
       parts.push(String(candidate.code));
     }
+    if (typeof candidate.status === 'string' || typeof candidate.status === 'number') {
+      parts.push(String(candidate.status));
+    }
+    if (typeof candidate.statusText === 'string') parts.push(candidate.statusText);
+    visit(candidate.error, depth + 1);
+    visit(candidate.response, depth + 1);
+    visit(candidate.data, depth + 1);
     visit(candidate.cause, depth + 1);
     if (Array.isArray(candidate.errors)) {
       candidate.errors.forEach(item => visit(item, depth + 1));
