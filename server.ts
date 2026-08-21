@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { exec, execFile } from 'child_process';
 import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
@@ -73,6 +73,15 @@ async function startServer() {
     : path.join(dataDir, 'sfx-library');
   const libraryOriginalsDir = path.join(libraryDir, 'originals');
   const libraryTempDir = path.join(libraryDir, 'temp');
+  const sfxLibraryAdminPassword = String(
+    process.env.SFX_LIBRARY_ADMIN_PASSWORD
+      || process.env.VITE_SFX_LIBRARY_ADMIN_PASSWORD
+      || '',
+  ).trim();
+  const sfxLibraryAdminSessions = new Map<string, number>();
+  const sfxLibraryEventClients = new Set<express.Response>();
+  const SFX_LIBRARY_ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+  let sfxLibraryRevision = Date.now();
   const geminiTempDir = path.join(dataDir, '.gemini-upload');
   const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
   const MAX_INLINE_MEDIA_BYTES = 24 * 1024 * 1024;
@@ -340,6 +349,47 @@ async function startServer() {
       .slice(0, 120) || '音频素材';
   };
 
+  const secretsMatch = (actual: string, expected: string) => {
+    const actualBuffer = Buffer.from(actual);
+    const expectedBuffer = Buffer.from(expected);
+    return actualBuffer.length === expectedBuffer.length
+      && timingSafeEqual(actualBuffer, expectedBuffer);
+  };
+
+  const getSfxLibraryAdminToken = (req: express.Request) => {
+    const authorization = String(req.headers.authorization || '');
+    return authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
+  };
+
+  const hasValidSfxLibraryAdminSession = (req: express.Request) => {
+    const token = getSfxLibraryAdminToken(req);
+    if (!token) return false;
+    const expiresAt = sfxLibraryAdminSessions.get(token) || 0;
+    if (expiresAt <= Date.now()) {
+      sfxLibraryAdminSessions.delete(token);
+      return false;
+    }
+    return true;
+  };
+
+  const requireSfxLibraryAdmin: express.RequestHandler = (req, res, next) => {
+    if (hasValidSfxLibraryAdminSession(req)) return next();
+    return res.status(401).json({ error: '需要有效的音效库管理权限。' });
+  };
+
+  const notifySfxLibraryChanged = (type: string) => {
+    sfxLibraryRevision = Math.max(Date.now(), sfxLibraryRevision + 1);
+    const event = `event: library-change\ndata: ${JSON.stringify({ type, revision: sfxLibraryRevision })}\n\n`;
+    sfxLibraryEventClients.forEach(client => {
+      try {
+        client.write(event);
+      } catch {
+        sfxLibraryEventClients.delete(client);
+      }
+    });
+    return sfxLibraryRevision;
+  };
+
   const inferLegacyPlacement = (sound: any) => {
     const text = `${sound?.fileName || ''} ${sound?.name || ''} ${sound?.path || ''}`.toLowerCase();
     const music = /(^|[\\/_\s-])(bgm|music)([\\/_\s-]|$)/.test(text) || text.includes('/music/');
@@ -414,7 +464,6 @@ async function startServer() {
     )) || sounds.some((sound: any) => (
       isLostLibraryText(sound?.category)
       || isLostLibraryText(sound?.subcategory)
-      || isLostLibraryText(sound?.name)
     ));
 
     categories.forEach((group: any, groupIndex: number) => {
@@ -507,18 +556,11 @@ async function startServer() {
       console.warn('Unable to parse library sounds; keeping the readable fallback index:', error);
     }
 
-    const beforeCategories = JSON.stringify(categories);
-    const beforeSounds = JSON.stringify(sounds);
-    const repaired = repairLibraryMetadata(categories, sounds);
-    const categoriesChanged = JSON.stringify(repaired.categories) !== beforeCategories;
-    const soundsChanged = JSON.stringify(repaired.sounds) !== beforeSounds;
-    if (categoriesChanged || !fs.existsSync(categoriesFile)) {
-      fs.writeFileSync(categoriesFile, JSON.stringify(repaired.categories, null, 2), 'utf-8');
-    }
-    if (soundsChanged || !fs.existsSync(soundsFile)) {
-      fs.writeFileSync(soundsFile, JSON.stringify(repaired.sounds, null, 2), 'utf-8');
-    }
-    return repaired;
+    return {
+      categories,
+      sounds,
+      touched: { categories: false, sounds: false },
+    };
   };
 
   // Repair legacy metadata before the library is first read.
@@ -685,10 +727,97 @@ async function startServer() {
   // Serve uploaded files statically
   app.use('/uploads', express.static(uploadsDir));
 
+  app.post('/api/sfx/admin/login', (req, res) => {
+    if (!sfxLibraryAdminPassword) {
+      return res.status(503).json({ error: '服务器尚未配置音效库管理密码。' });
+    }
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    if (!secretsMatch(password, sfxLibraryAdminPassword)) {
+      return res.status(401).json({ error: '管理密码错误。' });
+    }
+    const token = randomUUID();
+    const expiresAt = Date.now() + SFX_LIBRARY_ADMIN_SESSION_TTL_MS;
+    sfxLibraryAdminSessions.set(token, expiresAt);
+    return res.json({ authorized: true, token, expiresAt });
+  });
+
+  app.get('/api/sfx/admin/session', (req, res) => {
+    return res.json({ authorized: hasValidSfxLibraryAdminSession(req) });
+  });
+
+  app.post('/api/sfx/admin/logout', (req, res) => {
+    const token = getSfxLibraryAdminToken(req);
+    if (token) sfxLibraryAdminSessions.delete(token);
+    return res.json({ success: true });
+  });
+
+  app.get('/api/sfx/library/events', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+    res.write(`event: connected\ndata: ${JSON.stringify({ revision: sfxLibraryRevision })}\n\n`);
+    sfxLibraryEventClients.add(res);
+    const keepAlive = setInterval(() => res.write(': keep-alive\n\n'), 25_000);
+    req.on('close', () => {
+      clearInterval(keepAlive);
+      sfxLibraryEventClients.delete(res);
+    });
+  });
+
+  app.get('/api/sfx/library/state', (req, res) => {
+    try {
+      const repaired = loadAndRepairLibraryMetadata();
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({
+        revision: sfxLibraryRevision,
+        categories: repaired.categories,
+        sounds: fs.existsSync(soundsFile) ? repaired.sounds : INITIAL_SOUNDS,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.put('/api/sfx/library/state', requireSfxLibraryAdmin, (req, res) => {
+    try {
+      const categories = req.body?.categories;
+      const sounds = req.body?.sounds;
+      const baseRevision = Number(req.body?.baseRevision);
+      if (!Array.isArray(categories) || !Array.isArray(sounds)) {
+        return res.status(400).json({ error: '音效库目录或清单格式无效。' });
+      }
+      const hasCorruptedDirectoryText = categories.some((group: any) => (
+        isLostLibraryText(group?.name)
+        || (Array.isArray(group?.subCategories) && group.subCategories.some((sub: any) => isLostLibraryText(sub?.name)))
+      )) || sounds.some((sound: any) => (
+        isLostLibraryText(sound?.category) || isLostLibraryText(sound?.subcategory)
+      ));
+      if (hasCorruptedDirectoryText) {
+        return res.status(400).json({ error: '检测到损坏的目录文字，已拒绝保存以保护服务器数据。' });
+      }
+      if (Number.isFinite(baseRevision) && baseRevision !== sfxLibraryRevision) {
+        const current = loadAndRepairLibraryMetadata();
+        return res.status(409).json({
+          error: '音效库已被其他管理员更新，请刷新后重试。',
+          revision: sfxLibraryRevision,
+          categories: current.categories,
+          sounds: current.sounds,
+        });
+      }
+      fs.writeFileSync(categoriesFile, JSON.stringify(categories, null, 2), 'utf-8');
+      fs.writeFileSync(soundsFile, JSON.stringify(sounds, null, 2), 'utf-8');
+      const revision = notifySfxLibraryChanged('state-updated');
+      return res.json({ success: true, revision });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // Private company-library media endpoints. The browser streams these files
   // directly from the server with HTTP Range support instead of proxying audio
   // through the React app or storing large uploads in browser IndexedDB.
-  app.post('/api/sfx/library/upload', asyncRoute(async (req, res) => {
+  app.post('/api/sfx/library/upload', requireSfxLibraryAdmin, asyncRoute(async (req, res) => {
     const rawName = Array.isArray(req.headers['x-filename'])
       ? req.headers['x-filename'][0]
       : req.headers['x-filename'];
@@ -750,7 +879,7 @@ async function startServer() {
     });
   });
 
-  app.delete('/api/sfx/library/file', asyncRoute(async (req, res) => {
+  app.delete('/api/sfx/library/file', requireSfxLibraryAdmin, asyncRoute(async (req, res) => {
     const filePath = resolveLibraryPath(req.query.key);
     if (!filePath) return res.status(400).json({ error: 'Invalid library storage path.' });
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Library file not found.' });
@@ -804,7 +933,7 @@ async function startServer() {
   });
 
   // 2. Save Categories
-  app.post('/api/sfx/categories', (req, res) => {
+  app.post('/api/sfx/categories', requireSfxLibraryAdmin, (req, res) => {
     try {
       const categories = req.body;
       if (!Array.isArray(categories)) {
@@ -813,12 +942,12 @@ async function startServer() {
       const existingSounds = fs.existsSync(soundsFile)
         ? JSON.parse(fs.readFileSync(soundsFile, 'utf-8'))
         : [];
-      const repaired = repairLibraryMetadata(categories, Array.isArray(existingSounds) ? existingSounds : []);
-      fs.writeFileSync(categoriesFile, JSON.stringify(repaired.categories, null, 2), 'utf-8');
-      if (repaired.touched.sounds) {
-        fs.writeFileSync(soundsFile, JSON.stringify(repaired.sounds, null, 2), 'utf-8');
+      fs.writeFileSync(categoriesFile, JSON.stringify(categories, null, 2), 'utf-8');
+      if (!fs.existsSync(soundsFile)) {
+        fs.writeFileSync(soundsFile, JSON.stringify(Array.isArray(existingSounds) ? existingSounds : [], null, 2), 'utf-8');
       }
-      return res.json({ success: true });
+      const revision = notifySfxLibraryChanged('categories-updated');
+      return res.json({ success: true, revision });
     } catch (err: any) {
       console.error('Error saving categories:', err);
       return res.status(500).json({ error: err.message });
@@ -837,7 +966,7 @@ async function startServer() {
   });
 
   // 4. Save Sound Effects List
-  app.post('/api/sfx/sounds', (req, res) => {
+  app.post('/api/sfx/sounds', requireSfxLibraryAdmin, (req, res) => {
     try {
       const sounds = req.body;
       if (!Array.isArray(sounds)) {
@@ -846,13 +975,12 @@ async function startServer() {
       const existingCategories = fs.existsSync(categoriesFile)
         ? JSON.parse(fs.readFileSync(categoriesFile, 'utf-8'))
         : [];
-      const repaired = repairLibraryMetadata(
-        Array.isArray(existingCategories) ? existingCategories : [],
-        sounds,
-      );
-      fs.writeFileSync(soundsFile, JSON.stringify(repaired.sounds, null, 2), 'utf-8');
-      fs.writeFileSync(categoriesFile, JSON.stringify(repaired.categories, null, 2), 'utf-8');
-      return res.json({ success: true });
+      fs.writeFileSync(soundsFile, JSON.stringify(sounds, null, 2), 'utf-8');
+      if (!fs.existsSync(categoriesFile)) {
+        fs.writeFileSync(categoriesFile, JSON.stringify(Array.isArray(existingCategories) ? existingCategories : [], null, 2), 'utf-8');
+      }
+      const revision = notifySfxLibraryChanged('sounds-updated');
+      return res.json({ success: true, revision });
     } catch (err: any) {
       console.error('Error saving sounds:', err);
       return res.status(500).json({ error: err.message });

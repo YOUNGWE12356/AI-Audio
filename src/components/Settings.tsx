@@ -5,6 +5,11 @@
 
 import { useEffect, useState } from 'react';
 import { Database, LockKeyhole, LogOut, ShieldCheck, Trash2 } from 'lucide-react';
+import {
+  loginSfxLibraryAdmin,
+  logoutSfxLibraryAdmin,
+  verifySfxLibraryAdmin,
+} from '../services/sfxLibraryAdminService';
 
 interface SettingsProps {
   onKeysUpdated?: () => void;
@@ -14,49 +19,56 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
   const [cleared, setCleared] = useState(false);
   const [adminPassword, setAdminPassword] = useState('');
   const [passwordFeedback, setPasswordFeedback] = useState<string | null>(null);
-  const [isAuthorized, setIsAuthorized] = useState(() => {
-    if (typeof window === 'undefined') return false;
-    return localStorage.getItem('OWNER_AUTHORIZED') === 'true';
-  });
+  const [isAuthorized, setIsAuthorized] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const syncAuthorization = () => {
-      setIsAuthorized(localStorage.getItem('OWNER_AUTHORIZED') === 'true');
+    let active = true;
+    const syncAuthorization = async () => {
+      const authorized = await verifySfxLibraryAdmin();
+      if (active) setIsAuthorized(authorized);
     };
-    window.addEventListener('security-state-changed', syncAuthorization);
-    syncAuthorization();
-    return () => window.removeEventListener('security-state-changed', syncAuthorization);
+    const handleStateChange = () => void syncAuthorization();
+    window.addEventListener('security-state-changed', handleStateChange);
+    void syncAuthorization();
+    return () => {
+      active = false;
+      window.removeEventListener('security-state-changed', handleStateChange);
+    };
   }, []);
 
-  const setAuthorization = (authorized: boolean) => {
-    if (typeof window === 'undefined') return;
-    localStorage.setItem('OWNER_AUTHORIZED', authorized ? 'true' : 'false');
-    window.dispatchEvent(new Event('security-state-changed'));
-    setIsAuthorized(authorized);
+  const handleUnlockManager = async () => {
+    if (!adminPassword.trim() || isVerifying) return;
+    setIsVerifying(true);
+    setPasswordFeedback(null);
+    try {
+      await loginSfxLibraryAdmin(adminPassword.trim());
+      setIsAuthorized(true);
+      setPasswordFeedback('管理系统已解锁。');
+      setAdminPassword('');
+      onKeysUpdated?.();
+    } catch (error) {
+      setIsAuthorized(false);
+      setPasswordFeedback(error instanceof Error ? error.message : '管理密码验证失败。');
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  const handleLockManager = async () => {
+    await logoutSfxLibraryAdmin();
+    setIsAuthorized(false);
+    setPasswordFeedback('管理系统已锁定。');
     onKeysUpdated?.();
   };
 
-  const handleUnlockManager = () => {
-    if (adminPassword.trim() === 'mayangwei') {
-      setAuthorization(true);
-      setPasswordFeedback('管理系统已解锁。');
-      setAdminPassword('');
-      return;
-    }
-    setPasswordFeedback('密码错误，请重试。');
-  };
-
-  const handleLockManager = () => {
-    setAuthorization(false);
-    setPasswordFeedback('管理系统已锁定。');
-  };
-
-  const handleClearCache = () => {
+  const handleClearCache = async () => {
     if (
       typeof window !== 'undefined' &&
       confirm('确定要清空本地浏览器缓存与历史工程记录吗？这不会影响服务器已保存的文件，但会清空本地操作历史。')
     ) {
+      await logoutSfxLibraryAdmin();
       localStorage.clear();
       setCleared(true);
       onKeysUpdated?.();
@@ -96,15 +108,16 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
             <div className="flex items-end gap-2">
               <button
                 type="button"
-                onClick={handleUnlockManager}
-                className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white transition hover:bg-indigo-500"
+                onClick={() => void handleUnlockManager()}
+                disabled={isVerifying || !adminPassword.trim()}
+                className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <LockKeyhole className="h-3.5 w-3.5" />
-                解锁管理
+                {isVerifying ? '正在验证...' : '解锁管理'}
               </button>
               <button
                 type="button"
-                onClick={handleLockManager}
+                onClick={() => void handleLockManager()}
                 disabled={!isAuthorized}
                 className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
               >
@@ -137,7 +150,7 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
         <div className="pt-2">
           <button
             type="button"
-            onClick={handleClearCache}
+            onClick={() => void handleClearCache()}
             className="w-full bg-slate-50 hover:bg-red-50 text-slate-700 hover:text-red-600 border border-slate-200 hover:border-red-200 font-bold py-3 rounded-xl text-xs flex items-center justify-center gap-2 shadow-sm transition-all"
           >
             <Trash2 className="w-4 h-4" />

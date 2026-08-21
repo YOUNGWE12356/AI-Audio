@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import JSZip from 'jszip';
 import { 
   Database, 
@@ -47,6 +47,12 @@ import {
 } from 'lucide-react';
 import { HistoryItem } from '../types';
 import { optimizeImportMetadata } from '../services/geminiService';
+import {
+  getSfxLibraryAdminHeaders,
+  loginSfxLibraryAdmin,
+  setSfxLibraryAdminToken,
+  verifySfxLibraryAdmin,
+} from '../services/sfxLibraryAdminService';
 import { DEFAULT_CATEGORIES, INITIAL_SOUNDS } from '../data/sfxData';
 import type { SoundEffect, SubCategory, CategoryGroup } from '../data/sfxData';
 
@@ -101,26 +107,6 @@ type ImportTarget = {
   category: string;
   subcategory: string;
 };
-
-const SFX_DIRECTORY_TREE_VERSION = 'custom-empty-directory-tree-v2';
-const LIBRARY_ADMIN_PASSWORD = String(
-  (import.meta as ImportMeta & { env?: { VITE_SFX_LIBRARY_ADMIN_PASSWORD?: string } }).env
-    ?.VITE_SFX_LIBRARY_ADMIN_PASSWORD || '',
-).trim();
-const LEGACY_DIRECTORY_IDS = new Set([
-  'music_all',
-  'company_sfx',
-  'char_foley',
-  'weapons_combat',
-  'magic_skills',
-  'creatures_monsters',
-  'ambient_nature',
-  'system_ui',
-]);
-
-const isLegacyDirectoryTree = (categories: CategoryGroup[]) => (
-  categories.some(category => LEGACY_DIRECTORY_IDS.has(category.id))
-);
 
 const isUploadedAudioAsset = (sound: SoundEffect) => {
   if (sound.storageKey) return true;
@@ -572,16 +558,10 @@ export const LOCAL_INITIAL_SOUNDS: SoundEffect[] = [
 export default function SfxLibrary() {
   // --- States ---
   // Security lock states
-  const [isAuthorized, setIsAuthorized] = useState(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('OWNER_AUTHORIZED') === 'true';
-    }
-    return false;
-  });
+  const [isAuthorized, setIsAuthorized] = useState(false);
 
   const checkOwnerPermission = (): boolean => {
-    const authorized = localStorage.getItem('OWNER_AUTHORIZED') === 'true';
-    if (!authorized || !isDirectoryManageMode) {
+    if (!isAuthorized || !isDirectoryManageMode) {
       showCustomAlert("需要开启管理", "请点击左侧目录上方的“管理”，输入管理密码并进入管理模式后再操作。");
       return false;
     }
@@ -590,12 +570,16 @@ export default function SfxLibrary() {
 
   // Sync security authorization reactively
   useEffect(() => {
-    const handleStateChange = () => {
-      const authorized = localStorage.getItem('OWNER_AUTHORIZED') === 'true';
-      setIsAuthorized(authorized);
+    let active = true;
+    const syncAuthorization = async () => {
+      const authorized = await verifySfxLibraryAdmin();
+      if (active) setIsAuthorized(authorized);
     };
+    const handleStateChange = () => void syncAuthorization();
+    void syncAuthorization();
     window.addEventListener('security-state-changed', handleStateChange);
     return () => {
+      active = false;
       window.removeEventListener('security-state-changed', handleStateChange);
     };
   }, []);
@@ -622,21 +606,11 @@ export default function SfxLibrary() {
   // Dynamic Categories state
   const [categories, setCategories] = useState<CategoryGroup[]>(() => {
     if (typeof window !== 'undefined') {
-      const treeVersion = localStorage.getItem('sfx_library_directory_tree_version');
-      if (treeVersion !== SFX_DIRECTORY_TREE_VERSION) {
-        localStorage.setItem('sfx_library_directory_tree_version', SFX_DIRECTORY_TREE_VERSION);
-        localStorage.setItem('sfx_library_categories', JSON.stringify([]));
-        return [];
-      }
       const saved = localStorage.getItem('sfx_library_categories');
       if (saved) {
         try {
           const parsed = JSON.parse(saved);
-          if (Array.isArray(parsed) && isLegacyDirectoryTree(parsed)) {
-            localStorage.setItem('sfx_library_categories', JSON.stringify([]));
-            return [];
-          }
-          return parsed;
+          return Array.isArray(parsed) ? parsed : [];
         } catch (e) {
           console.error("Failed to parse saved categories from localStorage", e);
         }
@@ -657,6 +631,7 @@ export default function SfxLibrary() {
   const [isManageUnlockOpen, setIsManageUnlockOpen] = useState<boolean>(false);
   const [managePasswordInput, setManagePasswordInput] = useState<string>('');
   const [managePasswordError, setManagePasswordError] = useState<string | null>(null);
+  const [isManageUnlocking, setIsManageUnlocking] = useState(false);
   const canModifyLibrary = isAuthorized && isDirectoryManageMode;
   const canManageDirectories = canModifyLibrary;
   const [folderContextMenu, setFolderContextMenu] = useState<FolderContextMenuState | null>(null);
@@ -698,19 +673,21 @@ export default function SfxLibrary() {
     setIsManageUnlockOpen(true);
   };
 
-  const handleUnlockDirectoryManageMode = () => {
-    if (!LIBRARY_ADMIN_PASSWORD || managePasswordInput.trim() !== LIBRARY_ADMIN_PASSWORD) {
-      setManagePasswordError('密码错误，请重新输入。');
-      return;
-    }
-
-    localStorage.setItem('OWNER_AUTHORIZED', 'true');
-    window.dispatchEvent(new Event('security-state-changed'));
-    setIsAuthorized(true);
-    setIsDirectoryManageMode(true);
-    setIsManageUnlockOpen(false);
-    setManagePasswordInput('');
+  const handleUnlockDirectoryManageMode = async () => {
+    if (!managePasswordInput.trim() || isManageUnlocking) return;
+    setIsManageUnlocking(true);
     setManagePasswordError(null);
+    try {
+      await loginSfxLibraryAdmin(managePasswordInput.trim());
+      setIsAuthorized(true);
+      setIsDirectoryManageMode(true);
+      setIsManageUnlockOpen(false);
+      setManagePasswordInput('');
+    } catch (error) {
+      setManagePasswordError(error instanceof Error ? error.message : '管理密码验证失败。');
+    } finally {
+      setIsManageUnlocking(false);
+    }
   };
 
   const startAddSubCategory = (groupId: string) => {
@@ -782,6 +759,8 @@ export default function SfxLibrary() {
   });
 
   const isLoadedFromServer = useRef(false);
+  const serverRevisionRef = useRef(0);
+  const serverSnapshotRef = useRef({ categories: '', sounds: '' });
   const [serverAssetStats, setServerAssetStats] = useState<AudioAssetLibraryStats | null>(null);
   const [isRefreshingAssetIndex, setIsRefreshingAssetIndex] = useState(false);
 
@@ -864,7 +843,7 @@ export default function SfxLibrary() {
     }
   };
 
-  const fetchJsonIfAvailable = async <T,>(url: string): Promise<T | null> => {
+  const fetchJsonIfAvailable = useCallback(async <T,>(url: string): Promise<T | null> => {
     const response = await fetch(url, { headers: { Accept: 'application/json' } });
     if (!response.ok) return null;
 
@@ -872,90 +851,95 @@ export default function SfxLibrary() {
     if (!contentType.toLowerCase().includes('application/json')) return null;
 
     return response.json() as Promise<T>;
-  };
-
-  // Load categories and sounds from full-stack backend on mount
-  useEffect(() => {
-    const loadServerData = async () => {
-      try {
-        const [catData, soundData, assetStatsData] = await Promise.all([
-          fetchJsonIfAvailable<CategoryGroup[]>('/api/sfx/categories'),
-          fetchJsonIfAvailable<SoundEffect[]>('/api/sfx/sounds'),
-          fetchJsonIfAvailable<AudioAssetLibraryStats>('/api/audio-assets/stats')
-        ]);
-        if (Array.isArray(catData)) {
-          const treeVersion = localStorage.getItem('sfx_library_directory_tree_version');
-          const shouldResetLegacyTree = treeVersion !== SFX_DIRECTORY_TREE_VERSION || isLegacyDirectoryTree(catData);
-          // Migrate the old built-in tree without deleting user-created folders.
-          const nextCategories = shouldResetLegacyTree
-            ? catData.filter(category => !LEGACY_DIRECTORY_IDS.has(category.id))
-            : catData;
-          setCategories(nextCategories);
-          localStorage.setItem('sfx_library_directory_tree_version', SFX_DIRECTORY_TREE_VERSION);
-          localStorage.setItem('sfx_library_categories', JSON.stringify(nextCategories));
-          if (shouldResetLegacyTree) {
-            fetch('/api/sfx/categories', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify([]),
-            }).catch(err => console.error("Failed to clear legacy categories on backend:", err));
-          }
-        }
-        if (Array.isArray(soundData)) {
-          setSounds(soundData);
-          localStorage.setItem('sfx_library_sounds', JSON.stringify(soundData));
-        }
-        if (assetStatsData) {
-          setServerAssetStats(assetStatsData);
-        }
-      } catch (err) {
-        console.error("Failed to load sfx library database from server:", err);
-      } finally {
-        isLoadedFromServer.current = true;
-      }
-    };
-    loadServerData();
   }, []);
 
-  // Save categories to localStorage and server
-  useEffect(() => {
-    if (!isLoadedFromServer.current) return;
-    localStorage.setItem('sfx_library_categories', JSON.stringify(categories));
-    const syncCategories = async () => {
-      try {
-        await fetch('/api/sfx/categories', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(categories)
-        });
-      } catch (err) {
-        console.error("Failed to sync categories with backend:", err);
+  const loadServerData = useCallback(async () => {
+    try {
+      const [libraryState, assetStatsData] = await Promise.all([
+        fetchJsonIfAvailable<{
+          revision: number;
+          categories: CategoryGroup[];
+          sounds: SoundEffect[];
+        }>('/api/sfx/library/state'),
+        fetchJsonIfAvailable<AudioAssetLibraryStats>('/api/audio-assets/stats'),
+      ]);
+      if (libraryState && Array.isArray(libraryState.categories) && Array.isArray(libraryState.sounds)) {
+        const categoriesJson = JSON.stringify(libraryState.categories);
+        const soundsJson = JSON.stringify(libraryState.sounds);
+        serverRevisionRef.current = Number(libraryState.revision) || 0;
+        serverSnapshotRef.current = { categories: categoriesJson, sounds: soundsJson };
+        setCategories(libraryState.categories);
+        setSounds(libraryState.sounds);
+        localStorage.setItem('sfx_library_categories', categoriesJson);
+        localStorage.setItem('sfx_library_sounds', soundsJson);
       }
-    };
-    if (categories && categories.length > 0) {
-      syncCategories();
+      if (assetStatsData) setServerAssetStats(assetStatsData);
+    } catch (err) {
+      console.error('Failed to load sfx library database from server:', err);
+    } finally {
+      isLoadedFromServer.current = true;
     }
-  }, [categories]);
+  }, [fetchJsonIfAvailable]);
 
-  // Save sounds to localStorage and server
+  // The server is authoritative. SSE provides immediate updates and polling
+  // recovers automatically after sleep, Wi-Fi changes, or a proxy timeout.
+  useEffect(() => {
+    void loadServerData();
+    const events = new EventSource('/api/sfx/library/events');
+    const handleLibraryChange = () => void loadServerData();
+    events.addEventListener('library-change', handleLibraryChange);
+    const pollingTimer = window.setInterval(() => void loadServerData(), 15_000);
+    return () => {
+      events.removeEventListener('library-change', handleLibraryChange);
+      events.close();
+      window.clearInterval(pollingTimer);
+    };
+  }, [loadServerData]);
+
+  // Admin edits are committed atomically with optimistic revision checking.
   useEffect(() => {
     if (!isLoadedFromServer.current) return;
-    localStorage.setItem('sfx_library_sounds', JSON.stringify(sounds));
-    const syncSounds = async () => {
+    const categoriesJson = JSON.stringify(categories);
+    const soundsJson = JSON.stringify(sounds);
+    localStorage.setItem('sfx_library_categories', categoriesJson);
+    localStorage.setItem('sfx_library_sounds', soundsJson);
+    if (!isAuthorized) return;
+    if (
+      categoriesJson === serverSnapshotRef.current.categories
+      && soundsJson === serverSnapshotRef.current.sounds
+    ) return;
+
+    const syncTimer = window.setTimeout(async () => {
       try {
-        await fetch('/api/sfx/sounds', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(sounds)
+        const response = await fetch('/api/sfx/library/state', {
+          method: 'PUT',
+          headers: getSfxLibraryAdminHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({
+            baseRevision: serverRevisionRef.current,
+            categories,
+            sounds,
+          }),
         });
+        const payload = await response.json().catch(() => ({}));
+        if (response.status === 401) {
+          setSfxLibraryAdminToken('');
+          setIsAuthorized(false);
+          return;
+        }
+        if (response.status === 409) {
+          console.warn(payload.error || 'Sound library changed on another client; refreshing.');
+          await loadServerData();
+          return;
+        }
+        if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+        serverRevisionRef.current = Number(payload.revision) || serverRevisionRef.current;
+        serverSnapshotRef.current = { categories: categoriesJson, sounds: soundsJson };
       } catch (err) {
-        console.error("Failed to sync sounds with backend:", err);
+        console.error('Failed to sync sound library with backend:', err);
       }
-    };
-    if (sounds && sounds.length > 0) {
-      syncSounds();
-    }
-  }, [sounds]);
+    }, 250);
+    return () => window.clearTimeout(syncTimer);
+  }, [categories, isAuthorized, loadServerData, sounds]);
 
   // Edit Sound state
   const [editingSound, setEditingSound] = useState<SoundEffect | null>(null);
@@ -2547,12 +2531,17 @@ export default function SfxLibrary() {
         try {
           const response = await fetch('/api/sfx/library/upload', {
             method: 'POST',
-            headers: {
+            headers: getSfxLibraryAdminHeaders({
               'Content-Type': item.originalFile.type || 'application/octet-stream',
               'x-filename': encodeURIComponent(item.fileName)
-            },
+            }),
             body: item.originalFile
           });
+          if (response.status === 401) {
+            setSfxLibraryAdminToken('');
+            setIsAuthorized(false);
+            throw new Error('管理权限已过期，请重新验证。');
+          }
           if (response.ok) {
             const uploadRes = await response.json();
             finalFileUrl = uploadRes.url;
@@ -2635,6 +2624,7 @@ export default function SfxLibrary() {
         const cleanupResults = await Promise.allSettled(replacedStorageKeys.map(async (storageKey) => {
           const response = await fetch(`/api/sfx/library/file?key=${encodeURIComponent(storageKey)}`, {
             method: 'DELETE',
+            headers: getSfxLibraryAdminHeaders(),
           });
           if (!response.ok && response.status !== 404) {
             throw new Error(`HTTP ${response.status}`);
@@ -4824,6 +4814,7 @@ export default function SfxLibrary() {
                 }}
                 placeholder="请输入管理密码"
                 autoFocus
+                disabled={isManageUnlocking}
                 className={`w-full rounded-xl border bg-white px-3 py-2.5 text-sm text-slate-900 outline-none transition ${
                   managePasswordError
                     ? 'border-rose-300 focus:border-rose-500'
@@ -4847,10 +4838,11 @@ export default function SfxLibrary() {
                 </button>
                 <button
                   type="submit"
-                  className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white transition hover:bg-emerald-500"
+                  disabled={isManageUnlocking || !managePasswordInput.trim()}
+                  className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <LockOpen className="h-3.5 w-3.5" />
-                  验证并打开
+                  {isManageUnlocking ? '正在验证...' : '验证并打开'}
                 </button>
               </div>
             </form>
