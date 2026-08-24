@@ -33,6 +33,7 @@ import {
 } from '../services/audioEncoderService';
 import { isolateAudio } from '../services/elevenLabsService';
 import AudioWorkstation from './AudioWorkstation';
+import type { AssistantAudioRequest } from './GlobalAssistant';
 
 const AudioAnalyzer = React.lazy(() => import('./AudioAnalyzer'));
 
@@ -109,8 +110,8 @@ const FACTORY_LOUDNESS_PRESETS = [
 
 const MIN_ANALYSIS_DB = -80;
 const AUDIO_TOOLS_SUBNAV_MIN_WIDTH = 64;
-const AUDIO_TOOLS_SUBNAV_COMPACT_WIDTH = 128;
-const AUDIO_TOOLS_SUBNAV_DEFAULT_WIDTH = 240;
+const AUDIO_TOOLS_SUBNAV_COMPACT_WIDTH = 176;
+const AUDIO_TOOLS_SUBNAV_DEFAULT_WIDTH = 184;
 const AUDIO_TOOLS_SUBNAV_MAX_WIDTH = 520;
 
 const FACTORY_FORMAT_OPTIONS: Array<{
@@ -360,7 +361,11 @@ function normalizeAudioBuffer(
   };
 }
 
-export default function AudioTools() {
+interface AudioToolsProps {
+  assistantAudioRequest?: AssistantAudioRequest | null;
+}
+
+export default function AudioTools({ assistantAudioRequest = null }: AudioToolsProps) {
   const [activeSubTab, setActiveSubTab] = useState<'workstation' | 'analysis' | 'factory' | 'renamer' | 'isolation'>('workstation');
   const [subNavWidth, setSubNavWidth] = useState(() => {
     if (typeof window === 'undefined') return AUDIO_TOOLS_SUBNAV_DEFAULT_WIDTH;
@@ -563,6 +568,38 @@ export default function AudioTools() {
   const [factoryProgress, setFactoryProgress] = useState<number>(0);
   const [factoryError, setFactoryError] = useState<string | null>(null);
   const [factoryResults, setFactoryResults] = useState<FactoryConversionResult[]>([]);
+  const [assistantAnalysisFiles, setAssistantAnalysisFiles] = useState<File[]>([]);
+  const assistantFactorySubmitRef = useRef<string | null>(null);
+  const assistantFactoryDownloadRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!assistantAudioRequest) return;
+    if (assistantAudioRequest.task === 'analyze') {
+      setAssistantAnalysisFiles([assistantAudioRequest.file]);
+      setActiveSubTab('analysis');
+      return;
+    }
+    assistantFactorySubmitRef.current = assistantAudioRequest.id;
+    assistantFactoryDownloadRef.current = assistantAudioRequest.id;
+    setFactoryFiles([assistantAudioRequest.file]);
+    setFactoryResults([]);
+    setFactoryError(null);
+    if (assistantAudioRequest.targetSampleRate !== undefined) {
+      setFactorySampleRate(assistantAudioRequest.targetSampleRate);
+    }
+    if (assistantAudioRequest.targetBitrate !== undefined) {
+      setFactoryBitrate(assistantAudioRequest.targetBitrate);
+    }
+    if (assistantAudioRequest.targetLufs !== undefined) {
+      setFactoryNormalizeEnabled(true);
+      setFactoryTargetLufs(assistantAudioRequest.targetLufs);
+    }
+    if (assistantAudioRequest.targetFormat) {
+      setFactoryFormat(assistantAudioRequest.targetFormat);
+    }
+    setFactoryStatus('助手已载入文件，请确认参数后开始转换。');
+    setActiveSubTab('factory');
+  }, [assistantAudioRequest]);
 
   const factoryInputRef = useRef<HTMLInputElement>(null);
   const factoryFolderInputRef = useRef<HTMLInputElement>(null);
@@ -968,6 +1005,29 @@ export default function AudioTools() {
     if (operation.type === 'remove') return `删除「${operation.findText || '未填写'}」`;
     return `把「${operation.findText || '未填写'}」替换成「${operation.replaceText || '空'}」`;
   };
+
+  useEffect(() => {
+    if (!assistantAudioRequest || assistantAudioRequest.task !== 'convert') return;
+    if (assistantFactorySubmitRef.current !== assistantAudioRequest.id || !factoryFile || factoryLoading) return;
+    assistantFactorySubmitRef.current = null;
+    void handleFactorySubmit();
+  }, [assistantAudioRequest, factoryFile, factoryLoading]);
+
+  useEffect(() => {
+    if (!assistantAudioRequest || assistantAudioRequest.task !== 'convert' || factoryLoading || !factoryBlob) return;
+    if (assistantFactoryDownloadRef.current !== assistantAudioRequest.id) return;
+    assistantFactoryDownloadRef.current = null;
+    const sourceName = factoryFile?.name || 'converted_audio.wav';
+    const baseName = sourceName.replace(/\.[^.]+$/, '') || 'converted_audio';
+    const url = URL.createObjectURL(factoryBlob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${baseName}_converted.mp3`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }, [assistantAudioRequest, factoryBlob, factoryFile, factoryLoading]);
 
   const createRenameOperation = (type: RenameRuleType): RenameOperation => ({
     id: `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -1429,7 +1489,7 @@ export default function AudioTools() {
           <button
             onClick={() => setActiveSubTab('workstation')}
             title="音频工作站"
-            className={`w-full flex items-center rounded-xl text-xs font-semibold transition-all duration-200 ${
+            className={`w-full flex items-center overflow-hidden whitespace-nowrap rounded-xl text-xs font-semibold transition-all duration-200 ${
               isSubNavCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
             } ${
               activeSubTab === 'workstation'
@@ -1437,15 +1497,15 @@ export default function AudioTools() {
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
             }`}
           >
-            <Music className={`w-4 h-4 transition-colors ${activeSubTab === 'workstation' ? 'text-emerald-600' : 'text-slate-400'}`} />
-            <span className={isSubNavCompact ? 'hidden' : ''}>音频工作站</span>
+            <Music className={`w-4 h-4 shrink-0 transition-colors ${activeSubTab === 'workstation' ? 'text-emerald-600' : 'text-slate-400'}`} />
+            <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>音频工作站</span>
           </button>
 
           {/* Subtab Button: 音频分析 */}
           <button
             onClick={() => setActiveSubTab('analysis')}
             title="音频分析"
-            className={`w-full flex items-center rounded-xl text-xs font-semibold transition-all duration-200 ${
+            className={`w-full flex items-center overflow-hidden whitespace-nowrap rounded-xl text-xs font-semibold transition-all duration-200 ${
               isSubNavCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
             } ${
               activeSubTab === 'analysis'
@@ -1453,15 +1513,15 @@ export default function AudioTools() {
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
             }`}
           >
-            <BarChart3 className={`w-4 h-4 transition-colors ${activeSubTab === 'analysis' ? 'text-emerald-600' : 'text-slate-400'}`} />
-            <span className={isSubNavCompact ? 'hidden' : ''}>音频分析</span>
+            <BarChart3 className={`w-4 h-4 shrink-0 transition-colors ${activeSubTab === 'analysis' ? 'text-emerald-600' : 'text-slate-400'}`} />
+            <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>音频分析</span>
           </button>
 
           {/* Subtab Button 1: 音频转换 */}
           <button
             onClick={() => setActiveSubTab('factory')}
             title="格式/压缩/音量"
-            className={`w-full flex items-center rounded-xl text-xs font-semibold transition-all duration-200 ${
+            className={`w-full flex items-center overflow-hidden whitespace-nowrap rounded-xl text-xs font-semibold transition-all duration-200 ${
               isSubNavCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
             } ${
               activeSubTab === 'factory'
@@ -1469,15 +1529,15 @@ export default function AudioTools() {
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
             }`}
           >
-            <RefreshCw className={`w-4 h-4 transition-colors ${activeSubTab === 'factory' ? 'text-emerald-600' : 'text-slate-400'}`} />
-            <span className={isSubNavCompact ? 'hidden' : ''}>格式/压缩/音量</span>
+            <RefreshCw className={`w-4 h-4 shrink-0 transition-colors ${activeSubTab === 'factory' ? 'text-emerald-600' : 'text-slate-400'}`} />
+            <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>格式/压缩/音量</span>
           </button>
 
           {/* Subtab Button: 批量命名 */}
           <button
             onClick={() => setActiveSubTab('renamer')}
             title="批量命名"
-            className={`w-full flex items-center rounded-xl text-xs font-semibold transition-all duration-200 ${
+            className={`w-full flex items-center overflow-hidden whitespace-nowrap rounded-xl text-xs font-semibold transition-all duration-200 ${
               isSubNavCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
             } ${
               activeSubTab === 'renamer'
@@ -1485,15 +1545,15 @@ export default function AudioTools() {
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
             }`}
           >
-            <FileText className={`w-4 h-4 transition-colors ${activeSubTab === 'renamer' ? 'text-emerald-600' : 'text-slate-400'}`} />
-            <span className={isSubNavCompact ? 'hidden' : ''}>批量命名</span>
+            <FileText className={`w-4 h-4 shrink-0 transition-colors ${activeSubTab === 'renamer' ? 'text-emerald-600' : 'text-slate-400'}`} />
+            <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>批量命名</span>
           </button>
 
           {/* Subtab Button 2: 人声分离 */}
           <button
             onClick={() => setActiveSubTab('isolation')}
             title="人声分离 (AI)"
-            className={`w-full flex items-center rounded-xl text-xs font-semibold transition-all duration-200 ${
+            className={`w-full flex items-center overflow-hidden whitespace-nowrap rounded-xl text-xs font-semibold transition-all duration-200 ${
               isSubNavCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
             } ${
               activeSubTab === 'isolation'
@@ -1501,8 +1561,8 @@ export default function AudioTools() {
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
             }`}
           >
-            <Sparkles className={`w-4 h-4 transition-colors ${activeSubTab === 'isolation' ? 'text-emerald-600' : 'text-slate-400'}`} />
-            <span className={isSubNavCompact ? 'hidden' : ''}>人声分离 (AI)</span>
+            <Sparkles className={`w-4 h-4 shrink-0 transition-colors ${activeSubTab === 'isolation' ? 'text-emerald-600' : 'text-slate-400'}`} />
+            <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>人声分离 (AI)</span>
           </button>
         </div>
         <button
@@ -1541,7 +1601,7 @@ export default function AudioTools() {
             </div>
           }
         >
-          <AudioAnalyzer />
+          <AudioAnalyzer initialFiles={assistantAnalysisFiles} />
         </React.Suspense>
       )}
 

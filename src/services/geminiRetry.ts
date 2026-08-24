@@ -1,4 +1,5 @@
 import type { GoogleGenAI } from '@google/genai';
+import { recordAiUsage, toUsageNumber } from './usageTracking';
 
 export const GEMINI_PRIMARY_MODEL = 'gemini-3.6-flash';
 export const GEMINI_FALLBACK_MODEL = 'gemini-3.1-flash-lite';
@@ -17,9 +18,40 @@ type GptResponse = {
   error?: { message?: string };
   model?: string;
   output_text?: string;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+    output_tokens_details?: { reasoning_tokens?: number };
+  };
   output?: Array<{
     content?: Array<{ type?: string; text?: string }>;
   }>;
+};
+
+const recordGeminiUsage = (response: GenerateContentResponse, requestedModel: string) => {
+  const usage = (response as GenerateContentResponse & {
+    usageMetadata?: {
+      promptTokenCount?: number;
+      candidatesTokenCount?: number;
+      thoughtsTokenCount?: number;
+      totalTokenCount?: number;
+    };
+  }).usageMetadata;
+  if (!usage) return;
+
+  const inputTokens = toUsageNumber(usage.promptTokenCount);
+  const outputTokens = toUsageNumber(usage.candidatesTokenCount);
+  const reasoningTokens = toUsageNumber(usage.thoughtsTokenCount);
+  recordAiUsage({
+    provider: 'gemini',
+    model: response.modelVersion || requestedModel,
+    inputTokens,
+    outputTokens,
+    reasoningTokens,
+    totalTokens: toUsageNumber(usage.totalTokenCount) || inputTokens + outputTokens + reasoningTokens,
+    credits: 0,
+  });
 };
 
 type GptInputContentPart =
@@ -235,6 +267,18 @@ const generateGptText = async (
     const text = extractGptText(result);
     if (!text) throw new Error('GPT gateway returned no text output.');
     if (responseSchema) JSON.parse(text);
+    const inputTokens = toUsageNumber(result.usage?.input_tokens);
+    const outputTokens = toUsageNumber(result.usage?.output_tokens);
+    const reasoningTokens = toUsageNumber(result.usage?.output_tokens_details?.reasoning_tokens);
+    recordAiUsage({
+      provider: 'gpt',
+      model: result.model || gateway.model,
+      inputTokens,
+      outputTokens,
+      reasoningTokens,
+      totalTokens: toUsageNumber(result.usage?.total_tokens) || inputTokens + outputTokens,
+      credits: 0,
+    });
     console.info(`[ai-router] ${input.hasImage ? 'Vision' : 'Text'} request completed with ${result.model || gateway.model} via ${gateway.provider}.`);
     return { text, modelVersion: result.model || gateway.model } as GenerateContentResponse;
   } finally {
@@ -365,10 +409,12 @@ export async function generateGeminiContent(
 
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
     try {
-      return await ai.models.generateContent({
+      const response = await ai.models.generateContent({
         ...request,
         model: GEMINI_PRIMARY_MODEL,
       });
+      recordGeminiUsage(response, GEMINI_PRIMARY_MODEL);
+      return response;
     } catch (error) {
       if (isGeminiUnsupportedLocationError(error)) {
         throw createFriendlyGeminiUnsupportedLocationError(error);
@@ -384,10 +430,12 @@ export async function generateGeminiContent(
   }
 
   try {
-    return await ai.models.generateContent({
+    const response = await ai.models.generateContent({
       ...request,
       model: GEMINI_FALLBACK_MODEL,
     });
+    recordGeminiUsage(response, GEMINI_FALLBACK_MODEL);
+    return response;
   } catch (fallbackError) {
     console.error('Gemini fallback model failed:', fallbackError);
     throw createFriendlyGeminiError(

@@ -3,6 +3,7 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { exec, execFile } from 'child_process';
 import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
@@ -31,6 +32,16 @@ import {
   isGptTextConfigured,
   isGeminiUnsupportedLocationError,
 } from './src/services/geminiRetry';
+import {
+  recordElevenLabsResponseUsage,
+  setAiUsageRecorder,
+} from './src/services/usageTracking';
+import type { AiUsageEvent } from './src/services/usageTracking';
+import {
+  summarizeUsageUsers,
+  type StoredAiUsageEvent,
+  type UsageIdentitySource,
+} from './src/services/usageAggregation';
 import {
   ELEVENLABS_MUSIC_MODEL,
   ELEVENLABS_MUSIC_OUTPUT_FORMAT,
@@ -62,6 +73,94 @@ async function startServer() {
 
   // Use JSON middleware with large payload support for categories/sounds state and inline media references.
   app.use(express.json({ limit: '120mb' }));
+
+  type UsageActor = {
+    userId: string;
+    displayName: string;
+    department: string;
+    identitySource: UsageIdentitySource;
+  };
+  type UsageRequestContext = UsageActor & { feature: string; endpoint: string };
+  const usageRequestContext = new AsyncLocalStorage<UsageRequestContext>();
+  const normalizeIdentityText = (value: unknown, maxLength: number) => (
+    typeof value === 'string'
+      ? value.normalize('NFC').replace(/[\0-\x1f\x7f]/g, '').trim().slice(0, maxLength)
+      : ''
+  );
+  const resolveUsageActor = (req: express.Request, res: express.Response): UsageActor => {
+    // A future Feishu auth middleware should set this server-verified value before this middleware.
+    // Client-provided headers are never treated as authenticated Feishu identity.
+    const feishuUser = res.locals.feishuUser as {
+      openId?: unknown;
+      displayName?: unknown;
+      department?: unknown;
+    } | undefined;
+    const feishuOpenId = normalizeIdentityText(feishuUser?.openId, 128);
+    if (feishuOpenId) {
+      return {
+        userId: `feishu:${feishuOpenId}`,
+        displayName: normalizeIdentityText(feishuUser?.displayName, 80) || '飞书用户',
+        department: normalizeIdentityText(feishuUser?.department, 80),
+        identitySource: 'feishu',
+      };
+    }
+
+    const headerValue = Array.isArray(req.headers['x-ai-audio-client-id'])
+      ? req.headers['x-ai-audio-client-id'][0]
+      : req.headers['x-ai-audio-client-id'];
+    const clientId = normalizeIdentityText(headerValue, 128);
+    if (clientId && /^[a-zA-Z0-9._:-]+$/.test(clientId)) {
+      const suffix = clientId.replace(/[^a-zA-Z0-9]/g, '').slice(-8).toUpperCase();
+      return {
+        userId: `device:${clientId}`,
+        displayName: `设备 ${suffix || '未命名'}`,
+        department: '',
+        identitySource: 'device',
+      };
+    }
+
+    return {
+      userId: 'unknown',
+      displayName: '历史未识别用户',
+      department: '',
+      identitySource: 'unknown',
+    };
+  };
+  const resolveUsageFeature = (req: express.Request) => {
+    const endpoint = req.path;
+    if (endpoint.includes('/audio-design')) return 'AI 音频设计';
+    if (endpoint.includes('/regenerate-lyrics') || endpoint.includes('/generate-lyrics')) return 'AI 音乐 · 歌词生成';
+    if (endpoint.includes('/music-prompt')) return 'AI 音乐 · 提示词优化';
+    if (endpoint.includes('/sfx-requirements')) return '音效需求表';
+    if (endpoint.includes('/optimize-metadata')) return '音效库 · 元数据优化';
+    if (endpoint.includes('/match-voice') || endpoint.includes('/match-similar-voices')) return 'AI 配音 · 声音匹配';
+    if (endpoint.includes('/voice-v3-enhance')) return 'AI 配音 · 台词增强';
+    if (endpoint.includes('/translate-dubbing')) return '翻译配音';
+    if (endpoint.includes('/translate-language') || endpoint.endsWith('/translate')) return '文本翻译';
+    if (endpoint.includes('/speech-to-speech')) return '音频工具 · 语音转换';
+    if (endpoint.includes('/audio-isolation') || endpoint.includes('/separate-original-audio')) return '音频工具 · 人声分离';
+    if (endpoint.includes('/speech-to-text')) return '音频工具 · 语音转文字';
+    if (endpoint.includes('/sound-effect')) return 'AI 音效';
+    if (endpoint.includes('/elevenlabs/music')) return 'AI 音乐';
+    if (endpoint.includes('/elevenlabs/voice')) return 'AI 配音';
+    if (endpoint.includes('/video/analyze')) return '视频声音制作 · AI 分析';
+    if (endpoint.includes('/video/generate-clip')) {
+      const trackType = String(req.body?.trackType || req.body?.trackId || '');
+      if (trackType === 'dubbing') return '视频声音制作 · 配音';
+      if (trackType === 'bgm') return '视频声音制作 · 音乐';
+      return '视频声音制作 · 音效';
+    }
+    return '其他 AI 功能';
+  };
+
+  app.use((req, res, next) => {
+    const endpoint = req.path;
+    usageRequestContext.run({
+      feature: resolveUsageFeature(req),
+      endpoint,
+      ...resolveUsageActor(req, res),
+    }, next);
+  });
 
   // Directories paths
   const dataDir = path.join(process.cwd(), 'data');
@@ -210,6 +309,94 @@ async function startServer() {
   if (!fs.existsSync(geminiTempDir)) {
     fs.mkdirSync(geminiTempDir, { recursive: true });
   }
+
+  const aiUsageLedgerPath = path.join(dataDir, 'ai-usage.jsonl');
+  const aiUsageMetadataPath = path.join(dataDir, 'ai-usage-meta.json');
+  const nowIso = new Date().toISOString();
+  let usageMetadata: { startedAt: string; detailedSince: string; identitySince: string } = {
+    startedAt: nowIso,
+    detailedSince: nowIso,
+    identitySince: nowIso,
+  };
+  try {
+    const existing = JSON.parse(fs.readFileSync(aiUsageMetadataPath, 'utf8')) as {
+      startedAt?: unknown;
+      detailedSince?: unknown;
+      identitySince?: unknown;
+    };
+    if (typeof existing.startedAt === 'string' && Number.isFinite(Date.parse(existing.startedAt))) {
+      usageMetadata.startedAt = existing.startedAt;
+    }
+    if (typeof existing.detailedSince === 'string' && Number.isFinite(Date.parse(existing.detailedSince))) {
+      usageMetadata.detailedSince = existing.detailedSince;
+    }
+    if (typeof existing.identitySince === 'string' && Number.isFinite(Date.parse(existing.identitySince))) {
+      usageMetadata.identitySince = existing.identitySince;
+    }
+  } catch {
+    // Create or repair the marker below.
+  }
+  fs.writeFileSync(aiUsageMetadataPath, JSON.stringify(usageMetadata, null, 2), 'utf8');
+
+  setAiUsageRecorder((event) => {
+    const context = usageRequestContext.getStore();
+    const storedEvent: StoredAiUsageEvent = {
+      ...event,
+      timestamp: new Date().toISOString(),
+      feature: context?.feature || '其他 AI 功能',
+      endpoint: context?.endpoint || '',
+      userId: context?.userId || 'unknown',
+      displayName: context?.displayName || '历史未识别用户',
+      department: context?.department || '',
+      identitySource: context?.identitySource || 'unknown',
+    };
+    fs.appendFileSync(aiUsageLedgerPath, `${JSON.stringify(storedEvent)}\n`, 'utf8');
+  });
+
+  const readAiUsageEvents = () => {
+    if (!fs.existsSync(aiUsageLedgerPath)) return [] as StoredAiUsageEvent[];
+    return fs.readFileSync(aiUsageLedgerPath, 'utf8')
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .flatMap((line) => {
+        try {
+          const event = JSON.parse(line) as Partial<StoredAiUsageEvent>;
+          return event && ['elevenlabs', 'gemini', 'gpt'].includes(String(event.provider))
+            ? [{
+                provider: event.provider as AiUsageEvent['provider'],
+                model: String(event.model || 'unknown'),
+                inputTokens: Number(event.inputTokens) || 0,
+                outputTokens: Number(event.outputTokens) || 0,
+                reasoningTokens: Number(event.reasoningTokens) || 0,
+                totalTokens: Number(event.totalTokens) || 0,
+                credits: Number(event.credits) || 0,
+                timestamp: String(event.timestamp || ''),
+                feature: String(event.feature || '升级前未分类'),
+                endpoint: String(event.endpoint || ''),
+                userId: String(event.userId || 'unknown'),
+                displayName: String(event.displayName || '历史未识别用户'),
+                department: String(event.department || ''),
+                identitySource: ['feishu', 'device'].includes(String(event.identitySource))
+                  ? event.identitySource as UsageIdentitySource
+                  : 'unknown',
+              } satisfies StoredAiUsageEvent]
+            : [];
+        } catch {
+          return [];
+        }
+      });
+  };
+
+  const getDateKey = (timestamp: string, timeZone: string) => {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date(timestamp));
+    const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+    return `${values.year}-${values.month}-${values.day}`;
+  };
 
   const isPathInside = (root: string, candidate: string) => {
     const relative = path.relative(path.resolve(root), path.resolve(candidate));
@@ -400,7 +587,7 @@ async function startServer() {
 
   const requireSfxLibraryAdmin: express.RequestHandler = (req, res, next) => {
     if (hasValidSfxLibraryAdminSession(req)) return next();
-    return res.status(401).json({ error: '需要有效的音效库管理权限。' });
+    return res.status(401).json({ error: '需要有效的管理权限。' });
   };
 
   const notifySfxLibraryChanged = (type: string) => {
@@ -933,6 +1120,155 @@ async function startServer() {
       timestamp: new Date().toISOString(),
     });
   });
+
+  app.get('/api/usage/summary', requireSfxLibraryAdmin, asyncRoute(async (req, res) => {
+    const now = Date.now();
+    const requestedStart = Number(req.query.start);
+    const requestedEnd = Number(req.query.end);
+    const startTime = Number.isFinite(requestedStart) ? requestedStart : now - (7 * 24 * 60 * 60 * 1000);
+    const endTime = Number.isFinite(requestedEnd) ? Math.min(requestedEnd, now) : now;
+    if (startTime >= endTime || endTime - startTime > 370 * 24 * 60 * 60 * 1000) {
+      return res.status(400).json({ error: 'Invalid usage time range.' });
+    }
+
+    const requestedTimeZone = typeof req.query.timeZone === 'string' ? req.query.timeZone : 'Asia/Shanghai';
+    let timeZone = 'Asia/Shanghai';
+    try {
+      new Intl.DateTimeFormat('en', { timeZone: requestedTimeZone }).format();
+      timeZone = requestedTimeZone;
+    } catch {
+      // Keep the stable application default when the browser sends an invalid zone.
+    }
+
+    const events = readAiUsageEvents().filter((event) => {
+      const timestamp = Date.parse(event.timestamp);
+      return timestamp >= startTime && timestamp <= endTime;
+    });
+    const summarizeLocalProvider = (provider: AiUsageEvent['provider'], configured: boolean) => {
+      const providerEvents = events.filter(event => event.provider === provider);
+      const daily = new Map<string, {
+        date: string;
+        credits: number;
+        inputTokens: number;
+        outputTokens: number;
+        reasoningTokens: number;
+        totalTokens: number;
+        requests: number;
+      }>();
+      const models = new Map<string, number>();
+      const features = new Map<string, {
+        feature: string;
+        credits: number;
+        inputTokens: number;
+        outputTokens: number;
+        reasoningTokens: number;
+        totalTokens: number;
+        requests: number;
+        models: Map<string, number>;
+      }>();
+      const totals = {
+        credits: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        reasoningTokens: 0,
+        totalTokens: 0,
+        requests: 0,
+        unmeteredRequests: 0,
+      };
+
+      for (const event of providerEvents) {
+        totals.credits += event.credits;
+        totals.inputTokens += event.inputTokens;
+        totals.outputTokens += event.outputTokens;
+        totals.reasoningTokens += event.reasoningTokens;
+        totals.totalTokens += event.totalTokens;
+        totals.requests += 1;
+        if (provider === 'elevenlabs' && event.credits === 0) totals.unmeteredRequests += 1;
+        const primaryAmount = provider === 'elevenlabs' ? event.credits : event.totalTokens;
+        models.set(event.model, (models.get(event.model) || 0) + primaryAmount);
+
+        const feature = features.get(event.feature) || {
+          feature: event.feature,
+          credits: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          reasoningTokens: 0,
+          totalTokens: 0,
+          requests: 0,
+          models: new Map<string, number>(),
+        };
+        feature.credits += event.credits;
+        feature.inputTokens += event.inputTokens;
+        feature.outputTokens += event.outputTokens;
+        feature.reasoningTokens += event.reasoningTokens;
+        feature.totalTokens += event.totalTokens;
+        feature.requests += 1;
+        feature.models.set(event.model, (feature.models.get(event.model) || 0) + primaryAmount);
+        features.set(event.feature, feature);
+
+        const date = getDateKey(event.timestamp, timeZone);
+        const bucket = daily.get(date) || {
+          date,
+          credits: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          reasoningTokens: 0,
+          totalTokens: 0,
+          requests: 0,
+        };
+        bucket.credits += event.credits;
+        bucket.inputTokens += event.inputTokens;
+        bucket.outputTokens += event.outputTokens;
+        bucket.reasoningTokens += event.reasoningTokens;
+        bucket.totalTokens += event.totalTokens;
+        bucket.requests += 1;
+        daily.set(date, bucket);
+      }
+
+      return {
+        status: configured ? 'tracking' as const : 'not_configured' as const,
+        ...totals,
+        models: Array.from(models, ([model, amount]) => ({ model, amount }))
+          .sort((left, right) => right.amount - left.amount),
+        features: Array.from(features.values()).map(feature => ({
+          ...feature,
+          models: Array.from(feature.models, ([model, amount]) => ({ model, amount }))
+            .sort((left, right) => right.amount - left.amount),
+        })).sort((left, right) => (
+          provider === 'elevenlabs'
+            ? right.credits - left.credits
+            : right.totalTokens - left.totalTokens
+        )),
+        daily: Array.from(daily.values()).sort((a, b) => a.date.localeCompare(b.date)),
+      };
+    };
+
+    const users = summarizeUsageUsers(events);
+
+    return res.json({
+      range: {
+        start: new Date(startTime).toISOString(),
+        end: new Date(endTime).toISOString(),
+        timeZone,
+      },
+      collectedSince: usageMetadata.startedAt,
+      detailedSince: usageMetadata.detailedSince,
+      identitySince: usageMetadata.identitySince,
+      scope: 'this-tool-only',
+      users,
+      providers: {
+        elevenLabs: summarizeLocalProvider(
+          'elevenlabs',
+          Boolean(process.env.ELEVENLABS_API_KEY || process.env.VITE_ELEVENLABS_API_KEY),
+        ),
+        gemini: summarizeLocalProvider(
+          'gemini',
+          Boolean(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY),
+        ),
+        gpt: summarizeLocalProvider('gpt', isGptTextConfigured()),
+      },
+    });
+  }));
 
   app.get('/api/video/separation-engines', asyncRoute(async (_req, res) => {
     const demucs = await probeDemucsAvailability();
@@ -4054,6 +4390,7 @@ CRITICAL SUBTITLE OCR PASS:
             throw new Error(`ElevenLabs TTS Error: ${errJson.detail?.message || apiResponse.statusText}`);
           }
 
+          recordElevenLabsResponseUsage(apiResponse, 'eleven_v3');
           return Buffer.from(await apiResponse.arrayBuffer());
         });
         fs.writeFileSync(filePath, buffer);
@@ -4103,7 +4440,8 @@ CRITICAL SUBTITLE OCR PASS:
           const errJson = await apiResponse.json().catch(() => ({}));
           throw new Error(`ElevenLabs SFX Gen Error: ${errJson.detail?.message || apiResponse.statusText}`);
         }
-        
+
+        recordElevenLabsResponseUsage(apiResponse, ELEVENLABS_SOUND_MODEL);
         const wavBlob = wrapElevenLabsPcmAsWav(await apiResponse.arrayBuffer());
         const buffer = Buffer.from(await wavBlob.arrayBuffer());
         fs.writeFileSync(filePath, buffer);

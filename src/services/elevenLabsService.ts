@@ -8,6 +8,7 @@ import {
   isElevenLabsProQualityMode,
 } from '../utils/elevenLabsQuality';
 import type { ElevenLabsQualityMode } from '../utils/elevenLabsQuality';
+import { recordElevenLabsResponseUsage } from './usageTracking';
 
 const isBrowser = typeof window !== 'undefined';
 
@@ -208,6 +209,7 @@ export async function generateSoundEffect(text: string, duration?: number, optio
     throw new Error(`ElevenLabs API error: ${errorData.detail?.message || response.statusText}`);
   }
 
+  recordElevenLabsResponseUsage(response, ELEVENLABS_SOUND_MODEL);
   return wrapElevenLabsPcmAsWav(await response.arrayBuffer());
 }
 
@@ -297,6 +299,7 @@ export async function generateMusic(
     throw new Error(`ElevenLabs Music API error: ${message}`);
   }
 
+  recordElevenLabsResponseUsage(response, ELEVENLABS_MUSIC_MODEL);
   return await response.blob();
 }
 
@@ -366,6 +369,7 @@ export async function generateVoice(
       });
 
       if (response.ok) {
+        recordElevenLabsResponseUsage(response, modelId);
         successfulBlob = await response.blob();
         break;
       } else {
@@ -417,6 +421,7 @@ export async function generateVoice(
       });
 
       if (response.ok) {
+        recordElevenLabsResponseUsage(response, 'eleven_multilingual_v2');
         return await response.blob();
       }
       
@@ -660,6 +665,7 @@ export async function generateSpeechToSpeech(
     throw new Error(`ElevenLabs API error: ${errorData.detail?.message || response.statusText}`);
   }
 
+  recordElevenLabsResponseUsage(response, 'eleven_multilingual_sts_v2');
   return await response.blob();
 }
 
@@ -722,6 +728,7 @@ export async function isolateAudio(audioFile: File | Blob): Promise<Blob> {
     throw new Error(`ElevenLabs API error (Audio Isolation): ${errorData.detail?.message || response.statusText}`);
   }
 
+  recordElevenLabsResponseUsage(response, 'audio-isolation');
   return await response.blob();
 }
 
@@ -797,5 +804,6 @@ export async function transcribeSpeech(
     throw new Error(`ElevenLabs STT API error: ${errorData.detail?.message || response.statusText}`);
   }
 
+  recordElevenLabsResponseUsage(response, 'scribe_v1');
   return await response.json();
 }

@@ -3,12 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Database, LockKeyhole, LogOut, ShieldCheck, Trash2 } from 'lucide-react';
+import UsageDashboard from './UsageDashboard';
+import { clearLocalStoragePreservingClientIdentity } from '../services/clientIdentity';
 import {
   loginSfxLibraryAdmin,
   logoutSfxLibraryAdmin,
-  verifySfxLibraryAdmin,
 } from '../services/sfxLibraryAdminService';
 
 interface SettingsProps {
@@ -16,27 +17,11 @@ interface SettingsProps {
 }
 
 export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
-  const [cleared, setCleared] = useState(false);
+  const [isAuthorized, setIsAuthorized] = useState(false);
   const [adminPassword, setAdminPassword] = useState('');
   const [passwordFeedback, setPasswordFeedback] = useState<string | null>(null);
-  const [isAuthorized, setIsAuthorized] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    let active = true;
-    const syncAuthorization = async () => {
-      const authorized = await verifySfxLibraryAdmin();
-      if (active) setIsAuthorized(authorized);
-    };
-    const handleStateChange = () => void syncAuthorization();
-    window.addEventListener('security-state-changed', handleStateChange);
-    void syncAuthorization();
-    return () => {
-      active = false;
-      window.removeEventListener('security-state-changed', handleStateChange);
-    };
-  }, []);
+  const [cleared, setCleared] = useState(false);
 
   const handleUnlockManager = async () => {
     if (!adminPassword.trim() || isVerifying) return;
@@ -45,7 +30,6 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
     try {
       await loginSfxLibraryAdmin(adminPassword.trim());
       setIsAuthorized(true);
-      setPasswordFeedback('管理系统已解锁。');
       setAdminPassword('');
       onKeysUpdated?.();
     } catch (error) {
@@ -59,105 +43,95 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
   const handleLockManager = async () => {
     await logoutSfxLibraryAdmin();
     setIsAuthorized(false);
-    setPasswordFeedback('管理系统已锁定。');
+    setPasswordFeedback(null);
     onKeysUpdated?.();
   };
 
   const handleClearCache = async () => {
-    if (
-      typeof window !== 'undefined' &&
-      confirm('确定要清空本地浏览器缓存与历史工程记录吗？这不会影响服务器已保存的文件，但会清空本地操作历史。')
-    ) {
-      await logoutSfxLibraryAdmin();
-      localStorage.clear();
-      setCleared(true);
-      onKeysUpdated?.();
-      setTimeout(() => setCleared(false), 2500);
-      window.location.reload();
-    }
+    if (typeof window === 'undefined' || !confirm('确定清空本地浏览器缓存与历史工程记录吗？服务器文件不会被删除。')) return;
+    await logoutSfxLibraryAdmin();
+    clearLocalStoragePreservingClientIdentity();
+    setCleared(true);
+    onKeysUpdated?.();
+    setTimeout(() => window.location.reload(), 800);
   };
 
-  return (
-    <div id="settings-view" className="flex-1 p-6 max-w-4xl mx-auto w-full">
-      <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-5 shadow-sm">
-        <div className="space-y-3 rounded-2xl border border-indigo-100 bg-indigo-50/70 p-5">
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="h-4 w-4 text-indigo-600" />
-            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700">管理系统验证</h3>
-            <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${isAuthorized ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
-              {isAuthorized ? '已解锁' : '未解锁'}
-            </span>
+  if (!isAuthorized) {
+    return (
+      <div className="mx-auto flex min-h-[calc(100dvh-4rem)] w-full max-w-md items-center px-4 py-10 lg:min-h-dvh">
+        <section className="w-full rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700">
+            <ShieldCheck className="h-5 w-5" />
           </div>
-          <p className="text-[11px] leading-relaxed text-slate-600">
-            输入管理密码后，可解锁音效库与分组列表的增删改权限。
-          </p>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <div className="flex-1">
-              <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">管理密码</label>
-              <input
-                type="password"
-                value={adminPassword}
-                onChange={(e) => setAdminPassword(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleUnlockManager();
-                }}
-                placeholder="请输入管理密码"
-                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none transition focus:border-indigo-500"
-              />
-            </div>
-            <div className="flex items-end gap-2">
-              <button
-                type="button"
-                onClick={() => void handleUnlockManager()}
-                disabled={isVerifying || !adminPassword.trim()}
-                className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <LockKeyhole className="h-3.5 w-3.5" />
-                {isVerifying ? '正在验证...' : '解锁管理'}
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleLockManager()}
-                disabled={!isAuthorized}
-                className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <LogOut className="h-3.5 w-3.5" />
-                退出管理
-              </button>
-            </div>
-          </div>
-          {passwordFeedback && (
-            <p className={`text-[11px] font-medium ${isAuthorized ? 'text-emerald-700' : 'text-rose-600'}`}>
-              {passwordFeedback}
-            </p>
-          )}
-        </div>
+          <h1 className="mt-4 text-lg font-bold text-slate-900">设置访问验证</h1>
+          <p className="mt-1 text-xs leading-5 text-slate-500">输入管理密码后才能查看用量统计和系统设置。</p>
 
-        <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-2 border-b border-slate-100 pb-3">
-          <Database className="w-4 h-4 text-slate-600" />
-          <span>数据与本地存储</span>
-        </h3>
-
-        <div className="space-y-2 text-xs text-slate-500">
-          <p>
-            为了提供连续的工作体验，工程进度、剪辑轨道、配音列表、上传文件记录等会临时保存在本地浏览器 LocalStorage 中。
-          </p>
-          <p className="text-[10px] text-slate-400 leading-relaxed mt-1">
-            如果页面卡顿、数据不同步，或需要重新开始，可以清空本地缓存。该操作会重置本地会话与历史记录。
-          </p>
-        </div>
-
-        <div className="pt-2">
+          <label className="mt-5 block text-[11px] font-semibold text-slate-600" htmlFor="settings-admin-password">
+            管理密码
+          </label>
+          <input
+            id="settings-admin-password"
+            type="password"
+            autoComplete="current-password"
+            value={adminPassword}
+            onChange={(event) => setAdminPassword(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') void handleUnlockManager();
+            }}
+            placeholder="请输入管理密码"
+            className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+          />
+          {passwordFeedback ? <p className="mt-2 text-[11px] text-rose-600">{passwordFeedback}</p> : null}
           <button
             type="button"
-            onClick={() => void handleClearCache()}
-            className="w-full bg-slate-50 hover:bg-red-50 text-slate-700 hover:text-red-600 border border-slate-200 hover:border-red-200 font-bold py-3 rounded-xl text-xs flex items-center justify-center gap-2 shadow-sm transition-all"
+            onClick={() => void handleUnlockManager()}
+            disabled={isVerifying || !adminPassword.trim()}
+            className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 py-2.5 text-xs font-bold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <Trash2 className="w-4 h-4" />
-            <span>{cleared ? '本地缓存已清空，正在重新加载页面...' : '清空本地缓存并重置应用'}</span>
+            <LockKeyhole className="h-4 w-4" />
+            {isVerifying ? '正在验证...' : '验证并进入设置'}
           </button>
-        </div>
+        </section>
       </div>
+    );
+  }
+
+  return (
+    <div className="mx-auto w-full max-w-7xl p-4 sm:p-6 lg:p-8">
+      <header className="flex items-center justify-between gap-4 border-b border-slate-200 pb-5">
+        <div>
+          <h1 className="text-xl font-bold text-slate-900">设置</h1>
+          <p className="mt-1 text-xs text-slate-500">用量统计与本地数据管理</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void handleLockManager()}
+          className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+        >
+          <LogOut className="h-4 w-4" />
+          退出设置
+        </button>
+      </header>
+
+      <UsageDashboard />
+
+      <section className="mt-8 border-t border-slate-200 pt-6">
+        <div className="flex items-center gap-2">
+          <Database className="h-4 w-4 text-slate-500" />
+          <h2 className="text-sm font-bold text-slate-800">本地数据</h2>
+        </div>
+        <p className="mt-2 max-w-3xl text-[11px] leading-5 text-slate-500">
+          工程进度、剪辑轨道、配音列表和操作历史会临时保存在当前浏览器中。清空操作不会删除服务器保存的音频文件。
+        </p>
+        <button
+          type="button"
+          onClick={() => void handleClearCache()}
+          className="mt-4 inline-flex items-center gap-2 rounded-lg border border-rose-200 bg-white px-4 py-2.5 text-xs font-bold text-rose-600 hover:bg-rose-50"
+        >
+          <Trash2 className="h-4 w-4" />
+          {cleared ? '缓存已清空，正在重新加载...' : '清空本地缓存'}
+        </button>
+      </section>
     </div>
   );
 }

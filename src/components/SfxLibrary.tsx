@@ -75,6 +75,26 @@ type DuplicateImportResolution = 'replace' | 'skip' | 'keep';
 
 const normalizeAudioFileName = (value: string) => value.trim().normalize('NFC').toLocaleLowerCase();
 
+const getAudioDirectoryFileKey = (
+  category: string,
+  subcategory: string | undefined,
+  fileName: string,
+) => {
+  const normalizedFileName = normalizeAudioFileName(fileName);
+  if (!normalizedFileName) return '';
+  return JSON.stringify([
+    category.trim().normalize('NFC').toLocaleLowerCase(),
+    (subcategory || '').trim().normalize('NFC').toLocaleLowerCase(),
+    normalizedFileName,
+  ]);
+};
+
+const appendDuplicateFileNameSuffix = (fileName: string, suffix: number) => {
+  const extensionIndex = fileName.lastIndexOf('.');
+  if (extensionIndex <= 0) return `${fileName}_${suffix}`;
+  return `${fileName.slice(0, extensionIndex)}_${suffix}${fileName.slice(extensionIndex)}`;
+};
+
 const hasLostFileNameText = (value: string) => /[?\uFFFD]/.test(value);
 
 const encodeUtf8Base64 = (value: string) => {
@@ -2479,7 +2499,7 @@ export default function SfxLibrary() {
     itemsToUpload
       .filter(item => item.status !== 'success' && item.status !== 'skipped')
       .forEach(item => {
-        const key = normalizeAudioFileName(item.fileName);
+        const key = getAudioDirectoryFileKey(item.category, item.subcategory, item.fileName);
         if (!key) return;
         const group = pendingGroups.get(key) || [];
         group.push(item);
@@ -2487,7 +2507,9 @@ export default function SfxLibrary() {
       });
 
     const existingFileNameKeys = new Set(
-      sounds.map(sound => normalizeAudioFileName(sound.fileName)).filter(Boolean),
+      sounds
+        .map(sound => getAudioDirectoryFileKey(sound.category, sound.subcategory, sound.fileName))
+        .filter(Boolean),
     );
     const duplicateKeys = new Set(
       Array.from(pendingGroups.entries())
@@ -2497,10 +2519,37 @@ export default function SfxLibrary() {
 
     let duplicateResolution: DuplicateImportResolution = 'keep';
     if (duplicateKeys.size > 0) {
-      const duplicateNames = Array.from(duplicateKeys).map(key => pendingGroups.get(key)?.[0]?.fileName || key);
+      const duplicateNames = Array.from(duplicateKeys).map(key => {
+        const item = pendingGroups.get(key)?.[0];
+        return item
+          ? `${item.category} / ${item.subcategory || '根目录'} · ${item.fileName}`
+          : key;
+      });
       const resolution = await requestDuplicateImportResolution(duplicateNames);
       if (!resolution) return;
       duplicateResolution = resolution;
+    }
+
+    if (duplicateResolution === 'keep') {
+      const reservedKeys = new Set(existingFileNameKeys);
+      itemsToUpload
+        .filter(item => item.status !== 'success' && item.status !== 'skipped')
+        .forEach(item => {
+          const originalName = item.fileName;
+          let candidateName = originalName;
+          let candidateKey = getAudioDirectoryFileKey(item.category, item.subcategory, candidateName);
+          let suffix = 2;
+          while (reservedKeys.has(candidateKey)) {
+            candidateName = appendDuplicateFileNameSuffix(originalName, suffix);
+            candidateKey = getAudioDirectoryFileKey(item.category, item.subcategory, candidateName);
+            suffix += 1;
+          }
+          if (candidateName !== originalName) {
+            item.fileName = candidateName;
+            item.name = `${item.name} (${suffix - 1})`;
+          }
+          reservedKeys.add(candidateKey);
+        });
     }
 
     const uploadItemIds = new Set<string>();
@@ -2636,11 +2685,15 @@ export default function SfxLibrary() {
 
     // Add successful ones to library
     if (soundsToAdd.length > 0) {
-      const newFileNameKeys = new Set(soundsToAdd.map(sound => normalizeAudioFileName(sound.fileName)));
+      const newFileNameKeys = new Set(soundsToAdd.map(sound => (
+        getAudioDirectoryFileKey(sound.category, sound.subcategory, sound.fileName)
+      )));
 
       if (duplicateResolution === 'replace') {
         const replacedStorageKeys = sounds
-          .filter(sound => newFileNameKeys.has(normalizeAudioFileName(sound.fileName)))
+          .filter(sound => newFileNameKeys.has(
+            getAudioDirectoryFileKey(sound.category, sound.subcategory, sound.fileName),
+          ))
           .map(sound => sound.storageKey)
           .filter((storageKey): storageKey is string => Boolean(storageKey));
 
@@ -2662,7 +2715,13 @@ export default function SfxLibrary() {
 
       setSounds(prev => {
         const retainedSounds = duplicateResolution === 'replace'
-          ? prev.filter(existingSound => !newFileNameKeys.has(normalizeAudioFileName(existingSound.fileName)))
+          ? prev.filter(existingSound => !newFileNameKeys.has(
+              getAudioDirectoryFileKey(
+                existingSound.category,
+                existingSound.subcategory,
+                existingSound.fileName,
+              ),
+            ))
           : prev;
         return [...soundsToAdd, ...retainedSounds];
       });

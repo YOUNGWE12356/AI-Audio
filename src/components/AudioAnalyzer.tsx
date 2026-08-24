@@ -493,7 +493,11 @@ const ConfidencePill = ({ value }: { value: Confidence }) => (
   </span>
 );
 
-export default function AudioAnalyzer() {
+interface AudioAnalyzerProps {
+  initialFiles?: File[];
+}
+
+export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [analysisItems, setAnalysisItems] = useState<AnalysisQueueItem[]>([]);
   const [selectedResultId, setSelectedResultId] = useState<string | null>(null);
@@ -502,6 +506,13 @@ export default function AudioAnalyzer() {
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
+
+  React.useEffect(() => {
+    if (!initialFiles.length || loading) return;
+    handleFiles(initialFiles);
+    // The assistant passes a new file list only when a new task is confirmed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialFiles]);
 
   const totalSelectedSize = analysisItems.reduce((sum, item) => sum + item.file.size, 0);
   const completedCount = analysisItems.filter(item => item.status === 'done').length;

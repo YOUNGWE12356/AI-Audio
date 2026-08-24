@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useRef, useEffect } from 'react';
+import type { AssistantVideoRequest } from './GlobalAssistant';
 import { 
   Upload, 
   Play, 
@@ -51,6 +52,10 @@ import { ELEVENLABS_VOICES, VoiceItem } from '../data/voices';
 import { fetchAvailableVoices, generateSpeechToSpeech, transcribeSpeech } from '../services/elevenLabsService';
 import { extractVideoKeyframes } from '../utils/mediaPreparation';
 import { getElevenLabsQualityMode } from '../utils/elevenLabsQuality';
+import {
+  distributeOverlappingSfxClips,
+  isAutoSfxTrackId,
+} from '../utils/sfxTrackLayout';
 
 const MAX_VIDEO_UPLOAD_BYTES = 100 * 1024 * 1024;
 const DEFAULT_DUBBING_VOICE_ID = '';
@@ -752,6 +757,27 @@ const createStandardAudioTrack = (type: CreatableTrackType): SoundtrackTrack => 
   return { id: 'sfx', name: '音效 SFX', type: 'sfx', volume: DEFAULT_VOLUME_FADER, isMuted: false, isSoloed: false };
 };
 
+const reconcileAutoSfxTracks = (
+  existingTracks: SoundtrackTrack[],
+  requiredTrackIds: string[],
+) => {
+  const existingBaseTrack = existingTracks.find(track => track.id === 'sfx');
+  const baseTrack = existingBaseTrack || createStandardAudioTrack('sfx');
+  const requiredTracks = requiredTrackIds.map((trackId, index) => ({
+    ...baseTrack,
+    id: trackId,
+    name: requiredTrackIds.length > 1 ? `音效 SFX ${index + 1}` : '音效 SFX',
+    type: 'sfx' as const,
+  }));
+  const firstManagedIndex = existingTracks.findIndex(track => isAutoSfxTrackId(track.id));
+  const unmanagedTracks = existingTracks.filter(track => !isAutoSfxTrackId(track.id));
+  const insertionIndex = firstManagedIndex < 0
+    ? unmanagedTracks.length
+    : existingTracks.slice(0, firstManagedIndex).filter(track => !isAutoSfxTrackId(track.id)).length;
+  unmanagedTracks.splice(insertionIndex, 0, ...requiredTracks);
+  return unmanagedTracks;
+};
+
 const createLegacyTracksForClips = (clips: TimelineClip[] = []): SoundtrackTrack[] => {
   const clipTrackIds = new Set(clips.map(clip => clip.trackId));
   const restoredTracks: SoundtrackTrack[] = [];
@@ -960,7 +986,11 @@ const isStereoWaveform = (channelPeakRanges: WaveformPeakRange[][]) => (
   && channelPeakRanges[1]?.length > 0
 );
 
-export default function VideoSoundtrack() {
+interface VideoSoundtrackProps {
+  assistantVideoRequest?: AssistantVideoRequest | null;
+}
+
+export default function VideoSoundtrack({ assistantVideoRequest = null }: VideoSoundtrackProps) {
   // Project saving and loading states
   const [isProjectActive, setIsProjectActive] = useState<boolean>(false);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
@@ -1030,6 +1060,9 @@ export default function VideoSoundtrack() {
   const [videoLoadFailed, setVideoLoadFailed] = useState<boolean>(false);
   const [isPreparingVideoPreview, setIsPreparingVideoPreview] = useState<boolean>(false);
   const videoPreviewRequestRef = useRef(0);
+  const consumedAssistantVideoRequestRef = useRef<string | null>(null);
+  const assistantAutoAnalysisStartedRef = useRef<string | null>(null);
+  const assistantAutoGenerationStartedRef = useRef<string | null>(null);
   const lastFailedVideoUrlRef = useRef<string | null>(null);
   
   // AI Generation configuration options
@@ -4688,6 +4721,22 @@ export default function VideoSoundtrack() {
     await uploadVideoFile(file);
   };
 
+  // The global assistant uses the same upload path as manual imports so the
+  // video remains available to local preview, server-side analysis, and export.
+  useEffect(() => {
+    if (!assistantVideoRequest || consumedAssistantVideoRequestRef.current === assistantVideoRequest.id) return;
+    consumedAssistantVideoRequestRef.current = assistantVideoRequest.id;
+
+    const tracks = assistantVideoRequest.tracks;
+    setIsProjectActive(true);
+    setBgmEnabled(tracks.includes('bgm'));
+    setSfxEnabled(tracks.includes('sfx'));
+    setDubbingEnabled(tracks.includes('dubbing'));
+    if (assistantVideoRequest.file) {
+      void uploadVideoFile(assistantVideoRequest.file);
+    }
+  }, [assistantVideoRequest]);
+
   // Drag and drop events
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
@@ -4723,7 +4772,7 @@ export default function VideoSoundtrack() {
       setError('请至少启用一条需要 AI 规划的音轨。');
       return;
     }
-    const analysisTracks = ensureStandardAudioTracks([
+    let analysisTracks = ensureStandardAudioTracks([
       ...(analysisBgmEnabled ? ['bgm' as const] : []),
       ...(analysisSfxEnabled ? ['sfx' as const] : []),
       ...(analysisDubbingEnabled ? ['dubbing' as const] : []),
@@ -4812,7 +4861,7 @@ export default function VideoSoundtrack() {
         setAnalysisStage('正在整理时间轴...');
         const analysisRunId = Date.now().toString(36);
         // Map default volume values
-        const mappedClips: TimelineClip[] = data.clips
+        let mappedClips: TimelineClip[] = data.clips
           .filter((clip: any) => targetTrackIds.has(String(clip.trackId || '')))
           .map((clip: any, clipIndex: number) => {
           const sourceClipId = String(clip.subtitleId || clip.id || '');
@@ -4884,6 +4933,21 @@ export default function VideoSoundtrack() {
           throw new Error('AI 未返回合适的时间轴配置，请重新尝试。');
         }
 
+        let autoSfxTrackCount = 0;
+        if (analysisSfxEnabled) {
+          const sfxClips = mappedClips.filter(clip => clip.trackId === 'sfx');
+          const sfxLayout = distributeOverlappingSfxClips(sfxClips);
+          const assignedSfxClips = new Map(sfxLayout.clips.map(clip => [clip.id, clip]));
+          mappedClips = mappedClips.map(clip => assignedSfxClips.get(clip.id) || clip);
+          const requiredSfxTrackIds = sfxLayout.trackIds.length > 0
+            ? sfxLayout.trackIds
+            : ['sfx'];
+          analysisTracks = reconcileAutoSfxTracks(analysisTracks, requiredSfxTrackIds);
+          tracksRef.current = analysisTracks;
+          setTracks(analysisTracks);
+          autoSfxTrackCount = sfxLayout.trackIds.length;
+        }
+
         const preservedOriginalAudioClips = clipsRef.current.filter(isOriginalAudioClip);
         const nextClips = [
           ...preservedOriginalAudioClips,
@@ -4896,6 +4960,7 @@ export default function VideoSoundtrack() {
         });
         audioInstancesRef.current = {};
         cancelExportJobs();
+        clipsRef.current = nextClips;
         setClips(nextClips);
         setMixedVideoUrl(null);
         setExportedMixedUrl(null);
@@ -4925,6 +4990,8 @@ export default function VideoSoundtrack() {
             ? 'AI 分析完成，但没有识别到可配音字幕。'
             : usingFullVideoDubbingAnalysis
             ? 'AI 分析完成：已识别字幕、对白与口型，并按字幕逐句建立配音片段。'
+            : autoSfxTrackCount > 1
+            ? `AI 分析完成：重叠音效已自动分配到 ${autoSfxTrackCount} 条音效轨。`
             : usedNativeVideo
             ? 'AI 分析完成：系统已自动改用完整视频与原音轨完成分析。'
             : usedServerFrames || usingServerFallback
@@ -4967,6 +5034,28 @@ export default function VideoSoundtrack() {
       }
     }
   };
+
+  // A confirmed assistant video task should perform the first analysis after
+  // the upload is actually available to the server. Manual imports still wait
+  // for the user to press the analysis button.
+  useEffect(() => {
+    if (!assistantVideoRequest?.autoAnalyze) return;
+    if (assistantAutoAnalysisStartedRef.current === assistantVideoRequest.id) return;
+    if (!videoFile?.isUploaded || isUploadingToServer || isAnalyzing) return;
+
+    assistantAutoAnalysisStartedRef.current = assistantVideoRequest.id;
+    const timer = window.setTimeout(() => {
+      void handleAnalyzeVideo();
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [
+    assistantVideoRequest?.autoAnalyze,
+    assistantVideoRequest?.id,
+    videoFile?.isUploaded,
+    videoFile?.name,
+    isUploadingToServer,
+    isAnalyzing,
+  ]);
 
   const handleAnalyzeTrack = async (trackId: 'bgm' | 'sfx' | 'dubbing') => {
     if (!videoFile || analysisLockRef.current) return;
@@ -5031,9 +5120,9 @@ export default function VideoSoundtrack() {
       }
 
       const data = await res.json();
-      const analysisTracks = ensureStandardAudioTracks([trackId]);
+      let analysisTracks = ensureStandardAudioTracks([trackId]);
       const analysisRunId = Date.now().toString(36);
-      const mappedClips: TimelineClip[] = (Array.isArray(data.clips) ? data.clips : [])
+      let mappedClips: TimelineClip[] = (Array.isArray(data.clips) ? data.clips : [])
         .filter((clip: any) => String(clip.trackId || '') === trackId)
         .map((clip: any, clipIndex: number) => {
           const sourceClipId = String(clip.subtitleId || clip.id || '');
@@ -5081,10 +5170,23 @@ export default function VideoSoundtrack() {
         return;
       }
 
-      // Stop and remove only the selected track's old clips. Other tracks keep
-      // both their timeline clips and already generated audio instances.
+      let autoSfxTrackCount = 0;
+      if (trackId === 'sfx') {
+        const sfxLayout = distributeOverlappingSfxClips(mappedClips);
+        mappedClips = sfxLayout.clips;
+        analysisTracks = reconcileAutoSfxTracks(analysisTracks, sfxLayout.trackIds);
+        tracksRef.current = analysisTracks;
+        setTracks(analysisTracks);
+        autoSfxTrackCount = sfxLayout.trackIds.length;
+      }
+
+      // Re-analyzing SFX replaces every system-managed SFX lane. Other tracks
+      // keep both their timeline clips and already generated audio instances.
+      const isReplacedTrackClip = (clip: TimelineClip) => (
+        trackId === 'sfx' ? isAutoSfxTrackId(clip.trackId) : clip.trackId === trackId
+      );
       clipsRef.current
-        .filter(clip => clip.trackId === trackId)
+        .filter(isReplacedTrackClip)
         .forEach(clip => {
           const audio = audioInstancesRef.current[clip.id];
           if (audio) {
@@ -5094,18 +5196,20 @@ export default function VideoSoundtrack() {
           }
         });
       const nextClips = [
-        ...clipsRef.current.filter(clip => clip.trackId !== trackId),
+        ...clipsRef.current.filter(clip => !isReplacedTrackClip(clip)),
         ...mappedClips,
       ].sort((a, b) => a.startTime - b.startTime || a.trackId.localeCompare(b.trackId));
       clipsRef.current = nextClips;
       setClips(nextClips);
       invalidateTrackOutputs(trackId);
-      setSelectedTrackId(trackId);
+      setSelectedTrackId(mappedClips[0].trackId);
       setSelectedClipId(mappedClips[0].id);
       setSelectedClipIds([mappedClips[0].id]);
       const message = trackId === 'bgm'
         ? `配乐轨重新分析完成，已生成 ${mappedClips.length} 个片段。`
-        : trackId === 'sfx' ? `音效轨重新分析完成，已生成 ${mappedClips.length} 个片段。` : `配音轨重新分析完成，已识别 ${mappedClips.length} 个片段。`;
+        : trackId === 'sfx'
+          ? `音效轨重新分析完成，已生成 ${mappedClips.length} 个片段，并分配到 ${autoSfxTrackCount} 条无重叠音效轨。`
+          : `配音轨重新分析完成，已识别 ${mappedClips.length} 个片段。`;
       setToast({ message, type: 'success' });
       window.setTimeout(() => setToast(null), 4_000);
     } catch (err: any) {
@@ -5433,6 +5537,46 @@ export default function VideoSoundtrack() {
       }, 4500);
     }
   };
+
+  // Once assistant analysis has produced timeline clips, synthesize each
+  // requested non-original clip in sequence. This keeps API load predictable
+  // and lets every clip report its own error without stopping the remaining
+  // tracks.
+  useEffect(() => {
+    if (!assistantVideoRequest?.autoGenerate) return;
+    if (assistantAutoGenerationStartedRef.current === assistantVideoRequest.id) return;
+    if (isAnalyzing || isUploadingToServer || !videoFile?.isUploaded) return;
+
+    const pendingClipIds = clips
+      .filter((clip) => !isOriginalAudioClip(clip) && !clip.audioUrl && !clip.isGenerating)
+      .map((clip) => clip.id);
+    if (pendingClipIds.length === 0) return;
+
+    assistantAutoGenerationStartedRef.current = assistantVideoRequest.id;
+    let cancelled = false;
+    const runQueue = async () => {
+      setToast({ message: `正在自动合成 ${pendingClipIds.length} 个视频声音片段...`, type: 'info' });
+      for (const clipId of pendingClipIds) {
+        if (cancelled) return;
+        await handleGenerateAudioClip(clipId);
+      }
+      if (!cancelled) {
+        setToast({ message: '视频声音片段已按时间线自动合成完成，可继续试听和混音导出。', type: 'success' });
+        window.setTimeout(() => setToast(null), 4_000);
+      }
+    };
+    void runQueue();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    assistantVideoRequest?.autoGenerate,
+    assistantVideoRequest?.id,
+    clips,
+    isAnalyzing,
+    isUploadingToServer,
+    videoFile?.isUploaded,
+  ]);
 
   // Upload custom local audio file for a timeline clip
   const handleUploadClipAudio = async (clipId: string, file: File) => {
@@ -7247,7 +7391,7 @@ export default function VideoSoundtrack() {
 
   if (!isProjectActive) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[500px] h-full bg-slate-900 text-slate-100 p-8 relative overflow-hidden select-none">
+      <div className="relative flex min-h-[calc(100dvh-4rem)] w-full select-none flex-col items-center justify-center overflow-hidden bg-slate-900 p-8 text-slate-100 lg:min-h-dvh">
         {/* Decorative ambient gradients */}
         <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-indigo-500/10 rounded-full filter blur-[100px] pointer-events-none" />
         <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-purple-500/10 rounded-full filter blur-[100px] pointer-events-none" />
@@ -7814,7 +7958,11 @@ export default function VideoSoundtrack() {
                           ) : (
                             <button
                               onClick={() => handleExportAudio('sfx')}
-                              disabled={clips.filter(c => c.audioUrl && !c.muted && c.trackId === 'sfx').length === 0}
+                              disabled={!clips.some(c => (
+                                c.audioUrl
+                                && !c.muted
+                                && tracks.find(track => track.id === c.trackId)?.type === 'sfx'
+                              ))}
                               className="text-[10px] font-bold bg-blue-600/20 hover:bg-blue-600 text-blue-400 hover:text-white px-2 py-1 rounded transition-colors disabled:opacity-50 cursor-pointer"
                             >
                               导出

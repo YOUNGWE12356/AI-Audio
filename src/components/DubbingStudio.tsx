@@ -37,6 +37,7 @@ import { downloadAudioHelper } from '../utils/downloadHelper';
 import GeneratedAudioPlayer, { sanitizeAudioFileName } from './GeneratedAudioPlayer';
 import { enhanceVoicePromptForElevenV3 } from '../services/geminiService';
 import { getElevenLabsQualityMode } from '../utils/elevenLabsQuality';
+import type { AssistantVoiceRequest } from './GlobalAssistant';
 
 interface PendingVoiceOption {
   url: string;
@@ -93,6 +94,7 @@ interface DubbingStudioProps {
     optionA: PendingVoiceOption | null;
     optionB: PendingVoiceOption | null;
   }>>;
+  assistantVoiceRequest?: AssistantVoiceRequest | null;
 }
 
 const VOICE_SEARCH_SYNONYMS: Array<{ triggers: string[]; terms: string[] }> = [
@@ -105,6 +107,7 @@ const VOICE_SEARCH_SYNONYMS: Array<{ triggers: string[]; terms: string[] }> = [
   { triggers: ['年轻', '青春', '少年', '少女', '学生', 'young', 'youthful', 'teen', '若い', '青春', '若者', '젊은', '청춘', 'jeune', 'joven', 'juvenil', 'jung', 'jugendlich'], terms: ['young', 'youthful', 'teen', 'fresh'] },
   { triggers: ['老人', '老年', '年长', '爷爷', '奶奶', 'old', 'elderly', 'senior', 'お年寄り', '老人', '高齢', '노인', '어르신', 'âgé', 'âgée', 'senior', 'mayor', 'anciano', 'älter', 'idoso'], terms: ['old', 'elderly', 'senior', 'aged', 'mature'] },
   { triggers: ['旁白', '解说', '叙述', '纪录片', '讲述', 'narration', 'narrator', 'voiceover', 'ナレーション', '語り', '解説', '내레이션', '해설', 'narrateur', 'narratrice', 'voix off', 'narrador', 'narradora', 'erzähler', 'sprecher'], terms: ['narration', 'narrator', 'storytelling', 'documentary', 'voiceover', 'deep engaging'] },
+  { triggers: ['牧师', '神父', '传教士', '牧师角色', 'priest', 'pastor', 'preacher', 'reverend'], terms: ['priest', 'pastor', 'preacher', 'reverend', 'authoritative', 'warm'] },
   { triggers: ['广告', '宣传', '品牌', '产品', 'commercial', 'promo', 'brand', '広告', '宣伝', '브랜드', '광고', 'publicité', 'marque', 'promoción', 'marca', 'werbung', 'marke'], terms: ['commercial', 'promo', 'advertising', 'brand', 'clear', 'professional'] },
   { triggers: ['角色', '动画', '游戏', '卡通', '可爱', 'q版', 'character', 'animation', 'game', 'cartoon', 'cute', 'キャラ', 'アニメ', 'ゲーム', 'かわいい', '캐릭터', '애니', '게임', '귀여운', 'personnage', 'dessin animé', 'jeu', 'mignon', 'personaje', 'animación', 'juego', 'lindo', 'figur', 'spiel', 'süß'], terms: ['character', 'animation', 'game', 'cartoon', 'cute', 'playful'] },
   { triggers: ['害怕', '紧张', '恐惧', '惊悚', '悬疑', 'nervous', 'tense', 'scared', 'suspense', '怖い', '緊張', '不安', '무서운', '긴장', '불안', 'nerveux', 'tendu', 'peur', 'suspense', 'nervioso', 'tenso', 'miedo', 'suspenso', 'nervös', 'angespannt', 'unheimlich'], terms: ['nervous', 'tense', 'scared', 'suspense', 'dramatic'] },
@@ -119,6 +122,10 @@ const QUICK_VOICE_SEARCHES = ['温柔女声', '低沉男声', '年轻旁白', '�
 const DEFAULT_SMART_VOICE_SEARCH_TERMS = ['voice', 'narration', 'natural', 'expressive', 'character'];
 const BATCH_VOICE_ACCEPTED_FILE_TYPES = '.txt,.md,.csv,.tsv,.json,.html,.htm,.docx,.xlsx,.xls,.pdf,image/*';
 const BATCH_VOICE_READABLE_FILE_HINT = '支持拖拽 Word .docx、Excel .xlsx、CSV/TSV、TXT/MD/JSON/HTML；旧版 .xls 建议另存为 .xlsx 或 CSV。';
+const DUBBING_SUBNAV_MIN_WIDTH = 64;
+const DUBBING_SUBNAV_COMPACT_WIDTH = 168;
+const DUBBING_SUBNAV_DEFAULT_WIDTH = 184;
+const DUBBING_SUBNAV_MAX_WIDTH = 520;
 
 const normalizeVoiceSearchText = (value: unknown) => (
   String(value || '')
@@ -547,7 +554,8 @@ export default function DubbingStudio({
   historyList,
   setHistoryList,
   pendingVoiceOptions,
-  setPendingVoiceOptions
+  setPendingVoiceOptions,
+  assistantVoiceRequest
 }: DubbingStudioProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [playingHistoryId, setPlayingHistoryId] = useState<string | null>(null);
@@ -570,11 +578,14 @@ export default function DubbingStudio({
   const [visitedSubTabs, setVisitedSubTabs] = useState<Set<'tts' | 'sts' | 'translate' | 'stt'>>(() => new Set(['tts']));
   const [ttsInputMode, setTtsInputMode] = useState<'single' | 'batch'>('single');
   const [subNavWidth, setSubNavWidth] = useState(() => {
-    if (typeof window === 'undefined') return 240;
+    if (typeof window === 'undefined') return DUBBING_SUBNAV_DEFAULT_WIDTH;
     const saved = Number(window.localStorage.getItem('ai-audio-dubbing-subnav-width'));
-    return Number.isFinite(saved) ? Math.max(180, Math.min(360, saved)) : 240;
+    return Number.isFinite(saved)
+      ? Math.max(DUBBING_SUBNAV_MIN_WIDTH, Math.min(DUBBING_SUBNAV_MAX_WIDTH, saved))
+      : DUBBING_SUBNAV_DEFAULT_WIDTH;
   });
   const [isResizingSubNav, setIsResizingSubNav] = useState(false);
+  const isSubNavCompact = subNavWidth < DUBBING_SUBNAV_COMPACT_WIDTH;
 
   // STS File Upload & Playing States
   const [stsFile, setStsFile] = useState<File | null>(null);
@@ -598,14 +609,14 @@ export default function DubbingStudio({
   const [stsError, setStsError] = useState<string | null>(null);
   const [stsIsPlaying, setStsIsPlaying] = useState(false);
   const stsAudioRef = useRef<HTMLAudioElement | null>(null);
-  const subNavResizeStartRef = useRef({ width: 240, x: 0 });
+  const subNavResizeStartRef = useRef({ width: DUBBING_SUBNAV_DEFAULT_WIDTH, x: 0 });
 
   useEffect(() => {
     if (!isResizingSubNav) return;
 
     const handleMouseMove = (event: MouseEvent) => {
       const nextWidth = subNavResizeStartRef.current.width + event.clientX - subNavResizeStartRef.current.x;
-      setSubNavWidth(Math.max(180, Math.min(360, nextWidth)));
+      setSubNavWidth(Math.max(DUBBING_SUBNAV_MIN_WIDTH, Math.min(DUBBING_SUBNAV_MAX_WIDTH, nextWidth)));
     };
 
     const handleMouseUp = () => {
@@ -1206,6 +1217,18 @@ export default function DubbingStudio({
     setShowVoiceDropdown(true);
   };
 
+  useEffect(() => {
+    if (!assistantVoiceRequest?.openVoiceLibrary) return;
+    const search = assistantVoiceRequest.voiceSearchQuery?.trim() || (
+      assistantVoiceRequest.gender === 'male' ? '男声' : '女声'
+    );
+    setVoiceSmartSearchInput(search);
+    setVoiceSearchQuery(buildSmartVoiceSearchQuery(search));
+    setVoiceSearchManuallyEdited(false);
+    setShowVoiceDropdown(true);
+    setVoiceGenderFilter(assistantVoiceRequest.gender);
+  }, [assistantVoiceRequest?.id]);
+
   const handleManualVoiceSearchChange = (query: string) => {
     setVoiceSearchQuery(query);
     setVoiceSearchManuallyEdited(true);
@@ -1541,75 +1564,97 @@ export default function DubbingStudio({
     <div id="dubbingstudio-view" className="flex-1 flex flex-col md:flex-row bg-slate-50 min-h-screen overflow-hidden">
       {/* Sub-navigation Sidebar */}
       <div
-        className="relative w-full md:w-[var(--dubbing-subnav-width)] bg-white border-b md:border-b-0 md:border-r border-slate-200 flex flex-col p-4 md:p-5 shrink-0 select-none"
+        className={`relative w-full md:w-[var(--dubbing-subnav-width)] bg-white border-b md:border-b-0 md:border-r border-slate-200 flex flex-col shrink-0 select-none ${
+          isSubNavCompact ? 'p-2 md:p-3' : 'p-4 md:p-5'
+        }`}
         style={{ '--dubbing-subnav-width': `${subNavWidth}px` } as React.CSSProperties}
       >
         <div className="space-y-1.5">
-          <p className="px-3 text-[10px] font-bold text-emerald-800/80 tracking-wider uppercase mb-2">AI配音</p>
+          <p className={`px-3 text-[10px] font-bold text-emerald-800/80 tracking-wider uppercase mb-2 ${isSubNavCompact ? 'hidden' : ''}`}>AI配音</p>
           
           {/* Subtab Button 1: 文本转语音 */}
           <button
+            type="button"
+            title="文本转语音"
+            aria-label="文本转语音"
             onClick={() => {
               setActiveSubTab('tts');
             }}
-            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 cursor-pointer ${
+            className={`w-full flex items-center overflow-hidden whitespace-nowrap rounded-xl text-xs font-semibold transition-all duration-200 cursor-pointer ${
+              isSubNavCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
+            } ${
               activeSubTab === 'tts'
                 ? 'bg-emerald-50 text-emerald-700 shadow-sm border border-emerald-100'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
             }`}
           >
-            <Mic className={`w-4 h-4 transition-colors ${activeSubTab === 'tts' ? 'text-emerald-600' : 'text-slate-400'}`} />
-            <span>文本转语音</span>
+            <Mic className={`w-4 h-4 shrink-0 transition-colors ${activeSubTab === 'tts' ? 'text-emerald-600' : 'text-slate-400'}`} />
+            <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>文本转语音</span>
           </button>
 
           {/* Subtab Button 2: 语音转语音 */}
           <button
+            type="button"
+            title="语音转语音"
+            aria-label="语音转语音"
             onClick={() => {
               setActiveSubTab('sts');
               if (standaloneVoiceAudioRef.current) standaloneVoiceAudioRef.current.pause();
               setIsPlaying(false);
             }}
-            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 cursor-pointer ${
+            className={`w-full flex items-center overflow-hidden whitespace-nowrap rounded-xl text-xs font-semibold transition-all duration-200 cursor-pointer ${
+              isSubNavCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
+            } ${
               activeSubTab === 'sts'
                 ? 'bg-emerald-50 text-emerald-700 shadow-sm border border-emerald-100'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
             }`}
           >
-            <Volume2 className={`w-4 h-4 transition-colors ${activeSubTab === 'sts' ? 'text-emerald-600' : 'text-slate-400'}`} />
-            <span>语音转语音</span>
+            <Volume2 className={`w-4 h-4 shrink-0 transition-colors ${activeSubTab === 'sts' ? 'text-emerald-600' : 'text-slate-400'}`} />
+            <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>语音转语音</span>
           </button>
 
           {/* Subtab Button 3: 跨语种转换 */}
           <button
+            type="button"
+            title="跨语种转换"
+            aria-label="跨语种转换"
             onClick={() => {
               setActiveSubTab('translate');
               if (standaloneVoiceAudioRef.current) standaloneVoiceAudioRef.current.pause();
               setIsPlaying(false);
             }}
-            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 cursor-pointer ${
+            className={`w-full flex items-center overflow-hidden whitespace-nowrap rounded-xl text-xs font-semibold transition-all duration-200 cursor-pointer ${
+              isSubNavCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
+            } ${
               activeSubTab === 'translate'
                 ? 'bg-emerald-50 text-emerald-700 shadow-sm border border-emerald-100'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
             }`}
           >
-            <Languages className={`w-4 h-4 transition-colors ${activeSubTab === 'translate' ? 'text-emerald-600' : 'text-slate-400'}`} />
-            <span>跨语种转换</span>
+            <Languages className={`w-4 h-4 shrink-0 transition-colors ${activeSubTab === 'translate' ? 'text-emerald-600' : 'text-slate-400'}`} />
+            <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>跨语种转换</span>
           </button>
 
           <button
+            type="button"
+            title="语音转文本"
+            aria-label="语音转文本"
             onClick={() => {
               setActiveSubTab('stt');
               if (standaloneVoiceAudioRef.current) standaloneVoiceAudioRef.current.pause();
               setIsPlaying(false);
             }}
-            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200 cursor-pointer ${
+            className={`w-full flex items-center overflow-hidden whitespace-nowrap rounded-xl text-xs font-semibold transition-all duration-200 cursor-pointer ${
+              isSubNavCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
+            } ${
               activeSubTab === 'stt'
                 ? 'bg-emerald-50 text-emerald-700 shadow-sm border border-emerald-100'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
             }`}
           >
-            <FileAudio className={`w-4 h-4 transition-colors ${activeSubTab === 'stt' ? 'text-emerald-600' : 'text-slate-400'}`} />
-            <span>语音转文本</span>
+            <FileAudio className={`w-4 h-4 shrink-0 transition-colors ${activeSubTab === 'stt' ? 'text-emerald-600' : 'text-slate-400'}`} />
+            <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>语音转文本</span>
           </button>
         </div>
         <button
@@ -1740,7 +1785,7 @@ export default function DubbingStudio({
                       ) : (
                         <Sparkles className="h-3.5 w-3.5" />
                       )}
-                      <span>{v3EnhancementLoading ? '增强中...' : 'V3 自动增强'}</span>
+                      <span>{v3EnhancementLoading ? '增强中...' : '自动语气'}</span>
                     </button>
                     {canRestoreV3Original && (
                       <button
@@ -2028,6 +2073,22 @@ export default function DubbingStudio({
 
               {/* PREMIUM VOICE SELECTION WIDGET */}
               <div className="space-y-3 relative">
+                  {assistantVoiceRequest?.openVoiceLibrary && (
+                    <div className="rounded-xl border border-emerald-200 bg-emerald-50/80 px-3 py-2 text-[10px] leading-relaxed text-emerald-900">
+                      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                        <span className="font-bold">已提取台词并按匹配度排列声音</span>
+                        <span className="text-emerald-700/80">请试听并选择，生成由你确认</span>
+                      </div>
+                      <div className="mt-1 truncate text-emerald-800/80" title={assistantVoiceRequest.text}>
+                        台词：{assistantVoiceRequest.text || '未识别到台词，请在文本框中补充'}
+                      </div>
+                      {assistantVoiceRequest.translationApplied && assistantVoiceRequest.sourceText && (
+                        <div className="mt-1 truncate text-emerald-700/70" title={assistantVoiceRequest.sourceText}>
+                          已将中文台词翻译为英文；原文：{assistantVoiceRequest.sourceText}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
                     <div className="flex items-center justify-between gap-2 mb-2">
                       <span className="text-[10px] font-black text-slate-700 flex items-center gap-1.5">

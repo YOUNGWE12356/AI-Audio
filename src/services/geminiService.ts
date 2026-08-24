@@ -4,6 +4,7 @@ import {
   generateGeminiContent,
   isGeminiNetworkError,
 } from './geminiRetry';
+import { setClientIdentityHeader } from './clientIdentity';
 
 const isBrowser = typeof window !== 'undefined';
 
@@ -470,6 +471,7 @@ export async function preuploadAudioDesignVideo(
     options.signal?.addEventListener('abort', handleAbort, { once: true });
 
     request.open('POST', '/api/ai/gemini/audio-design-video-preupload');
+    setClientIdentityHeader(request);
     request.responseType = 'json';
     request.timeout = 180_000;
     request.upload.onprogress = (event) => {
@@ -537,6 +539,7 @@ export async function analyzeAudioDesignVideo(
     options.signal?.addEventListener('abort', handleAbort, { once: true });
 
     request.open('POST', '/api/ai/gemini/audio-design-video');
+    setClientIdentityHeader(request);
     request.responseType = 'json';
     request.timeout = 240_000;
     request.upload.onprogress = (event) => {

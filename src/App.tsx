@@ -56,6 +56,7 @@ const SettingsComponent = lazy(() => import('./components/Settings'));
 const SfxLibrary = lazy(() => import('./components/SfxLibrary'));
 const SfxRequirements = lazy(() => import('./components/SfxRequirements'));
 const VideoSoundtrack = lazy(() => import('./components/VideoSoundtrack'));
+import GlobalAssistant, { AssistantAudioRequest, AssistantMusicRequest, AssistantSfxRequest, AssistantVideoRequest, AssistantVoiceRequest } from './components/GlobalAssistant';
 
 function WorkspaceLoading() {
   return (
@@ -72,6 +73,11 @@ export default function App() {
   const [currentTab, setCurrentTab] = useState<TabType>('workbench');
   const [visitedTabs, setVisitedTabs] = useState<Set<TabType>>(() => new Set(['workbench']));
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
+  const [assistantAudioRequest, setAssistantAudioRequest] = useState<AssistantAudioRequest | null>(null);
+  const [assistantVideoRequest, setAssistantVideoRequest] = useState<AssistantVideoRequest | null>(null);
+  const [assistantVoiceRequest, setAssistantVoiceRequest] = useState<AssistantVoiceRequest | null>(null);
+  const [assistantMusicAutoRunId, setAssistantMusicAutoRunId] = useState<string | null>(null);
+  const [assistantSfxAutoRunId, setAssistantSfxAutoRunId] = useState<string | null>(null);
   
   // The HTML5 client only reads service availability from the same-origin API.
   // Secret values remain on the server and are never embedded into the bundle.
@@ -216,6 +222,64 @@ export default function App() {
   const [standaloneVoiceAudioUrl, setStandaloneVoiceAudioUrl] = useState<string | null>(null);
   const [standaloneVoiceError, setStandaloneVoiceError] = useState<string | null>(null);
   const standaloneVoiceAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  const handleAssistantAudioRequest = useCallback((request: AssistantAudioRequest) => {
+    setAssistantAudioRequest(request);
+    setCurrentTab('audio-tools');
+  }, []);
+
+  const handleAssistantVoiceRequest = useCallback(async (request: AssistantVoiceRequest) => {
+    const sourceText = request.text.trim();
+    let preparedText = sourceText;
+    let translationApplied = false;
+
+    // A target-language instruction should also transform the speakable text.
+    // Keep the original as metadata so the user can compare or recover it later.
+    if (request.language === 'en' && /[\u3400-\u9fff]/.test(sourceText)) {
+      try {
+        const translated = (await translateToEnglish(sourceText)).trim();
+        if (translated && translated !== sourceText) {
+          preparedText = translated;
+          translationApplied = true;
+        }
+      } catch (error) {
+        console.error('助手台词翻译失败，保留原文:', error);
+      }
+    }
+
+    setStandaloneVoiceText(preparedText);
+    setStandaloneVoiceLang(request.language);
+    setStandaloneVoiceGender(request.gender);
+    // Let the user choose from the ranked voice list instead of silently reusing
+    // a previous voice or generating with an arbitrary gender-only fallback.
+    setStandaloneVoiceRole('');
+    setSelectedStandaloneVoice(null);
+    setCurrentTab('dubbing-studio');
+    setAssistantVoiceRequest({
+      ...request,
+      text: preparedText,
+      sourceText: sourceText !== preparedText ? sourceText : undefined,
+      translationApplied,
+    });
+  }, []);
+
+  const handleAssistantVideoRequest = useCallback((request: AssistantVideoRequest) => {
+    setAssistantVideoRequest(request);
+    setCurrentTab('video-soundtrack');
+  }, []);
+
+  const handleAssistantMusicRequest = useCallback((request: AssistantMusicRequest) => {
+    setStandaloneMusicPrompt(request.prompt);
+    setStandaloneMusicType('instrumental');
+    setCurrentTab('music-studio');
+    setAssistantMusicAutoRunId(request.id);
+  }, []);
+
+  const handleAssistantSfxRequest = useCallback((request: AssistantSfxRequest) => {
+    setStandalonePrompt(request.prompt);
+    setCurrentTab('sfx-studio');
+    setAssistantSfxAutoRunId(request.id);
+  }, []);
 
   // Two alternatives state for standalone voiceover generation
   const [pendingVoiceOptions, setPendingVoiceOptions] = useState<{
@@ -683,6 +747,15 @@ export default function App() {
     }
   };
 
+  useEffect(() => {
+    if (!assistantSfxAutoRunId || !standalonePrompt.trim() || standaloneLoading) return;
+    setAssistantSfxAutoRunId(null);
+    const timer = window.setTimeout(() => {
+      void handleStandaloneGenerate();
+    }, 120);
+    return () => window.clearTimeout(timer);
+  }, [assistantSfxAutoRunId, standalonePrompt, standaloneLoading]);
+
   // Standalone Music generator handler
   const handleStandaloneMusicGenerate = async () => {
     if (!hasElevenLabsKey) {
@@ -767,6 +840,15 @@ export default function App() {
       setStandaloneMusicLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!assistantMusicAutoRunId || !standaloneMusicPrompt.trim() || standaloneMusicLoading) return;
+    setAssistantMusicAutoRunId(null);
+    const timer = window.setTimeout(() => {
+      void handleStandaloneMusicGenerate();
+    }, 120);
+    return () => window.clearTimeout(timer);
+  }, [assistantMusicAutoRunId, standaloneMusicPrompt, standaloneMusicLoading]);
 
   // AI Multimodal director planner handler
   const onGenerate = async () => {
@@ -1118,8 +1200,9 @@ export default function App() {
         </header>
 
         {/* Right Side Workspace Frame */}
-        <main id="app-workspace-viewport" className="relative min-h-0 min-w-0 flex-1 overflow-auto bg-slate-50 custom-scrollbar">
-          <Suspense fallback={<WorkspaceLoading />}>
+        <WorkspaceErrorBoundary>
+          <main id="app-workspace-viewport" className="relative min-h-0 min-w-0 flex-1 overflow-auto bg-slate-50 custom-scrollbar">
+            <Suspense fallback={<WorkspaceLoading />}>
             {visitedTabs.has('workbench') && (
               <section hidden={currentTab !== 'workbench'} className="min-h-full">
                 <Workbench
@@ -1234,13 +1317,14 @@ export default function App() {
                   setHistoryList={setHistoryList}
                   pendingVoiceOptions={pendingVoiceOptions}
                   setPendingVoiceOptions={setPendingVoiceOptions}
+                  assistantVoiceRequest={assistantVoiceRequest}
                 />
               </section>
             )}
 
             {visitedTabs.has('audio-tools') && (
               <section hidden={currentTab !== 'audio-tools'} className="min-h-full">
-                <AudioTools />
+                <AudioTools assistantAudioRequest={assistantAudioRequest} />
               </section>
             )}
 
@@ -1268,12 +1352,69 @@ export default function App() {
 
             {visitedTabs.has('video-soundtrack') && (
               <section hidden={currentTab !== 'video-soundtrack'} className="min-h-full">
-                <VideoSoundtrack />
+                <VideoSoundtrack assistantVideoRequest={assistantVideoRequest} />
               </section>
             )}
-          </Suspense>
-        </main>
+            </Suspense>
+          </main>
+        </WorkspaceErrorBoundary>
       </div>
+      <GlobalAssistant
+        onNavigate={setCurrentTab}
+        onAudioRequest={handleAssistantAudioRequest}
+        onVoiceRequest={handleAssistantVoiceRequest}
+        onVideoRequest={handleAssistantVideoRequest}
+        onMusicRequest={handleAssistantMusicRequest}
+        onSfxRequest={handleAssistantSfxRequest}
+      />
     </div>
   );
+}
+
+interface WorkspaceErrorBoundaryProps {
+  children: React.ReactNode;
+}
+
+interface WorkspaceErrorBoundaryState {
+  hasError: boolean;
+}
+
+class WorkspaceErrorBoundary extends React.Component<WorkspaceErrorBoundaryProps, WorkspaceErrorBoundaryState> {
+  state: WorkspaceErrorBoundaryState = { hasError: false };
+
+  static getDerivedStateFromError(): WorkspaceErrorBoundaryState {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error('工作区渲染失败:', error, info.componentStack);
+  }
+
+  handleRetry = () => {
+    (this as any).setState({ hasError: false });
+  };
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex min-h-full items-center justify-center p-8">
+          <div className="w-full max-w-md rounded-2xl border border-amber-200 bg-amber-50 p-5 text-center shadow-sm">
+            <p className="text-sm font-bold text-amber-900">当前功能暂时无法加载</p>
+            <p className="mt-2 text-xs leading-relaxed text-amber-800">
+              智能助手仍然可用。你可以重试当前功能，或从左侧导航切换到其他模块。
+            </p>
+            <button
+              type="button"
+              onClick={this.handleRetry}
+              className="mt-4 inline-flex h-9 items-center justify-center rounded-lg bg-amber-700 px-4 text-xs font-bold text-white transition hover:bg-amber-800"
+            >
+              重试当前功能
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return (this as any).props.children;
+  }
 }

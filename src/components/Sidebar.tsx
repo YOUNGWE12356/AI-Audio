@@ -22,8 +22,8 @@ import {
 import { TabType } from '../types';
 
 const SIDEBAR_MIN_WIDTH = 72;
-const SIDEBAR_COMPACT_WIDTH = 128;
-const SIDEBAR_DEFAULT_WIDTH = 256;
+const SIDEBAR_COMPACT_WIDTH = 160;
+const SIDEBAR_DEFAULT_WIDTH = 192;
 const SIDEBAR_MAX_WIDTH = 520;
 
 interface SidebarProps {
@@ -138,7 +138,7 @@ export default function Sidebar({ currentTab, setCurrentTab, isMobileOpen, onMob
                 id={`nav-item-${variant}-${item.id}`}
                 onClick={() => handleTabChange(item.id)}
                 title={variant === 'desktop' && isDesktopCompact ? item.label : undefined}
-                className={`w-full flex items-center rounded-xl text-xs font-semibold transition-all duration-200 ${
+                className={`w-full flex items-center overflow-hidden whitespace-nowrap rounded-xl text-xs font-semibold transition-all duration-200 ${
                   variant === 'desktop' && isDesktopCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
                 } ${
                   isActive 
@@ -147,7 +147,7 @@ export default function Sidebar({ currentTab, setCurrentTab, isMobileOpen, onMob
                 }`}
               >
                 <Icon className={`w-4 h-4 transition-colors ${isActive ? 'text-emerald-600' : 'text-slate-400'}`} />
-                <span className={variant === 'desktop' && isDesktopCompact ? 'hidden' : ''}>{item.label}</span>
+                <span className={`shrink-0 whitespace-nowrap ${variant === 'desktop' && isDesktopCompact ? 'hidden' : ''}`}>{item.label}</span>
               </button>
             );
           })}
