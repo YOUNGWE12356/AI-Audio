@@ -75,6 +75,17 @@ type DuplicateImportResolution = 'replace' | 'skip' | 'keep';
 
 const normalizeAudioFileName = (value: string) => value.trim().normalize('NFC').toLocaleLowerCase();
 
+const hasLostFileNameText = (value: string) => /[?\uFFFD]/.test(value);
+
+const encodeUtf8Base64 = (value: string) => {
+  const bytes = new TextEncoder().encode(value.normalize('NFC'));
+  let binary = '';
+  bytes.forEach(byte => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary);
+};
+
 interface AudioAssetLibraryStats {
   total: number;
   uploaded: number;
@@ -2452,6 +2463,17 @@ export default function SfxLibrary() {
     if (!checkOwnerPermission()) return;
     if (importItems.length === 0) return;
 
+    const damagedNames = importItems
+      .map(item => item.fileName.trim())
+      .filter(name => hasLostFileNameText(name));
+    if (damagedNames.length > 0) {
+      showCustomAlert(
+        '文件名编码异常',
+        `检测到 ${damagedNames.length} 个文件名含有损坏字符“?”。请在预览中重新输入正确名称后再上传，系统不会再用错误名称入库。`,
+      );
+      return;
+    }
+
     const itemsToUpload = importItems.map(item => ({ ...item }));
     const pendingGroups = new Map<string, ImportItem[]>();
     itemsToUpload
@@ -2533,7 +2555,8 @@ export default function SfxLibrary() {
             method: 'POST',
             headers: getSfxLibraryAdminHeaders({
               'Content-Type': item.originalFile.type || 'application/octet-stream',
-              'x-filename': encodeURIComponent(item.fileName)
+              'x-filename': encodeURIComponent(item.fileName),
+              'x-filename-utf8-base64': encodeUtf8Base64(item.fileName),
             }),
             body: item.originalFile
           });

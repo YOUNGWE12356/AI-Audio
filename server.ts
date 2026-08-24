@@ -171,6 +171,32 @@ async function startServer() {
     return normalized || fallback;
   };
 
+  const hasLostFileNameText = (value: unknown) => (
+    typeof value === 'string' && /[?\uFFFD]/.test(value)
+  );
+
+  const readUploadDisplayName = (req: express.Request) => {
+    const rawUtf8Name = Array.isArray(req.headers['x-filename-utf8-base64'])
+      ? req.headers['x-filename-utf8-base64'][0]
+      : req.headers['x-filename-utf8-base64'];
+    if (rawUtf8Name) {
+      try {
+        return Buffer.from(String(rawUtf8Name), 'base64').toString('utf8');
+      } catch {
+        return '';
+      }
+    }
+
+    const rawName = Array.isArray(req.headers['x-filename'])
+      ? req.headers['x-filename'][0]
+      : req.headers['x-filename'];
+    try {
+      return decodeURIComponent(String(rawName || 'audio-asset'));
+    } catch {
+      return String(rawName || 'audio-asset');
+    }
+  };
+
   // Ensure directories exist
   if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
@@ -793,8 +819,11 @@ async function startServer() {
       )) || sounds.some((sound: any) => (
         isLostLibraryText(sound?.category) || isLostLibraryText(sound?.subcategory)
       ));
-      if (hasCorruptedDirectoryText) {
-        return res.status(400).json({ error: '检测到损坏的目录文字，已拒绝保存以保护服务器数据。' });
+      const hasCorruptedSoundName = sounds.some((sound: any) => (
+        hasLostFileNameText(sound?.name) || hasLostFileNameText(sound?.fileName)
+      ));
+      if (hasCorruptedDirectoryText || hasCorruptedSoundName) {
+        return res.status(400).json({ error: '检测到损坏的目录或文件名文字，已拒绝保存以保护服务器数据。' });
       }
       if (Number.isFinite(baseRevision) && baseRevision !== sfxLibraryRevision) {
         const current = loadAndRepairLibraryMetadata();
@@ -818,14 +847,11 @@ async function startServer() {
   // directly from the server with HTTP Range support instead of proxying audio
   // through the React app or storing large uploads in browser IndexedDB.
   app.post('/api/sfx/library/upload', requireSfxLibraryAdmin, asyncRoute(async (req, res) => {
-    const rawName = Array.isArray(req.headers['x-filename'])
-      ? req.headers['x-filename'][0]
-      : req.headers['x-filename'];
-    let originalName = 'audio-asset';
-    try {
-      originalName = decodeURIComponent(String(rawName || 'audio-asset'));
-    } catch {
-      originalName = String(rawName || 'audio-asset');
+    const originalName = normalizeUploadDisplayName(readUploadDisplayName(req), '');
+    if (!originalName || hasLostFileNameText(originalName)) {
+      return res.status(400).json({
+        error: '文件名编码异常，请重新选择原文件或在上传预览中修正文件名。',
+      });
     }
     const extension = getSafeUploadExtension(originalName, req.headers['content-type'], '.wav');
     const storageName = `${randomUUID()}${extension}`;
@@ -848,7 +874,7 @@ async function startServer() {
       return res.json({
         success: true,
         fileName: storageName,
-        originalName: normalizeUploadDisplayName(originalName, storageName),
+        originalName,
         storageKey,
         sizeBytes: byteCount,
         url: streamUrl,
