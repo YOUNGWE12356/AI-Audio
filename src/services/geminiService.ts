@@ -1821,7 +1821,7 @@ export async function createEnglishMusicPromptForElevenLabs(
 export async function translateTextToLanguage(
   text: string,
   targetLanguage: string,
-  options?: { preserveTone?: boolean }
+  options?: { preserveTone?: boolean; maxDurationSeconds?: number }
 ): Promise<string> {
   const normalizedText = text.trim();
   if (!normalizedText) return '';
@@ -1833,16 +1833,21 @@ export async function translateTextToLanguage(
       text: normalizedText,
       targetLanguage: normalizedTargetLanguage,
       preserveTone: options?.preserveTone !== false,
+      maxDurationSeconds: options?.maxDurationSeconds,
     });
     return result.text;
   }
 
   try {
     const { ai, ThinkingLevel } = await getAI();
+    const durationInstruction = typeof options?.maxDurationSeconds === 'number' && Number.isFinite(options.maxDurationSeconds)
+      ? `The translated line must be concise enough to speak naturally within about ${Math.max(0.5, options.maxDurationSeconds).toFixed(1)} seconds. Prefer shorter idiomatic wording and remove verbal redundancy, but keep every essential fact and intention.`
+      : '';
     const prompt = `You are a professional dubbing translator.
 Translate the source dialogue into ${normalizedTargetLanguage}.
 Preserve the original meaning, emotion, tone, speaking intention, and natural spoken rhythm.
 Make the translated line sound like a real voice actor would say it, not like a literal subtitle.
+${durationInstruction}
 The output language MUST be ${normalizedTargetLanguage}. Do not return the source language unless the source is already ${normalizedTargetLanguage}.
 Return only the translated dialogue. Do not add explanations, labels, quotation marks, or markdown.
 

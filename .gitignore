@@ -8,5 +8,17 @@ uploads/*
 !uploads/.gitkeep
 .DS_Store
 *.log
+__pycache__/
+*.pyc
 .env*
 !.env.example
+tools/python311/
+tools/python-*-embed-amd64.zip
+tools/local-voice-clone/.venv/
+tools/local-voice-clone/models/
+tools/local-voice-clone/output/
+tools/python310/
+tools/python-3.10*-embed-amd64.zip
+tools/cosyvoice/repo/
+tools/cosyvoice/models/
+tools/cosyvoice/output/

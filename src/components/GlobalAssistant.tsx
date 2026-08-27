@@ -1,25 +1,34 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   Check,
   ChevronRight,
-  FileAudio,
   FileText,
-  Image as ImageIcon,
   Loader2,
-  Paperclip,
+  MessageCircle,
+  MessageSquarePlus,
+  Minus,
   Plus,
-  Send,
   Sparkles,
   Trash2,
-  X,
 } from 'lucide-react';
 import type { TabType } from '../types';
+import {
+  EMPTY_SFX_LIBRARY_INDEX,
+  buildSfxLibraryIndex,
+  SFX_LIBRARY_CATEGORIES_KEY,
+  SFX_LIBRARY_INDEX_EVENT,
+  SFX_LIBRARY_SOUNDS_KEY,
+  findSfxLibraryMatches,
+  readSfxLibraryIndex,
+} from '../services/sfxLibraryIndex';
+import type { SfxLibraryIndex } from '../services/sfxLibraryIndex';
 
 export interface AssistantAudioRequest {
   id: string;
-  file: File;
-  task: 'analyze' | 'convert';
-  targetFormat?: 'mp3';
+  file?: File;
+  task: 'analyze' | 'convert' | 'rename' | 'workstation' | 'isolate';
+  audioTool?: 'workstation' | 'analysis' | 'factory' | 'renamer' | 'isolation';
+  targetFormat?: 'mp3' | 'wav' | 'ogg' | 'flac' | 'aac' | 'm4a';
   targetSampleRate?: number;
   targetBitrate?: number;
   targetLufs?: number;
@@ -27,6 +36,7 @@ export interface AssistantAudioRequest {
 
 export interface AssistantVoiceRequest {
   id: string;
+  file?: File;
   text: string;
   sourceText?: string;
   translationApplied?: boolean;
@@ -36,6 +46,8 @@ export interface AssistantVoiceRequest {
   role?: string;
   voiceSearchQuery?: string;
   openVoiceLibrary?: boolean;
+  mode?: 'tts' | 'sts' | 'translate' | 'stt';
+  inputMode?: 'single' | 'batch';
 }
 
 export interface AssistantVideoRequest {
@@ -51,11 +63,33 @@ export interface AssistantVideoRequest {
 export interface AssistantMusicRequest {
   id: string;
   prompt: string;
+  durationSeconds?: number;
+  musicType?: 'instrumental' | 'vocal';
 }
 
 export interface AssistantSfxRequest {
   id: string;
   prompt: string;
+  durationSeconds?: number;
+}
+
+export interface AssistantDirectorRequest {
+  id: string;
+  file?: File;
+  prompt: string;
+}
+
+export interface AssistantRequirementsRequest {
+  id: string;
+  prompt: string;
+  template?: 'game_sfx_general' | 'game_sfx_middleware' | 'voiceover_general' | 'voiceover_multilang';
+}
+
+export interface AssistantLibraryRequest {
+  id: string;
+  searchQuery: string;
+  category?: string;
+  subcategory?: string;
 }
 
 export interface AssistantPlan {
@@ -66,11 +100,38 @@ export interface AssistantPlan {
   kind: 'audio' | 'voice' | 'video' | 'music' | 'sfx' | 'director' | 'requirements' | 'library' | 'general';
   tracks?: Array<'bgm' | 'sfx' | 'dubbing'>;
   analyzeSubtitles?: boolean;
+  autoGenerateVideo?: boolean;
+  librarySearchQuery?: string;
+  libraryMatchCount?: number;
+  libraryCategory?: string;
+  librarySubcategory?: string;
+  libraryFallbackKind?: 'sfx' | 'music';
+  libraryFallbackPrompt?: string;
+  inputPrompt?: string;
+  durationSeconds?: number;
+  musicType?: 'instrumental' | 'vocal';
+  voiceMode?: AssistantVoiceRequest['mode'];
+  voiceInputMode?: AssistantVoiceRequest['inputMode'];
+  voiceText?: string;
+  voiceLanguage?: string;
+  voiceGender?: 'male' | 'female';
+  voiceEmotion?: string;
+  voiceRole?: string;
+  openVoiceLibrary?: boolean;
+  requestedAudioFormat?: AssistantAudioRequest['targetFormat'];
+  requirementsTemplate?: AssistantRequirementsRequest['template'];
+  navigationOnly?: boolean;
   audioTargets?: {
     targetSampleRate?: number;
     targetBitrate?: number;
     targetLufs?: number;
   };
+  audioTask?: AssistantAudioRequest['task'];
+  audioTool?: AssistantAudioRequest['audioTool'];
+  plannerSource?: 'model' | 'local';
+  plannerModel?: string;
+  plannerProvider?: 'openai' | 'ark' | 'tokenhub';
+  plannerWarning?: string;
 }
 
 interface AssistantMemory {
@@ -82,8 +143,43 @@ interface AssistantMemory {
   preferredEmotion?: string;
   preferredFormat?: 'mp3';
   recentTasks: string[];
-  customPreferences: string[];
 }
+
+interface AssistantConversationMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+interface SharedAssistantState {
+  prompt: string;
+  file?: File;
+  plan: AssistantPlan | null;
+  conversation: AssistantConversationMessage[];
+}
+
+let sharedAssistantState: SharedAssistantState = {
+  prompt: '',
+  file: undefined,
+  plan: null,
+  conversation: [],
+};
+const sharedAssistantListeners = new Set<() => void>();
+
+const subscribeToSharedAssistant = (listener: () => void) => {
+  sharedAssistantListeners.add(listener);
+  return () => sharedAssistantListeners.delete(listener);
+};
+
+const readSharedAssistant = () => sharedAssistantState;
+
+const updateSharedAssistant = (
+  update: Partial<SharedAssistantState> | ((previous: SharedAssistantState) => Partial<SharedAssistantState>),
+) => {
+  const next = typeof update === 'function' ? update(sharedAssistantState) : update;
+  sharedAssistantState = { ...sharedAssistantState, ...next };
+  sharedAssistantListeners.forEach((listener) => listener());
+};
 
 interface GlobalAssistantProps {
   onNavigate: (tab: TabType) => void;
@@ -92,6 +188,11 @@ interface GlobalAssistantProps {
   onVideoRequest: (request: AssistantVideoRequest) => void;
   onMusicRequest: (request: AssistantMusicRequest) => void;
   onSfxRequest: (request: AssistantSfxRequest) => void;
+  onDirectorRequest?: (request: AssistantDirectorRequest) => void;
+  onRequirementsRequest?: (request: AssistantRequirementsRequest) => void;
+  onLibraryRequest?: (request: AssistantLibraryRequest) => void;
+  externalTaskRunning?: boolean;
+  embedded?: boolean;
 }
 
 const AUDIO_EXTENSIONS = /\.(wav|mp3|m4a|aac|ogg|oga|flac|aif|aiff|opus|webm|caf)$/i;
@@ -103,7 +204,6 @@ const EMPTY_ASSISTANT_MEMORY: AssistantMemory = {
   version: 1,
   taskCount: 0,
   recentTasks: [],
-  customPreferences: [],
 };
 
 const loadAssistantMemory = (): AssistantMemory => {
@@ -117,7 +217,6 @@ const loadAssistantMemory = (): AssistantMemory => {
       ...parsed,
       version: 1,
       recentTasks: Array.isArray(parsed.recentTasks) ? parsed.recentTasks.slice(0, 6) : [],
-      customPreferences: Array.isArray(parsed.customPreferences) ? parsed.customPreferences.filter(Boolean).slice(0, 8) : [],
     };
   } catch {
     return EMPTY_ASSISTANT_MEMORY;
@@ -128,13 +227,111 @@ const normalize = (value: string) => value.toLowerCase().replace(/[\s，。！�
 
 const detectVoiceRequest = (prompt: string) => {
   const normalized = normalize(prompt);
-  return /配音|朗读|读出|声音|女声|男声|voice|tts|arabic|阿拉伯|阿语|英语|中文|日语|韩语/.test(normalized);
+  return /配音(?!乐)|朗读|读出|念出|说出|女声|男声|女性|男性|voiceover|tts/.test(normalized)
+    || /(?:用|换成|改成).{0,20}(?:声音|声线).{0,20}(?:读|朗读|配音)/.test(normalized)
+    || /(?:用|让).{0,30}(?:说|念|读|朗读)/.test(normalized);
 };
+
+const detectVoiceMode = (prompt: string): NonNullable<AssistantVoiceRequest['mode']> => {
+  const normalized = normalize(prompt);
+  if (
+    /(?:语音|音频|录音|配音|声音|对白|旁白)(?:转|转成|转为|转换成)(?:文本|文字|台词)/.test(normalized)
+    || /(?:从|把|将)?(?:语音|音频|录音|配音|声音|对白|旁白).{0,24}(?:提取|识别|整理出|导出).{0,12}(?:文本|文字|台词|内容)/.test(normalized)
+    || /(?:提取|识别).{0,20}(?:语音|音频|录音|配音|声音|对白|旁白).{0,12}(?:文本|文字|台词|内容)/.test(normalized)
+    || /(?:转写|听写|转录)/.test(normalized)
+    || /(?:语音|音频|录音|配音|声音|对白|旁白).{0,20}(?:说了什么|讲了什么|说的内容|讲的内容|内容是什么)/.test(normalized)
+    || /语音识别|音频识别|录音识别|识别录音内容|语音转写|音频转写|录音转写/.test(normalized)
+  ) return 'stt';
+  if (/跨语种转换|跨语言转换|跨语种配音|语音翻译|音频翻译|录音翻译|保留原声线|保留音色|原声线.*翻译|原音色.*翻译/.test(normalized)) return 'translate';
+  if (/语音转语音|声音转声音|变声|换声|换音色|换声线|转换声线|男声变女声|女声变男声|变成女声|变成男声|(?:录音|语音|声音).{0,24}(?:听起来像|改成|换成|变为).{0,16}(?:男声|女声|声线)/.test(normalized)) return 'sts';
+  return 'tts';
+};
+
+const hasExplicitVoiceWorkflow = (prompt: string) => detectVoiceMode(prompt) !== 'tts';
 
 const detectAudioTask = (prompt: string, file?: File) => {
   const normalized = normalize(prompt);
   if (file && AUDIO_EXTENSIONS.test(file.name)) return true;
-  return /音频|歌曲|音乐文件|wav|mp3|响度|风格分析|bpm|调性|格式转换|转换格式|转格式|提取音频|转成mp3|转换成mp3|音量/.test(normalized);
+  return /音频|歌曲|音乐文件|wav|mp3|响度|风格分析|bpm|调性|格式转换|转换格式|转格式|提取音频|转成mp3|转换成mp3|音量|压缩|采样率|比特率|lufs/.test(normalized);
+};
+
+const detectWorkstationTask = (prompt: string) => {
+  const normalized = normalize(prompt);
+  const hasExplicitAnalysis = /分析|检测|识别|统计|测一下|测量|测速|查看|是多少|多少/.test(normalized);
+  return !hasExplicitAnalysis && /音频工具|音频工作站|daw|升调|降调|升[^，。！？:：]{0,8}半音|降[^，。！？:：]{0,8}半音|提高音调|降低音调|调高|调低|升高|变调|移调|变速|播放速度|倍速|音频拉伸|时间拉伸|时间伸缩|time.?stretch|加速|加快|放慢|减速|减慢|节拍器|打拍子|bpm|拍号|剪掉|剪切|裁剪|裁掉|切掉|分割|拆分|淡入|淡出|混音|混合|声像|左右声道|左声道|右声道|交换声道|声道互换|音轨|轨道|时间线|网格吸附|吸附|复制.*片段|粘贴.*片段|删除.*片段|静音.*片段|静音事件|复制音频|粘贴音频|撤销|重做|恢复操作|添加音轨|新增音轨|删除音轨|独奏音轨|轨道独奏|导入.*音频|导出混音/.test(normalized);
+};
+
+const detectFactoryTask = (prompt: string) => {
+  const normalized = normalize(prompt);
+  return /格式转换|转换格式|转格式|(?:转成|转换成|转为|提取成|提取为|输出|导出为|导出成|保存为)(?:mp3|wav|flac|ogg|aac|m4a)|压缩音频|压缩|采样率|比特率|kbps|khz|响度标准化|标准化响度|lufs/.test(normalized)
+    || /(?:从)?视频.*(?:提取|导出).*(?:声音|音频|原声)|(?:提取|导出).*视频.*(?:声音|音频|原声)/.test(normalized)
+    || (/音量/.test(normalized) && !/轨道音量|声像|混音/.test(normalized));
+};
+
+const detectAnalysisTask = (prompt: string) => {
+  const normalized = normalize(prompt);
+  return /分析音频|音频分析|分析这首|分析歌曲|风格分析|bpm分析|分析bpm|调性|和弦|乐器|响度分析|动态范围|底噪|snr|信噪比/.test(normalized);
+};
+
+const detectIsolationTask = (prompt: string) => {
+  const normalized = normalize(prompt);
+  return /人声分离|提取人声|提取.*人声|分离人声|去掉人声|消除人声|提取伴奏|去除伴奏|去掉.*伴奏|删除.*伴奏|移除.*伴奏|分离.*伴奏|消除伴奏|去噪|降噪|消除噪音|消除背景音|去掉背景音乐|去除背景音乐|删除背景音乐|移除背景音乐/.test(normalized);
+};
+
+const detectRenameTask = (prompt: string) => (
+  /重命名|批量命名|批量重命名|改文件名|修改文件名|改名|(?:音频)?文件(?:名)?.*(?:前缀|后缀|编号|大小写|查找替换|正则替换|删除字符)|(?:前缀|后缀|自动编号).*文件名/.test(normalize(prompt))
+);
+
+const detectBatchVoiceRequest = (prompt: string) => (
+  /批量配音|多文本配音|多段配音|多句配音|多角色配音|批量朗读|多段台词|多句台词/.test(normalize(prompt))
+);
+
+const detectSettingsNavigation = (prompt: string) => (
+  /^(?:打开|进入|前往|切换到|带我去)?(?:系统)?设置(?:页面|面板|中心)?$/.test(normalize(prompt))
+);
+
+const detectWorkbenchNavigation = (prompt: string) => (
+  /^(?:打开|进入|前往|切换到|返回|回到)?(?:工作台|首页|主页)$/.test(normalize(prompt))
+);
+
+const buildExplicitNavigationPlan = (prompt: string): AssistantPlan | null => {
+  const normalized = normalize(prompt);
+  const match = normalized.match(/^(?:打开|进入|前往|切换到|带我去|返回|回到)(.+?)(?:页面|面板|功能|模块)?$/);
+  if (!match) return null;
+  const destination = match[1];
+  const base = {
+    navigationOnly: true,
+    summary: `将打开${destination}`,
+    steps: [`打开${destination}`],
+  };
+  if (/^(?:工作台|首页|主页)$/.test(destination)) return { ...base, title: '返回工作台', tab: 'workbench', kind: 'general' };
+  if (/^(?:设置|系统设置|设置中心)$/.test(destination)) return { ...base, title: '打开设置', tab: 'settings', kind: 'general' };
+  if (/^(?:视频声音制作|视频配声)$/.test(destination)) return { ...base, title: '打开视频声音制作', tab: 'video-soundtrack', kind: 'video', tracks: [], analyzeSubtitles: false, autoGenerateVideo: false };
+  if (/^(?:ai音频设计|音频设计|声音设计)$/.test(destination)) return { ...base, title: '打开 AI 音频设计', tab: 'audio-director', kind: 'director' };
+  if (/^(?:ai音乐|音乐生成)$/.test(destination)) return { ...base, title: '打开 AI 音乐', tab: 'music-studio', kind: 'music' };
+  if (/^(?:ai音效|音效生成)$/.test(destination)) return { ...base, title: '打开 AI 音效', tab: 'sfx-studio', kind: 'sfx' };
+  if (/^(?:音效需求表|需求表)$/.test(destination)) return { ...base, title: '打开音效需求表', tab: 'sfx-requirements', kind: 'requirements' };
+  if (/^(?:配音声音库|配音声线库|人声库|声线库)$/.test(destination)) return { ...base, title: '打开配音声音库', tab: 'dubbing-studio', kind: 'voice', voiceMode: 'tts', openVoiceLibrary: true };
+  if (/^(?:音效库|声音库|音频库)$/.test(destination)) return { ...base, title: '打开音效库', tab: 'sfx-library', kind: 'library' };
+  if (/^(?:音频工具|音频工作站|daw)$/.test(destination)) return { ...base, title: '打开音频工作站', tab: 'audio-tools', kind: 'audio', audioTask: 'workstation', audioTool: 'workstation' };
+  if (/^(?:音频分析|测速测调|乐器和弦分析)$/.test(destination)) return { ...base, title: '打开音频分析', tab: 'audio-tools', kind: 'audio', audioTask: 'analyze', audioTool: 'analysis' };
+  if (/^(?:格式(?:\/)?压缩(?:\/)?音量|格式转换|音频转换|音频压缩)$/.test(destination)) return { ...base, title: '打开格式/压缩/音量', tab: 'audio-tools', kind: 'audio', audioTask: 'convert', audioTool: 'factory' };
+  if (/^(?:批量命名|批量重命名)$/.test(destination)) return { ...base, title: '打开批量命名', tab: 'audio-tools', kind: 'audio', audioTask: 'rename', audioTool: 'renamer' };
+  if (/^(?:人声分离|人声提取)$/.test(destination)) return { ...base, title: '打开人声分离', tab: 'audio-tools', kind: 'audio', audioTask: 'isolate', audioTool: 'isolation' };
+  const voiceMode = /语音转语音/.test(destination) ? 'sts'
+    : /跨语种转换|跨语言转换/.test(destination) ? 'translate'
+      : /语音转文本/.test(destination) ? 'stt' : 'tts';
+  if (/^(?:ai配音|配音|文本转语音|多文本配音|批量配音|多段配音|语音转语音|跨语种转换|跨语言转换|语音转文本)$/.test(destination)) {
+    return {
+      ...base,
+      title: `打开${destination}`,
+      tab: 'dubbing-studio',
+      kind: 'voice',
+      voiceMode,
+      voiceInputMode: /多文本|批量|多段/.test(destination) ? 'batch' : 'single',
+    };
+  }
+  return null;
 };
 
 const detectVideoTask = (prompt: string, file?: File) => {
@@ -143,21 +340,65 @@ const detectVideoTask = (prompt: string, file?: File) => {
   const hasVideoContext = /视频|字幕|画面|口型|镜头|视频声音制作|成片|影片|短片|视频配声|视频配音/.test(normalized);
   const hasSoundtrackContext = /给.*(?:配|加|制作)|(?:配|加|制作).*给/.test(normalized)
     && /配乐|背景音乐|bgm|音效|环境声|foley|配音|旁白|混音/.test(normalized);
-  return (!normalized && hasVideoFile) || hasVideoContext || hasSoundtrackContext;
+  const hasContinuationContext = /继续|下一步|第一段|第二段|第(?:\d+|[一二三四五六七八九十]+)段|时间段|分段|这段|这个视频/.test(normalized);
+  return (!normalized && hasVideoFile) || hasVideoContext || (hasVideoFile && (hasSoundtrackContext || hasContinuationContext));
 };
 
 const detectVideoTracks = (prompt: string): Array<'bgm' | 'sfx' | 'dubbing'> => {
   const normalized = normalize(prompt);
   const tracks: Array<'bgm' | 'sfx' | 'dubbing'> = [];
-  if (/配乐|背景音乐|bgm|音乐/.test(normalized)) tracks.push('bgm');
+  const excludesMusic = /(?:不要|不再|避免|无需|不需要|不重复|保留(?:已有|现有|当前)?|不重新(?:生成|规划|制作)?).{0,12}(?:配乐|背景音乐|bgm|音乐)/.test(normalized);
+  if (!excludesMusic && /配乐|背景音乐|bgm|音乐/.test(normalized)) tracks.push('bgm');
   if (/音效|环境声|拟音|foley|soundeffect/.test(normalized)) tracks.push('sfx');
-  if (/配音|朗读|旁白|字幕|口型|人声/.test(normalized)) tracks.push('dubbing');
+  if (/配音(?!乐)|朗读|旁白|字幕|口型|人声/.test(normalized)) tracks.push('dubbing');
   return tracks.length ? tracks : ['bgm', 'sfx', 'dubbing'];
+};
+
+const filterPreservedVideoTracks = (
+  tracks: Array<'bgm' | 'sfx' | 'dubbing'>,
+  prompt: string,
+) => {
+  const normalized = normalize(prompt);
+  const preserved = {
+    bgm: /(?:不要|不再|避免|无需|不需要|不重复|保留(?:已有|现有|当前)?|不重新(?:生成|规划|制作)?).{0,12}(?:配乐|背景音乐|bgm|音乐)/.test(normalized),
+    sfx: /(?:不要|不再|避免|无需|不需要|不重复|保留(?:已有|现有|当前)?|不重新(?:生成|规划|制作)?).{0,12}(?:音效|环境声|拟音|foley)/.test(normalized),
+    dubbing: /(?:不要|不再|避免|无需|不需要|不重复|保留(?:已有|现有|当前)?|不重新(?:生成|规划|制作)?).{0,12}(?:配音|旁白|朗读|人声)/.test(normalized),
+  };
+  const filtered = tracks.filter((track) => !preserved[track]);
+  return filtered.length > 0 ? filtered : tracks;
 };
 
 const detectSfxTask = (prompt: string) => {
   const normalized = normalize(prompt);
-  return /音效|soundeffect|foley|打嗝|咳嗽|喷嚏|笑声|哭声|尖叫|脚步|敲门|开门|关门|爆炸|枪声|风声|雨声|雷声|鸟叫|猫叫|狗叫|呼吸|心跳|水滴|碰撞|刹车|汽车|按钮|提示音|击打|摩擦|燃烧|玻璃碎|whoosh|叮|哔声/.test(normalized);
+  return /音效|soundeffect|foley|打嗝|咳嗽|喷嚏|笑声|哭声|尖叫|脚步|敲门|开门|关门|爆炸|枪声|风声|雨声|雷声|钟声|铃声|门铃|鸟叫|猫叫|狗叫|呼吸|心跳|水滴|碰撞|刹车|汽车|按钮|提示音|击打|摩擦|燃烧|玻璃碎|whoosh|叮|哔声/.test(normalized)
+    || /(?:生成|制作|合成|创建|设计).{1,40}(?:环境声|声音效果|声响|声音|声)$/.test(normalized);
+};
+
+type AmbiguousSoundIntent = 'library' | 'voice' | 'music' | 'sfx' | 'analysis' | null;
+
+/**
+ * “声音” is a common non-professional synonym for several asset types.
+ * Resolve it with intent cues before the more generic module detectors run.
+ * Library lookup wins for requests that ask to find/use/download an asset;
+ * generation only wins when the user explicitly asks to create it.
+ */
+const classifyAmbiguousSoundIntent = (prompt: string): AmbiguousSoundIntent => {
+  const normalized = normalize(prompt);
+  if (!/(?:声音|声响|声效|sound)/i.test(normalized)) return null;
+
+  if (/分析|检查|检测|识别|测一下|测速|响度|底噪|信噪比|bpm|调性|和弦|乐器/.test(normalized)) return 'analysis';
+  if (/配音|朗读|读出|念出|说出|台词|对白|旁白|人声|男声|女声|男性|女性|声线|语气|角色|(?:用|让).{0,30}(?:读|念|说)/.test(normalized)) return 'voice';
+  if (/音乐|配乐|背景音乐|bgm|歌曲|旋律|节奏|歌词|乐器|作曲/.test(normalized)) return 'music';
+  if (/需求表|需求清单|声音清单|制作清单|声音设计|声音方案|声音排程|视频|画面|短片|影片|成片/.test(normalized)) return null;
+
+  const asksToFindAsset = /音效库|声音库|音频库|资产库|库里|已有|目录|项目|查找|搜索|寻找|找|试听|下载|收藏|调用|使用|需要|想要|要一个|要一段|给我/.test(normalized);
+  const asksToGenerate = /生成|制作|合成|创建|设计|做出?|写|造|录制|模拟/.test(normalized);
+  const soundEffectCues = /环境|拟音|foley|动作|材质|空间|脚步|敲门|开门|关门|爆炸|枪声|风声|雨声|雷声|钟声|铃声|鸟叫|猫叫|狗叫|呼吸|心跳|水滴|碰撞|刹车|按钮|提示音|击打|摩擦|燃烧|玻璃碎|whoosh/.test(normalized);
+
+  if (asksToFindAsset && !asksToGenerate) return 'library';
+  if (soundEffectCues || asksToGenerate) return 'sfx';
+  // Asset-first is safer than silently generating or selecting a voice.
+  return 'library';
 };
 
 const detectDirectorTask = (prompt: string) => (
@@ -166,10 +407,94 @@ const detectDirectorTask = (prompt: string) => (
 
 const detectRequirementsTask = (prompt: string) => (
   /音效需求|需求表|需求清单|声音清单|镜头清单|制作清单|待办音效/.test(normalize(prompt))
+  || /(?:fmod|wwise).*(?:事件|event|清单|表|需求|整理)/i.test(normalize(prompt))
 );
 
 const detectLibraryTask = (prompt: string) => (
-  /音效库|声音库|音频资产|资产库|查找音效|搜索音效|浏览音效|下载音效|收藏音效/.test(normalize(prompt))
+  /音效库|声音库|音频库|音频资产|资产库|(?:查找|搜索|寻找|找|浏览|试听|下载|收藏|调用|使用).*(?:音效|音乐|配乐|声音|音频)/.test(normalize(prompt))
+);
+
+const extractLibrarySearchQuery = (prompt: string) => stripLeadingRequestWords(prompt)
+  .replace(/^(?:打开|进入)?(?:音效库|声音库|音频库|音频资产库|资产库)(?:中|里)?\s*/i, '')
+  .replace(/^(?:搜索|查找|浏览|试听|下载|收藏|找|寻找|使用|调用)\s*(?:一个|一段|一首|一曲)?\s*/i, '')
+  .replace(/^(?:一个|一段|一首|一曲)\s*/i, '')
+  .replace(/\s*(?:并|然后)?\s*(?:试听|下载|收藏)\s*$/i, '')
+  .replace(/(?:的)?(?:声音效果|背景音乐|音效|音乐|配乐|声音)\s*$/i, '')
+  .replace(/[，。！？、:：;；]/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const trimPromptPunctuation = (value: string) => value
+  .replace(/^[\s，。！？、:：;；“”‘’"']+|[\s，。！？、:：;；“”‘’"']+$/g, '')
+  .trim();
+
+const stripLeadingRequestWords = (prompt: string) => prompt
+  .trim()
+  .replace(/^(?:请|麻烦|帮我|给我|我要|我想要|我需要)\s*/g, '')
+  .trim();
+
+const REQUIREMENTS_DEFAULT_PROMPTS: Record<NonNullable<AssistantRequirementsRequest['template']>, string> = {
+  game_sfx_general: '按场景、时间点、动作、材质、空间和优先级整理音效需求',
+  game_sfx_middleware: '按 FMOD / Wwise 事件路径、播放参数、触发条件和音频参考整理音效需求',
+  voiceover_general: '按角色、台词、语言、语气、声线和交付规格整理配音需求',
+  voiceover_multilang: '按角色、源台词、目标语言、译文、语气和交付规格整理多语种配音需求',
+};
+
+const extractRequirementsPrompt = (
+  prompt: string,
+  template: NonNullable<AssistantRequirementsRequest['template']>,
+) => {
+  const withoutRequestWords = stripLeadingRequestWords(prompt).replace(/^把\s*/, '');
+  const extracted = withoutRequestWords
+    .replace(/^(?:整理|制作|生成|创建|列出|做)\s*(?:一份|一个)?\s*/i, '')
+    .replace(/^(?:音效需求|需求描述|制作需求)\s*[:：]\s*/i, '')
+    .replace(/(?:的)?(?:音效|声音|配音)?需求(?:表|清单)\s*[，,:：]?\s*/gi, '，')
+    .replace(/\s*(?:做成|整理成|制作成|生成成|转成|输出为|列成|整理为)?\s*(?:一份|一个)?\s*(?:游戏)?\s*(?:音效|声音)?需求(?:表|清单)\s*$/i, '')
+    .replace(/\s*(?:做成|整理成|制作成|生成成|转成|输出为|列成|整理为)\s*(?:音效需求表|音效需求清单)\s*$/i, '');
+  const cleaned = trimPromptPunctuation(extracted).replace(/^，+|，+$/g, '').trim();
+  const genericOnly = /^(?:fmod|wwise|fmod\s*\/\s*wwise|游戏|多语言|多语种|多语言配音|多语种配音|配音|音效|声音)?$/i.test(cleaned);
+  return cleaned.length >= 2 && !genericOnly ? cleaned : REQUIREMENTS_DEFAULT_PROMPTS[template];
+};
+
+const extractGenerationPrompt = (prompt: string) => {
+  const withoutRequestWords = stripLeadingRequestWords(prompt);
+  const musicForTargetMatch = withoutRequestWords.match(/^(?:给|为)(.+?)配(?:一段|一首|一曲)?(?:音乐|配乐)(.*)$/i);
+  const contentFirstPrompt = musicForTargetMatch
+    ? `${musicForTargetMatch[1]}配乐${musicForTargetMatch[2] ? `，${musicForTargetMatch[2]}` : ''}`
+    : withoutRequestWords;
+  const extracted = contentFirstPrompt.replace(
+    /^(?:(?:用\s*)?ai\s*)?(?:生成|制作|合成|创作|设计|写|录制|模拟|做出?|来)\s*(?:一个|一段|一首|一曲)?\s*/i,
+    '',
+  )
+    .replace(/^(?:音效描述|声音描述|音乐描述|配乐描述|风格描述)\s*[:：]\s*/i, '')
+    .replace(/(?:时长|持续)?\s*\d+(?:\.\d+)?\s*(?:分钟|分|秒钟|秒|s|sec|seconds?)\s*(?:的)?/gi, '')
+    .replace(/(?:不要人声|无人声|不带人声|纯音乐|纯配乐|带歌词|有人声|带人声|包含人声)/gi, '');
+  const cleaned = trimPromptPunctuation(extracted).replace(/(音乐|配乐)声音$/i, '$1');
+  return /^(?:的)?(?:音乐|配乐|音效|声音)?$/i.test(cleaned) ? '' : cleaned;
+};
+
+const extractDurationSeconds = (prompt: string) => {
+  const match = prompt.match(/(\d+(?:\.\d+)?)\s*(分钟|分|秒钟|秒|s|sec|seconds?)/i);
+  if (!match) return /半分钟/.test(prompt) ? 30 : undefined;
+  const value = Number(match[1]);
+  const seconds = /分钟|分/.test(match[2]) ? value * 60 : value;
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : undefined;
+};
+
+const extractMusicType = (prompt: string): 'instrumental' | 'vocal' => (
+  /带歌词|有人声|带人声|包含人声|演唱|歌唱/.test(normalize(prompt)) ? 'vocal' : 'instrumental'
+);
+
+const hasExplicitSfxGenerationIntent = (prompt: string) => (
+  /生成|制作|合成|创作|设计(?:一个|一段)?|做(?:一个|一段)?|造(?:一个|一段)?|用\s*ai|ai\s*(?:生成|制作|合成|音效)|人工智能音效/i.test(normalize(prompt))
+);
+
+const hasLibraryLookupIntent = (prompt: string) => (
+  /要|想要|找|寻找|给我|使用|调用|下载|试听|收藏|库里|已有|项目|目录|匹配/.test(normalize(prompt))
+);
+
+const isGenericLibraryDirectoryName = (name: string) => (
+  /^(?:音效库|声音库|音频库|音频资产库|资产库|音乐|音效|音频|声音|配乐|背景音乐|bgm|sound|music|sfx)$/i.test(name.trim())
 );
 
 const extractLanguage = (prompt: string, fallback = 'zh') => {
@@ -178,6 +503,9 @@ const extractLanguage = (prompt: string, fallback = 'zh') => {
   if (/英语|英文|english/.test(normalized)) return 'en';
   if (/日语|日文|japanese/.test(normalized)) return 'ja';
   if (/韩语|韩文|korean/.test(normalized)) return 'ko';
+  if (/法语|法文|french/.test(normalized)) return 'fr';
+  if (/德语|德文|german/.test(normalized)) return 'de';
+  if (/西班牙语|西班牙文|spanish/.test(normalized)) return 'es';
   // Keep Chinese lines in their source language; persisted preferences must not
   // override the language of the current request.
   if (/[\u3400-\u9fff]/.test(prompt)) return 'zh';
@@ -211,6 +539,16 @@ const extractVoiceText = (prompt: string) => {
     return source.slice(colonIndex + 1).trim().replace(/^[“「『"]|[”」』"]$/g, '').trim();
   }
 
+  const labeledLine = source.match(/(?:台词|文案|内容)\s*(?:是|为)?\s*[，,:：]?\s*(.+)$/i);
+  if (labeledLine?.[1]?.trim()) return labeledLine[1].trim();
+
+  const spokenAfterVerb = source.match(/(?:朗读|读出|念出|说出|读)\s*(?:这句话|这段话|下面这句|以下内容)?\s*[，,:：]?\s*(.+)$/i);
+  if (spokenAfterVerb?.[1]?.trim()) return spokenAfterVerb[1].trim();
+
+  if (/^(?:请|帮我|请你)?\s*(?:生成|制作|创建|准备|打开)?\s*(?:一个|一段|一条)?\s*(?:[\u3400-\u9fff]{0,12})?(?:男声|女声|配音|朗读|语音)\s*(?:配音)?$/i.test(source)) {
+    return '';
+  }
+
   // Remove a leading instruction when no explicit delimiter was provided.
   const withoutInstruction = source
     .replace(/^(?:请|帮我|请你)?\s*(?:把|将)?(?:这句话|这段话|下面这句|以下内容)?\s*(?:用[^，。！？:：]+?(?:的)?(?:语气|声音|声线))?\s*(?:读|读出|朗读|念出|说出|配音)\s*/i, '')
@@ -221,7 +559,7 @@ const extractVoiceText = (prompt: string) => {
 };
 
 const extractEmotion = (prompt: string, fallback = '自然、清晰') => {
-  const matches = ['温柔', '甜美', '坚定', '活泼', '悲伤', '开心', '平静', '紧张', '热情', '严肃', '神秘', '温暖']
+  const matches = ['可爱', '温柔', '甜美', '柔和', '低沉', '磁性', '成熟', '坚定', '活泼', '悲伤', '开心', '愉快', '兴奋', '平静', '紧张', '热情', '严肃', '庄严', '神圣', '正式', '神秘', '温暖', '自然', '清晰']
     .filter((tag) => prompt.includes(tag));
   if (!matches.length && /[\u3400-\u9fff]/.test(prompt)) return '自然、清晰';
   return matches.length ? matches.join(', ') : fallback;
@@ -229,12 +567,14 @@ const extractEmotion = (prompt: string, fallback = '自然、清晰') => {
 
 const extractAudioTargets = (prompt: string) => {
   const normalized = normalize(prompt);
-  const lufsMatch = normalized.match(/(-?\d+(?:\.\d+)?)lufs/i)
-    || normalized.match(/(?:\u54cd\u5ea6)(?:\u53d8\u6210|\u8bbe\u4e3a|\u4e3a)?(-?\d+(?:\.\d+)?)/i);
-  const sampleRateMatch = normalized.match(/(\d+(?:\.\d+)?)(khz|hz|\u8d6b\u5179)/i)
-    || normalized.match(/(?:\u91c7\u6837\u7387)(\d+(?:\.\d+)?)(khz|hz)?/i);
-  const bitrateMatch = normalized.match(/(\d+(?:\.\d+)?)(kbps|kbit|kb\/s)/i)
-    || normalized.match(/(?:\u6bd4\u7279\u7387)(\d+(?:\.\d+)?)/i);
+  // Parse numeric targets from the original prompt so `MP3, 128kbps` does
+  // not become `MP3128kbps` after normalization and accidentally read as 3128.
+  const lufsMatch = prompt.match(/(-?\d+(?:\.\d+)?)\s*lufs/i)
+    || prompt.match(/(?:响度)\s*(?:变成|设为|为)?\s*(-?\d+(?:\.\d+)?)/i);
+  const sampleRateMatch = prompt.match(/(\d+(?:\.\d+)?)\s*(khz|hz|赫兹)/i)
+    || prompt.match(/(?:采样率)\s*(\d+(?:\.\d+)?)(?:\s*(khz|hz))?/i);
+  const bitrateMatch = prompt.match(/(\d+(?:\.\d+)?)\s*(kbps|kbit|kb\/s)/i)
+    || prompt.match(/(?:比特率)\s*(\d+(?:\.\d+)?)/i);
   const sampleRateValue = sampleRateMatch ? Number(sampleRateMatch[1]) : undefined;
   const sampleRateUnit = sampleRateMatch?.[2]?.toLowerCase();
 
@@ -247,27 +587,190 @@ const extractAudioTargets = (prompt: string) => {
   };
 };
 
-const buildPlan = (prompt: string, file?: File, memory: AssistantMemory = EMPTY_ASSISTANT_MEMORY): AssistantPlan => {
+const extractRequestedAudioFormat = (prompt: string): AssistantAudioRequest['targetFormat'] | undefined => {
+  const match = prompt.match(/(?:转成|转换成|转为|提取成|提取为|输出|导出为|导出成|保存为|目标格式(?:是|为)?)\s*(mp3|wav|flac|ogg|aac|m4a)/i);
+  return match?.[1]?.toLowerCase() as AssistantAudioRequest['targetFormat'] | undefined;
+};
+
+const detectRequirementsTemplate = (prompt: string): NonNullable<AssistantRequirementsRequest['template']> => {
   const normalized = normalize(prompt);
-  const hasExplicitAudioOperation = /音频分析|分析音频|转格式|转换格式|格式转换|提取音频|转成mp3|转换成mp3|输出mp3/.test(normalized);
-  if (detectVideoTask(prompt, file) && !hasExplicitAudioOperation) {
-    const tracks = detectVideoTracks(prompt);
+  if (/多语言|多语种|本地化|国际化/.test(normalized) && /配音|台词|语音/.test(normalized)) return 'voiceover_multilang';
+  if (/配音|台词|角色语音|旁白/.test(normalized)) return 'voiceover_general';
+  if (/fmod|wwise|中间件|event:|事件路径|bank/.test(normalized)) return 'game_sfx_middleware';
+  return 'game_sfx_general';
+};
+
+const buildPlan = (
+  prompt: string,
+  file?: File,
+  memory: AssistantMemory = EMPTY_ASSISTANT_MEMORY,
+  libraryIndex: SfxLibraryIndex = EMPTY_SFX_LIBRARY_INDEX,
+): AssistantPlan => {
+  const normalized = normalize(prompt);
+  const explicitNavigationPlan = buildExplicitNavigationPlan(prompt);
+  if (explicitNavigationPlan) return explicitNavigationPlan;
+  const soundIntent = classifyAmbiguousSoundIntent(prompt);
+  const hasExplicitAudioOperation = detectWorkstationTask(prompt)
+    || detectFactoryTask(prompt)
+    || detectAnalysisTask(prompt)
+    || soundIntent === 'analysis'
+    || detectIsolationTask(prompt)
+    || /音频分析|分析音频|转格式|转换格式|格式转换|提取音频|转成mp3|转换成mp3|输出mp3/.test(normalized);
+  const explicitSfxGeneration = hasExplicitSfxGenerationIntent(prompt);
+  const explicitVoiceIntent = soundIntent === 'voice' || hasExplicitVoiceWorkflow(prompt) || detectVoiceRequest(prompt);
+  const extractedLibrarySearchQuery = extractLibrarySearchQuery(prompt);
+  const libraryMatches = findSfxLibraryMatches(extractedLibrarySearchQuery || prompt, libraryIndex);
+  const specificLibraryMatches = libraryMatches.filter(entry => !isGenericLibraryDirectoryName(entry.name));
+  const hasSfxLookupRequest = !explicitSfxGeneration && !explicitVoiceIntent && !hasExplicitAudioOperation && (
+    detectLibraryTask(prompt)
+    || soundIntent === 'library'
+    || (
+      detectSfxTask(prompt)
+      && hasLibraryLookupIntent(prompt)
+    )
+  );
+
+  if (detectSettingsNavigation(prompt)) {
+    return {
+      title: '打开设置',
+      summary: '将打开设置面板',
+      tab: 'settings',
+      kind: 'general',
+      steps: ['打开设置', '查看服务状态、密钥配置和管理权限'],
+    };
+  }
+
+  if (detectWorkbenchNavigation(prompt)) {
+    return {
+      title: '返回工作台',
+      summary: '将返回功能总览工作台',
+      tab: 'workbench',
+      kind: 'general',
+      steps: ['打开工作台', '查看全部功能入口和最近生成记录'],
+    };
+  }
+
+  // A named library asset is a stronger signal than the generic word "音效".
+  // Resolve it before AI generation so requests like "我要 Jinn 的音效" open
+  // the shared library and search the matching project directory.
+  if (hasSfxLookupRequest) {
+    const resolvedLibraryMatches = specificLibraryMatches;
+    const matchedName = resolvedLibraryMatches[0]?.name;
+    const matchedDirectory = resolvedLibraryMatches.find(entry => entry.kind === 'directory');
+    const searchQuery = matchedName || extractedLibrarySearchQuery;
+    const soundMatchCount = resolvedLibraryMatches.filter(entry => entry.kind === 'sound').length;
+    const fallbackKind = /音乐|配乐|bgm/.test(normalized) ? 'music' : 'sfx';
+    const fallbackGenerator = fallbackKind === 'music' ? 'AI 音乐' : 'AI 音效';
+    const matchSummary = matchedName
+      ? `已从音效库实时目录匹配到“${matchedName}”，准备查找${soundMatchCount ? `${soundMatchCount} 个` : '对应目录中的'}音频资产`
+      : `音效库中暂未找到“${searchQuery || '该音频'}”，请先确认是否改用 ${fallbackGenerator}生成`;
+    return {
+      title: '打开音效库',
+      summary: matchSummary,
+      tab: 'sfx-library',
+      kind: 'library',
+      librarySearchQuery: searchQuery,
+      libraryMatchCount: resolvedLibraryMatches.length,
+      libraryCategory: matchedDirectory?.category,
+      librarySubcategory: matchedDirectory?.subcategory,
+      ...(resolvedLibraryMatches.length === 0 ? {
+        libraryFallbackKind: fallbackKind,
+        libraryFallbackPrompt: searchQuery || extractGenerationPrompt(prompt) || prompt.trim(),
+      } : {}),
+      steps: [
+        '打开音效库并读取最新目录和音频名称',
+        matchedName ? `定位“${matchedName}”所属目录并筛选匹配文件` : '在共享音效库中搜索该名称、项目或标签',
+        matchedName ? '试听、下载或收藏选中的文件' : `未找到后不自动生成；确认后再进入${fallbackGenerator}`,
+      ],
+    };
+  }
+
+  if (detectRenameTask(prompt)) {
+    return {
+      title: '准备批量命名',
+      summary: file ? `已载入 ${file.name}，准备批量修改文件名` : '将打开音频工具的批量命名功能，请先导入需要改名的音频',
+      tab: 'audio-tools',
+      kind: 'audio',
+      audioTask: 'rename',
+      audioTool: 'renamer',
+      steps: [
+        '打开音频工具 > 批量命名',
+        file ? '载入已提供的音频文件' : '导入多个音频或整个文件夹',
+        '设置查找替换、前后缀、编号或命名模板',
+        '预览改名结果后导出文件或 ZIP',
+      ],
+    };
+  }
+
+  if (detectWorkstationTask(prompt)) {
+    return {
+      title: '准备音频工作站',
+      summary: file ? `已载入 ${file.name}，准备在 DAW 时间线上处理` : '将打开音频工作站，准备进行时间线和轨道处理',
+      tab: 'audio-tools',
+      kind: 'audio',
+      audioTask: 'workstation',
+      audioTool: 'workstation',
+      steps: [
+        '打开音频工具 > 音频工作站',
+        file ? '载入已提供的音频文件并放入时间线' : '导入音频或创建音轨',
+        '按请求执行移调、变速、剪切、淡入淡出、节拍器、BPM、声像或混音操作',
+        '试听后导出处理结果',
+      ],
+    };
+  }
+
+  if (detectIsolationTask(prompt)) {
+    return {
+      title: '准备人声分离',
+      summary: file ? `已载入 ${file.name}，准备提取人声或去除背景` : '将打开人声分离功能，请导入待处理音频',
+      tab: 'audio-tools',
+      kind: 'audio',
+      audioTask: 'isolate',
+      audioTool: 'isolation',
+      steps: [
+        '打开音频工具 > 人声分离 (AI)',
+        file ? '载入已提供的音频或视频' : '导入需要处理的音频或视频',
+        '执行人声提取、伴奏移除或背景噪音消除',
+        '试听并下载分离结果',
+      ],
+    };
+  }
+
+  // Explicit module requests must win over broad video keywords such as
+  // "短片" or "镜头". Otherwise a sound-design brief or requirements list
+  // can be routed into video soundtrack preparation by accident.
+  if (
+    detectVideoTask(prompt, file)
+    && !hasExplicitAudioOperation
+    && !hasExplicitVoiceWorkflow(prompt)
+    && !detectDirectorTask(prompt)
+    && !detectRequirementsTask(prompt)
+    && !detectLibraryTask(prompt)
+  ) {
+    const hasVideoGenerationIntent = /(?:生成|制作|创建|添加|加上).*(?:配乐|背景音乐|音效|环境声|拟音|配音(?!乐)|旁白)/.test(normalized)
+      || /(?:给|为).*视频.*(?:配|加).*(?:音乐|配乐|音效|环境声|配音(?!乐)|旁白)/.test(normalized);
+    const analysisOnly = /分析|识别|检测|检查|查看/.test(normalized) && !hasVideoGenerationIntent;
+    const tracks = analysisOnly ? [] : detectVideoTracks(prompt);
     const analyzeSubtitles = /字幕|台词|对白|口型|看画面|识别文字|分析视频/.test(normalized);
     const trackLabels = tracks.map((track) => track === 'bgm' ? '配乐轨' : track === 'sfx' ? '音效轨' : '配音轨');
     const steps = [
       '打开视频声音制作并载入视频',
       analyzeSubtitles ? '分析画面、字幕和时间线，补齐未识别的字幕片段' : '分析视频时长、画面节奏和声音时间线',
       ...trackLabels.map((label) => `生成${label}；重叠事件自动分配到独立轨道`),
-      '试听每条轨道，支持单独重新生成、调整和静音',
-      '确认后混音并导出最终视频',
+      ...(analysisOnly
+        ? ['只输出分析和时间线建议，不自动生成任何音轨']
+        : ['试听每条轨道，支持单独重新生成、调整和静音', '确认后混音并导出最终视频']),
     ];
     return {
-      title: '准备视频声音制作',
-      summary: file ? `已载入 ${file.name}，将按视频时间线生成 ${trackLabels.join('、')}` : `将按视频时间线生成 ${trackLabels.join('、')}`,
+      title: analysisOnly ? '准备分析视频画面与声音' : '准备视频声音制作',
+      summary: analysisOnly
+        ? (file ? `已载入 ${file.name}，只分析画面、字幕和时间线` : '只分析画面、字幕和时间线，不自动生成音轨')
+        : file ? `已载入 ${file.name}，将按视频时间线生成 ${trackLabels.join('、')}` : `将按视频时间线生成 ${trackLabels.join('、')}`,
       tab: 'video-soundtrack',
       kind: 'video',
       tracks,
       analyzeSubtitles,
+      autoGenerateVideo: !analysisOnly,
       steps,
     };
   }
@@ -287,13 +790,26 @@ const buildPlan = (prompt: string, file?: File, memory: AssistantMemory = EMPTY_
   }
 
   if (detectRequirementsTask(prompt)) {
+    const requirementsTemplate = detectRequirementsTemplate(prompt);
+    const inputPrompt = extractRequirementsPrompt(prompt, requirementsTemplate);
+    const templateLabel = requirementsTemplate === 'game_sfx_middleware'
+      ? 'FMOD / Wwise 引擎中间件需求表'
+      : requirementsTemplate === 'voiceover_multilang'
+        ? '多语种配音本地化表'
+        : requirementsTemplate === 'voiceover_general'
+          ? '通用角色配音表'
+          : '游戏音效配乐通用表';
     return {
       title: '准备音效需求表',
-      summary: '识别为音效需求清单整理任务',
+      summary: `已选择“${templateLabel}”；提取需求描述：${inputPrompt}`,
       tab: 'sfx-requirements',
       kind: 'requirements',
+      inputPrompt,
+      requirementsTemplate,
       steps: [
         '打开音效需求表',
+        `选择“${templateLabel}”模板`,
+        `将“${inputPrompt}”写入需求描述框`,
         '按场景和时间线整理待制作音效',
         '保留编辑、补充、翻译和导出功能',
       ],
@@ -314,20 +830,59 @@ const buildPlan = (prompt: string, file?: File, memory: AssistantMemory = EMPTY_
     };
   }
 
-  if (detectVoiceRequest(prompt) && !detectAudioTask(prompt, file)) {
+  const voiceMode = detectVoiceMode(prompt);
+  if (soundIntent === 'voice' || hasExplicitVoiceWorkflow(prompt) || (detectVoiceRequest(prompt) && !detectAudioTask(prompt, file))) {
     const language = extractLanguage(prompt, memory.preferredLanguage);
-    const languageLabel = language === 'ar' ? '阿拉伯语' : language === 'en' ? '英语' : language === 'ja' ? '日语' : language === 'ko' ? '韩语' : '原语言';
+    const languageLabel = language === 'ar' ? '阿拉伯语'
+      : language === 'en' ? '英语'
+        : language === 'ja' ? '日语'
+          : language === 'ko' ? '韩语'
+            : language === 'fr' ? '法语'
+              : language === 'de' ? '德语'
+                : language === 'es' ? '西班牙语' : '原语言';
     const genderLabel = extractGender(prompt, memory.preferredGender) === 'female' ? '女声' : '男声';
     const emotion = extractEmotion(prompt, memory.preferredEmotion);
     const sourceIsChinese = /[\u3400-\u9fff]/.test(extractVoiceText(prompt));
     const needsTranslation = language === 'en' && sourceIsChinese;
+    if (voiceMode === 'sts') {
+      return {
+        title: '准备语音转语音',
+        summary: file ? `已载入 ${file.name}，准备转换为${genderLabel}` : `将打开语音转语音，目标声线：${genderLabel}`,
+        tab: 'dubbing-studio',
+        kind: 'voice',
+        voiceMode,
+        steps: ['打开 AI 配音 · 语音转语音', file ? '载入已提供的源音频' : '上传需要变声的源音频', `按${genderLabel}及角色描述筛选声线`, '由你试听并确认目标声音后生成'],
+      };
+    }
+    if (voiceMode === 'translate') {
+      return {
+        title: '准备跨语种转换',
+        summary: file ? `已载入 ${file.name}，准备转换为${languageLabel}` : `将打开跨语种转换，目标语言：${languageLabel}`,
+        tab: 'dubbing-studio',
+        kind: 'voice',
+        voiceMode,
+        steps: ['打开 AI 配音 · 跨语种转换', file ? '载入已提供的源音频' : '上传需要翻译的源音频', `设置目标语言为${languageLabel}`, '尽量保留原说话人的音色、语气和时间长度', '由你确认参数后生成'],
+      };
+    }
+    if (voiceMode === 'stt') {
+      return {
+        title: '准备语音转文本',
+        summary: file ? `已载入 ${file.name}，准备转写文字` : '将打开语音转文本，请上传录音或音频',
+        tab: 'dubbing-studio',
+        kind: 'voice',
+        voiceMode,
+        steps: ['打开 AI 配音 · 语音转文本', file ? '载入已提供的音频文件' : '上传需要转写的录音或音频', '自动识别语言并转写文本', '保留复制、翻译和下载结果功能'],
+      };
+    }
     return {
       title: '准备 AI 配音',
-      summary: `识别为${languageLabel}${genderLabel}配音，语气：${emotion}`,
+      summary: `${detectBatchVoiceRequest(prompt) ? '识别为多文本批量配音' : `识别为${languageLabel}${genderLabel}配音`}，语气：${emotion}`,
       tab: 'dubbing-studio',
       kind: 'voice',
+      voiceMode: 'tts',
+      voiceInputMode: detectBatchVoiceRequest(prompt) ? 'batch' : 'single',
       steps: [
-        '打开 AI 配音 · 文本转语音',
+        `打开 AI 配音 · 文本转语音${detectBatchVoiceRequest(prompt) ? ' · 多文本' : ''}`,
         `使用${genderLabel}声音库筛选：${emotion}`,
         needsTranslation
           ? '检测到中文台词：先翻译成英文，再交给配音模块'
@@ -338,25 +893,38 @@ const buildPlan = (prompt: string, file?: File, memory: AssistantMemory = EMPTY_
     };
   }
 
-  if (detectSfxTask(prompt) && !hasExplicitAudioOperation) {
+  if ((soundIntent === 'sfx' || detectSfxTask(prompt)) && !hasExplicitAudioOperation) {
+    const inputPrompt = extractGenerationPrompt(prompt) || '通用场景音效';
+    const durationSeconds = extractDurationSeconds(prompt);
     return {
       title: '准备生成音效',
-      summary: `识别为 AI 音效生成任务：${prompt.trim() || '根据当前描述生成音效'}`,
+      summary: `已提取音效描述：${inputPrompt || '根据当前描述生成音效'}`,
       tab: 'sfx-studio',
       kind: 'sfx',
+      inputPrompt,
+      durationSeconds,
       steps: [
         '打开 AI 音效',
-        '根据描述识别主体、动作、材质和空间感',
+        `将“${inputPrompt}”写入音效场景描述框`,
+        durationSeconds ? `设置音效时长为 ${durationSeconds} 秒` : '根据描述自动判断音效时长',
+        '识别主体、动作、材质和空间感',
         '生成两版试听结果并保留重新生成和下载',
       ],
     };
   }
 
-  if (detectAudioTask(prompt, file)) {
+  if (detectAudioTask(prompt, file) || detectFactoryTask(prompt) || detectAnalysisTask(prompt) || soundIntent === 'analysis') {
     const audioTargets = extractAudioTargets(prompt);
-    const wantsConvert = /转成mp3|转换成mp3|输出mp3|格式转换|转换格式|转格式|提取音频|convert.*mp3|mp3/.test(normalized);
-    const hasProcessingTarget = wantsConvert || audioTargets.targetSampleRate !== undefined || audioTargets.targetBitrate !== undefined || audioTargets.targetLufs !== undefined;
-    const wantsAnalysis = /分析|风格|响度|bpm|调性|和弦|乐器|snr|动态/.test(normalized) || hasProcessingTarget || !wantsConvert;
+    const requestedAudioFormat = extractRequestedAudioFormat(prompt);
+    const isRequestedFormatSupported = !requestedAudioFormat || requestedAudioFormat === 'mp3' || requestedAudioFormat === 'wav';
+    const wantsFormatConversion = Boolean(requestedAudioFormat)
+      || /格式转换|转换格式|转格式|提取音频|convert.*(?:mp3|wav|flac|ogg|aac|m4a)/.test(normalized);
+    const wantsFactoryProcessing = detectFactoryTask(prompt) || wantsFormatConversion;
+    const hasProcessingTarget = wantsFactoryProcessing || audioTargets.targetSampleRate !== undefined || audioTargets.targetBitrate !== undefined || audioTargets.targetLufs !== undefined;
+    // Conversion still decodes/resamples internally, but it does not need the
+    // user-facing analysis pass (BPM, key, SNR, style, etc.). Only add that
+    // step when the request explicitly asks for analysis metrics.
+    const wantsAnalysis = detectAnalysisTask(prompt) || soundIntent === 'analysis' || /分析|风格|bpm|调性|和弦|乐器|snr|动态|底噪/.test(normalized) || (!wantsFactoryProcessing && audioTargets.targetLufs === undefined);
     const steps: string[] = [];
     if (wantsAnalysis) {
       steps.push('打开音频工具 > 音频分析，读取原文件的格式、时长、采样率和音量');
@@ -364,31 +932,53 @@ const buildPlan = (prompt: string, file?: File, memory: AssistantMemory = EMPTY_
     }
     if (hasProcessingTarget) {
       steps.push('切换到格式/压缩/音量，继续使用同一个原始文件');
-      if (wantsConvert) steps.push('设置目标格式为 MP3');
+      if (requestedAudioFormat) steps.push(`设置目标格式为 ${requestedAudioFormat.toUpperCase()}`);
+      if (!requestedAudioFormat && /音量/.test(normalized)) steps.push('保留当前格式并按要求调整音量，不额外执行 BPM、调性或风格分析');
+      if (!isRequestedFormatSupported && requestedAudioFormat) {
+        steps.push(`当前编码器尚未接入 ${requestedAudioFormat.toUpperCase()}，页面将保留请求但不会伪装成 MP3 转换`);
+      }
       if (audioTargets.targetSampleRate !== undefined) steps.push(`设置目标采样率为 ${audioTargets.targetSampleRate} Hz`);
       if (audioTargets.targetBitrate !== undefined) steps.push(`设置目标比特率为 ${audioTargets.targetBitrate} kbps`);
       if (audioTargets.targetLufs !== undefined) steps.push(`启用响度统一并设置目标为 ${audioTargets.targetLufs} LUFS，同时保留峰值保护`);
-      steps.push('先生成处理结果并试听，确认音量和音质后再下载');
+      steps.push(isRequestedFormatSupported ? '先生成处理结果并试听，确认音量和音质后再下载' : '请选择当前支持的 MP3 或 WAV，或等待目标编码器接入');
     } else {
       steps.push('分析结果生成后提供试听和下载');
     }
     return {
-      title: hasProcessingTarget && wantsAnalysis ? '分析、转换并标准化音频' : wantsConvert ? '转换音频格式' : '分析音频',
-      summary: file ? `已载入 ${file.name}` : '将使用音频工具处理你的任务',
+      title: !isRequestedFormatSupported && requestedAudioFormat
+        ? `${requestedAudioFormat.toUpperCase()} 暂不可转换`
+        : hasProcessingTarget && wantsAnalysis ? '分析并处理音频' : wantsFormatConversion ? '转换音频格式' : hasProcessingTarget ? '调整音频参数' : '分析音频',
+      summary: !isRequestedFormatSupported && requestedAudioFormat
+        ? `已识别目标格式 ${requestedAudioFormat.toUpperCase()}；当前转换器仅支持 MP3 和 WAV`
+        : file ? `已载入 ${file.name}` : '将使用音频工具处理你的任务',
       tab: 'audio-tools',
       kind: 'audio',
       steps,
       audioTargets,
+      requestedAudioFormat,
+      audioTask: wantsFactoryProcessing ? 'convert' : 'analyze',
+      audioTool: wantsFactoryProcessing ? 'factory' : 'analysis',
     };
   }
 
-  if (/配乐|bgm|背景音乐|音乐|music/.test(normalized)) {
+  if (soundIntent === 'music' || /配乐|bgm|背景音乐|音乐|music/.test(normalized)) {
+    const durationSeconds = extractDurationSeconds(prompt);
+    const musicType = extractMusicType(prompt);
+    const inputPrompt = extractGenerationPrompt(prompt) || (musicType === 'vocal' ? '带歌词的人声音乐' : '背景音乐');
     return {
       title: '准备生成音乐',
-      summary: '识别为 AI 音乐生成任务',
+      summary: `已提取配乐描述：${inputPrompt}`,
       tab: 'music-studio',
       kind: 'music',
-      steps: ['打开 AI 音乐', '填入风格、情绪和时长', '生成试听结果并保留下载'],
+      inputPrompt,
+      durationSeconds,
+      musicType,
+      steps: [
+        '打开 AI 音乐',
+        `将“${inputPrompt}”写入配乐风格与情感描述框`,
+        durationSeconds ? `设置生成时长为 ${durationSeconds} 秒` : '根据描述保留默认生成时长',
+        '生成试听结果并保留下载',
+      ],
     };
   }
 
@@ -401,50 +991,111 @@ const buildPlan = (prompt: string, file?: File, memory: AssistantMemory = EMPTY_
   };
 };
 
-export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceRequest, onVideoRequest, onMusicRequest, onSfxRequest }: GlobalAssistantProps) {
-  const [open, setOpen] = useState(false);
-  const [prompt, setPrompt] = useState('');
-  const [file, setFile] = useState<File | undefined>();
-  const [plan, setPlan] = useState<AssistantPlan | null>(null);
+const ASSISTANT_PLAN_KINDS = new Set<AssistantPlan['kind']>([
+  'audio', 'voice', 'video', 'music', 'sfx', 'director', 'requirements', 'library', 'general',
+]);
+const ASSISTANT_PLAN_TABS = new Set<TabType>([
+  'workbench', 'audio-director', 'music-studio', 'sfx-studio', 'dubbing-studio',
+  'settings', 'sfx-library', 'sfx-requirements', 'audio-tools', 'video-soundtrack',
+]);
+
+const parseModelPlan = (value: unknown, model: unknown, provider: unknown): AssistantPlan | null => {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = value as Partial<AssistantPlan>;
+  if (
+    typeof candidate.title !== 'string'
+    || typeof candidate.summary !== 'string'
+    || typeof candidate.kind !== 'string'
+    || !ASSISTANT_PLAN_KINDS.has(candidate.kind as AssistantPlan['kind'])
+    || typeof candidate.tab !== 'string'
+    || !ASSISTANT_PLAN_TABS.has(candidate.tab as TabType)
+    || !Array.isArray(candidate.steps)
+    || candidate.steps.length === 0
+    || candidate.steps.some(step => typeof step !== 'string')
+  ) return null;
+
+  return {
+    ...candidate,
+    title: candidate.title,
+    summary: candidate.summary,
+    kind: candidate.kind as AssistantPlan['kind'],
+    tab: candidate.tab as TabType,
+    steps: candidate.steps as string[],
+    plannerSource: 'model',
+    plannerModel: typeof model === 'string' ? model : 'gpt-5.6-sol',
+    plannerProvider: provider === 'openai' || provider === 'ark' || provider === 'tokenhub'
+      ? provider
+      : undefined,
+  };
+};
+
+export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceRequest, onVideoRequest, onMusicRequest, onSfxRequest, onDirectorRequest, onRequirementsRequest, onLibraryRequest, externalTaskRunning = false, embedded = false }: GlobalAssistantProps) {
+  const [open, setOpen] = useState(embedded);
+  const sharedAssistant = useSyncExternalStore(subscribeToSharedAssistant, readSharedAssistant, readSharedAssistant);
+  const prompt = sharedAssistant.prompt;
+  const file = sharedAssistant.file;
+  const plan = sharedAssistant.plan;
+  const conversation = sharedAssistant.conversation;
+  const setPrompt = useCallback<React.Dispatch<React.SetStateAction<string>>>((value) => {
+    updateSharedAssistant((previous) => ({ prompt: typeof value === 'function' ? value(previous.prompt) : value }));
+  }, []);
+  const setFile = useCallback<React.Dispatch<React.SetStateAction<File | undefined>>>((value) => {
+    updateSharedAssistant((previous) => ({ file: typeof value === 'function' ? value(previous.file) : value }));
+  }, []);
+  const setPlan = useCallback<React.Dispatch<React.SetStateAction<AssistantPlan | null>>>((value) => {
+    updateSharedAssistant((previous) => ({ plan: typeof value === 'function' ? value(previous.plan) : value }));
+  }, []);
+  const setConversation = useCallback<React.Dispatch<React.SetStateAction<AssistantConversationMessage[]>>>((value) => {
+    updateSharedAssistant((previous) => ({ conversation: typeof value === 'function' ? value(previous.conversation) : value }));
+  }, []);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analysisStatus, setAnalysisStatus] = useState('正在理解任务...');
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [isAddingPreference, setIsAddingPreference] = useState(false);
-  const [preferenceDraft, setPreferenceDraft] = useState('');
   const [memory, setMemory] = useState<AssistantMemory>(() => loadAssistantMemory());
+  const [libraryIndex, setLibraryIndex] = useState<SfxLibraryIndex>(() => readSfxLibraryIndex());
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const conversationLogRef = useRef<HTMLDivElement>(null);
+  const conversationGenerationRef = useRef(0);
+  const assistantBusy = analyzing || running || externalTaskRunning;
 
-  const addManualPreference = () => {
-    const value = preferenceDraft.trim();
-    if (!value) return;
-    const preferenceLanguage = /英语|英文|english/i.test(value)
-      ? 'en'
-      : /阿拉伯语|阿拉伯文|arabic/i.test(value)
-        ? 'ar'
-        : /中文|汉语|普通话|chinese|mandarin/i.test(value)
-          ? 'zh'
-          : undefined;
-    const preferenceGender = /男声|男性|男牧师|male|man|pastor|priest/i.test(value)
-      ? 'male'
-      : /女声|女性|female|woman/i.test(value)
-        ? 'female'
-        : undefined;
-    const preferenceEmotion = /温柔|柔和|gentle|soft/i.test(value)
-      ? '温柔'
-      : /开心|高兴|快乐|happy|excited/i.test(value)
-        ? '开心'
-        : /严肃|正式|专业|serious|formal/i.test(value)
-          ? '严肃'
-          : undefined;
-    setMemory((previous) => ({
-      ...previous,
-      customPreferences: [value, ...previous.customPreferences.filter((item) => item !== value)].slice(0, 8),
-      preferredLanguage: preferenceLanguage || previous.preferredLanguage,
-      preferredGender: preferenceGender || previous.preferredGender,
-      preferredEmotion: preferenceEmotion || previous.preferredEmotion,
-    }));
-    setPreferenceDraft('');
-    setIsAddingPreference(false);
+  const startNewConversation = () => {
+    conversationGenerationRef.current += 1;
+    setConversation([]);
+    setPrompt('');
+    setFile(undefined);
+    setPlan(null);
+    setError(null);
+    setAnalyzing(false);
+    setRunning(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    setOpen(true);
   };
+
+  const appendConversation = (role: AssistantConversationMessage['role'], content: string) => {
+    const message = content.trim();
+    if (!message) return;
+    setConversation((previous) => [
+      ...previous,
+      { id: `assistant-message-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, role, content: message },
+    ].slice(-16));
+  };
+
+  useEffect(() => {
+    const refreshLibraryIndex = (event?: Event) => {
+      const customEvent = event as CustomEvent<SfxLibraryIndex> | undefined;
+      setLibraryIndex(customEvent?.detail?.entries ? customEvent.detail : readSfxLibraryIndex());
+    };
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === SFX_LIBRARY_CATEGORIES_KEY || event.key === SFX_LIBRARY_SOUNDS_KEY) refreshLibraryIndex();
+    };
+    window.addEventListener(SFX_LIBRARY_INDEX_EVENT, refreshLibraryIndex);
+    window.addEventListener('storage', handleStorage);
+    return () => {
+      window.removeEventListener(SFX_LIBRARY_INDEX_EVENT, refreshLibraryIndex);
+      window.removeEventListener('storage', handleStorage);
+    };
+  }, []);
 
   useEffect(() => {
     try {
@@ -454,6 +1105,27 @@ export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceReq
     }
   }, [memory]);
 
+  useEffect(() => {
+    const log = conversationLogRef.current;
+    if (!log) return;
+    log.scrollTop = log.scrollHeight;
+  }, [conversation, open]);
+
+  useEffect(() => {
+    if (!analyzing) return;
+    setAnalysisStatus('正在理解任务...');
+    const matchingTimer = window.setTimeout(() => {
+      setAnalysisStatus('正在匹配最合适的功能...');
+    }, 1_500);
+    const validationTimer = window.setTimeout(() => {
+      setAnalysisStatus('正在核对参数和实时资源...');
+    }, 4_500);
+    return () => {
+      window.clearTimeout(matchingTimer);
+      window.clearTimeout(validationTimer);
+    };
+  }, [analyzing]);
+
   const fileKind = useMemo(() => {
     if (!file) return null;
     if (AUDIO_EXTENSIONS.test(file.name) || file.type.startsWith('audio/')) return 'audio';
@@ -462,98 +1134,259 @@ export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceReq
     return 'file';
   }, [file]);
 
-  const analyzeRequest = () => {
+  const analyzeRequest = async () => {
+    if (analyzing) return;
+    const generation = conversationGenerationRef.current;
+    const requestedPrompt = prompt.trim();
+    const attachedFile = file;
+    appendConversation('user', requestedPrompt || (attachedFile ? `上传文件：${attachedFile.name}` : '继续当前任务'));
+    setAnalyzing(true);
     try {
       setError(null);
-      const nextPlan = buildPlan(prompt, file, memory);
+      let currentLibraryIndex = libraryIndex;
+      try {
+        const response = await fetch('/api/sfx/library/state', { headers: { Accept: 'application/json' } });
+        if (response.ok) {
+          const state = await response.json() as { categories?: unknown; sounds?: unknown };
+          if (Array.isArray(state.categories) && Array.isArray(state.sounds)) {
+            currentLibraryIndex = buildSfxLibraryIndex(state.categories, state.sounds);
+            setLibraryIndex(currentLibraryIndex);
+          }
+        }
+      } catch {
+        // The local event-backed index remains usable when the shared server is offline.
+      }
+      let nextPlan: AssistantPlan;
+      try {
+        const response = await fetch('/api/ai/assistant/plan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({
+            prompt: requestedPrompt,
+            file: file ? { name: file.name, type: file.type, size: file.size } : undefined,
+            conversation: conversation.slice(-8).map(({ role, content }) => ({ role, content })),
+            memory: {
+              preferredLanguage: memory.preferredLanguage,
+              preferredGender: memory.preferredGender,
+              preferredEmotion: memory.preferredEmotion,
+              preferredFormat: memory.preferredFormat,
+              recentTasks: memory.recentTasks,
+            },
+          }),
+        });
+        const result = await response.json().catch(() => ({})) as {
+          plan?: unknown;
+          model?: unknown;
+          provider?: unknown;
+          error?: string;
+        };
+        if (!response.ok) throw new Error(result.error || `GPT 任务规划失败 (${response.status})`);
+        const modelPlan = parseModelPlan(result.plan, result.model, result.provider);
+        if (!modelPlan) throw new Error('GPT 返回了无法执行的任务计划。');
+        nextPlan = modelPlan;
+      } catch (modelError) {
+        console.warn('GPT 任务规划不可用，使用本地兜底:', modelError);
+        nextPlan = {
+          ...buildPlan(requestedPrompt, attachedFile, memory, currentLibraryIndex),
+          plannerSource: 'local',
+          plannerWarning: 'GPT 智能理解暂时不可用，当前结果来自本地兜底规则。',
+        };
+      }
+      if (generation !== conversationGenerationRef.current) return;
       setPlan(nextPlan);
+      appendConversation('assistant', `${nextPlan.title}：${nextPlan.summary}`);
       setMemory((previous) => ({
         ...previous,
         taskCount: previous.taskCount + 1,
         lastKind: nextPlan.kind,
-        preferredLanguage: nextPlan.kind === 'voice' ? extractLanguage(prompt, previous.preferredLanguage) : previous.preferredLanguage,
-        preferredGender: nextPlan.kind === 'voice' ? extractGender(prompt, previous.preferredGender) : previous.preferredGender,
-        preferredEmotion: nextPlan.kind === 'voice' ? extractEmotion(prompt, previous.preferredEmotion) : previous.preferredEmotion,
-        preferredFormat: /转成mp3|转换成mp3|输出mp3|mp3/i.test(normalize(prompt)) ? 'mp3' : previous.preferredFormat,
-        recentTasks: [prompt.trim(), ...previous.recentTasks.filter((item) => item !== prompt.trim())].filter(Boolean).slice(0, 6),
+        preferredLanguage: nextPlan.kind === 'voice' ? (nextPlan.voiceLanguage || extractLanguage(requestedPrompt, previous.preferredLanguage)) : previous.preferredLanguage,
+        preferredGender: nextPlan.kind === 'voice' ? (nextPlan.voiceGender || extractGender(requestedPrompt, previous.preferredGender)) : previous.preferredGender,
+        preferredEmotion: nextPlan.kind === 'voice' ? (nextPlan.voiceEmotion || extractEmotion(requestedPrompt, previous.preferredEmotion)) : previous.preferredEmotion,
+        preferredFormat: nextPlan.requestedAudioFormat === 'mp3' || /转成mp3|转换成mp3|输出mp3|mp3/i.test(normalize(requestedPrompt)) ? 'mp3' : previous.preferredFormat,
+        recentTasks: [requestedPrompt, ...previous.recentTasks.filter((item) => item !== requestedPrompt)].filter(Boolean).slice(0, 6),
       }));
     } catch (cause) {
+      if (generation !== conversationGenerationRef.current) return;
       console.error('智能助手分析失败:', cause);
       setPlan(null);
       setError('任务分析失败，请检查描述后重试。');
+    } finally {
+      if (generation === conversationGenerationRef.current) setAnalyzing(false);
     }
   };
 
   const executePlan = async () => {
     if (!plan) return;
+    const generation = conversationGenerationRef.current;
     setRunning(true);
     setError(null);
-    const shouldCloseAfterSuccess = ['director', 'requirements', 'library', 'voice', 'video', 'music', 'sfx'].includes(plan.kind);
     try {
       onNavigate(plan.tab);
       const requestId = `assistant-${Date.now()}`;
 
-      if (plan.kind === 'audio' && file) {
+      if (plan.navigationOnly) {
+        if (plan.kind === 'audio') {
+          onAudioRequest({
+            id: requestId,
+            task: plan.audioTask || 'workstation',
+            audioTool: plan.audioTool || 'workstation',
+          });
+        } else if (plan.kind === 'voice') {
+          const mode = plan.voiceMode || 'tts';
+          await onVoiceRequest({
+            id: requestId,
+            mode,
+            inputMode: plan.voiceInputMode || 'single',
+            text: '',
+            language: memory.preferredLanguage,
+            gender: memory.preferredGender,
+            emotion: memory.preferredEmotion,
+            openVoiceLibrary: plan.openVoiceLibrary ?? false,
+          });
+        }
+        if (generation !== conversationGenerationRef.current) return;
+        appendConversation('assistant', `已打开${plan.title}。你可以继续告诉我下一步，我会沿用当前文件和上下文。`);
+        setPrompt('');
+        setPlan(null);
+        setOpen(false);
+        window.setTimeout(() => setRunning(false), 300);
+        return;
+      }
+
+      if (plan.kind === 'audio') {
         const hasAudioTargets = plan.audioTargets && Object.values(plan.audioTargets).some((value) => value !== undefined);
-        const wantsConvert = hasAudioTargets || /转成mp3|转换成mp3|输出mp3|格式转换|转换格式|转格式|提取音频|mp3/i.test(prompt);
+        const wantsConvert = plan.audioTask === 'convert' || hasAudioTargets || /转成mp3|转换成mp3|输出mp3|格式转换|转换格式|转格式|提取音频|mp3/i.test(prompt);
         onAudioRequest({
           id: requestId,
           file,
-          task: wantsConvert ? 'convert' : 'analyze',
-          targetFormat: 'mp3',
+          task: plan.audioTask || (wantsConvert ? 'convert' : 'analyze'),
+          audioTool: plan.audioTool,
+          ...(plan.requestedAudioFormat ? { targetFormat: plan.requestedAudioFormat } : {}),
           ...plan.audioTargets,
         });
       } else if (plan.kind === 'voice') {
-        const language = extractLanguage(prompt, memory.preferredLanguage);
-        const gender = extractGender(prompt, memory.preferredGender);
-        const emotion = extractEmotion(prompt, memory.preferredEmotion);
+        const mode = plan.voiceMode || detectVoiceMode(prompt);
+        const language = plan.voiceLanguage && plan.voiceLanguage !== 'auto'
+          ? plan.voiceLanguage
+          : extractLanguage(prompt, memory.preferredLanguage);
+        const gender = plan.voiceGender || extractGender(prompt, memory.preferredGender);
+        const emotion = plan.voiceEmotion || extractEmotion(prompt, memory.preferredEmotion);
         const genderLabel = gender === 'female' ? '女声' : '男声';
-        const role = extractVoiceRole(prompt);
+        const role = plan.voiceRole || extractVoiceRole(prompt);
         await onVoiceRequest({
           id: requestId,
-          text: extractVoiceText(prompt),
+          file,
+          mode,
+          inputMode: plan.voiceInputMode || (detectBatchVoiceRequest(prompt) ? 'batch' : 'single'),
+          text: mode === 'tts' ? (plan.voiceText || extractVoiceText(prompt)) : '',
           language,
           gender,
           emotion,
           role: role || undefined,
           voiceSearchQuery: [role, genderLabel, emotion, language].filter(Boolean).join(' '),
-          openVoiceLibrary: true,
+          openVoiceLibrary: plan.openVoiceLibrary ?? mode === 'tts',
         });
       } else if (plan.kind === 'video') {
+        const requestedTracks = filterPreservedVideoTracks(
+          plan.tracks || detectVideoTracks(prompt),
+          prompt,
+        );
         onVideoRequest({
           id: requestId,
           file,
           prompt,
-          tracks: plan.tracks || ['bgm', 'sfx', 'dubbing'],
+          tracks: requestedTracks,
           analyzeSubtitles: plan.analyzeSubtitles ?? true,
           autoAnalyze: true,
-          autoGenerate: true,
+          autoGenerate: plan.autoGenerateVideo ?? true,
         });
       } else if (plan.kind === 'music') {
-        onMusicRequest({ id: requestId, prompt: prompt.trim() });
+        onMusicRequest({
+          id: requestId,
+          prompt: plan.inputPrompt || prompt.trim(),
+          durationSeconds: plan.durationSeconds,
+          musicType: plan.musicType,
+        });
       } else if (plan.kind === 'sfx') {
-        onSfxRequest({ id: requestId, prompt: prompt.trim() });
+        onSfxRequest({ id: requestId, prompt: plan.inputPrompt || prompt.trim(), durationSeconds: plan.durationSeconds });
+      } else if (plan.kind === 'director') {
+        onDirectorRequest?.({ id: requestId, file, prompt: prompt.trim() });
+      } else if (plan.kind === 'requirements') {
+        onRequirementsRequest?.({
+          id: requestId,
+          prompt: plan.inputPrompt || prompt.trim(),
+          template: plan.requirementsTemplate,
+        });
+      } else if (plan.kind === 'library') {
+        onLibraryRequest?.({
+          id: requestId,
+          searchQuery: plan.librarySearchQuery || extractLibrarySearchQuery(prompt),
+          category: plan.libraryCategory,
+          subcategory: plan.librarySubcategory,
+        });
       }
 
-      if (shouldCloseAfterSuccess) setOpen(false);
+      if (generation !== conversationGenerationRef.current) return;
+      appendConversation('assistant', `已执行“${plan.title}”。当前文件和会话已保留，可以继续下达下一步任务。`);
+      setPrompt('');
+      setPlan(null);
+      setOpen(false);
       window.setTimeout(() => setRunning(false), 700);
     } catch (cause) {
+      if (generation !== conversationGenerationRef.current) return;
       console.error('智能助手执行失败:', cause);
       setRunning(false);
       setError('打开功能失败，当前任务已保留。请重试，或直接从主导航进入对应功能。');
     }
   };
 
+  const executeLibraryFallback = () => {
+    if (!plan?.libraryFallbackKind || !plan.libraryFallbackPrompt) return;
+    const generation = conversationGenerationRef.current;
+    setRunning(true);
+    setError(null);
+    const requestId = `assistant-library-fallback-${Date.now()}`;
+    try {
+      if (plan.libraryFallbackKind === 'music') {
+        onNavigate('music-studio');
+        onMusicRequest({
+          id: requestId,
+          prompt: plan.libraryFallbackPrompt,
+          durationSeconds: extractDurationSeconds(prompt),
+          musicType: extractMusicType(prompt),
+        });
+      } else {
+        onNavigate('sfx-studio');
+        onSfxRequest({
+          id: requestId,
+          prompt: plan.libraryFallbackPrompt,
+          durationSeconds: extractDurationSeconds(prompt),
+        });
+      }
+      if (generation !== conversationGenerationRef.current) return;
+      setOpen(false);
+      window.setTimeout(() => setRunning(false), 700);
+    } catch (cause) {
+      if (generation !== conversationGenerationRef.current) return;
+      console.error('智能助手切换 AI 生成失败:', cause);
+      setRunning(false);
+      setError('打开 AI 生成功能失败，当前任务已保留，请重试。');
+    }
+  };
+
   return (
-    <div className="pointer-events-none fixed inset-0 z-[80]">
+    <div className={embedded ? 'relative z-0 w-full pointer-events-auto' : 'pointer-events-none fixed inset-0 z-[80]'}>
       {!open && (
         <button
           type="button"
-          aria-label="打开智能助手"
+          aria-label={assistantBusy ? '智能助手正在处理任务，点击展开' : '打开智能助手'}
+          title={assistantBusy ? '任务处理中' : '打开智能助手'}
           onClick={() => setOpen(true)}
-          className="pointer-events-auto absolute bottom-5 right-5 flex h-14 w-14 items-center justify-center rounded-full border border-cyan-200/35 bg-[#07151d]/95 text-cyan-100 shadow-[0_0_28px_rgba(45,212,191,0.22),0_18px_40px_rgba(0,0,0,0.35)] transition hover:scale-105 hover:border-cyan-100/70 hover:bg-[#0b202a] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-200 sm:bottom-7 sm:right-7"
+          className={embedded
+            ? `relative mt-3 flex h-11 w-11 items-center justify-center rounded-full border bg-white/65 text-emerald-600 backdrop-blur-md transition hover:scale-105 hover:border-emerald-300 hover:bg-white/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300 ${assistantBusy ? 'border-emerald-300 shadow-[0_8px_32px_rgba(16,185,129,0.24)]' : 'border-emerald-200/70 shadow-[0_8px_28px_rgba(16,185,129,0.16)]'}`
+            : `pointer-events-auto absolute bottom-5 right-5 flex h-14 w-14 items-center justify-center rounded-full border bg-white/65 text-emerald-600 backdrop-blur-md transition hover:scale-105 hover:border-emerald-300 hover:bg-white/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300 sm:bottom-7 sm:right-7 ${assistantBusy ? 'border-emerald-300 shadow-[0_8px_32px_rgba(16,185,129,0.24)]' : 'border-emerald-200/70 shadow-[0_8px_28px_rgba(16,185,129,0.16)]'}`}
         >
-          <Sparkles className="h-5 w-5" />
+          {assistantBusy ? <Loader2 className="h-5 w-5 animate-spin" /> : <Sparkles className="h-5 w-5" />}
         </button>
       )}
 
@@ -562,40 +1395,76 @@ export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceReq
           role="dialog"
           aria-modal="false"
           aria-label="全局智能助手"
-          className="pointer-events-auto absolute bottom-4 right-4 flex w-[min(440px,calc(100vw-2rem))] max-h-[min(720px,calc(100dvh-2rem))] flex-col overflow-hidden rounded-[22px] border border-cyan-300/25 bg-[#061018]/70 text-slate-100 shadow-[0_24px_90px_rgba(0,0,0,0.36),0_0_0_1px_rgba(45,212,191,0.06)] backdrop-blur-xl sm:bottom-6 sm:right-6"
+          className={`${embedded ? 'relative mx-auto flex min-h-[360px] max-h-[460px] w-full max-w-2xl' : 'pointer-events-auto absolute bottom-8 right-4 flex w-[min(440px,calc(100vw-2rem))] max-h-[min(720px,calc(100dvh-2rem))] sm:bottom-10 sm:right-6'} flex-col overflow-hidden text-slate-700 ${embedded ? 'rounded-none border-0 bg-transparent shadow-none backdrop-blur-0' : 'rounded-[22px] border border-emerald-200/65 bg-white/45 shadow-[0_20px_70px_rgba(15,23,42,0.14),0_0_0_1px_rgba(16,185,129,0.07)] backdrop-blur-2xl'}`}
         >
-          <header className="relative flex items-center justify-between border-b border-cyan-300/15 bg-[#081a24]/72 px-5 py-4 text-white">
-            <div className="absolute inset-x-0 top-0 h-px bg-cyan-200/75" aria-hidden="true" />
+          {!embedded && <header className="relative flex items-center justify-between border-b border-emerald-200/55 bg-white/52 px-5 py-4 text-slate-800">
+            <div className="absolute inset-x-0 top-0 h-px bg-emerald-400/80" aria-hidden="true" />
             <div className="flex items-center gap-3">
-              <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-cyan-200/25 bg-cyan-300/10 shadow-[0_0_20px_rgba(45,212,191,0.16)]">
-                <Sparkles className="h-4 w-4 text-cyan-200" />
-              </div>
-              <div>
-                <h2 className="text-sm font-bold">智能助手</h2>
-                <p className="mt-0.5 text-[10px] text-slate-300">描述任务，我会打开对应功能并准备参数</p>
-              </div>
+              {!embedded && (
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-emerald-200/70 bg-emerald-50/80 shadow-[0_0_18px_rgba(16,185,129,0.14)]">
+                  {assistantBusy ? <Loader2 className="h-4 w-4 animate-spin text-emerald-600" /> : <Sparkles className="h-4 w-4 text-emerald-600" />}
+                </div>
+              )}
+              {!embedded && (
+                <div>
+                  <h2 className="text-sm font-bold">智能助手</h2>
+                  <p className="mt-0.5 text-[10px] text-slate-500">描述任务，我会打开对应功能并准备参数</p>
+                </div>
+              )}
             </div>
-            <div className="mr-2 flex items-center gap-1.5 font-mono text-[8px] tracking-[0.16em] text-cyan-200/65" aria-label="SYSTEM ONLINE">
-              <span className="relative flex h-2 w-2">
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-cyan-300/50" />
-                <span className="relative inline-flex h-2 w-2 rounded-full bg-cyan-200" />
-              </span>
-              <span className="hidden sm:inline">ONLINE</span>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={startNewConversation}
+                aria-label="新建对话"
+                title="新建对话"
+                className="flex h-8 w-8 items-center justify-center rounded-lg border border-transparent text-slate-400 transition hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700"
+              >
+                <MessageSquarePlus className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                aria-label="最小化智能助手"
+                title="最小化智能助手"
+                className="flex h-8 w-8 items-center justify-center rounded-lg border border-transparent text-slate-400 transition hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700"
+              >
+                <Minus className="h-4 w-4" />
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={() => setOpen(false)}
-              aria-label="关闭智能助手"
-              className="flex h-8 w-8 items-center justify-center rounded-lg border border-transparent text-slate-400 transition hover:border-cyan-200/25 hover:bg-cyan-300/10 hover:text-cyan-100"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </header>
+          </header>}
 
-          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto bg-[linear-gradient(rgba(103,232,249,0.035)_1px,transparent_1px),linear-gradient(90deg,rgba(103,232,249,0.035)_1px,transparent_1px)] bg-[size:20px_20px] bg-[#061018]/30 p-3.5">
+          <div className={`min-h-0 flex-1 space-y-3 overflow-y-auto p-3.5 ${embedded ? 'bg-transparent' : 'bg-white/20'}`}>
+            {conversation.length > 0 && (
+              <div
+                ref={conversationLogRef}
+                role="log"
+                aria-label="助手任务会话"
+                className="max-h-[220px] shrink-0 space-y-2 overflow-y-auto rounded-2xl border border-emerald-200/55 bg-white/24 p-2.5"
+              >
+                <div className="flex items-center gap-1.5 px-1 text-[10px] font-bold text-emerald-700">
+                  <MessageCircle className="h-3.5 w-3.5" />
+                  <span>任务会话</span>
+                </div>
+                {conversation.map((message) => (
+                  <div
+                    key={message.id}
+                    className={`rounded-xl px-2.5 py-2 text-[10px] leading-relaxed ${message.role === 'user'
+                      ? 'ml-5 bg-emerald-500/10 text-slate-700'
+                      : 'mr-5 border border-emerald-100/80 bg-white/45 text-slate-500'}`}
+                  >
+                    <span className="mr-1 font-bold text-emerald-700">{message.role === 'user' ? '你' : '助手'}</span>
+                    {message.content}
+                  </div>
+                ))}
+              </div>
+            )}
+
             <div
               onClick={() => fileInputRef.current?.click()}
-              className="cursor-pointer rounded-2xl border border-dashed border-cyan-300/30 bg-[#0b202a]/40 p-3 transition hover:border-cyan-200/70 hover:bg-cyan-300/10"
+              aria-label="上传音频、视频、图片或文档"
+              title={file ? file.name : '上传文件'}
+              className="cursor-pointer p-1 text-emerald-600 transition hover:text-emerald-700"
             >
               <input
                 ref={fileInputRef}
@@ -604,17 +1473,17 @@ export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceReq
                 className="hidden"
                 onChange={(event) => setFile(event.target.files?.[0])}
               />
-              <div className="flex items-center gap-3">
-                <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-cyan-200/15 bg-cyan-300/10 text-cyan-100 shadow-[0_0_18px_rgba(45,212,191,0.1)]">
-                  {fileKind === 'audio' ? <FileAudio className="h-4 w-4" /> : fileKind === 'image' ? <ImageIcon className="h-4 w-4" /> : <Paperclip className="h-4 w-4" />}
+              <div className="flex items-center justify-start">
+                <div className="flex h-9 w-9 items-center justify-center text-emerald-600">
+                  <Plus className="h-5 w-5" strokeWidth={2.25} />
                 </div>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-xs font-bold text-cyan-50">{file ? file.name : '上传音频、视频、图片或文档'}</p>
-                  <p className="mt-0.5 text-[10px] text-cyan-100/50">{file ? `${Math.max(1, Math.round(file.size / 1024))} KB · 点击替换` : '也可以只输入文字任务'}</p>
+                <div className={`${file ? 'min-w-0 flex-1' : 'hidden'}`}>
+                  <p className="truncate text-xs font-bold text-slate-700">{file ? file.name : '上传音频、视频、图片或文档'}</p>
+                  <p className="mt-0.5 text-[10px] text-slate-400">{file ? `${Math.max(1, Math.round(file.size / 1024))} KB · 点击替换` : '也可以只输入文字任务'}</p>
                 </div>
                 {file && (
                   <div className="flex shrink-0 items-center gap-2">
-                    <Check className="h-4 w-4 text-cyan-200" aria-hidden="true" />
+                    <Check className="h-4 w-4 text-emerald-600" aria-hidden="true" />
                     <button
                       type="button"
                       aria-label="删除已上传文件"
@@ -624,7 +1493,7 @@ export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceReq
                         setFile(undefined);
                         setPlan(null);
                       }}
-                      className="flex h-7 w-7 items-center justify-center rounded-lg text-cyan-100/50 transition hover:bg-red-400/10 hover:text-red-300"
+                      className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-red-50 hover:text-red-500"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
@@ -640,127 +1509,83 @@ export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceReq
                 if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') analyzeRequest();
               }}
               placeholder="告诉我你想完成什么……"
-              className="min-h-28 w-full resize-y rounded-2xl border border-cyan-300/20 bg-[#081a24]/40 px-3 py-3 text-xs leading-relaxed text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-cyan-200/70 focus:ring-2 focus:ring-cyan-300/15"
+              className="min-h-28 w-full resize-y rounded-2xl border border-emerald-200/65 bg-white/26 px-3 py-3 text-xs leading-relaxed text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100"
             />
+            {file && (
+              <p className="px-1 text-[10px] text-slate-400">
+                已保留当前文件和会话，可直接说“继续”“下一步”或指定新的片段任务。
+              </p>
+            )}
 
             <button
               type="button"
-              disabled={!prompt.trim() && !file}
+              disabled={analyzing || (!prompt.trim() && !file)}
               onClick={analyzeRequest}
-              className="flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-cyan-100/20 bg-cyan-300 text-xs font-bold text-slate-950 shadow-[0_0_22px_rgba(45,212,191,0.16)] transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:border-transparent disabled:bg-slate-800 disabled:text-slate-500"
+              className="flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-emerald-300/70 bg-emerald-500 text-xs font-bold text-white shadow-[0_0_22px_rgba(16,185,129,0.16)] transition hover:bg-emerald-600 disabled:cursor-not-allowed disabled:border-transparent disabled:bg-slate-200 disabled:text-slate-400"
             >
-              <Sparkles className="h-4 w-4" />
-              分析任务
+              {analyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              {analyzing ? analysisStatus : '分析任务'}
             </button>
 
             {error && (
-              <div role="alert" className="rounded-xl border border-amber-300/25 bg-amber-300/10 px-3 py-2 text-[10px] leading-relaxed text-amber-100">
+              <div role="alert" className="rounded-xl border border-amber-200 bg-amber-50/80 px-3 py-2 text-[10px] leading-relaxed text-amber-800">
                 {error}
               </div>
             )}
 
             {plan && (
-              <div className="space-y-3 rounded-2xl border border-emerald-300/20 bg-[#0a1e23]/52 p-3.5 shadow-[inset_0_1px_0_rgba(167,243,208,0.04)]">
+              <div className="space-y-3 rounded-2xl border border-emerald-200/65 bg-white/32 p-3.5 shadow-[inset_0_1px_0_rgba(167,243,208,0.1)]">
                 <div>
                   <div className="flex items-center justify-between gap-3">
-                    <h3 className="text-xs font-black text-slate-100">{plan.title}</h3>
-                    <span className="rounded-full border border-cyan-200/20 bg-cyan-300/10 px-2 py-0.5 text-[9px] font-bold text-cyan-100">{plan.tab === 'dubbing-studio' ? 'AI 配音' : plan.tab === 'audio-tools' ? '音频工具' : plan.tab === 'video-soundtrack' ? '视频声音制作' : plan.tab === 'music-studio' ? 'AI 音乐' : plan.tab === 'sfx-studio' ? 'AI 音效' : plan.tab === 'audio-director' ? 'AI 音频设计' : plan.tab === 'sfx-requirements' ? '音效需求表' : plan.tab === 'sfx-library' ? '音效库' : '工作台'}</span>
+                    <h3 className="text-xs font-black text-slate-800">{plan.title}</h3>
+                    <span className="rounded-full border border-emerald-200/80 bg-emerald-50/80 px-2 py-0.5 text-[9px] font-bold text-emerald-700">{plan.tab === 'dubbing-studio' ? 'AI 配音' : plan.tab === 'audio-tools' ? '音频工具' : plan.tab === 'video-soundtrack' ? '视频声音制作' : plan.tab === 'music-studio' ? 'AI 音乐' : plan.tab === 'sfx-studio' ? 'AI 音效' : plan.tab === 'audio-director' ? 'AI 音频设计' : plan.tab === 'sfx-requirements' ? '音效需求表' : plan.tab === 'sfx-library' ? '音效库' : '工作台'}</span>
                   </div>
-                  <p className="mt-1 text-[11px] text-slate-300">{plan.summary}</p>
+                  <p className="mt-1 text-[11px] text-slate-500">{plan.summary}</p>
+                  <p className="mt-1 text-[9px] text-slate-400">
+                    {plan.plannerSource === 'model'
+                      ? `GPT 规划 · ${plan.plannerModel || '当前模型'}${plan.plannerProvider ? ` · ${plan.plannerProvider}` : ''}`
+                      : '本地规则兜底'}
+                  </p>
                 </div>
+                {plan.plannerWarning && (
+                  <div role="status" className="rounded-lg border border-amber-200 bg-amber-50/80 px-2.5 py-2 text-[10px] leading-relaxed text-amber-800">
+                    {plan.plannerWarning}
+                  </div>
+                )}
                 <ol className="space-y-2">
                   {plan.steps.map((step, index) => (
-                    <li key={step} className="flex items-start gap-2 text-[11px] leading-relaxed text-slate-300">
-                      <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-cyan-200/25 bg-cyan-300/10 text-[9px] font-black text-cyan-100">{index + 1}</span>
+                    <li key={step} className="flex items-start gap-2 text-[11px] leading-relaxed text-slate-600">
+                      <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-emerald-200/80 bg-emerald-50 text-[9px] font-black text-emerald-700">{index + 1}</span>
                       <span>{step}</span>
                     </li>
                   ))}
                 </ol>
-                <button
-                  type="button"
-                  onClick={executePlan}
-                  disabled={running}
-                  className="flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-emerald-200/25 bg-emerald-300 text-xs font-bold text-slate-950 shadow-[0_0_22px_rgba(52,211,153,0.14)] transition hover:bg-emerald-200 disabled:bg-emerald-900 disabled:text-emerald-100/50"
-                >
-                  {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <ChevronRight className="h-4 w-4" />}
-                  {running ? '正在打开并准备…' : '确认并打开功能'}
-                </button>
+                <div className="sticky bottom-0 z-10 -mx-1 space-y-2 bg-white/72 px-1 pb-1 pt-2 backdrop-blur-md">
+                  <button
+                    type="button"
+                    onClick={executePlan}
+                    disabled={running}
+                    className={`flex h-11 w-full items-center justify-center gap-2 rounded-xl border text-xs font-bold transition disabled:bg-emerald-200 disabled:text-emerald-700/50 ${plan.kind === 'library' && plan.libraryMatchCount === 0 && plan.libraryFallbackKind ? 'border-emerald-200/80 bg-white/75 text-emerald-700 hover:bg-emerald-50/80' : 'border-emerald-300/70 bg-emerald-500 text-white shadow-[0_0_22px_rgba(16,185,129,0.14)] hover:bg-emerald-600'}`}
+                  >
+                    {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <ChevronRight className="h-4 w-4" />}
+                    {running ? '正在打开并准备…' : plan.kind === 'library' && plan.libraryMatchCount === 0 ? '打开音效库继续查找' : '确认并打开功能'}
+                  </button>
+                  {plan.kind === 'library' && plan.libraryMatchCount === 0 && plan.libraryFallbackKind && (
+                    <button
+                      type="button"
+                      onClick={executeLibraryFallback}
+                      disabled={running}
+                      className="flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-emerald-300/70 bg-emerald-500 text-xs font-bold text-white shadow-[0_0_22px_rgba(16,185,129,0.14)] transition hover:bg-emerald-600 disabled:bg-emerald-200 disabled:text-emerald-700/50"
+                    >
+                      {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                      {running ? '正在切换…' : `改用 ${plan.libraryFallbackKind === 'music' ? 'AI 音乐' : 'AI 音效'}生成`}
+                    </button>
+                  )}
+                </div>
               </div>
             )}
           </div>
 
-          <footer className="space-y-2 border-t border-cyan-300/15 bg-[#07151d]/50 px-4 py-3">
-            {isAddingPreference && (
-              <form
-                className="flex items-center gap-2"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  addManualPreference();
-                }}
-              >
-                <input
-                  autoFocus
-                  value={preferenceDraft}
-                  onChange={(event) => setPreferenceDraft(event.target.value)}
-                  placeholder="输入正确的任务偏好..."
-                  aria-label="手动任务偏好"
-                  className="min-w-0 flex-1 rounded-lg border border-cyan-200/25 bg-[#081a24]/70 px-2.5 py-2 text-[10px] text-cyan-50 outline-none placeholder:text-cyan-100/35 focus:border-cyan-200/70"
-                />
-                <button type="submit" aria-label="保存任务偏好" title="保存任务偏好" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-emerald-300 text-slate-950 transition hover:bg-emerald-200">
-                  <Check className="h-3.5 w-3.5" />
-                </button>
-                <button type="button" aria-label="取消添加任务偏好" title="取消" onClick={() => { setIsAddingPreference(false); setPreferenceDraft(''); }} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-cyan-200/20 text-cyan-100/60 transition hover:bg-cyan-300/10 hover:text-cyan-50">
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </form>
-            )}
-
-            {memory.customPreferences.length > 0 && (
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span className="font-mono text-[9px] tracking-wide text-cyan-100/45">手动偏好</span>
-                {memory.customPreferences.map((preference, index) => (
-                  <button
-                    key={`${preference}-${index}`}
-                    type="button"
-                    title="编辑此任务偏好"
-                    onClick={() => { setPreferenceDraft(preference); setIsAddingPreference(true); }}
-                    className="max-w-full truncate rounded-md border border-cyan-200/15 bg-cyan-300/10 px-2 py-1 text-[9px] text-cyan-100/75 transition hover:border-cyan-200/40 hover:bg-cyan-300/15"
-                  >
-                    {preference}
-                  </button>
-                ))}
-              </div>
-            )}
-
-            <div className="flex items-center justify-between gap-3">
-              <span className="min-w-0 truncate text-[10px] text-cyan-100/50">
-                {memory.taskCount > 0 ? `已记住 ${memory.taskCount} 次任务偏好` : '会记住你的常用偏好，下一次自动沿用'}
-              </span>
-              <div className="flex shrink-0 items-center gap-2">
-                <button
-                  type="button"
-                  aria-label="添加任务偏好"
-                  title="手动添加正确的任务偏好"
-                  onClick={() => { setIsAddingPreference(true); setPreferenceDraft(''); }}
-                  className="inline-flex items-center gap-1 rounded-md border border-cyan-200/20 px-2 py-1 text-[10px] font-bold text-cyan-100/70 transition hover:border-cyan-200/45 hover:bg-cyan-300/10 hover:text-cyan-50"
-                >
-                  <Plus className="h-3 w-3" />
-                  <span className="hidden sm:inline">添加偏好</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => { setMemory(EMPTY_ASSISTANT_MEMORY); setIsAddingPreference(false); setPreferenceDraft(''); }}
-                  className="text-[10px] font-bold text-cyan-100/50 hover:text-cyan-100"
-                  title="清除助手记住的偏好"
-                >
-                  重置记忆
-                </button>
-                <button type="button" onClick={() => { setPrompt(''); setFile(undefined); setPlan(null); setError(null); }} className="inline-flex items-center gap-1 text-[10px] font-bold text-cyan-100/60 hover:text-cyan-50">
-                  <Send className="h-3 w-3" /> 清空
-                </button>
-              </div>
-            </div>
-          </footer>
         </section>
       )}
     </div>

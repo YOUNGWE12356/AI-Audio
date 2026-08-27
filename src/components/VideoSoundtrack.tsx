@@ -609,6 +609,21 @@ const normalizeClipFade = (value: unknown, clipDuration = 0) => {
   return Math.min(5, Math.max(0, Math.min(value, Math.max(0, clipDuration / 2))));
 };
 
+export const getTimelineClipFadeMultiplier = (
+  clip: Pick<TimelineClip, 'startTime' | 'duration' | 'fadeIn' | 'fadeOut'>,
+  timelineTime: number,
+) => {
+  if (!Number.isFinite(timelineTime) || timelineTime < clip.startTime || timelineTime >= clip.startTime + clip.duration) {
+    return 0;
+  }
+  const clipOffset = timelineTime - clip.startTime;
+  const fadeIn = normalizeClipFade(clip.fadeIn, clip.duration);
+  const fadeOut = normalizeClipFade(clip.fadeOut, clip.duration);
+  const fadeInGain = fadeIn > 0 ? Math.min(1, clipOffset / fadeIn) : 1;
+  const fadeOutGain = fadeOut > 0 ? Math.min(1, (clip.duration - clipOffset) / fadeOut) : 1;
+  return Math.max(0, Math.min(fadeInGain, fadeOutGain));
+};
+
 const getAudioEnhancementPresetLabel = (preset: TimelineClip['audioEnhancementPreset']) => {
   switch (preset) {
     case 'voice_clean':
@@ -988,9 +1003,10 @@ const isStereoWaveform = (channelPeakRanges: WaveformPeakRange[][]) => (
 
 interface VideoSoundtrackProps {
   assistantVideoRequest?: AssistantVideoRequest | null;
+  onAssistantTaskRunningChange?: (requestId: string, running: boolean) => void;
 }
 
-export default function VideoSoundtrack({ assistantVideoRequest = null }: VideoSoundtrackProps) {
+export default function VideoSoundtrack({ assistantVideoRequest = null, onAssistantTaskRunningChange }: VideoSoundtrackProps) {
   // Project saving and loading states
   const [isProjectActive, setIsProjectActive] = useState<boolean>(false);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
@@ -1061,6 +1077,10 @@ export default function VideoSoundtrack({ assistantVideoRequest = null }: VideoS
   const [isPreparingVideoPreview, setIsPreparingVideoPreview] = useState<boolean>(false);
   const videoPreviewRequestRef = useRef(0);
   const consumedAssistantVideoRequestRef = useRef<string | null>(null);
+  const assistantContinuationRequestRef = useRef<{
+    id: string;
+    tracks: Array<'bgm' | 'sfx' | 'dubbing'>;
+  } | null>(null);
   const assistantAutoAnalysisStartedRef = useRef<string | null>(null);
   const assistantAutoGenerationStartedRef = useRef<string | null>(null);
   const lastFailedVideoUrlRef = useRef<string | null>(null);
@@ -2983,7 +3003,9 @@ export default function VideoSoundtrack({ assistantVideoRequest = null }: VideoS
           gainNode.connect(audioContext.destination);
           audioRoutingRef.current[clipId] = { source, gain: gainNode };
         }
-        audioRoutingRef.current[clipId].gain.gain.value = safeGain;
+        const gainParam = audioRoutingRef.current[clipId].gain.gain;
+        gainParam.cancelScheduledValues(audioContext.currentTime);
+        gainParam.setValueAtTime(safeGain, audioContext.currentTime);
         audio.volume = 1;
         return;
       }
@@ -2991,6 +3013,40 @@ export default function VideoSoundtrack({ assistantVideoRequest = null }: VideoS
       console.warn('WebAudio gain routing failed, falling back to native volume:', error);
     }
     audio.volume = Math.min(1, safeGain);
+  };
+
+  const scheduleClipPlaybackEnvelope = (
+    clip: TimelineClip,
+    audio: HTMLAudioElement,
+    timelineTime: number,
+    activeTracks: SoundtrackTrack[],
+  ) => {
+    const baseGain = getEffectiveClipVolume(clip, activeTracks);
+    const clipOffset = Math.max(0, Math.min(clip.duration, timelineTime - clip.startTime));
+    const fadeIn = normalizeClipFade(clip.fadeIn, clip.duration);
+    const fadeOut = normalizeClipFade(clip.fadeOut, clip.duration);
+    const fadeOutStart = Math.max(0, clip.duration - fadeOut);
+    const currentGain = baseGain * getTimelineClipFadeMultiplier(clip, timelineTime);
+
+    setClipPlaybackGain(clip.id, audio, currentGain);
+    const audioContext = audioContextRef.current;
+    const routing = audioRoutingRef.current[clip.id];
+    if (!audioContext || !routing || baseGain <= 0) return;
+
+    const now = audioContext.currentTime;
+    const gainParam = routing.gain.gain;
+    gainParam.cancelScheduledValues(now);
+    gainParam.setValueAtTime(currentGain, now);
+
+    if (fadeIn > 0 && clipOffset < fadeIn) {
+      gainParam.linearRampToValueAtTime(baseGain, now + fadeIn - clipOffset);
+    }
+    if (fadeOut > 0) {
+      if (clipOffset < fadeOutStart) {
+        gainParam.setValueAtTime(baseGain, now + fadeOutStart - clipOffset);
+      }
+      gainParam.linearRampToValueAtTime(0, now + Math.max(0.001, clip.duration - clipOffset));
+    }
   };
 
   const resumeAudioContextForPlayback = () => {
@@ -3953,11 +4009,11 @@ export default function VideoSoundtrack({ assistantVideoRequest = null }: VideoS
           audio.loop = false;
         }
 
-        setClipPlaybackGain(clip.id, audio, getEffectiveClipVolume(clip, tracks));
         const clipSpeed = getEffectiveClipSpeed(clip);
         audio.playbackRate = clipSpeed;
         const offset = currentTime - clip.startTime;
         const sourceOffset = getClipSourceOffset(clip);
+        scheduleClipPlaybackEnvelope(clip, audio, currentTime, tracks);
         
         // Determine maximum playable duration for non-BGM clips (e.g. dubbing/sfx shouldn't loop/replay)
         let maxPlayableDuration = clip.duration;
@@ -4067,9 +4123,9 @@ export default function VideoSoundtrack({ assistantVideoRequest = null }: VideoS
       }
 
       if (!clip.muted && offset >= 0 && offset < maxPlayableDuration && isTrackPlayable(clip.trackId)) {
+        scheduleClipPlaybackEnvelope(clip, audio, t, tracks);
         if (isPlaying && audio.paused) {
           setMediaTimeSafely(audio, sourceOffset + offset * clipSpeed);
-          setClipPlaybackGain(clip.id, audio, getEffectiveClipVolume(clip, tracks));
           audio.playbackRate = clipSpeed;
           resumeAudioContextForPlayback();
           audio.play().catch(e => console.log('Audio sync play failed:', e));
@@ -4721,21 +4777,41 @@ export default function VideoSoundtrack({ assistantVideoRequest = null }: VideoS
     await uploadVideoFile(file);
   };
 
-  // The global assistant uses the same upload path as manual imports so the
-  // video remains available to local preview, server-side analysis, and export.
+  // The global assistant reuses the active video project for follow-up tasks.
+  // Re-uploading the same File would clear the timeline, so only a genuinely
+  // new file is sent through the upload/reset path.
   useEffect(() => {
     if (!assistantVideoRequest || consumedAssistantVideoRequestRef.current === assistantVideoRequest.id) return;
     consumedAssistantVideoRequestRef.current = assistantVideoRequest.id;
+    const hasExistingTimeline = clipsRef.current.some((clip) => !isOriginalAudioClip(clip));
+    const isSameLoadedFile = Boolean(
+      videoFile
+      && hasExistingTimeline
+      && (!assistantVideoRequest.file || assistantVideoRequest.file === selectedFile),
+    );
+    assistantContinuationRequestRef.current = isSameLoadedFile
+      ? { id: assistantVideoRequest.id, tracks: assistantVideoRequest.tracks }
+      : null;
+    onAssistantTaskRunningChange?.(
+      assistantVideoRequest.id,
+      Boolean((assistantVideoRequest.file || isSameLoadedFile) && (assistantVideoRequest.autoAnalyze || assistantVideoRequest.autoGenerate)),
+    );
 
     const tracks = assistantVideoRequest.tracks;
     setIsProjectActive(true);
-    setBgmEnabled(tracks.includes('bgm'));
-    setSfxEnabled(tracks.includes('sfx'));
-    setDubbingEnabled(tracks.includes('dubbing'));
-    if (assistantVideoRequest.file) {
+    if (isSameLoadedFile) {
+      setBgmEnabled((previous) => previous || tracks.includes('bgm'));
+      setSfxEnabled((previous) => previous || tracks.includes('sfx'));
+      setDubbingEnabled((previous) => previous || tracks.includes('dubbing'));
+    } else {
+      setBgmEnabled(tracks.includes('bgm'));
+      setSfxEnabled(tracks.includes('sfx'));
+      setDubbingEnabled(tracks.includes('dubbing'));
+    }
+    if (assistantVideoRequest.file && !isSameLoadedFile) {
       void uploadVideoFile(assistantVideoRequest.file);
     }
-  }, [assistantVideoRequest]);
+  }, [assistantVideoRequest, onAssistantTaskRunningChange, selectedFile, videoFile]);
 
   // Drag and drop events
   const handleDragOver = (e: React.DragEvent) => {
@@ -5041,11 +5117,16 @@ export default function VideoSoundtrack({ assistantVideoRequest = null }: VideoS
   useEffect(() => {
     if (!assistantVideoRequest?.autoAnalyze) return;
     if (assistantAutoAnalysisStartedRef.current === assistantVideoRequest.id) return;
+    if (assistantContinuationRequestRef.current?.id === assistantVideoRequest.id) return;
     if (!videoFile?.isUploaded || isUploadingToServer || isAnalyzing) return;
 
     assistantAutoAnalysisStartedRef.current = assistantVideoRequest.id;
     const timer = window.setTimeout(() => {
-      void handleAnalyzeVideo();
+      void handleAnalyzeVideo().finally(() => {
+        if (!assistantVideoRequest.autoGenerate) {
+          onAssistantTaskRunningChange?.(assistantVideoRequest.id, false);
+        }
+      });
     }, 180);
     return () => window.clearTimeout(timer);
   }, [
@@ -5055,6 +5136,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null }: VideoS
     videoFile?.name,
     isUploadingToServer,
     isAnalyzing,
+    onAssistantTaskRunningChange,
   ]);
 
   const handleAnalyzeTrack = async (trackId: 'bgm' | 'sfx' | 'dubbing') => {
@@ -5078,23 +5160,32 @@ export default function VideoSoundtrack({ assistantVideoRequest = null }: VideoS
 
     try {
       let keyframes: any[] = [];
+      let usingServerFallback = false;
       const requiresFullVideo = trackId === 'dubbing';
       if (requiresFullVideo) {
         setAnalysisStage('正在重新分析完整视频中的字幕、对白与口型...');
       } else if (selectedFile) {
-        setAnalysisStage('正在提取关键画面...');
-        keyframes = await extractVideoKeyframes(selectedFile, {
-          maxFrames: 6,
-          maxDimension: 512,
-          jpegQuality: 0.68,
-          signal: controller.signal,
-        });
+        try {
+          setAnalysisStage('正在提取关键画面...');
+          keyframes = await extractVideoKeyframes(selectedFile, {
+            maxFrames: 6,
+            maxDimension: 512,
+            jpegQuality: 0.68,
+            signal: controller.signal,
+          });
+        } catch (keyframeError) {
+          if (controller.signal.aborted) throw keyframeError;
+          usingServerFallback = true;
+          console.warn('Failed to extract keyframes for single-track analysis, falling back to server video:', keyframeError);
+        }
       }
 
       if (!requiresFullVideo && keyframes.length === 0 && (isUploadingToServer || !videoFile.isUploaded)) {
         throw new Error('视频仍在同步到服务器，请等待上传完成后再试。');
       }
-      setAnalysisStage(trackId === 'bgm'
+      setAnalysisStage(usingServerFallback
+        ? '本地取帧不可用，正在由服务器重新提取画面...'
+        : trackId === 'bgm'
         ? 'AI 正在重新规划配乐轨...'
         : trackId === 'sfx' ? 'AI 正在重新规划音效轨...' : 'AI 正在重新识别配音轨...');
 
@@ -5228,6 +5319,48 @@ export default function VideoSoundtrack({ assistantVideoRequest = null }: VideoS
       }
     }
   };
+
+  // Follow-up assistant requests analyze only the newly requested tracks and
+  // merge them into the existing timeline. Previously this path re-ran the
+  // full-video analysis, replacing completed music and other track clips.
+  useEffect(() => {
+    const request = assistantVideoRequest;
+    const continuation = request ? assistantContinuationRequestRef.current : null;
+    if (!request?.autoAnalyze || !continuation || continuation.id !== request.id) return;
+    if (assistantAutoAnalysisStartedRef.current === request.id) return;
+    if (!videoFile?.isUploaded || isUploadingToServer || isAnalyzing) return;
+
+    const tracks: Array<'bgm' | 'sfx' | 'dubbing'> = Array.from(
+      new Set<'bgm' | 'sfx' | 'dubbing'>(continuation.tracks),
+    );
+    if (tracks.length === 0) {
+      onAssistantTaskRunningChange?.(request.id, false);
+      assistantAutoAnalysisStartedRef.current = request.id;
+      return;
+    }
+
+    assistantAutoAnalysisStartedRef.current = request.id;
+    const timer = window.setTimeout(async () => {
+      try {
+        for (const trackId of tracks) {
+          await handleAnalyzeTrack(trackId);
+        }
+      } finally {
+        if (!request.autoGenerate) {
+          onAssistantTaskRunningChange?.(request.id, false);
+        }
+      }
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [
+    assistantVideoRequest?.autoAnalyze,
+    assistantVideoRequest?.autoGenerate,
+    assistantVideoRequest?.id,
+    videoFile?.isUploaded,
+    isUploadingToServer,
+    isAnalyzing,
+    onAssistantTaskRunningChange,
+  ]);
 
   // Single timeline clip generator using ElevenLabs API on the server
   const handleGenerateAudioClip = async (clipId: string) => {
@@ -5550,25 +5683,27 @@ export default function VideoSoundtrack({ assistantVideoRequest = null }: VideoS
     const pendingClipIds = clips
       .filter((clip) => !isOriginalAudioClip(clip) && !clip.audioUrl && !clip.isGenerating)
       .map((clip) => clip.id);
-    if (pendingClipIds.length === 0) return;
+    if (pendingClipIds.length === 0) {
+      if (assistantAutoAnalysisStartedRef.current === assistantVideoRequest.id) {
+        onAssistantTaskRunningChange?.(assistantVideoRequest.id, false);
+      }
+      return;
+    }
 
     assistantAutoGenerationStartedRef.current = assistantVideoRequest.id;
-    let cancelled = false;
     const runQueue = async () => {
-      setToast({ message: `正在自动合成 ${pendingClipIds.length} 个视频声音片段...`, type: 'info' });
-      for (const clipId of pendingClipIds) {
-        if (cancelled) return;
-        await handleGenerateAudioClip(clipId);
-      }
-      if (!cancelled) {
+      try {
+        setToast({ message: `正在自动合成 ${pendingClipIds.length} 个视频声音片段...`, type: 'info' });
+        for (const clipId of pendingClipIds) {
+          await handleGenerateAudioClip(clipId);
+        }
         setToast({ message: '视频声音片段已按时间线自动合成完成，可继续试听和混音导出。', type: 'success' });
         window.setTimeout(() => setToast(null), 4_000);
+      } finally {
+        onAssistantTaskRunningChange?.(assistantVideoRequest.id, false);
       }
     };
     void runQueue();
-    return () => {
-      cancelled = true;
-    };
   }, [
     assistantVideoRequest?.autoGenerate,
     assistantVideoRequest?.id,
@@ -5576,6 +5711,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null }: VideoS
     isAnalyzing,
     isUploadingToServer,
     videoFile?.isUploaded,
+    onAssistantTaskRunningChange,
   ]);
 
   // Upload custom local audio file for a timeline clip
@@ -6748,8 +6884,11 @@ export default function VideoSoundtrack({ assistantVideoRequest = null }: VideoS
           );
         }
         // Adjust audio volume if it exists
-        if (field === 'volume' && audioInstancesRef.current[clipId]) {
-          setClipPlaybackGain(clipId, audioInstancesRef.current[clipId], getEffectiveClipVolume(updated, tracksRef.current));
+        if (
+          (field === 'volume' || field === 'fadeIn' || field === 'fadeOut')
+          && audioInstancesRef.current[clipId]
+        ) {
+          scheduleClipPlaybackEnvelope(updated, audioInstancesRef.current[clipId], currentTime, tracksRef.current);
         }
         // Automatic fitting and manual fine tuning always combine for preview.
         if (
@@ -8020,6 +8159,30 @@ export default function VideoSoundtrack({ assistantVideoRequest = null }: VideoS
           </div>
         )}
       </header>
+
+      {isAnalyzing && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="sticky top-0 z-30 flex shrink-0 items-center gap-3 border-b border-indigo-400/30 bg-indigo-950/95 px-4 py-2.5 text-indigo-50 shadow-lg shadow-indigo-950/20 backdrop-blur-md lg:px-6"
+        >
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-indigo-300/40 bg-indigo-400/15">
+            <Loader2 className="h-4 w-4 animate-spin text-indigo-200" aria-hidden="true" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-[11px] font-black tracking-wide text-indigo-100">视频分析进行中</p>
+            <p className="truncate text-[11px] text-indigo-200/85">当前阶段：{analysisStage}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => analysisAbortRef.current?.abort('user')}
+            className="flex shrink-0 items-center gap-1.5 rounded-lg border border-red-300/35 bg-red-500/15 px-3 py-1.5 text-[10px] font-bold text-red-100 transition hover:border-red-200/60 hover:bg-red-500/30"
+          >
+            <X className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>取消分析</span>
+          </button>
+        </div>
+      )}
 
       {/* 核心工作流画布 */}
       <div className="flex-1 flex overflow-hidden min-h-0">

@@ -507,7 +507,10 @@ export default function AudioDirector({
                             <p className="text-[11px] font-bold text-slate-700 truncate">{item.file.name}</p>
                             <p className="text-[9px] text-slate-400">{(item.file.size / (1024 * 1024)).toFixed(1)} MB</p>
                             {isVideo && preuploadLabel && (
-                              <p className={`text-[9px] font-bold truncate ${preuploadTone}`}>
+                              <p
+                                className={`text-[9px] font-bold truncate ${preuploadTone}`}
+                                title={item.preupload?.error || preuploadLabel}
+                              >
                                 {preuploadLabel}
                                 {item.preupload?.status !== 'ready' && item.preupload?.status !== 'error'
                                   ? ` ${item.preupload?.progress || 0}%`

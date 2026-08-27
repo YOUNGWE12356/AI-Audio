@@ -13,6 +13,7 @@ import {
   createEnglishMusicPromptForElevenLabs,
   preuploadAudioDesignVideo,
   regenerateLyrics,
+  translateTextToLanguage,
   translateToEnglish,
 } from './services/geminiService';
 import { generateSoundEffect, generateMusic, generateVoice } from './services/elevenLabsService';
@@ -56,7 +57,7 @@ const SettingsComponent = lazy(() => import('./components/Settings'));
 const SfxLibrary = lazy(() => import('./components/SfxLibrary'));
 const SfxRequirements = lazy(() => import('./components/SfxRequirements'));
 const VideoSoundtrack = lazy(() => import('./components/VideoSoundtrack'));
-import GlobalAssistant, { AssistantAudioRequest, AssistantMusicRequest, AssistantSfxRequest, AssistantVideoRequest, AssistantVoiceRequest } from './components/GlobalAssistant';
+import GlobalAssistant, { AssistantAudioRequest, AssistantDirectorRequest, AssistantLibraryRequest, AssistantMusicRequest, AssistantRequirementsRequest, AssistantSfxRequest, AssistantVideoRequest, AssistantVoiceRequest } from './components/GlobalAssistant';
 
 function WorkspaceLoading() {
   return (
@@ -76,8 +77,22 @@ export default function App() {
   const [assistantAudioRequest, setAssistantAudioRequest] = useState<AssistantAudioRequest | null>(null);
   const [assistantVideoRequest, setAssistantVideoRequest] = useState<AssistantVideoRequest | null>(null);
   const [assistantVoiceRequest, setAssistantVoiceRequest] = useState<AssistantVoiceRequest | null>(null);
+  const [assistantRequirementsRequest, setAssistantRequirementsRequest] = useState<AssistantRequirementsRequest | null>(null);
+  const [assistantLibrarySearchQuery, setAssistantLibrarySearchQuery] = useState('');
+  const [assistantLibraryCategory, setAssistantLibraryCategory] = useState('');
+  const [assistantLibrarySubcategory, setAssistantLibrarySubcategory] = useState('');
   const [assistantMusicAutoRunId, setAssistantMusicAutoRunId] = useState<string | null>(null);
   const [assistantSfxAutoRunId, setAssistantSfxAutoRunId] = useState<string | null>(null);
+  const [assistantRunningTaskIds, setAssistantRunningTaskIds] = useState<Set<string>>(() => new Set());
+
+  const updateAssistantTaskRunning = useCallback((requestId: string, running: boolean) => {
+    setAssistantRunningTaskIds((previous) => {
+      const next = new Set(previous);
+      if (running) next.add(requestId);
+      else next.delete(requestId);
+      return next;
+    });
+  }, []);
   
   // The HTML5 client only reads service availability from the same-origin API.
   // Secret values remain on the server and are never embedded into the bundle.
@@ -229,15 +244,32 @@ export default function App() {
   }, []);
 
   const handleAssistantVoiceRequest = useCallback(async (request: AssistantVoiceRequest) => {
+    if (request.mode && request.mode !== 'tts') {
+      setAssistantVoiceRequest(request);
+      setCurrentTab('dubbing-studio');
+      return;
+    }
     const sourceText = request.text.trim();
     let preparedText = sourceText;
     let translationApplied = false;
 
     // A target-language instruction should also transform the speakable text.
     // Keep the original as metadata so the user can compare or recover it later.
-    if (request.language === 'en' && /[\u3400-\u9fff]/.test(sourceText)) {
+    const targetLanguageNames: Record<string, string> = {
+      en: 'English',
+      ar: 'Arabic',
+      ja: 'Japanese',
+      ko: 'Korean',
+      fr: 'French',
+      de: 'German',
+      es: 'Spanish',
+    };
+    const targetLanguageName = targetLanguageNames[request.language];
+    if (targetLanguageName && /[\u3400-\u9fff]/.test(sourceText)) {
       try {
-        const translated = (await translateToEnglish(sourceText)).trim();
+        const translated = request.language === 'en'
+          ? (await translateToEnglish(sourceText)).trim()
+          : (await translateTextToLanguage(sourceText, targetLanguageName, { preserveTone: true })).trim();
         if (translated && translated !== sourceText) {
           preparedText = translated;
           translationApplied = true;
@@ -268,18 +300,57 @@ export default function App() {
     setCurrentTab('video-soundtrack');
   }, []);
 
+  const handleAssistantDirectorRequest = useCallback((request: AssistantDirectorRequest) => {
+    setRequirements(request.prompt);
+    if (request.file) {
+      setFiles((previous) => {
+        previous.forEach((item) => URL.revokeObjectURL(item.preview));
+        return [{
+          id: `assistant-director-${request.id}`,
+          file: request.file!,
+          preview: URL.createObjectURL(request.file!),
+          type: request.file!.type || 'application/octet-stream',
+        }];
+      });
+    }
+    setCurrentTab('audio-director');
+  }, []);
+
+  const handleAssistantRequirementsRequest = useCallback((request: AssistantRequirementsRequest) => {
+    setAssistantRequirementsRequest(request);
+    setCurrentTab('sfx-requirements');
+  }, []);
+
+  const handleAssistantLibraryRequest = useCallback((request: AssistantLibraryRequest) => {
+    setAssistantLibrarySearchQuery(request.searchQuery);
+    setAssistantLibraryCategory(request.category || '');
+    setAssistantLibrarySubcategory(request.subcategory || '');
+    setCurrentTab('sfx-library');
+  }, []);
+
   const handleAssistantMusicRequest = useCallback((request: AssistantMusicRequest) => {
     setStandaloneMusicPrompt(request.prompt);
-    setStandaloneMusicType('instrumental');
+    if (request.durationSeconds !== undefined) {
+      setStandaloneMusicDuration(Math.max(10, Math.min(60, Math.round(request.durationSeconds / 5) * 5)));
+    }
+    setStandaloneMusicType(request.musicType || 'instrumental');
     setCurrentTab('music-studio');
+    updateAssistantTaskRunning(request.id, true);
     setAssistantMusicAutoRunId(request.id);
-  }, []);
+  }, [updateAssistantTaskRunning]);
 
   const handleAssistantSfxRequest = useCallback((request: AssistantSfxRequest) => {
     setStandalonePrompt(request.prompt);
+    if (request.durationSeconds !== undefined) {
+      setStandaloneDuration(Math.max(1, Math.min(20, Math.round(request.durationSeconds))));
+      setStandaloneDurationMode('fixed');
+    } else {
+      setStandaloneDurationMode('auto');
+    }
     setCurrentTab('sfx-studio');
+    updateAssistantTaskRunning(request.id, true);
     setAssistantSfxAutoRunId(request.id);
-  }, []);
+  }, [updateAssistantTaskRunning]);
 
   // Two alternatives state for standalone voiceover generation
   const [pendingVoiceOptions, setPendingVoiceOptions] = useState<{
@@ -396,11 +467,14 @@ export default function App() {
         })
         .catch((error) => {
           if (controller.signal.aborted) return;
+          const detail = error instanceof Error ? error.message : '视频预上传失败。';
           updatePreuploadState(item.id, {
             status: 'error',
             progress: 0,
-            error: error instanceof Error ? error.message : '视频预上传失败。',
-            message: '预上传失败，点击分析时会尝试原流程。',
+            error: detail,
+            message: detail.includes('Gemini API 所在地区不支持')
+              ? 'Gemini API 当前地区不支持视频分析，点击分析仍会尝试原流程。'
+              : '预上传失败，点击分析时会尝试原流程。',
           });
         })
         .finally(() => {
@@ -749,12 +823,18 @@ export default function App() {
 
   useEffect(() => {
     if (!assistantSfxAutoRunId || !standalonePrompt.trim() || standaloneLoading) return;
-    setAssistantSfxAutoRunId(null);
+    const requestId = assistantSfxAutoRunId;
+    let started = false;
     const timer = window.setTimeout(() => {
-      void handleStandaloneGenerate();
+      started = true;
+      setAssistantSfxAutoRunId(null);
+      void handleStandaloneGenerate().finally(() => updateAssistantTaskRunning(requestId, false));
     }, 120);
-    return () => window.clearTimeout(timer);
-  }, [assistantSfxAutoRunId, standalonePrompt, standaloneLoading]);
+    return () => {
+      window.clearTimeout(timer);
+      if (!started) updateAssistantTaskRunning(requestId, false);
+    };
+  }, [assistantSfxAutoRunId, standalonePrompt, standaloneLoading, updateAssistantTaskRunning]);
 
   // Standalone Music generator handler
   const handleStandaloneMusicGenerate = async () => {
@@ -843,12 +923,18 @@ export default function App() {
 
   useEffect(() => {
     if (!assistantMusicAutoRunId || !standaloneMusicPrompt.trim() || standaloneMusicLoading) return;
-    setAssistantMusicAutoRunId(null);
+    const requestId = assistantMusicAutoRunId;
+    let started = false;
     const timer = window.setTimeout(() => {
-      void handleStandaloneMusicGenerate();
+      started = true;
+      setAssistantMusicAutoRunId(null);
+      void handleStandaloneMusicGenerate().finally(() => updateAssistantTaskRunning(requestId, false));
     }, 120);
-    return () => window.clearTimeout(timer);
-  }, [assistantMusicAutoRunId, standaloneMusicPrompt, standaloneMusicLoading]);
+    return () => {
+      window.clearTimeout(timer);
+      if (!started) updateAssistantTaskRunning(requestId, false);
+    };
+  }, [assistantMusicAutoRunId, standaloneMusicPrompt, standaloneMusicLoading, updateAssistantTaskRunning]);
 
   // AI Multimodal director planner handler
   const onGenerate = async () => {
@@ -886,6 +972,14 @@ export default function App() {
           return latestBeforeWait.preupload.uploadId;
         }
 
+        const stopForUnsupportedGeminiLocation = (preupload?: FileItem['preupload']) => {
+          const detail = `${preupload?.error || ''} ${preupload?.message || ''}`;
+          if (/Gemini API 当前地区不支持|User location is not supported|地区不支持视频分析/i.test(detail)) {
+            throw new Error('当前 Gemini API 所在地区不支持视频分析，请切换到支持 Gemini API 的网络地区后重试。');
+          }
+        };
+        stopForUnsupportedGeminiLocation(latestBeforeWait.preupload);
+
         const preuploadPromise = preuploadPromisesRef.current.get(fileItem.id);
         const canWaitForPreupload = preuploadPromise
           && latestBeforeWait.preupload
@@ -898,10 +992,14 @@ export default function App() {
           throw new Error('已取消本次分析。');
         }
 
+        // Let the pre-upload catch handler commit its React state before the
+        // fallback decision is made.
+        await new Promise(resolve => window.setTimeout(resolve, 0));
         const latestAfterWait = filesRef.current.find(item => item.id === fileItem.id);
         if (latestAfterWait?.preupload?.status === 'ready' && latestAfterWait.preupload.uploadId) {
           return latestAfterWait.preupload.uploadId;
         }
+        stopForUnsupportedGeminiLocation(latestAfterWait?.preupload);
         return null;
       };
 
@@ -1208,6 +1306,21 @@ export default function App() {
                 <Workbench
                   setCurrentTab={setCurrentTab}
                   historyList={historyList}
+                  assistantPanel={
+                    <GlobalAssistant
+                      embedded
+                      onNavigate={setCurrentTab}
+                      onAudioRequest={handleAssistantAudioRequest}
+                      onVoiceRequest={handleAssistantVoiceRequest}
+                      onVideoRequest={handleAssistantVideoRequest}
+                      onMusicRequest={handleAssistantMusicRequest}
+                      onSfxRequest={handleAssistantSfxRequest}
+                      onDirectorRequest={handleAssistantDirectorRequest}
+                      onRequirementsRequest={handleAssistantRequirementsRequest}
+                      onLibraryRequest={handleAssistantLibraryRequest}
+                      externalTaskRunning={assistantRunningTaskIds.size > 0}
+                    />
+                  }
                 />
               </section>
             )}
@@ -1324,7 +1437,10 @@ export default function App() {
 
             {visitedTabs.has('audio-tools') && (
               <section hidden={currentTab !== 'audio-tools'} className="min-h-full">
-                <AudioTools assistantAudioRequest={assistantAudioRequest} />
+                <AudioTools
+                  assistantAudioRequest={assistantAudioRequest}
+                  onAssistantTaskRunningChange={updateAssistantTaskRunning}
+                />
               </section>
             )}
 
@@ -1338,7 +1454,11 @@ export default function App() {
 
             {visitedTabs.has('sfx-library') && (
               <section hidden={currentTab !== 'sfx-library'} className="min-h-full">
-                <SfxLibrary />
+                <SfxLibrary
+                  assistantSearchQuery={assistantLibrarySearchQuery}
+                  assistantCategory={assistantLibraryCategory}
+                  assistantSubcategory={assistantLibrarySubcategory}
+                />
               </section>
             )}
 
@@ -1346,13 +1466,17 @@ export default function App() {
               <section hidden={currentTab !== 'sfx-requirements'} className="min-h-full">
                 <SfxRequirements
                   hasGeminiKey={hasGeminiKey}
+                  assistantRequest={assistantRequirementsRequest}
                 />
               </section>
             )}
 
             {visitedTabs.has('video-soundtrack') && (
               <section hidden={currentTab !== 'video-soundtrack'} className="min-h-full">
-                <VideoSoundtrack assistantVideoRequest={assistantVideoRequest} />
+                <VideoSoundtrack
+                  assistantVideoRequest={assistantVideoRequest}
+                  onAssistantTaskRunningChange={updateAssistantTaskRunning}
+                />
               </section>
             )}
             </Suspense>
@@ -1366,6 +1490,10 @@ export default function App() {
         onVideoRequest={handleAssistantVideoRequest}
         onMusicRequest={handleAssistantMusicRequest}
         onSfxRequest={handleAssistantSfxRequest}
+        onDirectorRequest={handleAssistantDirectorRequest}
+        onRequirementsRequest={handleAssistantRequirementsRequest}
+        onLibraryRequest={handleAssistantLibraryRequest}
+        externalTaskRunning={assistantRunningTaskIds.size > 0}
       />
     </div>
   );

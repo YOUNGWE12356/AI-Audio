@@ -119,7 +119,12 @@ const TOOL_CURSOR_BY_MODE: Record<ToolMode, string> = {
   mute: createToolCursor('M', 'pointer'),
 };
 
-export default function AudioWorkstation() {
+interface AudioWorkstationProps {
+  pendingImport?: { id: string; file: File } | null;
+  onPendingImportConsumed?: (id: string) => void;
+}
+
+export default function AudioWorkstation({ pendingImport = null, onPendingImportConsumed }: AudioWorkstationProps) {
   // Web Audio Context reference
   const audioCtxRef = useRef<AudioContext | null>(null);
   
@@ -194,6 +199,7 @@ export default function AudioWorkstation() {
   const animationFrameRef = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fileDragDepthRef = useRef<number>(0);
+  const consumedPendingImportRef = useRef<string | null>(null);
 
   // Synchronized refs for real-time playhead loop to avoid stale React closures
   const isPlayingRef = useRef<boolean>(false);
@@ -1498,6 +1504,14 @@ export default function AudioWorkstation() {
     setIsDecoding(false);
   };
 
+  useEffect(() => {
+    if (!pendingImport || consumedPendingImportRef.current === pendingImport.id) return;
+    consumedPendingImportRef.current = pendingImport.id;
+    void importAudioFiles([pendingImport.file]).finally(() => {
+      onPendingImportConsumed?.(pendingImport.id);
+    });
+  }, [pendingImport, onPendingImportConsumed]);
+
   // Handle local audio file selection/upload
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -2062,7 +2076,7 @@ export default function AudioWorkstation() {
       onDragOver={handleWorkstationDragOver}
       onDragLeave={handleWorkstationDragLeave}
       onDrop={handleWorkstationDrop}
-      className={`overflow-hidden rounded-2xl border bg-[#11161d] text-slate-200 shadow-2xl transition-colors ${
+      className={`min-h-full w-full overflow-hidden rounded-2xl border bg-[#11161d] text-slate-200 shadow-2xl transition-colors ${
         isWorkstationExpanded ? 'fixed inset-4 z-[9997] flex flex-col' : 'relative'
       } ${
         isFileDragActive ? 'border-emerald-400 ring-2 ring-emerald-400/40' : 'border-slate-800'

@@ -11,6 +11,8 @@ import JSZip from 'jszip';
 import ffmpegStatic from 'ffmpeg-static';
 import { DEFAULT_CATEGORIES, INITIAL_SOUNDS } from './src/data/sfxData';
 import type { SoundEffect } from './src/data/sfxData';
+import { buildSfxLibraryIndex, findSfxLibraryMatches } from './src/services/sfxLibraryIndex';
+import { planAssistantTask } from './src/services/assistantPlannerService';
 import multer from 'multer';
 import {
   analyzeAudioDesign,
@@ -25,9 +27,19 @@ import {
   translateTextToLanguage,
   translateToEnglish,
 } from './src/services/geminiService';
+
+const ASSISTANT_PLAN_CACHE_TTL_MS = 10 * 60 * 1000;
+const ASSISTANT_PLAN_CACHE_MAX_ENTRIES = 100;
+const assistantPlanCache = new Map<string, {
+  expiresAt: number;
+  response: {
+    plan: Record<string, unknown>;
+    model: string;
+    provider: string;
+  };
+}>();
 import {
   GEMINI_PRIMARY_MODEL,
-  createFriendlyGeminiUnsupportedLocationError,
   generateGeminiContent,
   isGptTextConfigured,
   isGeminiUnsupportedLocationError,
@@ -128,6 +140,7 @@ async function startServer() {
   };
   const resolveUsageFeature = (req: express.Request) => {
     const endpoint = req.path;
+    if (endpoint.includes('/assistant/plan')) return '智能助手 · GPT 任务规划';
     if (endpoint.includes('/audio-design')) return 'AI 音频设计';
     if (endpoint.includes('/regenerate-lyrics') || endpoint.includes('/generate-lyrics')) return 'AI 音乐 · 歌词生成';
     if (endpoint.includes('/music-prompt')) return 'AI 音乐 · 提示词优化';
@@ -1491,6 +1504,57 @@ async function startServer() {
     return res.send(Buffer.from(await blob.arrayBuffer()));
   };
 
+  app.post('/api/audio/decode', upload.single('media'), asyncRoute(async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ error: '请上传需要提取音轨的音频或视频文件。' });
+    }
+
+    const inputPath = req.file.path;
+    const outputPath = path.resolve(uploadsDir, `audio-decode-${randomUUID()}.wav`);
+    if (!isPathInside(uploadsDir, outputPath)) {
+      await safeUnlink(inputPath);
+      throw Object.assign(new Error('音轨临时输出路径无效。'), { status: 500 });
+    }
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const args = [
+          '-y',
+          '-i', inputPath,
+          '-map', '0:a:0',
+          '-vn',
+          '-map_metadata', '-1',
+          '-c:a', 'pcm_s16le',
+          outputPath,
+        ];
+        execFile(FFMPEG_BINARY, args, (error, _stdout, stderr) => {
+          if (!error) {
+            resolve();
+            return;
+          }
+          const ffmpegUnavailable = /ffmpeg.*(?:not recognized|not found)|ENOENT/i.test(`${error.message}\n${stderr}`);
+          reject(Object.assign(
+            new Error(ffmpegUnavailable
+              ? '本地 FFmpeg 不可用，无法正确提取视频音轨。'
+              : `提取音轨失败：${String(stderr || error.message).trim().split(/\r?\n/).slice(-1)[0] || error.message}`),
+            { status: ffmpegUnavailable ? 503 : 422 },
+          ));
+        });
+      });
+
+      res.type('audio/wav');
+      await new Promise<void>((resolve, reject) => {
+        res.sendFile(outputPath, (error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
+      return undefined;
+    } finally {
+      await Promise.all([safeUnlink(inputPath), safeUnlink(outputPath)]);
+    }
+  }));
+
   const voiceGenerationQueues = new Map<string, Promise<unknown>>();
   const runVoiceGenerationQueued = async <T,>(voiceId: string, task: () => Promise<T>): Promise<T> => {
     const previous = voiceGenerationQueues.get(voiceId) || Promise.resolve();
@@ -2640,6 +2704,96 @@ async function startServer() {
   };
 
   // --- Server-side AI gateway for the HTML5 client ---
+  app.post('/api/ai/assistant/plan', asyncRoute(async (req, res) => {
+    const prompt = String(req.body?.prompt || '').trim();
+    const rawFile = req.body?.file;
+    if (!prompt && !rawFile) {
+      return res.status(400).json({ error: '请描述任务或上传一个文件。' });
+    }
+    if (prompt.length > 8000) {
+      return res.status(400).json({ error: '任务描述过长，请精简后重试。' });
+    }
+
+    const file = rawFile && typeof rawFile === 'object'
+      ? {
+        name: normalizeIdentityText(rawFile.name, 240),
+        type: normalizeIdentityText(rawFile.type, 120),
+        size: Math.max(0, Math.min(Number(rawFile.size) || 0, MAX_UPLOAD_BYTES)),
+      }
+      : undefined;
+    const rawMemory = req.body?.memory && typeof req.body.memory === 'object' ? req.body.memory : {};
+    const memory = {
+      preferredLanguage: normalizeIdentityText(rawMemory.preferredLanguage, 16) || undefined,
+      preferredGender: normalizeIdentityText(rawMemory.preferredGender, 16) || undefined,
+      preferredEmotion: normalizeIdentityText(rawMemory.preferredEmotion, 80) || undefined,
+      preferredFormat: normalizeIdentityText(rawMemory.preferredFormat, 16) || undefined,
+      recentTasks: Array.isArray(rawMemory.recentTasks)
+        ? rawMemory.recentTasks.slice(0, 6).map((task: unknown) => normalizeIdentityText(task, 500)).filter(Boolean)
+        : [],
+    };
+    const conversation = Array.isArray(req.body?.conversation)
+      ? req.body.conversation.slice(-8).flatMap((message: unknown) => {
+        if (!message || typeof message !== 'object') return [];
+        const item = message as { role?: unknown; content?: unknown };
+        const role = item.role === 'assistant' ? 'assistant' : item.role === 'user' ? 'user' : null;
+        const content = normalizeIdentityText(item.content, 600);
+        return role && content ? [{ role, content }] : [];
+      })
+      : [];
+    const repairedLibrary = loadAndRepairLibraryMetadata();
+    const librarySounds = fs.existsSync(soundsFile) ? repairedLibrary.sounds : INITIAL_SOUNDS;
+    const libraryIndex = buildSfxLibraryIndex(repairedLibrary.categories, librarySounds);
+    const cacheKey = JSON.stringify({
+      prompt,
+      file,
+      memory,
+      conversation,
+      library: libraryIndex.entries.map(entry => [
+        entry.id,
+        entry.name,
+        entry.category || '',
+        entry.subcategory || '',
+      ]),
+    });
+    const cached = assistantPlanCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return res.json({ ...structuredClone(cached.response), cached: true });
+    }
+    if (cached) assistantPlanCache.delete(cacheKey);
+
+    const result = await planAssistantTask({
+      prompt,
+      file,
+      memory,
+      conversation,
+      libraryEntries: libraryIndex.entries,
+    });
+    if (result.plan.kind === 'library') {
+      const query = typeof result.plan.librarySearchQuery === 'string'
+        ? result.plan.librarySearchQuery.trim()
+        : prompt;
+      const matches = findSfxLibraryMatches(query, libraryIndex);
+      const bestMatch = matches[0];
+      result.plan.librarySearchQuery = query;
+      result.plan.libraryMatchCount = matches.length;
+      if (bestMatch) {
+        result.plan.libraryCategory = bestMatch.category || bestMatch.name;
+        result.plan.librarySubcategory = bestMatch.subcategory;
+        delete result.plan.libraryFallbackKind;
+        delete result.plan.libraryFallbackPrompt;
+      }
+    }
+    if (assistantPlanCache.size >= ASSISTANT_PLAN_CACHE_MAX_ENTRIES) {
+      const oldestKey = assistantPlanCache.keys().next().value;
+      if (oldestKey) assistantPlanCache.delete(oldestKey);
+    }
+    assistantPlanCache.set(cacheKey, {
+      expiresAt: Date.now() + ASSISTANT_PLAN_CACHE_TTL_MS,
+      response: structuredClone(result),
+    });
+    return res.json(result);
+  }));
+
   app.post('/api/ai/gemini/audio-design', asyncRoute(async (req, res) => {
     const { files, requirements = '', target = {}, isInstrumental = true } = req.body || {};
     if (!Array.isArray(files)) {
@@ -2914,7 +3068,12 @@ async function startServer() {
     const text = await translateTextToLanguage(
       String(req.body?.text || ''),
       String(req.body?.targetLanguage || 'English'),
-      { preserveTone: req.body?.preserveTone !== false },
+      {
+        preserveTone: req.body?.preserveTone !== false,
+        maxDurationSeconds: typeof req.body?.maxDurationSeconds === 'number'
+          ? parseNumber(req.body.maxDurationSeconds, 0, 0.5, 60)
+          : undefined,
+      },
     );
     return res.json({ text });
   }));
@@ -3250,6 +3409,696 @@ ${JSON.stringify(normalizedVoices)}
     ));
   }));
 
+  const localVoiceCloneLanguages: Record<string, string> = {
+    ar: 'Arabic',
+    da: 'Danish',
+    de: 'German',
+    el: 'Greek',
+    en: 'English',
+    es: 'Spanish',
+    fi: 'Finnish',
+    fr: 'French',
+    he: 'Hebrew',
+    hi: 'Hindi',
+    it: 'Italian',
+    ja: 'Japanese',
+    ko: 'Korean',
+    ms: 'Malay',
+    nl: 'Dutch',
+    no: 'Norwegian',
+    pl: 'Polish',
+    pt: 'Portuguese',
+    ru: 'Russian',
+    sv: 'Swedish',
+    sw: 'Swahili',
+    tr: 'Turkish',
+    zh: 'Chinese',
+  };
+  const cosyVoiceLanguages: Record<string, string> = {
+    de: 'German',
+    en: 'English',
+    es: 'Spanish',
+    fr: 'French',
+    it: 'Italian',
+    ja: 'Japanese',
+    ko: 'Korean',
+    ru: 'Russian',
+    zh: 'Chinese',
+  };
+  type LocalVoiceCloneEngine = 'chatterbox' | 'cosyvoice3';
+  const resolveLocalToolPath = (configuredPath: string | undefined, fallback: string) => (
+    path.resolve(process.cwd(), configuredPath?.trim() || fallback)
+  );
+  const localVoiceClonePython = resolveLocalToolPath(
+    process.env.LOCAL_VOICE_CLONE_PYTHON,
+    path.join('tools', 'python311', process.platform === 'win32' ? 'python.exe' : 'python'),
+  );
+  const localVoiceCloneScript = resolveLocalToolPath(
+    process.env.LOCAL_VOICE_CLONE_SCRIPT,
+    path.join('tools', 'local-voice-clone', 'clone_voice.py'),
+  );
+  const localVoiceCloneModelsDir = path.join(path.dirname(localVoiceCloneScript), 'models');
+  const cosyVoicePython = resolveLocalToolPath(
+    process.env.COSYVOICE_PYTHON,
+    path.join('tools', 'python310', process.platform === 'win32' ? 'python.exe' : 'python'),
+  );
+  const cosyVoiceScript = resolveLocalToolPath(
+    process.env.COSYVOICE_SCRIPT,
+    path.join('tools', 'cosyvoice', 'clone_voice.py'),
+  );
+  const cosyVoiceRepoDir = resolveLocalToolPath(
+    process.env.COSYVOICE_REPO_DIR,
+    path.join('tools', 'cosyvoice', 'repo'),
+  );
+  const cosyVoiceModelDir = resolveLocalToolPath(
+    process.env.COSYVOICE_MODEL_DIR,
+    path.join('tools', 'cosyvoice', 'models', 'Fun-CosyVoice3-0.5B'),
+  );
+  type LocalVoiceCloneEngineStatus = {
+    available: boolean;
+    model: string;
+    gpu?: string;
+    modelCached: boolean;
+    supportedLanguages: Record<string, string>;
+    reason?: string;
+  };
+  type LocalVoiceCloneServerStatus = {
+    defaultEngine: LocalVoiceCloneEngine;
+    engines: Record<LocalVoiceCloneEngine, LocalVoiceCloneEngineStatus>;
+  };
+  let localVoiceCloneQueue: Promise<void> = Promise.resolve();
+  let localVoiceCloneStatusCache: { expiresAt: number; value: LocalVoiceCloneServerStatus } | null = null;
+
+  const runLocalVoiceCloneQueued = async <T,>(task: () => Promise<T>): Promise<T> => {
+    const run = localVoiceCloneQueue.catch(() => undefined).then(task);
+    localVoiceCloneQueue = run.then(() => undefined, () => undefined);
+    return run;
+  };
+
+  const runLocalVoiceCloneProcess = (pythonPath: string, args: string[], timeout: number) => new Promise<string>((resolve, reject) => {
+    execFile(
+      pythonPath,
+      args,
+      {
+        cwd: process.cwd(),
+        timeout,
+        windowsHide: true,
+        maxBuffer: 16 * 1024 * 1024,
+      },
+      (error, stdout, stderr) => {
+        if (!error) {
+          resolve(stdout);
+          return;
+        }
+        const detail = String(stderr || stdout || error.message).trim().split(/\r?\n/).slice(-3).join(' ');
+        const message = /out of memory|CUDA.*memory/i.test(detail)
+          ? '本地显存不足，请缩短目标台词或关闭其他占用显卡的程序后重试。'
+          : /ENOENT|not found|cannot find/i.test(`${error.message} ${detail}`)
+            ? '本地声音克隆运行环境不完整，请检查 Python 和模型工具路径。'
+            : `本地声音克隆失败：${detail || error.message}`;
+        reject(Object.assign(new Error(message), { status: 503, cause: error }));
+      },
+    );
+  });
+
+  const readLocalVoiceCloneEngineStatus = async (
+    engine: LocalVoiceCloneEngine,
+  ): Promise<LocalVoiceCloneEngineStatus> => {
+    const isCosyVoice = engine === 'cosyvoice3';
+    const pythonPath = isCosyVoice ? cosyVoicePython : localVoiceClonePython;
+    const scriptPath = isCosyVoice ? cosyVoiceScript : localVoiceCloneScript;
+    const languages = isCosyVoice ? cosyVoiceLanguages : localVoiceCloneLanguages;
+    const model = isCosyVoice ? 'Fun-CosyVoice3 0.5B' : 'Chatterbox Multilingual V3';
+    const cosyVoiceRequiredFiles = [
+      'cosyvoice3.yaml',
+      'llm.pt',
+      'flow.pt',
+      'hift.pt',
+      'campplus.onnx',
+      'speech_tokenizer_v3.onnx',
+      path.join('CosyVoice-BlankEN', 'model.safetensors'),
+    ];
+    const modelCached = isCosyVoice
+      ? cosyVoiceRequiredFiles.every(fileName => fs.existsSync(path.join(cosyVoiceModelDir, fileName)))
+      : fs.existsSync(localVoiceCloneModelsDir)
+        && fs.readdirSync(localVoiceCloneModelsDir, { withFileTypes: true }).length > 0;
+    const baseStatus = { model, modelCached, supportedLanguages: languages };
+    if (!fs.existsSync(pythonPath) || !fs.existsSync(scriptPath)) {
+      return {
+        ...baseStatus,
+        available: false,
+        reason: `本地 Python 运行时或 ${model} 脚本不存在。`,
+      };
+    }
+    if (isCosyVoice && (!fs.existsSync(cosyVoiceRepoDir) || !modelCached)) {
+      return {
+        ...baseStatus,
+        available: false,
+        reason: modelCached ? 'CosyVoice 官方代码目录不存在。' : 'CosyVoice 3 模型尚未下载完成。',
+      };
+    }
+    try {
+      const runtimeProbe = isCosyVoice
+        ? [
+          'import json, sys, torch',
+          `sys.path.insert(0, ${JSON.stringify(cosyVoiceRepoDir)})`,
+          `sys.path.insert(0, ${JSON.stringify(path.join(cosyVoiceRepoDir, 'third_party', 'Matcha-TTS'))})`,
+          'from cosyvoice.cli.cosyvoice import AutoModel',
+          'print(json.dumps({"cuda": torch.cuda.is_available(), "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None}))',
+        ].join('; ')
+        : 'import json, torch; print(json.dumps({"cuda": torch.cuda.is_available(), "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None}))';
+      const stdout = await runLocalVoiceCloneProcess(pythonPath, [
+        '-c',
+        runtimeProbe,
+      ], 30_000);
+      const lastLine = stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) || '{}';
+      const runtime = JSON.parse(lastLine) as { cuda?: boolean; gpu?: string };
+      return {
+        ...baseStatus,
+        available: runtime.cuda === true,
+        gpu: runtime.gpu,
+        ...(runtime.cuda ? {} : { reason: '没有检测到可用的 NVIDIA CUDA 显卡。' }),
+      };
+    } catch (error: any) {
+      return {
+        ...baseStatus,
+        available: false,
+        reason: error?.message || `无法启动 ${model} 运行环境。`,
+      };
+    }
+  };
+
+  const readLocalVoiceCloneStatus = async (): Promise<LocalVoiceCloneServerStatus> => {
+    if (localVoiceCloneStatusCache && localVoiceCloneStatusCache.expiresAt > Date.now()) {
+      return localVoiceCloneStatusCache.value;
+    }
+    const [chatterbox, cosyvoice3] = await Promise.all([
+      readLocalVoiceCloneEngineStatus('chatterbox'),
+      readLocalVoiceCloneEngineStatus('cosyvoice3'),
+    ]);
+    const value: LocalVoiceCloneServerStatus = {
+      defaultEngine: 'chatterbox',
+      engines: { chatterbox, cosyvoice3 },
+    };
+    localVoiceCloneStatusCache = { expiresAt: Date.now() + 30_000, value };
+    return value;
+  };
+
+  app.get('/api/ai/local/voice-clone/status', asyncRoute(async (_req, res) => {
+    return res.json(await readLocalVoiceCloneStatus());
+  }));
+
+  app.post('/api/ai/local/voice-clone', aiUpload.single('reference'), asyncRoute(async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: '请上传一段参考音频或视频。' });
+    const text = String(req.body?.text || '').trim();
+    if (!text) return res.status(400).json({ error: '请输入需要生成的目标语言台词。' });
+    if (text.length > 800) return res.status(400).json({ error: '单次台词不能超过 800 个字符，请分段生成。' });
+
+    const engine = String(req.body?.engine || 'chatterbox').trim().toLowerCase() as LocalVoiceCloneEngine;
+    if (engine !== 'chatterbox' && engine !== 'cosyvoice3') {
+      return res.status(400).json({ error: '不支持的本地声音克隆模型。' });
+    }
+    const engineLanguages = engine === 'cosyvoice3' ? cosyVoiceLanguages : localVoiceCloneLanguages;
+    const language = String(req.body?.language || '').trim().toLowerCase();
+    if (!engineLanguages[language]) {
+      return res.status(400).json({ error: '当前本地模型不支持这个目标语言。' });
+    }
+    const status = (await readLocalVoiceCloneStatus()).engines[engine];
+    if (!status.available) {
+      return res.status(503).json({ error: status.reason || '本地声音克隆引擎不可用。' });
+    }
+
+    const sourceExtension = getSafeUploadExtension(req.file.originalname, req.file.mimetype, '.wav');
+    const jobId = randomUUID();
+    const sourcePath = path.resolve(uploadsDir, `local_clone_source_${jobId}${sourceExtension}`);
+    const referencePath = path.resolve(uploadsDir, `local_clone_reference_${jobId}.wav`);
+    const outputFileName = `local_voice_clone_${jobId}.wav`;
+    const outputPath = path.resolve(uploadsDir, outputFileName);
+    if (![sourcePath, referencePath, outputPath].every(filePath => isPathInside(uploadsDir, filePath))) {
+      throw Object.assign(new Error('本地声音克隆输出路径无效。'), { status: 500 });
+    }
+
+    fs.writeFileSync(sourcePath, req.file.buffer);
+    let keepOutput = false;
+    try {
+      const measuredSourceDuration = await getMediaDurationSeconds(sourcePath).catch(() => 0);
+      const reportedSourceDuration = parseNumber(req.body?.sourceDuration, 0, 0, 24 * 60 * 60);
+      const sourceDuration = measuredSourceDuration || reportedSourceDuration;
+      const requestedStart = parseNumber(req.body?.referenceStart, 0, 0, 60 * 60);
+      const referenceStart = sourceDuration > 0
+        ? Math.min(requestedStart, Math.max(0, sourceDuration - 0.5))
+        : requestedStart;
+      const requestedDuration = parseNumber(req.body?.referenceDuration, 0, 0.5, 20);
+      const requestedReferenceDuration = sourceDuration > 0
+        ? Math.min(20, Math.max(0.5, requestedDuration || sourceDuration - referenceStart), sourceDuration - referenceStart)
+        : requestedDuration || 20;
+
+      await runFfmpegFile([
+        '-y',
+        '-ss', referenceStart.toFixed(3),
+        '-i', sourcePath,
+        '-t', requestedReferenceDuration.toFixed(3),
+        '-map', '0:a:0',
+        '-vn',
+        '-ac', '1',
+        '-ar', '24000',
+        '-c:a', 'pcm_s16le',
+        referencePath,
+      ], 120_000);
+      const referenceDuration = await getMediaDurationSeconds(referencePath).catch(() => requestedReferenceDuration);
+
+      const seed = String(Math.floor(Math.random() * 2_147_483_647));
+      const performance = ['natural', 'expressive', 'stable'].includes(String(req.body?.performance))
+        ? String(req.body.performance)
+        : 'natural';
+      const processArgs = engine === 'cosyvoice3'
+        ? [
+          cosyVoiceScript,
+          '--reference', referencePath,
+          '--text', text,
+          '--language', language,
+          '--output', outputPath,
+          '--performance', performance,
+          '--repo-dir', cosyVoiceRepoDir,
+          '--model-dir', cosyVoiceModelDir,
+          '--seed', seed,
+        ]
+        : [
+          localVoiceCloneScript,
+          '--reference', referencePath,
+          '--text', text,
+          '--language', language,
+          '--output', outputPath,
+          '--model', 'v3',
+          '--exaggeration', String(parseNumber(req.body?.exaggeration, 0.5, 0.25, 2)),
+          '--cfg-weight', String(parseNumber(req.body?.cfgWeight, 0.3, 0, 1)),
+          '--temperature', String(parseNumber(req.body?.temperature, 0.8, 0.05, 2)),
+          '--seed', seed,
+        ];
+      const pythonPath = engine === 'cosyvoice3' ? cosyVoicePython : localVoiceClonePython;
+      const stdout = await runLocalVoiceCloneQueued(() => runLocalVoiceCloneProcess(
+        pythonPath,
+        processArgs,
+        10 * 60 * 1000,
+      ));
+      const lastLine = stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) || '{}';
+      const metadata = JSON.parse(lastLine) as {
+        duration_seconds?: number;
+        model?: string;
+        gpu?: string;
+      };
+      if (!fs.existsSync(outputPath)) {
+        throw Object.assign(new Error('本地模型没有生成可用的音频文件。'), { status: 502 });
+      }
+      keepOutput = true;
+      return res.json({
+        audioUrl: `/uploads/${outputFileName}`,
+        sourceText: '',
+        translatedText: text,
+        sourceDuration: sourceDuration || undefined,
+        generatedDuration: metadata.duration_seconds,
+        outputDuration: metadata.duration_seconds,
+        timingMode: 'natural',
+        dubbingModel: engine === 'cosyvoice3' ? 'local_cosyvoice3' : 'local_chatterbox',
+        outputFormat: 'wav',
+        language,
+        model: engine === 'cosyvoice3'
+          ? String(metadata.model || 'Fun-CosyVoice3-0.5B-2512')
+          : metadata.model === 'v3' ? 'Chatterbox Multilingual V3' : String(metadata.model || 'Chatterbox Multilingual'),
+        gpu: metadata.gpu || status.gpu,
+        referenceStart,
+        referenceDuration,
+      });
+    } finally {
+      await Promise.all([
+        safeUnlink(sourcePath),
+        safeUnlink(referencePath),
+        keepOutput ? Promise.resolve() : safeUnlink(outputPath),
+      ]);
+    }
+  }));
+
+  app.post('/api/ai/local/voice-clone/batch', aiUpload.single('source'), asyncRoute(async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: '请上传包含多人对话的源音频或视频。' });
+    let payload: any;
+    try {
+      payload = JSON.parse(String(req.body?.payload || '{}'));
+    } catch {
+      return res.status(400).json({ error: '多人配音参数格式无效。' });
+    }
+
+    const engine = String(payload.engine || '').trim().toLowerCase() as LocalVoiceCloneEngine;
+    if (engine !== 'chatterbox' && engine !== 'cosyvoice3') {
+      return res.status(400).json({ error: '不支持的本地声音克隆模型。' });
+    }
+    const language = String(payload.language || '').trim().toLowerCase();
+    const engineLanguages = engine === 'cosyvoice3' ? cosyVoiceLanguages : localVoiceCloneLanguages;
+    if (!engineLanguages[language]) return res.status(400).json({ error: '当前模型不支持这个目标语言。' });
+
+    const profiles = Array.isArray(payload.profiles) ? payload.profiles.slice(0, 8) : [];
+    const rawSegments = Array.isArray(payload.segments) ? payload.segments.slice(0, 40) : [];
+    const segments = rawSegments.filter((segment: any, segmentIndex: number) => {
+      const normalizedText = String(segment.targetText || segment.sourceText || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      return !rawSegments.slice(0, segmentIndex).some((previous: any) => (
+        String(previous.speakerId || '') === String(segment.speakerId || '')
+        && String(previous.targetText || previous.sourceText || '').toLowerCase().replace(/\s+/g, ' ').trim() === normalizedText
+        && Math.abs(Number(previous.start) - Number(segment.start)) < 0.18
+      ));
+    });
+    const supportedEventTypes = new Set(['laughter', 'breath', 'quick_breath', 'cough', 'sigh', 'noise', 'mn']);
+    const rawEvents = (Array.isArray(payload.events) ? payload.events : [])
+      .slice(0, 80)
+      .filter((event: any) => supportedEventTypes.has(String(event.type || '')));
+    const events: any[] = [];
+    rawEvents.sort((left: any, right: any) => Number(left.start) - Number(right.start)).forEach((event: any) => {
+      const previous = events.at(-1);
+      if (
+        previous
+        && String(previous.speakerId || '') === String(event.speakerId || '')
+        && String(previous.type || '') === String(event.type || '')
+        && Number(event.start) - Number(previous.end) <= 0.35
+      ) {
+        previous.end = Math.max(Number(previous.end), Number(event.end));
+        previous.sourceText = `${String(previous.sourceText || '')} ${String(event.sourceText || '')}`.trim();
+        return;
+      }
+      events.push({ ...event });
+    });
+    const versions = Array.isArray(payload.versions) ? payload.versions.slice(0, 2) : [];
+    if (profiles.length === 0 || segments.length === 0 || versions.length !== 2) {
+      return res.status(400).json({ error: '多人配音需要有效的角色、台词和两个生成版本。' });
+    }
+    if (segments.some((segment: any) => !String(segment.targetText || '').trim())) {
+      return res.status(400).json({ error: '存在空白的目标语言台词，请补全后再生成。' });
+    }
+
+    const status = (await readLocalVoiceCloneStatus()).engines[engine];
+    if (!status.available) return res.status(503).json({ error: status.reason || '本地声音克隆引擎当前不可用。' });
+
+    const sourceExtension = getSafeUploadExtension(req.file.originalname, req.file.mimetype, '.wav');
+    const jobId = randomUUID();
+    const sourcePath = path.resolve(uploadsDir, `local_multi_source_${jobId}${sourceExtension}`);
+    const manifestPath = path.resolve(uploadsDir, `local_multi_manifest_${jobId}.json`);
+    const temporaryPaths: string[] = [sourcePath, manifestPath];
+    const outputPaths: string[] = [];
+    fs.writeFileSync(sourcePath, req.file.buffer);
+
+    let keepOutputs = false;
+    try {
+      const measuredDuration = await getMediaDurationSeconds(sourcePath).catch(() => 0);
+      const reportedDuration = parseNumber(payload.sourceDuration, 0, 0, 24 * 60 * 60);
+      const sourceDuration = measuredDuration || reportedDuration || Math.max(
+        ...segments.map((segment: any) => Number(segment.end) || 0),
+        ...events.map((event: any) => Number(event.end) || 0),
+      );
+      const referencePaths = new Map<string, string>();
+      const referenceDurations: Record<string, number> = {};
+
+      for (let profileIndex = 0; profileIndex < profiles.length; profileIndex += 1) {
+        const profile = profiles[profileIndex];
+        const profileId = String(profile.id || '').trim();
+        if (!profileId) throw Object.assign(new Error('角色标识无效。'), { status: 400 });
+        const requestedRanges = Array.isArray(profile.referenceRanges) && profile.referenceRanges.length > 0
+          ? profile.referenceRanges
+          : [{ start: profile.referenceStart, end: profile.referenceEnd }];
+        const ranges: Array<{ start: number; end: number }> = [];
+        let totalReferenceDuration = 0;
+        for (const requestedRange of requestedRanges.slice(0, 5)) {
+          if (totalReferenceDuration >= 15) break;
+          const start = parseNumber(requestedRange?.start, 0, 0, Math.max(0, sourceDuration - 0.2));
+          const requestedEnd = parseNumber(requestedRange?.end, start + 0.5, start + 0.2, sourceDuration);
+          const end = Math.min(requestedEnd, start + Math.min(8, 15 - totalReferenceDuration));
+          if (end - start < 0.2) continue;
+          ranges.push({ start, end });
+          totalReferenceDuration += end - start;
+        }
+        if (ranges.length === 0) throw Object.assign(new Error(`角色 ${profileId} 没有可用参考音。`), { status: 400 });
+
+        const referencePath = path.resolve(uploadsDir, `local_multi_reference_${jobId}_${profileIndex}.wav`);
+        temporaryPaths.push(referencePath);
+        const splitFilter = ranges.length > 1
+          ? `[0:a]asplit=${ranges.length}${ranges.map((_range, index) => `[s${index}]`).join('')}`
+          : '';
+        const referenceFilters = ranges.map((range, rangeIndex) => (
+          `[${ranges.length > 1 ? `s${rangeIndex}` : '0:a'}]atrim=start=${range.start.toFixed(3)}:end=${range.end.toFixed(3)},asetpts=PTS-STARTPTS[r${rangeIndex}]`
+        ));
+        const filterComplex = ranges.length === 1
+          ? `${referenceFilters[0]};[r0]aresample=24000,aformat=sample_fmts=s16:channel_layouts=mono[out]`
+          : `${splitFilter};${referenceFilters.join(';')};${ranges.map((_range, index) => `[r${index}]`).join('')}concat=n=${ranges.length}:v=0:a=1,aresample=24000,aformat=sample_fmts=s16:channel_layouts=mono[out]`;
+        await runFfmpegFile([
+          '-y', '-i', sourcePath,
+          '-filter_complex', filterComplex,
+          '-map', '[out]', '-vn', '-c:a', 'pcm_s16le', referencePath,
+        ], 120_000);
+        referencePaths.set(profileId, referencePath);
+        referenceDurations[profileId] = await getMediaDurationSeconds(referencePath).catch(() => totalReferenceDuration);
+      }
+
+      const eventClips: Array<{ path: string; event: any; eventIndex: number; duration: number; start: number }> = [];
+      const sourceTimelineRanges = [
+        ...segments.map((segment: any) => ({ start: Number(segment.start), end: Number(segment.end) })),
+        ...events.map((event: any) => ({ start: Number(event.start), end: Number(event.end) })),
+      ].filter(range => Number.isFinite(range.start) && Number.isFinite(range.end));
+      let droppedEventCount = 0;
+      for (let eventIndex = 0; eventIndex < events.length; eventIndex += 1) {
+        const event = events[eventIndex];
+        const rawStart = parseNumber(event.start, 0, 0, Math.max(0, sourceDuration - 0.02));
+        const rawEnd = parseNumber(event.end, rawStart + 0.1, rawStart + 0.02, sourceDuration);
+        const isLaughter = String(event.type || '') === 'laughter';
+        const previousEnd = Math.max(
+          0,
+          ...sourceTimelineRanges
+            .filter(range => range.end <= rawStart - 0.01)
+            .map(range => range.end),
+        );
+        const nextStarts = sourceTimelineRanges
+          .filter(range => range.start >= rawEnd + 0.01)
+          .map(range => range.start);
+        const nextStart = nextStarts.length > 0 ? Math.min(...nextStarts) : sourceDuration;
+        const start = Math.max(previousEnd + 0.01, rawStart - (isLaughter ? 0.12 : 0.06), 0);
+        const end = Math.min(sourceDuration, nextStart - 0.01, rawEnd + (isLaughter ? 0.35 : 0.14));
+        const duration = end - start;
+        if (duration < 0.02) {
+          droppedEventCount += 1;
+          continue;
+        }
+        const eventPath = path.resolve(uploadsDir, `local_multi_event_${jobId}_${eventIndex}.wav`);
+        temporaryPaths.push(eventPath);
+        const fadeDuration = Math.min(isLaughter ? 0.09 : 0.05, duration / 5);
+        try {
+          await runFfmpegFile([
+            '-y', '-ss', start.toFixed(3), '-t', duration.toFixed(3), '-i', sourcePath,
+            '-af', `aresample=24000,aformat=sample_fmts=s16:channel_layouts=mono,afade=t=in:st=0:d=${fadeDuration.toFixed(3)},afade=t=out:st=${Math.max(0, duration - fadeDuration).toFixed(3)}:d=${fadeDuration.toFixed(3)}`,
+            '-vn', '-c:a', 'pcm_s16le', eventPath,
+          ], 120_000);
+          const measuredEventDuration = await getMediaDurationSeconds(eventPath).catch(() => duration);
+          eventClips.push({ path: eventPath, event, eventIndex, duration: measuredEventDuration, start });
+        } catch {
+          droppedEventCount += 1;
+          await safeUnlink(eventPath);
+        }
+      }
+
+      const manifestJobs: any[] = [];
+      const generatedClipsByVersion = new Map<string, Array<{ path: string; segment: any; segmentIndex: number }>>();
+      versions.forEach((version: any, versionIndex: number) => {
+        const versionId = versionIndex === 0 ? 'A' : 'B';
+        const clips: Array<{ path: string; segment: any; segmentIndex: number }> = [];
+        segments.forEach((segment: any, segmentIndex: number) => {
+          const referencePath = referencePaths.get(String(segment.speakerId || ''));
+          if (!referencePath) throw Object.assign(new Error(`第 ${segmentIndex + 1} 段台词没有对应角色参考音。`), { status: 400 });
+          const rawPath = path.resolve(uploadsDir, `local_multi_raw_${jobId}_${versionId}_${segmentIndex}.wav`);
+          temporaryPaths.push(rawPath);
+          clips.push({ path: rawPath, segment, segmentIndex });
+          manifestJobs.push({
+            id: `${versionId}-${segmentIndex}`,
+            reference: referencePath,
+            text: String(segment.targetText).trim().slice(0, 800),
+            language,
+            output: rawPath,
+            performance: ['natural', 'expressive', 'stable'].includes(String(version.performance)) ? version.performance : 'natural',
+            exaggeration: parseNumber(version.exaggeration, 0.5, 0.25, 2),
+            cfg_weight: parseNumber(version.cfgWeight, 0.3, 0, 1),
+            temperature: Math.min(0.78, parseNumber(version.temperature, 0.75, 0.05, 2)),
+            seed: Math.floor(Math.random() * 2_147_483_647),
+          });
+        });
+        generatedClipsByVersion.set(versionId, clips);
+      });
+      fs.writeFileSync(manifestPath, JSON.stringify({ jobs: manifestJobs }), 'utf8');
+
+      const processArgs = engine === 'cosyvoice3'
+        ? [cosyVoiceScript, '--batch-manifest', manifestPath, '--repo-dir', cosyVoiceRepoDir, '--model-dir', cosyVoiceModelDir]
+        : [localVoiceCloneScript, '--batch-manifest', manifestPath, '--model', 'v3'];
+      const pythonPath = engine === 'cosyvoice3' ? cosyVoicePython : localVoiceClonePython;
+      const stdout = await runLocalVoiceCloneQueued(() => runLocalVoiceCloneProcess(
+        pythonPath,
+        processArgs,
+        Math.max(10 * 60 * 1000, segments.length * versions.length * 90_000),
+      ));
+      const lastLine = stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) || '{}';
+      const metadata = JSON.parse(lastLine) as {
+        model?: string;
+        gpu?: string;
+        jobs?: Array<{ id?: string; duration_seconds?: number }>;
+      };
+      const generatedDurations = new Map(
+        (metadata.jobs || []).map(job => [String(job.id || ''), Number(job.duration_seconds) || 0]),
+      );
+
+      const options = [];
+      const versionTimelines: Array<{
+        id: 'A' | 'B';
+        shiftedClipCount: number;
+        maxShiftSeconds: number;
+        preservedEventCount: number;
+        droppedEventCount: number;
+        outputDuration: number;
+      }> = [];
+      const MIN_DIALOGUE_GAP_SECONDS = 0.06;
+      for (let versionIndex = 0; versionIndex < versions.length; versionIndex += 1) {
+        const versionId = versionIndex === 0 ? 'A' as const : 'B' as const;
+        const clips = [...(generatedClipsByVersion.get(versionId) || [])].sort((left, right) => (
+          Number(left.segment.start) - Number(right.segment.start)
+          || left.segmentIndex - right.segmentIndex
+        ));
+        if (clips.some(clip => !fs.existsSync(clip.path))) {
+          throw Object.assign(new Error(`本地模型没有完整生成版本 ${versionId} 的全部台词。`), { status: 502 });
+        }
+        const timelineItems = [
+          ...clips.map(clip => ({
+            kind: 'speech' as const,
+            path: clip.path,
+            speakerId: String(clip.segment.speakerId || ''),
+            originalStart: parseNumber(clip.segment.start, 0, 0, sourceDuration),
+            originalEnd: parseNumber(clip.segment.end, Number(clip.segment.start) + 0.2, Number(clip.segment.start) + 0.02, sourceDuration + 60),
+            duration: generatedDurations.get(`${versionId}-${clip.segmentIndex}`)
+              || Math.max(0.2, Number(clip.segment.end) - Number(clip.segment.start)),
+            stableIndex: clip.segmentIndex,
+          })),
+          ...eventClips.map(clip => ({
+            kind: 'event' as const,
+            path: clip.path,
+            speakerId: String(clip.event.speakerId || ''),
+            originalStart: clip.start,
+            originalEnd: clip.start + clip.duration,
+            duration: clip.duration,
+            stableIndex: segments.length + clip.eventIndex,
+          })),
+        ].sort((left, right) => left.originalStart - right.originalStart || left.stableIndex - right.stableIndex);
+        const filterParts: string[] = [];
+        const scheduledClips: Array<{
+          kind: 'speech' | 'event';
+          speakerId: string;
+          originalStart: number;
+          originalEnd: number;
+          scheduledStart: number;
+          scheduledEnd: number;
+        }> = [];
+        timelineItems.forEach((item, itemIndex) => {
+          let scheduledStart = item.originalStart;
+          if (item.kind === 'speech') {
+            scheduledClips.forEach(previous => {
+              const sameSpeaker = previous.speakerId === item.speakerId;
+              if (sameSpeaker) {
+                scheduledStart = Math.max(scheduledStart, previous.scheduledEnd + MIN_DIALOGUE_GAP_SECONDS);
+              }
+            });
+          }
+          scheduledStart = Math.max(0, scheduledStart);
+          const scheduledEnd = scheduledStart + item.duration;
+          scheduledClips.push({
+            kind: item.kind,
+            speakerId: item.speakerId,
+            originalStart: item.originalStart,
+            originalEnd: item.originalEnd,
+            scheduledStart,
+            scheduledEnd,
+          });
+          const fadeInDuration = Math.min(0.015, item.duration / 4);
+          const fadeOutDuration = Math.min(0.025, item.duration / 4);
+          const audioFilters = [
+            'aresample=24000',
+            'aformat=sample_fmts=fltp:channel_layouts=mono',
+          ];
+          if (item.kind === 'speech') {
+            audioFilters.push(
+              `afade=t=in:st=0:d=${fadeInDuration.toFixed(3)}`,
+              `afade=t=out:st=${Math.max(0, item.duration - fadeOutDuration).toFixed(3)}:d=${fadeOutDuration.toFixed(3)}`,
+            );
+          }
+          audioFilters.push(`adelay=${Math.round(scheduledStart * 1000)}:all=1`);
+          filterParts.push(`[${itemIndex}:a]${audioFilters.join(',')}[c${itemIndex}]`);
+        });
+        const shiftedSpeechClips = scheduledClips.filter(clip => (
+          clip.kind === 'speech' && clip.scheduledStart - clip.originalStart > 0.03
+        ));
+        const shiftedClipCount = shiftedSpeechClips.length;
+        const maxShiftSeconds = Math.max(0, ...shiftedSpeechClips.map(clip => clip.scheduledStart - clip.originalStart));
+        const outputDuration = Math.max(
+          sourceDuration,
+          ...scheduledClips.map(clip => clip.scheduledEnd + 0.15),
+          0.5,
+        );
+        versionTimelines.push({
+          id: versionId,
+          shiftedClipCount,
+          maxShiftSeconds,
+          preservedEventCount: eventClips.length,
+          droppedEventCount,
+          outputDuration,
+        });
+        filterParts.push(`${timelineItems.map((_item, index) => `[c${index}]`).join('')}amix=inputs=${timelineItems.length}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95:level=disabled,apad=whole_dur=${outputDuration.toFixed(3)},atrim=duration=${outputDuration.toFixed(3)}[out]`);
+        const outputFileName = `local_multi_voice_${jobId}_${versionId}.wav`;
+        const outputPath = path.resolve(uploadsDir, outputFileName);
+        outputPaths.push(outputPath);
+        await runFfmpegFile([
+          '-y', ...timelineItems.flatMap(item => ['-i', item.path]),
+          '-filter_complex', filterParts.join(';'),
+          '-map', '[out]', '-ar', '24000', '-ac', '1', '-c:a', 'pcm_s16le', outputPath,
+        ], 180_000);
+        const generatedDuration = await getMediaDurationSeconds(outputPath).catch(() => outputDuration);
+        const performance = ['natural', 'expressive', 'stable'].includes(String(versions[versionIndex].performance))
+          ? versions[versionIndex].performance
+          : 'natural';
+        options.push({
+          id: versionId,
+          performance,
+          data: {
+            audioUrl: `/uploads/${outputFileName}`,
+            sourceText: segments.map((segment: any) => `${segment.speakerId}: ${segment.sourceText}`).join('\n'),
+            translatedText: segments.map((segment: any) => `${segment.speakerId}: ${segment.targetText}`).join('\n'),
+            sourceDuration,
+            generatedDuration,
+            outputDuration: generatedDuration,
+            timingMode: 'natural',
+            dubbingModel: 'local_multispeaker',
+            outputFormat: 'wav',
+            model: engine === 'cosyvoice3'
+              ? String(metadata.model || 'Fun-CosyVoice3-0.5B-2512')
+              : metadata.model === 'v3' ? 'Chatterbox Multilingual V3' : String(metadata.model || 'Chatterbox Multilingual'),
+            gpu: metadata.gpu || status.gpu,
+          },
+        });
+      }
+      const timeline = {
+        shiftedClipCount: versionTimelines.reduce((sum, version) => sum + version.shiftedClipCount, 0),
+        maxShiftSeconds: Math.max(0, ...versionTimelines.map(version => version.maxShiftSeconds)),
+        preservedEventCount: eventClips.length,
+        droppedEventCount,
+        outputDuration: Math.max(0, ...versionTimelines.map(version => version.outputDuration)),
+        versions: versionTimelines,
+      };
+      keepOutputs = true;
+      return res.json({ options, referenceDurations, timeline });
+    } finally {
+      await Promise.all([
+        ...temporaryPaths.map(filePath => safeUnlink(filePath)),
+        ...(keepOutputs ? [] : outputPaths.map(filePath => safeUnlink(filePath))),
+      ]);
+    }
+  }));
+
   app.post('/api/ai/elevenlabs/voice', asyncRoute(async (req, res) => {
     const text = String(req.body?.text || '').trim();
     if (!text) return res.status(400).json({ error: 'text is required' });
@@ -3313,13 +4162,54 @@ ${JSON.stringify(normalizedVoices)}
 
   app.post('/api/ai/elevenlabs/speech-to-text', aiUpload.single('audio'), asyncRoute(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'audio is required' });
-    const audio = new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype });
-    const result = await transcribeSpeech(
-      audio,
-      typeof req.body?.languageCode === 'string' ? req.body.languageCode : undefined,
-      req.body?.tagAudioEvents !== 'false',
-    );
-    return res.json(result);
+    const sourceExtension = getSafeUploadExtension(req.file.originalname, req.file.mimetype, '.bin');
+    const isVideo = req.file.mimetype.startsWith('video/') || ALLOWED_VIDEO_EXTENSIONS.has(sourceExtension);
+    const sourcePath = path.resolve(uploadsDir, `speech-to-text-source-${randomUUID()}${sourceExtension}`);
+    const extractedAudioPath = path.resolve(uploadsDir, `speech-to-text-audio-${randomUUID()}.wav`);
+    fs.writeFileSync(sourcePath, req.file.buffer);
+
+    try {
+      let transcriptionPath = sourcePath;
+      let transcriptionType = req.file.mimetype;
+      if (isVideo) {
+        await new Promise<void>((resolve, reject) => {
+          execFile(
+            FFMPEG_BINARY,
+            ['-y', '-i', sourcePath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', extractedAudioPath],
+            { timeout: 120_000, maxBuffer: 2 * 1024 * 1024 },
+            (error, _stdout, stderr) => {
+              if (!error) {
+                resolve();
+                return;
+              }
+              const message = String(stderr || error.message).trim().split(/\r?\n/).slice(-1)[0];
+              reject(Object.assign(
+                new Error(message || '无法从视频中提取音轨。'),
+                { status: /(?:not recognized|not found)|ENOENT/i.test(`${error.message}\n${stderr}`) ? 503 : 422 },
+              ));
+            },
+          );
+        });
+        transcriptionPath = extractedAudioPath;
+        transcriptionType = 'audio/wav';
+      }
+
+      const audio = new Blob([new Uint8Array(fs.readFileSync(transcriptionPath))], { type: transcriptionType });
+      const result = await transcribeSpeech(
+        audio,
+        typeof req.body?.languageCode === 'string' ? req.body.languageCode : undefined,
+        req.body?.tagAudioEvents !== 'false',
+        {
+          diarize: req.body?.diarize === 'true',
+          numSpeakers: req.body?.numSpeakers
+            ? parseNumber(req.body.numSpeakers, 2, 1, 32)
+            : undefined,
+        },
+      );
+      return res.json(result);
+    } finally {
+      await Promise.all([safeUnlink(sourcePath), safeUnlink(extractedAudioPath)]);
+    }
   }));
 
   app.post('/api/ai/elevenlabs/translate-dubbing', aiUpload.single('audio'), asyncRoute(async (req, res) => {
@@ -3402,6 +4292,198 @@ ${JSON.stringify(normalizedVoices)}
     } finally {
       try { fs.unlinkSync(sourcePath); } catch {}
       try { fs.unlinkSync(generatedPath); } catch {}
+    }
+  }));
+
+  // Official Automatic Dubbing v2 flow. Unlike the legacy route above, this
+  // lets ElevenLabs preserve speaker identity, emotion, timing and background
+  // audio instead of translating into one selected TTS voice and stretching it.
+  app.post('/api/ai/elevenlabs/translate-dubbing-v2', aiUpload.single('audio'), asyncRoute(async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'audio is required' });
+
+    const apiKey = process.env.ELEVENLABS_API_KEY || process.env.VITE_ELEVENLABS_API_KEY || '';
+    if (!apiKey) return res.status(503).json({ error: 'ElevenLabs API Key is not configured.' });
+
+    const sourceLanguage = String(req.body?.sourceLanguage || 'auto').trim();
+    const targetLanguage = String(req.body?.targetLanguage || 'English').trim();
+    const cloningStrength = Math.min(10, Math.max(0, Math.round(Number(req.body?.cloningStrength ?? 7))));
+    const outputFormat = req.body?.outputFormat === 'mp4' ? 'mp4' : 'mp3';
+    const languageCodeByName: Record<string, string> = {
+      English: 'en',
+      'Chinese Mandarin': 'zh',
+      Japanese: 'ja',
+      Korean: 'ko',
+      French: 'fr',
+      German: 'de',
+      Spanish: 'es',
+      Portuguese: 'pt',
+      Italian: 'it',
+      Russian: 'ru',
+      Hindi: 'hi',
+      Indonesian: 'id',
+      Vietnamese: 'vi',
+      Thai: 'th',
+      Arabic: 'ar',
+      Turkish: 'tr',
+      Dutch: 'nl',
+      Polish: 'pl',
+      Swedish: 'sv',
+      Danish: 'da',
+      Finnish: 'fi',
+      Norwegian: 'no',
+      Greek: 'el',
+      Czech: 'cs',
+      Romanian: 'ro',
+      Hungarian: 'hu',
+      Ukrainian: 'uk',
+      Hebrew: 'he',
+      Malay: 'ms',
+      Filipino: 'fil',
+      Bengali: 'bn',
+      Urdu: 'ur',
+      Tamil: 'ta',
+    };
+    const sourceCode = sourceLanguage === 'auto' ? undefined : (languageCodeByName[sourceLanguage] || sourceLanguage);
+    const targetCode = languageCodeByName[targetLanguage] || targetLanguage;
+    const apiBase = 'https://api.elevenlabs.io/v1/dubbing';
+    const headers = { 'xi-api-key': apiKey, Accept: 'application/json' };
+    const parseApiResponse = async (response: Response) => {
+      const text = await response.text();
+      let payload: any = {};
+      try { payload = text ? JSON.parse(text) : {}; } catch { payload = { detail: text }; }
+      if (!response.ok) {
+        const detail = typeof payload?.detail === 'string'
+          ? payload.detail
+          : payload?.detail?.message || payload?.message || response.statusText;
+        throw new Error(`ElevenLabs Dubbing API error: ${detail}`);
+      }
+      return payload;
+    };
+    const waitFor = async <T>(load: () => Promise<T>, ready: (value: T) => boolean, label: string) => {
+      const deadline = Date.now() + 10 * 60 * 1000;
+      let lastValue: T | undefined;
+      while (Date.now() < deadline) {
+        lastValue = await load();
+        if (ready(lastValue)) return lastValue;
+        await new Promise(resolve => setTimeout(resolve, 5000));
+      }
+      throw new Error(`ElevenLabs Dubbing ${label} 超时，请稍后重试。`);
+    };
+
+    const sourceExt = getSafeUploadExtension(req.file.originalname, req.file.mimetype, '.wav');
+    const sourceIsVideo = req.file.mimetype.startsWith('video/') || ALLOWED_VIDEO_EXTENSIONS.has(sourceExt);
+    if (outputFormat === 'mp4' && !sourceIsVideo) {
+      return res.status(422).json({ error: '只有上传视频时才能输出 MP4；音频文件请输出 MP3。' });
+    }
+    const sourceFileName = `translate_v2_source_${randomUUID()}${sourceExt}`;
+    const sourcePath = path.join(uploadsDir, sourceFileName);
+    const downloadedFileName = `translated_dubbing_v2_raw_${randomUUID()}.flac`;
+    const downloadedPath = path.join(uploadsDir, downloadedFileName);
+    const outputFileName = `translated_dubbing_v2_${randomUUID()}.${outputFormat}`;
+    const outputPath = path.join(uploadsDir, outputFileName);
+    fs.writeFileSync(sourcePath, req.file.buffer);
+
+    try {
+      const sourceAudio = new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype });
+      const transcriptionPromise = transcribeSpeech(
+        sourceAudio,
+        sourceCode,
+        false,
+      ).catch(() => ({ text: '', language_code: undefined }));
+      const sourceDurationPromise = getMediaDurationSeconds(sourcePath).catch(() => 0);
+
+      const createForm = new FormData();
+      createForm.append('file', sourceAudio, req.file.originalname || 'source-media');
+      createForm.append('model_id', 'dubbing_v2');
+      createForm.append('reference', `AI Audio cross-language dubbing · ${req.file.originalname || 'source'}`.slice(0, 500));
+      if (sourceCode) createForm.append('source_language', sourceCode);
+      const projectResponse = await fetch(`${apiBase}/project`, {
+        method: 'POST',
+        headers,
+        body: createForm,
+      });
+      const project = await parseApiResponse(projectResponse);
+      const projectId = String(project.project_id || '');
+      if (!projectId) throw new Error('ElevenLabs Dubbing 未返回项目 ID。');
+
+      const readyProject = await waitFor(
+        async () => parseApiResponse(await fetch(`${apiBase}/project/${encodeURIComponent(projectId)}`, { headers })),
+        (value: any) => value.status === 'ready' || value.status === 'failed',
+        '项目准备',
+      );
+      if (readyProject.status === 'failed') {
+        throw new Error(readyProject.error?.message || 'ElevenLabs Dubbing 项目处理失败。');
+      }
+
+      let languageId = Array.isArray(readyProject.language_ids) ? readyProject.language_ids[0] : undefined;
+      if (!languageId) {
+        const languageResponse = await fetch(`${apiBase}/project/${encodeURIComponent(projectId)}/language`, {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            target_language: targetCode,
+            voice_settings: { cloning_strength: cloningStrength },
+          }),
+        });
+        const language = await parseApiResponse(languageResponse);
+        languageId = String(language.language_id || '');
+      }
+      if (!languageId) throw new Error('ElevenLabs Dubbing 未返回目标语言 ID。');
+
+      const target = await waitFor(
+        async () => parseApiResponse(await fetch(`${apiBase}/project/${encodeURIComponent(projectId)}/language/${encodeURIComponent(languageId)}`, { headers })),
+        (value: any) => ['completed', 'failed'].includes(value.status),
+        '目标语言生成',
+      );
+      if (target.status === 'failed') {
+        throw new Error(target.error?.message || 'ElevenLabs Dubbing 目标语言生成失败。');
+      }
+      const signedAudioUrl = target.outputs?.lossless_audio;
+      if (!signedAudioUrl) throw new Error('ElevenLabs Dubbing 未返回可下载音频。');
+
+      const signedResponse = await fetch(signedAudioUrl);
+      if (!signedResponse.ok) throw new Error(`下载 ElevenLabs Dubbing 音频失败：${signedResponse.statusText}`);
+      fs.writeFileSync(downloadedPath, Buffer.from(await signedResponse.arrayBuffer()));
+      if (outputFormat === 'mp4') {
+        await runFfmpegFile([
+          '-y', '-i', sourcePath, '-i', downloadedPath,
+          '-map', '0:v:0', '-map', '1:a:0',
+          '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', outputPath,
+        ], 120000);
+      } else {
+        await runFfmpegFile([
+          '-y', '-i', downloadedPath, '-vn', '-ar', '48000', '-codec:a', 'libmp3lame', '-b:a', '192k', outputPath,
+        ], 120000);
+      }
+
+      const [transcription, sourceDuration, outputDuration] = await Promise.all([
+        transcriptionPromise,
+        sourceDurationPromise,
+        getMediaDurationSeconds(outputPath).catch(() => 0),
+      ]);
+      const sourceText = String(transcription.text || '').trim();
+      let translatedText = '';
+      if (sourceText) {
+        translatedText = await translateTextToLanguage(sourceText, targetLanguage, { preserveTone: true }).catch(() => '');
+      }
+
+      return res.json({
+        audioUrl: `/uploads/${outputFileName}`,
+        sourceText,
+        translatedText,
+        detectedLanguage: transcription.language_code,
+        sourceDuration: sourceDuration || undefined,
+        generatedDuration: outputDuration || undefined,
+        outputDuration: outputDuration || undefined,
+        timingMode: 'natural',
+        qualityMode: 'pro',
+        dubbingModel: 'dubbing_v2',
+        cloningStrength,
+        outputFormat,
+      });
+    } finally {
+      try { fs.unlinkSync(sourcePath); } catch {}
+      try { fs.unlinkSync(downloadedPath); } catch {}
     }
   }));
 
@@ -4307,9 +5389,23 @@ CRITICAL SUBTITLE OCR PASS:
       
     } catch (err: any) {
       console.error('Error analyzing video:', err);
-      const clientError = isGeminiUnsupportedLocationError(err)
-        ? createFriendlyGeminiUnsupportedLocationError(err)
-        : err;
+      // The Gemini SDK may wrap the provider payload in Error.message. Unwrap it
+      // here as this route has its own response handler and bypasses the global
+      // API error middleware.
+      let providerMessage = String(err?.message || '');
+      try {
+        const parsed = JSON.parse(providerMessage) as { error?: { message?: unknown } };
+        const nestedMessage = parsed?.error?.message;
+        if (typeof nestedMessage === 'string' && nestedMessage.trim()) providerMessage = nestedMessage;
+      } catch {
+        // Keep the original message when it is not JSON.
+      }
+      const clientError = isGeminiUnsupportedLocationError(providerMessage)
+        ? Object.assign(
+          new Error('当前 Gemini API 所在地区不支持视频分析，请切换到支持 Gemini API 的网络地区，或配置可用的视觉模型网关后重试。'),
+          { status: 503 },
+        )
+        : Object.assign(err, { message: providerMessage });
       return res.status(clientError.status || 500).json({
         error: clientError.message || '视频分析暂时失败，请稍后重试。',
       });
@@ -5139,15 +6235,33 @@ CRITICAL SUBTITLE OCR PASS:
       || err?.type === 'entity.too.large'
       || err?.status === 413
       || err?.statusCode === 413;
-    const status = isPayloadTooLarge ? 413 : err?.status || err?.statusCode || 500;
     const rawMessage = String(err?.message || '');
+    // Google SDK errors can arrive as a JSON string nested inside Error.message.
+    // Unwrap that payload so the client receives an actionable message.
+    let providerMessage = rawMessage;
+    try {
+      const parsed = JSON.parse(rawMessage) as { error?: { message?: unknown } };
+      const nestedMessage = parsed?.error?.message;
+      if (typeof nestedMessage === 'string' && nestedMessage.trim()) providerMessage = nestedMessage;
+    } catch {
+      // Keep the original message when it is not JSON.
+    }
+    const isUnsupportedGeminiLocation = isGeminiUnsupportedLocationError(providerMessage);
+    const normalizedMessage = isUnsupportedGeminiLocation
+      ? '当前 Gemini API 所在地区不支持视频分析，请切换到支持 Gemini API 的网络地区，或配置可用的视觉模型网关后重试。'
+      : providerMessage;
+    const status = isPayloadTooLarge
+      ? 413
+      : isUnsupportedGeminiLocation
+        ? 503
+        : err?.status || err?.statusCode || 500;
     const isJsonTruncationError = /Unterminated string in JSON|Unexpected end of JSON input|JSON at position/i.test(rawMessage);
     return res.status(status).json({
       error: isPayloadTooLarge
         ? '上传内容超过 100MB 限制。'
         : isJsonTruncationError
           ? 'AI 返回结果过长或被截断，请缩短素材、减少字幕密度，或分段生成后重试。'
-        : err?.message || 'Internal Server Error'
+        : normalizedMessage || 'Internal Server Error'
     });
   });
 

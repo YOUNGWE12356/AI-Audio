@@ -113,6 +113,7 @@ const AUDIO_TOOLS_SUBNAV_MIN_WIDTH = 64;
 const AUDIO_TOOLS_SUBNAV_COMPACT_WIDTH = 176;
 const AUDIO_TOOLS_SUBNAV_DEFAULT_WIDTH = 184;
 const AUDIO_TOOLS_SUBNAV_MAX_WIDTH = 520;
+const AUDIO_TOOLS_SUBNAV_WIDTH_READY_KEY = 'ai-audio-tools-subnav-width-ready';
 
 const FACTORY_FORMAT_OPTIONS: Array<{
   value: FactoryAudioFormat;
@@ -133,138 +134,27 @@ const DEFAULT_RENAME_RULES: RenameRules = {
   normalizeFileName: true,
 };
 
-// Helper to extract audio from video/audio files via MediaElement fallback
-async function extractAudioViaMediaElement(file: File): Promise<AudioBuffer> {
-  return new Promise<AudioBuffer>((resolve, reject) => {
-    const video = document.createElement('video');
-    video.src = URL.createObjectURL(file);
-    video.crossOrigin = 'anonymous';
-    video.muted = false; // We need audio, but will mute it via GainNode
-    video.playsInline = true;
-    
-    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-    const audioCtx = new AudioContextClass();
-    
-    // We must connect MediaElement to AudioContext before playing
-    const source = audioCtx.createMediaElementSource(video);
-    
-    // Use ScriptProcessorNode to record the audio samples
-    const bufferSize = 4096;
-    const numberOfChannels = 2; // Default to stereo
-    const scriptNode = audioCtx.createScriptProcessor(bufferSize, numberOfChannels, numberOfChannels);
-    
-    const recordedChunks: Float32Array[][] = Array.from({ length: numberOfChannels }, () => []);
-    let totalSamples = 0;
-    let isRecording = true;
-    
-    scriptNode.onaudioprocess = (event) => {
-      if (!isRecording) return;
-      
-      const inputBuffer = event.inputBuffer;
-      const channels = inputBuffer.numberOfChannels;
-      
-      for (let ch = 0; ch < numberOfChannels; ch++) {
-        const srcCh = ch < channels ? ch : 0;
-        const channelData = inputBuffer.getChannelData(srcCh);
-        recordedChunks[ch].push(new Float32Array(channelData));
-      }
-      totalSamples += inputBuffer.length;
-    };
-    
-    // Mute destination so there is no high-speed squeaking
-    const gainNode = audioCtx.createGain();
-    gainNode.gain.value = 0;
-    
-    source.connect(scriptNode);
-    scriptNode.connect(gainNode);
-    gainNode.connect(audioCtx.destination);
-    
-    // Set max possible playback speed to decode as fast as possible
-    video.playbackRate = 16;
-    video.preservesPitch = false;
-    
-    let timeoutId: any = null;
-    
-    const cleanup = () => {
-      isRecording = false;
-      if (timeoutId) clearTimeout(timeoutId);
-      video.pause();
-      try {
-        source.disconnect();
-        scriptNode.disconnect();
-        gainNode.disconnect();
-      } catch (e) {}
-      URL.revokeObjectURL(video.src);
-      audioCtx.close().catch(() => {});
-    };
-    
-    const finishRecording = () => {
-      if (!isRecording) return;
-      cleanup();
-      
-      if (totalSamples === 0) {
-        reject(new Error('未检测到任何音频信号，可能该视频不包含可识别的音频轨道。'));
-        return;
-      }
-      
-      try {
-        const outCtx = new AudioContextClass();
-        const mergedBuffer = outCtx.createBuffer(numberOfChannels, totalSamples, audioCtx.sampleRate);
-        
-        for (let ch = 0; ch < numberOfChannels; ch++) {
-          const channelData = mergedBuffer.getChannelData(ch);
-          let offset = 0;
-          for (const chunk of recordedChunks[ch]) {
-            channelData.set(chunk, offset);
-            offset += chunk.length;
-          }
-        }
-        
-        outCtx.close().catch(() => {});
-        resolve(mergedBuffer);
-      } catch (e) {
-        reject(new Error('封装音频缓冲区失败：' + (e as Error).message));
-      }
-    };
-    
-    video.oncanplaythrough = async () => {
-      try {
-        if (audioCtx.state === 'suspended') {
-          await audioCtx.resume();
-        }
-        await video.play();
-      } catch (err: any) {
-        reject(new Error('无法播放此视频文件以提取音频：' + err.message));
-        cleanup();
-      }
-    };
-    
-    video.onended = () => {
-      finishRecording();
-    };
-    
-    video.onerror = (e) => {
-      reject(new Error('载入视频文件失败，可能文件损坏或格式不受浏览器支持。'));
-      cleanup();
-    };
-    
-    video.onloadedmetadata = () => {
-      const duration = video.duration;
-      if (duration && !isNaN(duration) && isFinite(duration)) {
-        const expectedTimeMs = (duration / video.playbackRate) * 1000 + 2000;
-        timeoutId = setTimeout(() => {
-          if (isRecording) {
-            console.warn("Extraction hit timeout buffer, force finishing.");
-            finishRecording();
-          }
-        }, Math.max(expectedTimeMs, 5000));
-      }
-    };
+async function decodeAudioOnServer(file: File, audioCtx: AudioContext): Promise<AudioBuffer> {
+  const formData = new FormData();
+  formData.append('media', file, file.name);
+  const response = await fetch('/api/audio/decode', {
+    method: 'POST',
+    body: formData,
   });
+  if (!response.ok) {
+    const contentType = response.headers.get('content-type') || '';
+    const message = contentType.includes('application/json')
+      ? String((await response.json().catch(() => null))?.error || '')
+      : await response.text().catch(() => '');
+    throw new Error(message || `服务端音轨提取失败（${response.status}）。`);
+  }
+  return audioCtx.decodeAudioData(await response.arrayBuffer());
 }
 
-// Main entry with fallback
 async function decodeAudioWithFallback(file: File, arrayBuffer: ArrayBuffer, audioCtx: AudioContext): Promise<AudioBuffer> {
+  const isVideo = file.type.startsWith('video/') || /\.(mp4|mov|mkv|avi|webm)$/i.test(file.name);
+  if (isVideo) return decodeAudioOnServer(file, audioCtx);
+
   try {
     const decoded = await new Promise<AudioBuffer>((resolve, reject) => {
       audioCtx.decodeAudioData(
@@ -275,8 +165,8 @@ async function decodeAudioWithFallback(file: File, arrayBuffer: ArrayBuffer, aud
     });
     return decoded;
   } catch (err) {
-    console.warn("Standard decodeAudioData failed, attempting MediaElement audio extraction fallback...", err);
-    return await extractAudioViaMediaElement(file);
+    console.warn('Standard decodeAudioData failed, attempting server-side audio decoding.', err);
+    return decodeAudioOnServer(file, audioCtx);
   }
 }
 
@@ -363,14 +253,16 @@ function normalizeAudioBuffer(
 
 interface AudioToolsProps {
   assistantAudioRequest?: AssistantAudioRequest | null;
+  onAssistantTaskRunningChange?: (requestId: string, running: boolean) => void;
 }
 
-export default function AudioTools({ assistantAudioRequest = null }: AudioToolsProps) {
+export default function AudioTools({ assistantAudioRequest = null, onAssistantTaskRunningChange }: AudioToolsProps) {
   const [activeSubTab, setActiveSubTab] = useState<'workstation' | 'analysis' | 'factory' | 'renamer' | 'isolation'>('workstation');
   const [subNavWidth, setSubNavWidth] = useState(() => {
     if (typeof window === 'undefined') return AUDIO_TOOLS_SUBNAV_DEFAULT_WIDTH;
+    const hasInitializedWidth = window.localStorage.getItem(AUDIO_TOOLS_SUBNAV_WIDTH_READY_KEY) === '1';
     const saved = Number(window.localStorage.getItem('ai-audio-tools-subnav-width'));
-    return Number.isFinite(saved)
+    return hasInitializedWidth && Number.isFinite(saved)
       ? Math.max(AUDIO_TOOLS_SUBNAV_MIN_WIDTH, Math.min(AUDIO_TOOLS_SUBNAV_MAX_WIDTH, saved))
       : AUDIO_TOOLS_SUBNAV_DEFAULT_WIDTH;
   });
@@ -406,6 +298,7 @@ export default function AudioTools({ assistantAudioRequest = null }: AudioToolsP
   useEffect(() => {
     if (typeof window === 'undefined') return;
     window.localStorage.setItem('ai-audio-tools-subnav-width', String(subNavWidth));
+    window.localStorage.setItem(AUDIO_TOOLS_SUBNAV_WIDTH_READY_KEY, '1');
   }, [subNavWidth]);
 
   // ==========================================================
@@ -568,20 +461,51 @@ export default function AudioTools({ assistantAudioRequest = null }: AudioToolsP
   const [factoryProgress, setFactoryProgress] = useState<number>(0);
   const [factoryError, setFactoryError] = useState<string | null>(null);
   const [factoryResults, setFactoryResults] = useState<FactoryConversionResult[]>([]);
+  const [pendingWorkstationImport, setPendingWorkstationImport] = useState<{ id: string; file: File } | null>(null);
   const [assistantAnalysisFiles, setAssistantAnalysisFiles] = useState<File[]>([]);
   const assistantFactorySubmitRef = useRef<string | null>(null);
-  const assistantFactoryDownloadRef = useRef<string | null>(null);
+  const assistantFactoryRunningRequestRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!assistantAudioRequest) return;
-    if (assistantAudioRequest.task === 'analyze') {
-      setAssistantAnalysisFiles([assistantAudioRequest.file]);
-      setActiveSubTab('analysis');
+    const previousRunningRequestId = assistantFactoryRunningRequestRef.current;
+    if (previousRunningRequestId && previousRunningRequestId !== assistantAudioRequest.id) {
+      onAssistantTaskRunningChange?.(previousRunningRequestId, false);
+      assistantFactoryRunningRequestRef.current = null;
+    }
+    if (assistantAudioRequest.task === 'workstation' || assistantAudioRequest.audioTool === 'workstation') {
+      setActiveSubTab('workstation');
       return;
     }
+    if (assistantAudioRequest.task === 'isolate' || assistantAudioRequest.audioTool === 'isolation') {
+      if (assistantAudioRequest.file) {
+        setIsolationFile(assistantAudioRequest.file);
+        setIsolationError(null);
+        setIsolationAudioUrl(null);
+        setIsolationBlob(null);
+        setIsolationStatus('助手已载入待处理文件，请确认后开始人声分离。');
+      }
+      setActiveSubTab('isolation');
+      return;
+    }
+    if (assistantAudioRequest.task === 'rename') {
+      setRenameFiles(assistantAudioRequest.file ? [assistantAudioRequest.file] : []);
+      setRenameManualNames({});
+      setRenameError(null);
+      setRenameStatus(assistantAudioRequest.file
+        ? '助手已载入文件，请设置命名规则并预览。'
+        : '助手已打开批量命名，请导入需要改名的音频。');
+      setActiveSubTab('renamer');
+      return;
+    }
+    if (assistantAudioRequest.task === 'analyze') {
+      setActiveSubTab('analysis');
+      if (!assistantAudioRequest.file) return;
+      setAssistantAnalysisFiles([assistantAudioRequest.file]);
+      return;
+    }
+    setActiveSubTab('factory');
     assistantFactorySubmitRef.current = assistantAudioRequest.id;
-    assistantFactoryDownloadRef.current = assistantAudioRequest.id;
-    setFactoryFiles([assistantAudioRequest.file]);
     setFactoryResults([]);
     setFactoryError(null);
     if (assistantAudioRequest.targetSampleRate !== undefined) {
@@ -595,21 +519,56 @@ export default function AudioTools({ assistantAudioRequest = null }: AudioToolsP
       setFactoryTargetLufs(assistantAudioRequest.targetLufs);
     }
     if (assistantAudioRequest.targetFormat) {
-      setFactoryFormat(assistantAudioRequest.targetFormat);
+      const requestedFormatOption = FACTORY_FORMAT_OPTIONS.find(option => option.value === assistantAudioRequest.targetFormat);
+      if (requestedFormatOption?.supported) {
+        setFactoryFormat(assistantAudioRequest.targetFormat);
+      } else {
+        setFactoryError(`${assistantAudioRequest.targetFormat.toUpperCase()} 格式编码暂未接入，当前仅支持 MP3 或 WAV。`);
+      }
     }
-    setFactoryStatus('助手已载入文件，请确认参数后开始转换。');
-    setActiveSubTab('factory');
-  }, [assistantAudioRequest]);
+    if (!assistantAudioRequest.file) {
+      setFactoryStatus('助手已准备转换参数，请导入需要处理的音频。');
+      onAssistantTaskRunningChange?.(assistantAudioRequest.id, false);
+      return;
+    }
+    assistantFactoryRunningRequestRef.current = assistantAudioRequest.id;
+    onAssistantTaskRunningChange?.(assistantAudioRequest.id, true);
+    setFactoryFiles([assistantAudioRequest.file]);
+    setFactoryStatus('助手已载入文件，正在生成可试听结果；试听确认后再手动下载。');
+  }, [assistantAudioRequest, onAssistantTaskRunningChange]);
 
   const factoryInputRef = useRef<HTMLInputElement>(null);
   const factoryFolderInputRef = useRef<HTMLInputElement>(null);
   const [factoryDragActive, setFactoryDragActive] = useState<boolean>(false);
   const factoryFile = factoryFiles[0] || null;
   const selectedFactoryFormatOption = FACTORY_FORMAT_OPTIONS.find(option => option.value === factoryFormat) || FACTORY_FORMAT_OPTIONS[0];
-  const primaryFactoryResult = factoryResults.find(item => item.blob && item.url) || null;
+  const factoryFileId = factoryFile ? `${factoryFile.name}-${factoryFile.size}-${factoryFile.lastModified}` : null;
+  const primaryFactoryResult = (
+    (factoryFileId ? factoryResults.find(item => item.id === factoryFileId && item.blob && item.url) : null)
+    || factoryResults.find(item => item.blob && item.url)
+    || null
+  );
   const factoryAudioUrl = primaryFactoryResult?.url || null;
   const factoryBlob = primaryFactoryResult?.blob || null;
   const factoryOriginalDuration = primaryFactoryResult?.duration || null;
+  const primaryFactoryLoudnessLimited = Boolean(
+    primaryFactoryResult?.loudness
+    && primaryFactoryResult.loudness.requestedGainDb > primaryFactoryResult.loudness.appliedGainDb + 0.1
+    && primaryFactoryResult.loudness.afterLufs < primaryFactoryResult.loudness.targetLufs - 0.2,
+  );
+
+  const sendFactoryResultToWorkstation = () => {
+    if (!factoryBlob || !primaryFactoryResult) return;
+    const baseName = primaryFactoryResult.sourceName.replace(/\.[^/.]+$/, '') || 'converted_audio';
+    const outputName = `${baseName}_converted.${factoryFormat}`;
+    const mimeType = factoryFormat === 'mp3' ? 'audio/mpeg' : 'audio/wav';
+    const outputFile = new File([factoryBlob], outputName, { type: mimeType, lastModified: Date.now() });
+
+    downloadFile(factoryBlob, primaryFactoryResult.sourceName, factoryFormat);
+    setPendingWorkstationImport({ id: `factory-workstation-${Date.now()}`, file: outputFile });
+    setActiveSubTab('workstation');
+    setFactoryStatus(`已下载并放入工作站：${outputName}`);
+  };
 
   const bindFactoryFolderInput = React.useCallback((node: HTMLInputElement | null) => {
     factoryFolderInputRef.current = node;
@@ -790,6 +749,7 @@ export default function AudioTools({ assistantAudioRequest = null }: AudioToolsP
 
   const handleFactorySubmit = async () => {
     if (!factoryFile) return;
+    const assistantRequestId = assistantFactoryRunningRequestRef.current;
 
     if (factoryFiles.length >= 1) {
       setFactoryLoading(true);
@@ -826,7 +786,11 @@ export default function AudioTools({ assistantAudioRequest = null }: AudioToolsP
         const successCount = nextResults.filter(item => item.blob).length;
         const failedCount = nextResults.length - successCount;
         setFactoryProgress(100);
-        setFactoryStatus(`批量转换完成：成功 ${successCount} 个，失败 ${failedCount} 个。`);
+        setFactoryStatus(
+          assistantAudioRequest?.task === 'convert' && successCount > 0
+            ? `转换完成：成功 ${successCount} 个，失败 ${failedCount} 个。请先试听，确认无误后再下载当前结果。`
+            : `批量转换完成：成功 ${successCount} 个，失败 ${failedCount} 个。`,
+        );
         setFactoryError(successCount === 0 ? '全部文件转换失败，请检查文件格式或浏览器解码支持。' : null);
       } catch (err: any) {
         const errMsg = err?.message || '批量转换出错，请重新核对音频选项。';
@@ -835,6 +799,12 @@ export default function AudioTools({ assistantAudioRequest = null }: AudioToolsP
         setFactoryProgress(0);
       } finally {
         setFactoryLoading(false);
+        if (assistantRequestId) {
+          onAssistantTaskRunningChange?.(assistantRequestId, false);
+          if (assistantFactoryRunningRequestRef.current === assistantRequestId) {
+            assistantFactoryRunningRequestRef.current = null;
+          }
+        }
       }
       return;
     }
@@ -1014,20 +984,18 @@ export default function AudioTools({ assistantAudioRequest = null }: AudioToolsP
   }, [assistantAudioRequest, factoryFile, factoryLoading]);
 
   useEffect(() => {
-    if (!assistantAudioRequest || assistantAudioRequest.task !== 'convert' || factoryLoading || !factoryBlob) return;
-    if (assistantFactoryDownloadRef.current !== assistantAudioRequest.id) return;
-    assistantFactoryDownloadRef.current = null;
-    const sourceName = factoryFile?.name || 'converted_audio.wav';
-    const baseName = sourceName.replace(/\.[^.]+$/, '') || 'converted_audio';
-    const url = URL.createObjectURL(factoryBlob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${baseName}_converted.mp3`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    window.setTimeout(() => URL.revokeObjectURL(url), 1500);
-  }, [assistantAudioRequest, factoryBlob, factoryFile, factoryLoading]);
+    const requestId = assistantFactoryRunningRequestRef.current;
+    if (!requestId || factoryLoading) return;
+    const conversionSettled = factoryResults.length > 0 || Boolean(factoryError && assistantFactorySubmitRef.current === null);
+    if (!conversionSettled) return;
+
+    if (factoryResults.length === 1 && primaryFactoryResult?.blob) {
+      sendFactoryResultToWorkstation();
+    }
+
+    onAssistantTaskRunningChange?.(requestId, false);
+    assistantFactoryRunningRequestRef.current = null;
+  }, [factoryError, factoryLoading, factoryResults.length, onAssistantTaskRunningChange, primaryFactoryResult]);
 
   const createRenameOperation = (type: RenameRuleType): RenameOperation => ({
     id: `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -1580,13 +1548,18 @@ export default function AudioTools({ assistantAudioRequest = null }: AudioToolsP
       </div>
 
       {/* Main Workspace Panel */}
-      <div className={`flex-1 overflow-y-auto ${activeSubTab === 'workstation' ? 'p-4 md:p-6' : 'p-6 md:p-8'}`}>
+      <div className={`flex-1 min-h-0 overflow-y-auto ${activeSubTab === 'workstation' ? 'p-0' : 'p-6 md:p-8'}`}>
 
       {/* ==========================================================
           SUB-TAB 0: AUDIO WORKSTATION
           ========================================================== */}
       {activeSubTab === 'workstation' && (
-        <AudioWorkstation />
+        <AudioWorkstation
+          pendingImport={pendingWorkstationImport}
+          onPendingImportConsumed={(id) => {
+            setPendingWorkstationImport((current) => (current?.id === id ? null : current));
+          }}
+        />
       )}
 
       {/* ==========================================================
@@ -2482,25 +2455,32 @@ export default function AudioTools({ assistantAudioRequest = null }: AudioToolsP
                         </div>
                       )}
                       {primaryFactoryResult?.loudness && (
-                        <div className="grid grid-cols-2 gap-2 border-t border-slate-100/50 pt-2">
-                          <div className="rounded-lg bg-white/70 px-2 py-1.5">
-                            <span className="block text-[9px] text-slate-400">原始响度</span>
-                            <span className="font-bold text-slate-800">{formatLufs(primaryFactoryResult.loudness.beforeLufs)}</span>
+                        <div className="space-y-2 border-t border-slate-100/50 pt-2">
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="rounded-lg bg-white/70 px-2 py-1.5">
+                              <span className="block text-[9px] text-slate-400">原始响度</span>
+                              <span className="font-bold text-slate-800">{formatLufs(primaryFactoryResult.loudness.beforeLufs)}</span>
+                            </div>
+                            <div className="rounded-lg bg-white/70 px-2 py-1.5">
+                              <span className="block text-[9px] text-slate-400">处理后 / 目标</span>
+                              <span className="font-bold text-slate-800">
+                                {formatLufs(primaryFactoryResult.loudness.afterLufs)} / {primaryFactoryResult.loudness.targetLufs.toFixed(1)}
+                              </span>
+                            </div>
+                            <div className="rounded-lg bg-white/70 px-2 py-1.5">
+                              <span className="block text-[9px] text-slate-400">实际增益</span>
+                              <span className="font-bold text-slate-800">{formatSignedDb(primaryFactoryResult.loudness.appliedGainDb)}</span>
+                            </div>
+                            <div className="rounded-lg bg-white/70 px-2 py-1.5">
+                              <span className="block text-[9px] text-slate-400">峰值上限</span>
+                              <span className="font-bold text-slate-800">{primaryFactoryResult.loudness.peakCeilingDb.toFixed(1)} dBFS</span>
+                            </div>
                           </div>
-                          <div className="rounded-lg bg-white/70 px-2 py-1.5">
-                            <span className="block text-[9px] text-slate-400">处理后 / 目标</span>
-                            <span className="font-bold text-slate-800">
-                              {formatLufs(primaryFactoryResult.loudness.afterLufs)} / {primaryFactoryResult.loudness.targetLufs.toFixed(1)}
-                            </span>
-                          </div>
-                          <div className="rounded-lg bg-white/70 px-2 py-1.5">
-                            <span className="block text-[9px] text-slate-400">实际增益</span>
-                            <span className="font-bold text-slate-800">{formatSignedDb(primaryFactoryResult.loudness.appliedGainDb)}</span>
-                          </div>
-                          <div className="rounded-lg bg-white/70 px-2 py-1.5">
-                            <span className="block text-[9px] text-slate-400">峰值上限</span>
-                            <span className="font-bold text-slate-800">{primaryFactoryResult.loudness.peakCeilingDb.toFixed(1)} dBFS</span>
-                          </div>
+                          {primaryFactoryLoudnessLimited && (
+                            <p className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10px] font-semibold leading-relaxed text-amber-800">
+                              受峰值上限保护限制，处理后响度未达到目标值；试听确认后再下载，避免误用。
+                            </p>
+                          )}
                         </div>
                       )}
                     </div>
@@ -2571,14 +2551,14 @@ export default function AudioTools({ assistantAudioRequest = null }: AudioToolsP
                   )}
 
                   {/* Download Button */}
-                  {factoryBlob && factoryFile && (
+                  {factoryBlob && primaryFactoryResult && (
                     <button
                       type="button"
                       onClick={() => {
                         if (factoryResults.length > 1) {
                           void downloadFactoryResults();
                         } else {
-                          downloadFile(factoryBlob, factoryFile.name, factoryFormat);
+                          downloadFile(factoryBlob, primaryFactoryResult.sourceName, factoryFormat);
                         }
                       }}
                       className="w-full h-11 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer border border-slate-800"

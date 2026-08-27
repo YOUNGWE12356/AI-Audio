@@ -25,6 +25,7 @@ const SIDEBAR_MIN_WIDTH = 72;
 const SIDEBAR_COMPACT_WIDTH = 160;
 const SIDEBAR_DEFAULT_WIDTH = 192;
 const SIDEBAR_MAX_WIDTH = 520;
+const SIDEBAR_WIDTH_READY_KEY = 'ai-audio-sidebar-width-ready';
 
 interface SidebarProps {
   currentTab: TabType;
@@ -36,8 +37,11 @@ interface SidebarProps {
 export default function Sidebar({ currentTab, setCurrentTab, isMobileOpen, onMobileClose }: SidebarProps) {
   const [desktopWidth, setDesktopWidth] = React.useState(() => {
     if (typeof window === 'undefined') return SIDEBAR_DEFAULT_WIDTH;
+    const hasInitializedWidth = window.localStorage.getItem(SIDEBAR_WIDTH_READY_KEY) === '1';
     const saved = Number(window.localStorage.getItem('ai-audio-sidebar-width'));
-    return Number.isFinite(saved) ? Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, saved)) : SIDEBAR_DEFAULT_WIDTH;
+    return hasInitializedWidth && Number.isFinite(saved)
+      ? Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, saved))
+      : SIDEBAR_DEFAULT_WIDTH;
   });
   const [isResizingDesktop, setIsResizingDesktop] = React.useState(false);
   const isDesktopCompact = desktopWidth < SIDEBAR_COMPACT_WIDTH;
@@ -94,6 +98,7 @@ export default function Sidebar({ currentTab, setCurrentTab, isMobileOpen, onMob
   React.useEffect(() => {
     if (typeof window === 'undefined') return;
     window.localStorage.setItem('ai-audio-sidebar-width', String(desktopWidth));
+    window.localStorage.setItem(SIDEBAR_WIDTH_READY_KEY, '1');
   }, [desktopWidth]);
 
   const handleTabChange = (tab: TabType) => {

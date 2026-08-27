@@ -41,6 +41,11 @@ interface TranscriptionHistoryItem {
   languageProbability?: number;
 }
 
+interface SpeechToTextProps {
+  initialFile?: File;
+  assistantRequestId?: string;
+}
+
 const translationLanguageOptions = [
   { value: 'Chinese Mandarin', label: '中文', filenameSuffix: 'zh' },
   { value: 'English', label: '英文', filenameSuffix: 'en' },
@@ -51,7 +56,7 @@ const translationLanguageOptions = [
   { value: 'Spanish', label: '西班牙文', filenameSuffix: 'es' },
 ];
 
-export default function SpeechToText() {
+export default function SpeechToText({ initialFile, assistantRequestId }: SpeechToTextProps) {
   const [file, setFile] = useState<File | null>(null);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
@@ -151,6 +156,11 @@ export default function SpeechToText() {
     setTranslationError(null);
     setError(null);
   };
+
+  useEffect(() => {
+    if (!initialFile || !assistantRequestId) return;
+    handleFileChange(initialFile);
+  }, [assistantRequestId]);
 
   const triggerFileInput = () => {
     if (fileInputRef.current) {

@@ -82,6 +82,20 @@ const normalizeTokenHubModel = (value: string | undefined) => {
 const getGptGatewayConfig = (): GptGatewayConfig | null => {
   if (typeof window !== 'undefined' || process.env.AI_TEXT_PROVIDER === 'gemini') return null;
 
+  const openAiKey = process.env.OPENAI_API_KEY?.trim();
+  if (openAiKey) {
+    return {
+      apiKey: openAiKey,
+      baseUrl: trimTrailingSlashes(
+        process.env.OPENAI_BASE_URL?.trim()
+          || process.env.GPT_BASE_URL?.trim()
+          || 'https://api.openai.com/v1',
+      ),
+      model: process.env.OPENAI_MODEL?.trim() || process.env.GPT_MODEL?.trim() || 'gpt-5.6-sol',
+      provider: 'openai',
+    };
+  }
+
   const arkKey = process.env.ARK_API_KEY?.trim();
   if (arkKey) {
     return {
@@ -112,21 +126,95 @@ const getGptGatewayConfig = (): GptGatewayConfig | null => {
     };
   }
 
-  const openAiKey = process.env.OPENAI_API_KEY?.trim();
-  if (!openAiKey) return null;
-  return {
-    apiKey: openAiKey,
-    baseUrl: trimTrailingSlashes(
-      process.env.OPENAI_BASE_URL?.trim()
-        || process.env.GPT_BASE_URL?.trim()
-        || 'https://api.openai.com/v1',
-    ),
-    model: process.env.OPENAI_MODEL?.trim() || process.env.GPT_MODEL?.trim() || 'gpt-5.6-sol',
-    provider: 'openai',
-  };
+  return null;
 };
 
 export const isGptTextConfigured = () => Boolean(getGptGatewayConfig());
+
+export type GptStructuredResult<T> = {
+  value: T;
+  model: string;
+  provider: GptGatewayConfig['provider'];
+};
+
+export const generateGptStructuredJson = async <T>({
+  instructions,
+  input,
+  schema,
+  schemaName,
+  maxOutputTokens = 4000,
+  reasoningEffort = 'medium',
+}: {
+  instructions: string;
+  input: string;
+  schema: Record<string, unknown>;
+  schemaName: string;
+  maxOutputTokens?: number;
+  reasoningEffort?: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+}): Promise<GptStructuredResult<T>> => {
+  const gateway = getGptGatewayConfig();
+  if (!gateway) {
+    throw Object.assign(new Error('GPT 任务规划服务尚未配置。'), { status: 503 });
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 60_000);
+  try {
+    const response = await fetch(`${gateway.baseUrl}/responses`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${gateway.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: gateway.model,
+        instructions,
+        input,
+        reasoning: { effort: reasoningEffort },
+        max_output_tokens: maxOutputTokens,
+        text: {
+          format: {
+            type: 'json_schema',
+            name: schemaName.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64),
+            strict: true,
+            schema,
+          },
+        },
+      }),
+      signal: controller.signal,
+    });
+    const result = await response.json().catch(() => ({})) as GptResponse;
+    if (!response.ok) {
+      throw Object.assign(
+        new Error(result.error?.message || `GPT gateway request failed (${response.status})`),
+        { status: response.status },
+      );
+    }
+
+    const text = extractGptText(result);
+    if (!text) throw new Error('GPT gateway returned no structured output.');
+    const value = JSON.parse(text) as T;
+    const inputTokens = toUsageNumber(result.usage?.input_tokens);
+    const outputTokens = toUsageNumber(result.usage?.output_tokens);
+    const reasoningTokens = toUsageNumber(result.usage?.output_tokens_details?.reasoning_tokens);
+    recordAiUsage({
+      provider: 'gpt',
+      model: result.model || gateway.model,
+      inputTokens,
+      outputTokens,
+      reasoningTokens,
+      totalTokens: toUsageNumber(result.usage?.total_tokens) || inputTokens + outputTokens,
+      credits: 0,
+    });
+    return {
+      value,
+      model: result.model || gateway.model,
+      provider: gateway.provider,
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
 
 const collectGptCompatibleContent = (value: unknown, parts: GptInputContentPart[]): boolean => {
   if (typeof value === 'string') {
@@ -182,6 +270,15 @@ const getGptCompatibleInput = (contents: unknown): GptCompatibleInput | null => 
       ? [{ role: 'user', content: parts }]
       : textParts.join('\n\n'),
   };
+};
+
+const containsGeminiFileData = (value: unknown): boolean => {
+  if (Array.isArray(value)) return value.some(containsGeminiFileData);
+  if (!value || typeof value !== 'object') return false;
+
+  const part = value as Record<string, unknown>;
+  if ('fileData' in part || 'file_data' in part) return true;
+  return Array.isArray(part.parts) && part.parts.some(containsGeminiFileData);
 };
 
 const normalizeJsonSchema = (value: unknown): unknown => {
@@ -357,6 +454,25 @@ const getErrorStatus = (error: unknown) => {
   return match ? Number(match[1]) : undefined;
 };
 
+const isGeminiKeyFailoverError = (error: unknown) => {
+  const status = getErrorStatus(error);
+  if (status === 401 || status === 403 || status === 429) return true;
+
+  return /API_KEY_INVALID|API key not valid|invalid API key|PERMISSION_DENIED|RESOURCE_EXHAUSTED|quota|rate.?limit|billing/i
+    .test(getErrorText(error));
+};
+
+const getFallbackGeminiClient = async () => {
+  if (typeof window !== 'undefined') return null;
+
+  const fallbackKey = process.env.GEMINI_FALLBACK_API_KEY?.trim();
+  const primaryKey = (process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY)?.trim();
+  if (!fallbackKey || fallbackKey === primaryKey) return null;
+
+  const { GoogleGenAI } = await import('@google/genai');
+  return new GoogleGenAI({ apiKey: fallbackKey });
+};
+
 export const isRetryableGeminiError = (error: unknown) => {
   const status = getErrorStatus(error);
   if (status === 408 || status === 429 || (status !== undefined && status >= 500)) {
@@ -406,6 +522,7 @@ export async function generateGeminiContent(
   }
 
   let lastTransientError: unknown;
+  let shouldTryFallbackKey = false;
 
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
     try {
@@ -419,6 +536,11 @@ export async function generateGeminiContent(
       if (isGeminiUnsupportedLocationError(error)) {
         throw createFriendlyGeminiUnsupportedLocationError(error);
       }
+      if (isGeminiKeyFailoverError(error)) {
+        lastTransientError = error;
+        shouldTryFallbackKey = true;
+        break;
+      }
       if (!isRetryableGeminiError(error)) throw error;
       lastTransientError = error;
 
@@ -429,8 +551,35 @@ export async function generateGeminiContent(
     }
   }
 
+  const requestUsesUploadedFile = containsGeminiFileData(request.contents);
+  const fallbackClient = shouldTryFallbackKey && !requestUsesUploadedFile
+    ? await getFallbackGeminiClient()
+    : null;
+  if (shouldTryFallbackKey && requestUsesUploadedFile) {
+    console.warn(
+      '[ai-router] Gemini API key failover skipped because an uploaded file may be project-scoped; trying the fallback model with the primary key.',
+    );
+  }
+  if (fallbackClient) {
+    try {
+      const response = await fallbackClient.models.generateContent({
+        ...request,
+        model: GEMINI_PRIMARY_MODEL,
+      });
+      recordGeminiUsage(response, GEMINI_PRIMARY_MODEL);
+      console.info('[ai-router] Gemini request completed with the fallback API key.');
+      return response;
+    } catch (fallbackKeyError) {
+      console.warn(
+        '[ai-router] Gemini fallback API key failed; trying the fallback model.',
+        getErrorText(fallbackKeyError),
+      );
+      lastTransientError = fallbackKeyError;
+    }
+  }
+
   try {
-    const response = await ai.models.generateContent({
+    const response = await (fallbackClient || ai).models.generateContent({
       ...request,
       model: GEMINI_FALLBACK_MODEL,
     });

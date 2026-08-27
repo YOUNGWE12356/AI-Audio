@@ -126,6 +126,7 @@ const DUBBING_SUBNAV_MIN_WIDTH = 64;
 const DUBBING_SUBNAV_COMPACT_WIDTH = 168;
 const DUBBING_SUBNAV_DEFAULT_WIDTH = 184;
 const DUBBING_SUBNAV_MAX_WIDTH = 520;
+const DUBBING_SUBNAV_WIDTH_READY_KEY = 'ai-audio-dubbing-subnav-width-ready';
 
 const normalizeVoiceSearchText = (value: unknown) => (
   String(value || '')
@@ -579,8 +580,9 @@ export default function DubbingStudio({
   const [ttsInputMode, setTtsInputMode] = useState<'single' | 'batch'>('single');
   const [subNavWidth, setSubNavWidth] = useState(() => {
     if (typeof window === 'undefined') return DUBBING_SUBNAV_DEFAULT_WIDTH;
+    const hasInitializedWidth = window.localStorage.getItem(DUBBING_SUBNAV_WIDTH_READY_KEY) === '1';
     const saved = Number(window.localStorage.getItem('ai-audio-dubbing-subnav-width'));
-    return Number.isFinite(saved)
+    return hasInitializedWidth && Number.isFinite(saved)
       ? Math.max(DUBBING_SUBNAV_MIN_WIDTH, Math.min(DUBBING_SUBNAV_MAX_WIDTH, saved))
       : DUBBING_SUBNAV_DEFAULT_WIDTH;
   });
@@ -639,6 +641,7 @@ export default function DubbingStudio({
   useEffect(() => {
     if (typeof window === 'undefined') return;
     window.localStorage.setItem('ai-audio-dubbing-subnav-width', String(subNavWidth));
+    window.localStorage.setItem(DUBBING_SUBNAV_WIDTH_READY_KEY, '1');
   }, [subNavWidth]);
 
   useEffect(() => {
@@ -649,6 +652,18 @@ export default function DubbingStudio({
       return next;
     });
   }, [activeSubTab]);
+
+  useEffect(() => {
+    if (!assistantVoiceRequest?.id) return;
+    setActiveSubTab(assistantVoiceRequest.mode || 'tts');
+    if ((assistantVoiceRequest.mode || 'tts') === 'tts') {
+      const nextInputMode = assistantVoiceRequest.inputMode || 'single';
+      setTtsInputMode(nextInputMode);
+      if (nextInputMode === 'batch' && assistantVoiceRequest.text.trim()) {
+        setBatchVoiceRawText(assistantVoiceRequest.text);
+      }
+    }
+  }, [assistantVoiceRequest?.id, assistantVoiceRequest?.mode]);
 
   useEffect(() => {
     return () => {
@@ -1161,8 +1176,11 @@ export default function DubbingStudio({
     { id: 'zh', name: '中文 普通话 (Chinese)' },
     { id: 'en', name: '英语 美式/英式 (English)' },
     { id: 'ja', name: '日语 (Japanese)' },
+    { id: 'ko', name: '韩语 (Korean)' },
+    { id: 'ar', name: '阿拉伯语 (Arabic)' },
     { id: 'fr', name: '法语 (French)' },
     { id: 'de', name: '德语 (German)' },
+    { id: 'es', name: '西班牙语 (Spanish)' },
   ];
 
   const detectLanguage = (text: string): string | null => {
@@ -2084,7 +2102,14 @@ export default function DubbingStudio({
                       </div>
                       {assistantVoiceRequest.translationApplied && assistantVoiceRequest.sourceText && (
                         <div className="mt-1 truncate text-emerald-700/70" title={assistantVoiceRequest.sourceText}>
-                          已将中文台词翻译为英文；原文：{assistantVoiceRequest.sourceText}
+                          已将中文台词翻译为{
+                            assistantVoiceRequest.language === 'ar' ? '阿拉伯语'
+                              : assistantVoiceRequest.language === 'ja' ? '日语'
+                                : assistantVoiceRequest.language === 'ko' ? '韩语'
+                                  : assistantVoiceRequest.language === 'fr' ? '法语'
+                                    : assistantVoiceRequest.language === 'de' ? '德语'
+                                      : assistantVoiceRequest.language === 'es' ? '西班牙语' : '英语'
+                          }；原文：{assistantVoiceRequest.sourceText}
                         </div>
                       )}
                     </div>
@@ -2641,6 +2666,8 @@ export default function DubbingStudio({
           {visitedSubTabs.has('sts') && (
             <div hidden={activeSubTab !== 'sts'}>
               <SpeechToSpeech
+                initialFile={assistantVoiceRequest?.mode === 'sts' ? assistantVoiceRequest.file : undefined}
+                assistantRequestId={assistantVoiceRequest?.mode === 'sts' ? assistantVoiceRequest.id : undefined}
                 historyList={historyList}
                 setHistoryList={setHistoryList}
                 displayVoices={displayVoices}
@@ -2658,6 +2685,9 @@ export default function DubbingStudio({
           {visitedSubTabs.has('translate') && (
             <div hidden={activeSubTab !== 'translate'}>
               <CrossLanguageDubbing
+                initialFile={assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.file : undefined}
+                assistantRequestId={assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.id : undefined}
+                initialTargetLanguage={assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.language : undefined}
                 displayVoices={displayVoices}
                 setHistoryList={setHistoryList}
                 playingVoiceId={playingVoiceId}
@@ -2673,7 +2703,10 @@ export default function DubbingStudio({
           )}
           {visitedSubTabs.has('stt') && (
             <div hidden={activeSubTab !== 'stt'}>
-              <SpeechToText />
+              <SpeechToText
+                initialFile={assistantVoiceRequest?.mode === 'stt' ? assistantVoiceRequest.file : undefined}
+                assistantRequestId={assistantVoiceRequest?.mode === 'stt' ? assistantVoiceRequest.id : undefined}
+              />
             </div>
           )}
       </div>

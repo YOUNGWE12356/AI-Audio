@@ -55,6 +55,11 @@ import {
 } from '../services/sfxLibraryAdminService';
 import { DEFAULT_CATEGORIES, INITIAL_SOUNDS } from '../data/sfxData';
 import type { SoundEffect, SubCategory, CategoryGroup } from '../data/sfxData';
+import {
+  SFX_LIBRARY_CATEGORIES_KEY,
+  SFX_LIBRARY_SOUNDS_KEY,
+  publishSfxLibraryIndex,
+} from '../services/sfxLibraryIndex';
 
 interface ImportItem {
   id: string;
@@ -586,7 +591,13 @@ export const LOCAL_INITIAL_SOUNDS: SoundEffect[] = [
   }
 ];
 
-export default function SfxLibrary() {
+interface SfxLibraryProps {
+  assistantSearchQuery?: string;
+  assistantCategory?: string;
+  assistantSubcategory?: string;
+}
+
+export default function SfxLibrary({ assistantSearchQuery = '', assistantCategory = '', assistantSubcategory = '' }: SfxLibraryProps) {
   // --- States ---
   // Security lock states
   const [isAuthorized, setIsAuthorized] = useState(false);
@@ -629,7 +640,7 @@ export default function SfxLibrary() {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchHistory, setSearchHistory] = useState<string[]>(['金属撞击', '科幻激光', 'Q版点击']);
   const [showFilters, setShowFilters] = useState<boolean>(true);
-  
+
   // Custom expandable parent sections
   const [isCompanySfxParentExpanded, setIsCompanySfxParentExpanded] = useState<boolean>(true);
   const [isMusicParentExpanded, setIsMusicParentExpanded] = useState<boolean>(true);
@@ -637,7 +648,7 @@ export default function SfxLibrary() {
   // Dynamic Categories state
   const [categories, setCategories] = useState<CategoryGroup[]>(() => {
     if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('sfx_library_categories');
+      const saved = localStorage.getItem(SFX_LIBRARY_CATEGORIES_KEY);
       if (saved) {
         try {
           const parsed = JSON.parse(saved);
@@ -649,6 +660,25 @@ export default function SfxLibrary() {
     }
     return [];
   });
+
+  useEffect(() => {
+    const query = assistantSearchQuery.trim();
+    if (query) setSearchQuery(query);
+    const directory = assistantSubcategory.trim() || assistantCategory.trim();
+    if (directory) {
+      setSelectedCategory(directory);
+      const parentName = assistantCategory.trim();
+      const parentGroup = categories.find(group => group.name === parentName)
+        || categories.find(group => group.subCategories.some(subcategory => subcategory.name === directory));
+      if (parentGroup) {
+        setExpandedGroups(previous => ({ ...previous, [parentGroup.id]: true }));
+      }
+      // Directory matches should filter by the directory itself. Keeping the
+      // directory name in the free-text query would hide assets whose filename
+      // is unrelated to the project name.
+      if (assistantSubcategory.trim()) setSearchQuery('');
+    }
+  }, [assistantCategory, assistantSearchQuery, assistantSubcategory, categories]);
 
   // Category management helper states
   const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
@@ -777,7 +807,7 @@ export default function SfxLibrary() {
   // Dynamic Sounds state with backend synchronization
   const [sounds, setSounds] = useState<SoundEffect[]>(() => {
     if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('sfx_library_sounds');
+      const saved = localStorage.getItem(SFX_LIBRARY_SOUNDS_KEY);
       if (saved) {
         try {
           return JSON.parse(saved);
@@ -901,8 +931,9 @@ export default function SfxLibrary() {
         serverSnapshotRef.current = { categories: categoriesJson, sounds: soundsJson };
         setCategories(libraryState.categories);
         setSounds(libraryState.sounds);
-        localStorage.setItem('sfx_library_categories', categoriesJson);
-        localStorage.setItem('sfx_library_sounds', soundsJson);
+        localStorage.setItem(SFX_LIBRARY_CATEGORIES_KEY, categoriesJson);
+        localStorage.setItem(SFX_LIBRARY_SOUNDS_KEY, soundsJson);
+        publishSfxLibraryIndex(libraryState.categories, libraryState.sounds);
       }
       if (assetStatsData) setServerAssetStats(assetStatsData);
     } catch (err) {
@@ -932,8 +963,9 @@ export default function SfxLibrary() {
     if (!isLoadedFromServer.current) return;
     const categoriesJson = JSON.stringify(categories);
     const soundsJson = JSON.stringify(sounds);
-    localStorage.setItem('sfx_library_categories', categoriesJson);
-    localStorage.setItem('sfx_library_sounds', soundsJson);
+    localStorage.setItem(SFX_LIBRARY_CATEGORIES_KEY, categoriesJson);
+    localStorage.setItem(SFX_LIBRARY_SOUNDS_KEY, soundsJson);
+    publishSfxLibraryIndex(categories, sounds);
     if (!isAuthorized) return;
     if (
       categoriesJson === serverSnapshotRef.current.categories
@@ -1925,6 +1957,7 @@ export default function SfxLibrary() {
     if (sound.fileName.toLowerCase().includes(lowerQuery)) score += 8;
     if (sound.category.toLowerCase().includes(lowerQuery)) score += 5;
     if (sound.subcategory?.toLowerCase().includes(lowerQuery)) score += 5;
+    if (sound.path?.toLowerCase().includes(lowerQuery)) score += 7;
     if (sound.designer.toLowerCase().includes(lowerQuery)) score += 4;
 
     // Check tags matching

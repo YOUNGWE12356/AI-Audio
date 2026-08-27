@@ -20,9 +20,10 @@ import { HistoryItem, TabType } from '../types';
 interface WorkbenchProps {
   setCurrentTab: (tab: TabType) => void;
   historyList: HistoryItem[];
+  assistantPanel?: React.ReactNode;
 }
 
-export default function Workbench({ setCurrentTab, historyList }: WorkbenchProps) {
+export default function Workbench({ setCurrentTab, historyList, assistantPanel }: WorkbenchProps) {
   const studios = [
     {
       id: 'audio-director' as const,
@@ -142,18 +143,20 @@ export default function Workbench({ setCurrentTab, historyList }: WorkbenchProps
   ];
 
   return (
-    <div id="workbench-view" className="flex-1 p-8 space-y-8 max-w-6xl mx-auto w-full">
+    <div id="workbench-view" className="flex-1 p-8 space-y-6 max-w-6xl mx-auto w-full">
       {/* Welcome Banner */}
-      <div id="workbench-hero" className="relative overflow-hidden rounded-3xl bg-white border border-emerald-100 p-6 md:p-7 shadow-md">
-        <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-emerald-500/5 to-teal-500/5 blur-3xl pointer-events-none" />
+      <div id="workbench-hero" className="relative overflow-hidden p-6 md:p-7">
+        <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(ellipse_at_center,rgba(16,185,129,0.14)_0%,rgba(20,184,166,0.07)_42%,transparent_82%)]" />
         <div className="relative z-10">
-          <div className="space-y-3 text-center md:text-left">
+          <div className="space-y-3 text-center">
             <h2 className="text-2xl md:text-3xl font-extrabold text-slate-800 tracking-tight">
               欢迎回来，音频制作人
             </h2>
           </div>
         </div>
       </div>
+
+      {assistantPanel}
 
       {/* Main Studio Modules Grid */}
       <div className="space-y-4">

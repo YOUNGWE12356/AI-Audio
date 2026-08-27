@@ -23,12 +23,14 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { generateSfxRequirements } from '../services/geminiService';
+import type { AssistantRequirementsRequest } from './GlobalAssistant';
 
 type TemplateType = 'game_sfx_general' | 'game_sfx_middleware' | 'voiceover_general' | 'voiceover_multilang';
 type GenerateMode = 'replace' | 'append';
 
 interface SfxRequirementsProps {
   hasGeminiKey: boolean;
+  assistantRequest?: AssistantRequirementsRequest | null;
 }
 
 // Demo data matching our standard design principles
@@ -371,7 +373,7 @@ const simplifySingletonFilenameSuffixes = (items: any[]) => {
   });
 };
 
-export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) {
+export default function SfxRequirements({ hasGeminiKey, assistantRequest = null }: SfxRequirementsProps) {
   const [templateType, setTemplateType] = useState<TemplateType>('game_sfx_general');
   const [inputText, setInputText] = useState('');
   const [rowsByTemplate, setRowsByTemplate] = useState<Record<TemplateType, any[]>>(() => ({
@@ -403,8 +405,19 @@ export default function SfxRequirements({ hasGeminiKey }: SfxRequirementsProps) 
   const [activeGenerateMode, setActiveGenerateMode] = useState<GenerateMode>('replace');
   
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const consumedAssistantRequestRef = useRef<string | null>(null);
   const rows = rowsByTemplate[templateType] || [];
   const hasCurrentRequirementDraft = draftByTemplate[templateType] || false;
+
+  useEffect(() => {
+    if (!assistantRequest || consumedAssistantRequestRef.current === assistantRequest.id) return;
+    consumedAssistantRequestRef.current = assistantRequest.id;
+    if (assistantRequest.template) setTemplateType(assistantRequest.template);
+    setInputText(assistantRequest.prompt);
+    setError(null);
+    setSuccess(false);
+    setSuccessMessage('已将智能助手识别出的内容写入需求描述，请确认后生成需求表。');
+  }, [assistantRequest]);
 
   const setRowsForTemplate = (
     type: TemplateType,

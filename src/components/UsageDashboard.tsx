@@ -51,7 +51,7 @@ function ProviderSummary({ provider, usage }: { provider: typeof PROVIDERS[numbe
         </span>
       </div>
       <div className="mt-4">
-        <p className="text-[10px] text-slate-400">{provider.key === 'elevenLabs' ? 'Credits' : '总 Token'}</p>
+        <p className="text-[10px] text-slate-400">{provider.key === 'elevenLabs' ? '已消耗积分' : '总 Token'}</p>
         <p className="mt-1 font-mono text-2xl font-semibold text-slate-900">{primaryValue}</p>
       </div>
       {provider.key !== 'elevenLabs' ? (
@@ -62,7 +62,7 @@ function ProviderSummary({ provider, usage }: { provider: typeof PROVIDERS[numbe
         </div>
       ) : usage.unmeteredRequests > 0 ? (
         <p className="mt-3 border-t border-slate-100 pt-3 text-[10px] text-amber-700">
-          {usage.unmeteredRequests} 次响应未返回 credit 计费头，已记调用但未计入 credits。
+          {usage.unmeteredRequests} 次调用未返回积分计费信息，已记录调用次数，暂未计入积分。
         </p>
       ) : null}
     </div>
@@ -95,7 +95,7 @@ function MemberUsageTable({
               <th className="px-4 py-2.5 font-semibold">成员 / 设备</th>
               <th className="px-3 py-2.5 font-semibold">身份来源</th>
               <th className="px-3 py-2.5 text-right font-semibold">调用</th>
-              <th className="px-3 py-2.5 text-right font-semibold">ElevenLabs Credits</th>
+              <th className="px-3 py-2.5 text-right font-semibold">ElevenLabs 积分</th>
               <th className="px-3 py-2.5 text-right font-semibold">Gemini Token</th>
               <th className="px-3 py-2.5 text-right font-semibold">GPT Token</th>
               <th className="px-3 py-2.5 text-right font-semibold">总 Token</th>
@@ -145,7 +145,7 @@ function MemberUsageTable({
                                 <th className="pb-2 text-left font-semibold">功能</th>
                                 <th className="pb-2 text-left font-semibold">服务 / 模型</th>
                                 <th className="pb-2 text-right font-semibold">调用</th>
-                                <th className="pb-2 text-right font-semibold">Credits</th>
+                                <th className="pb-2 text-right font-semibold">积分</th>
                                 <th className="pb-2 text-right font-semibold">输入</th>
                                 <th className="pb-2 text-right font-semibold">输出</th>
                                 <th className="pb-2 text-right font-semibold">思考</th>
@@ -314,7 +314,7 @@ export default function UsageDashboard() {
                     <th className="px-4 py-2.5 font-semibold">功能</th>
                     <th className="px-3 py-2.5 font-semibold">服务 / 模型</th>
                     <th className="px-3 py-2.5 text-right font-semibold">调用</th>
-                    <th className="px-3 py-2.5 text-right font-semibold">Credits</th>
+                    <th className="px-3 py-2.5 text-right font-semibold">积分</th>
                     <th className="px-3 py-2.5 text-right font-semibold">输入 Token</th>
                     <th className="px-3 py-2.5 text-right font-semibold">输出 Token</th>
                     <th className="px-3 py-2.5 text-right font-semibold">思考 Token</th>

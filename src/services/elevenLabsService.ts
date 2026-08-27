@@ -39,6 +39,16 @@ export interface TranslateDubbingResult {
   timingMode: 'natural' | 'match' | 'strict';
   speedRatio?: number;
   qualityMode?: ElevenLabsQualityMode;
+  dubbingModel?: 'dubbing_v2' | 'manual_tts' | 'local_chatterbox' | 'local_cosyvoice3' | 'local_multispeaker';
+  cloningStrength?: number;
+  outputFormat?: 'mp3' | 'mp4' | 'wav';
+}
+
+export interface ElevenLabsDubbingV2Options {
+  sourceLanguage?: string;
+  targetLanguage: string;
+  cloningStrength?: number;
+  outputFormat?: 'mp3' | 'mp4';
 }
 
 const resolveQualityMode = (options?: ElevenLabsGenerationOptions): ElevenLabsQualityMode => (
@@ -692,6 +702,34 @@ export async function translateDubbingAudio(
 }
 
 /**
+ * Uses ElevenLabs Automatic Dubbing (Dubbing v2) so speaker identity,
+ * emotion, timing, and the original background mix are handled by ElevenLabs.
+ */
+export async function translateDubbingV2Audio(
+  audioFile: File | Blob,
+  options: ElevenLabsDubbingV2Options,
+): Promise<TranslateDubbingResult> {
+  if (!isBrowser) {
+    throw new Error('translateDubbingV2Audio is only available through the browser API proxy.');
+  }
+
+  const proxyFormData = new FormData();
+  proxyFormData.append('audio', audioFile, audioFile instanceof File ? audioFile.name : 'source.wav');
+  proxyFormData.append('sourceLanguage', options.sourceLanguage || 'auto');
+  proxyFormData.append('targetLanguage', options.targetLanguage);
+  proxyFormData.append(
+    'cloningStrength',
+    String(Math.min(10, Math.max(0, Math.round(options.cloningStrength ?? 7)))),
+  );
+  proxyFormData.append('outputFormat', options.outputFormat || 'mp3');
+
+  return requestJson<TranslateDubbingResult>('/api/ai/elevenlabs/translate-dubbing-v2', {
+    method: 'POST',
+    body: proxyFormData,
+  });
+}
+
+/**
  * Isolates vocals from an audio file (removes background noise, music, etc.)
  * using ElevenLabs Audio Isolation API.
  */
@@ -736,11 +774,12 @@ export async function isolateAudio(audioFile: File | Blob): Promise<Blob> {
  * Transcribes speech from an audio file to text
  * using ElevenLabs Speech to Text API (Scribe model).
  */
-export async function transcribeSpeech(
-  audioFile: File | Blob,
-  languageCode?: string,
-  tagAudioEvents: boolean = true
-): Promise<{
+export interface SpeechTranscriptionOptions {
+  diarize?: boolean;
+  numSpeakers?: number;
+}
+
+export interface SpeechTranscriptionResult {
   text: string;
   language_code?: string;
   language_probability?: number;
@@ -750,13 +789,24 @@ export async function transcribeSpeech(
     start?: number;
     end?: number;
     type?: string;
+    speaker_id?: string;
+    speakerId?: string;
   }>;
   segments?: Array<{
     text?: string;
     start?: number;
     end?: number;
+    speaker_id?: string;
+    speakerId?: string;
   }>;
-}> {
+}
+
+export async function transcribeSpeech(
+  audioFile: File | Blob,
+  languageCode?: string,
+  tagAudioEvents: boolean = true,
+  options: SpeechTranscriptionOptions = {},
+): Promise<SpeechTranscriptionResult> {
   if (isBrowser) {
     const proxyFormData = new FormData();
     proxyFormData.append('audio', audioFile, audioFile instanceof File ? audioFile.name : 'audio.wav');
@@ -764,6 +814,10 @@ export async function transcribeSpeech(
       proxyFormData.append('languageCode', languageCode);
     }
     proxyFormData.append('tagAudioEvents', String(tagAudioEvents));
+    if (options.diarize) proxyFormData.append('diarize', 'true');
+    if (typeof options.numSpeakers === 'number' && Number.isFinite(options.numSpeakers)) {
+      proxyFormData.append('numSpeakers', String(Math.round(options.numSpeakers)));
+    }
 
     const response = await fetch('/api/ai/elevenlabs/speech-to-text', {
       method: 'POST',
@@ -785,11 +839,15 @@ export async function transcribeSpeech(
 
   const formData = new FormData();
   formData.append("file", audioFile, audioFile instanceof File ? audioFile.name : "audio.wav");
-  formData.append("model_id", "scribe_v1");
+  formData.append("model_id", "scribe_v2");
   if (languageCode && languageCode !== "auto") {
     formData.append("language_code", languageCode);
   }
   formData.append("tag_audio_events", String(tagAudioEvents));
+  if (options.diarize) formData.append("diarize", "true");
+  if (typeof options.numSpeakers === 'number' && Number.isFinite(options.numSpeakers)) {
+    formData.append("num_speakers", String(Math.round(options.numSpeakers)));
+  }
 
   const response = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
     method: "POST",
@@ -804,6 +862,6 @@ export async function transcribeSpeech(
     throw new Error(`ElevenLabs STT API error: ${errorData.detail?.message || response.statusText}`);
   }
 
-  recordElevenLabsResponseUsage(response, 'scribe_v1');
+  recordElevenLabsResponseUsage(response, 'scribe_v2');
   return await response.json();
 }

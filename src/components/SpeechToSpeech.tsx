@@ -29,6 +29,8 @@ import { generateSpeechToSpeech } from '../services/elevenLabsService';
 import { downloadAudioHelper } from '../utils/downloadHelper';
 
 interface SpeechToSpeechProps {
+  initialFile?: File;
+  assistantRequestId?: string;
   historyList: HistoryItem[];
   setHistoryList: React.Dispatch<React.SetStateAction<HistoryItem[]>>;
   displayVoices: VoiceItem[];
@@ -110,6 +112,8 @@ const buildStsMonoPeaks = (audioBuffer: AudioBuffer, barCount = 72) => {
 };
 
 export default function SpeechToSpeech({
+  initialFile,
+  assistantRequestId,
   historyList,
   setHistoryList,
   displayVoices,
@@ -250,6 +254,11 @@ export default function SpeechToSpeech({
     if (pendingStsOptions.optionB) URL.revokeObjectURL(pendingStsOptions.optionB.url);
     setPendingStsOptions({ optionA: null, optionB: null });
   };
+
+  useEffect(() => {
+    if (!initialFile || !assistantRequestId) return;
+    handleStsFileChange(initialFile);
+  }, [assistantRequestId]);
 
   const toggleStsInputPlay = () => {
     if (stsInputAudioRef.current) {
