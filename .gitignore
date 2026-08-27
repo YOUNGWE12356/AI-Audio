@@ -2,6 +2,10 @@ node_modules/
 build/
 dist/
 coverage/
+uploads/*
+!uploads/.gitkeep
+/test.txt
+/test_*.mp4
 .DS_Store
 *.log
 .env*
