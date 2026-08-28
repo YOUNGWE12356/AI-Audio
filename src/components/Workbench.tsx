@@ -159,7 +159,7 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
       {assistantPanel}
 
       {/* Main Studio Modules Grid */}
-      <div className="space-y-4">
+      <div className="-mt-2 space-y-4">
         <h3 className="text-base font-bold text-slate-800">创意工作空间</h3>
         <div id="studios-grid" className="grid grid-cols-1 md:grid-cols-2 gap-5">
           {studios.map((studio) => {

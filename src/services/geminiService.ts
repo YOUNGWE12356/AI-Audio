@@ -1841,7 +1841,7 @@ export async function translateTextToLanguage(
   try {
     const { ai, ThinkingLevel } = await getAI();
     const durationInstruction = typeof options?.maxDurationSeconds === 'number' && Number.isFinite(options.maxDurationSeconds)
-      ? `The translated line must be concise enough to speak naturally within about ${Math.max(0.5, options.maxDurationSeconds).toFixed(1)} seconds. Prefer shorter idiomatic wording and remove verbal redundancy, but keep every essential fact and intention.`
+      ? `Aim to speak naturally within about ${Math.max(0.5, options.maxDurationSeconds).toFixed(1)} seconds when possible. Never omit, summarize, merge, or remove spoken content to fit the duration. Preserve repetitions, fillers, interjections, hesitations, and conversational emphasis. If timing and completeness conflict, prioritize complete dialogue.`
       : '';
     const prompt = `You are a professional dubbing translator.
 Translate the source dialogue into ${normalizedTargetLanguage}.

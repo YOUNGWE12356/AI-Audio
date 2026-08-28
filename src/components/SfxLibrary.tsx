@@ -1508,6 +1508,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   };
 
   const [selectedSoundId, setSelectedSoundId] = useState<string>('sfx-1');
+  const [isPropertiesPanelOpen, setIsPropertiesPanelOpen] = useState(true);
   const selectedSound = sounds.find(s => s.id === selectedSoundId) || sounds[0] || { duration: 1, name: '', fileName: '', format: '', tags: [], size: '', channels: '', sampleRate: '', designer: '', path: '' };
 
   // Global playback control states
@@ -4034,7 +4035,10 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                   return (
                     <div
                       key={sound.id}
-                      onClick={() => setSelectedSoundId(sound.id)}
+                      onClick={() => {
+                        setSelectedSoundId(sound.id);
+                        setIsPropertiesPanelOpen(true);
+                      }}
                       className={`group p-3 rounded-xl border transition-all cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
                         isSelected 
                           ? 'bg-emerald-50/60 border-emerald-300 shadow-sm' 
@@ -4267,7 +4271,20 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
         </section>
 
         {/* ==================== RIGHT COLUMN: Properties & AI Recommendations ==================== */}
+        {isPropertiesPanelOpen && (
         <aside id="sfx-lib-right-panel" className="w-64 bg-white border-l border-slate-200 flex flex-col overflow-y-auto custom-scrollbar">
+          <div className="flex items-center justify-between px-3 py-2 border-b border-slate-200 bg-white shrink-0">
+            <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">资源详情</span>
+            <button
+              type="button"
+              onClick={() => setIsPropertiesPanelOpen(false)}
+              className="p-1 rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors"
+              aria-label="关闭资源详情"
+              title="关闭资源详情"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
           
           {/* Audio Drag Area mockup */}
           <div className="p-4 border-b border-slate-200 bg-slate-50/60 text-center space-y-2 shrink-0">
@@ -4387,6 +4404,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
           </div>
 
         </aside>
+        )}
 
       </div>
 

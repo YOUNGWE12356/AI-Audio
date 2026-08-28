@@ -186,6 +186,8 @@ const buildMultiSpeakerDialogue = (transcription: Awaited<ReturnType<typeof tran
   const events: MultiSpeakerAudioEvent[] = [];
   let current: Array<(typeof timedWords)[number]> = [];
   const flush = () => {
+    while (current[0]?.isSpacing) current.shift();
+    while (current.at(-1)?.isSpacing) current.pop();
     if (current.length === 0) return;
     const sourceText = current.map(word => word.text).join('').replace(/\s+/g, ' ').trim();
     if (sourceText) {
@@ -253,10 +255,15 @@ const buildMultiSpeakerDialogue = (transcription: Awaited<ReturnType<typeof tran
     const previous = mergedSegments.at(-1);
     const previousDuration = previous ? previous.end - previous.start : 0;
     const segmentDuration = segment.end - segment.start;
+      const hasInterveningAudioEvent = Boolean(previous) && mergedEvents.some(event => (
+      event.start >= previous!.end - 0.02
+      && event.end <= segment.start + 0.02
+    ));
     const canMerge = Boolean(previous)
       && previous!.speakerId === segment.speakerId
       && segment.start - previous!.end <= 1.4
-      && segment.end - previous!.start <= 16;
+      && segment.end - previous!.start <= 16
+      && !hasInterveningAudioEvent;
     const shouldMerge = canMerge && (
       previousDuration < 1.4
       || segmentDuration < 1.4
@@ -295,8 +302,8 @@ const buildMultiSpeakerProfiles = (segments: MultiSpeakerSegment[], duration?: n
     const candidates = speakerSegments
       .filter(segment => segment.end - segment.start >= 0.7)
       .map(segment => ({
-        start: Math.max(0, segment.start - 0.12),
-        end: Math.min(maxDuration, segment.end + 0.12),
+        start: Math.max(0, segment.start + 0.03),
+        end: Math.min(maxDuration, segment.end - 0.03),
       }))
       .sort((a, b) => (b.end - b.start) - (a.end - a.start));
     const referenceRanges: Array<{ start: number; end: number }> = [];
@@ -436,7 +443,7 @@ const localPerformancePresets = [
     label: '自然',
     description: '音色与目标语言自然度平衡',
     exaggeration: 0.5,
-    cfgWeight: 0.3,
+    cfgWeight: 0.5,
     temperature: 0.8,
   },
   {
@@ -569,7 +576,7 @@ export default function CrossLanguageDubbing({
   const [sourceFileUrl, setSourceFileUrl] = useState<string | null>(null);
   const [sourceLanguage, setSourceLanguage] = useState('auto');
   const [targetLanguage, setTargetLanguage] = useState('English');
-  const [dubbingMode, setDubbingMode] = useState<DubbingMode>('dubbing_v2');
+  const [dubbingMode, setDubbingMode] = useState<DubbingMode>('self_hosted');
   const [localTargetLanguage, setLocalTargetLanguage] = useState('en');
   const [localTargetText, setLocalTargetText] = useState('');
   const [localDialogueMode, setLocalDialogueMode] = useState<LocalDialogueMode>('single');
@@ -827,6 +834,29 @@ export default function CrossLanguageDubbing({
     setTargetTextExtractionMessage('已自动提取并翻译，可继续修改');
   };
 
+  const translateTimedSingleSpeakerDialogue = async (
+    segments: MultiSpeakerSegment[],
+    language: string,
+    requestId: number,
+    eventCount: number,
+  ) => {
+    const translatedSegments = await Promise.all(segments.map(async segment => ({
+      ...segment,
+      speakerId: 'speaker_0',
+      targetText: (await translateTextToLanguage(segment.sourceText, localTargetLanguageLabel(language), {
+        preserveTone: true,
+        maxDurationSeconds: Math.max(0.5, segment.end - segment.start),
+      })).trim().slice(0, 800),
+    })));
+    if (targetTextRequestRef.current !== requestId) return;
+    setMultiSpeakerSegments(translatedSegments);
+    setLocalTargetText(translatedSegments.map(segment => segment.targetText).join('\n\n').slice(0, 800));
+    extractedSourceTextRef.current = translatedSegments.map(segment => segment.sourceText).join(' ');
+    setTargetTextExtractionMessage(
+      `已识别 ${translatedSegments.length} 段台词；笑声、呼吸等 ${eventCount} 个语气事件将按原时间保留`,
+    );
+  };
+
   const extractMultiSpeakerDialogue = async (file: File) => {
     const requestId = ++targetTextRequestRef.current;
     setIsExtractingTargetText(true);
@@ -905,20 +935,50 @@ export default function CrossLanguageDubbing({
     });
   };
 
+  const updateSingleSpeakerDialogue = (value: string) => {
+    const normalizedValue = value.slice(0, 800);
+    setLocalTargetText(normalizedValue);
+    setMultiSpeakerSegments(current => {
+      if (current.length === 0 || current.some(segment => segment.speakerId !== 'speaker_0')) return current;
+      const paragraphs = normalizedValue.split(/\n\s*\n/);
+      return current.map((segment, index) => ({
+        ...segment,
+        targetText: index < current.length - 1
+          ? (paragraphs[index] || '').slice(0, 800)
+          : paragraphs.slice(index).join('\n\n').slice(0, 800),
+      }));
+    });
+  };
+
   const extractTargetTextFromFile = async (file: File) => {
     const requestId = ++targetTextRequestRef.current;
     setIsExtractingTargetText(true);
     setTargetTextExtractionMessage('正在从上传文件提取台词…');
     try {
-      const transcription = await transcribeSpeech(file, undefined, false);
+      const transcription = await transcribeSpeech(file, undefined, true);
       if (targetTextRequestRef.current !== requestId) return;
-      const sourceText = String(transcription.text || '').trim();
-      if (!sourceText) throw new Error('没有识别到清晰台词，请换一段包含人声的文件。');
-      extractedSourceTextRef.current = sourceText;
-      await translateExtractedTargetText(sourceText, localTargetLanguage, requestId);
+      const dialogue = buildMultiSpeakerDialogue(transcription);
+      const segments = dialogue.segments.map(segment => ({ ...segment, speakerId: 'speaker_0' }));
+      const events = dialogue.events.map(event => ({ ...event, speakerId: 'speaker_0' }));
+      if (segments.length === 0) throw new Error('没有识别到带时间码的清晰台词，请换一段包含人声的文件。');
+      if (segments.length > 40) throw new Error('当前识别到超过 40 段台词，请先截取较短的素材。');
+      const profiles = buildMultiSpeakerProfiles(segments, sourceDuration);
+      setMultiSpeakerSegments(segments);
+      setMultiSpeakerAudioEvents(events);
+      setMultiSpeakerProfiles(profiles);
+      const primaryProfile = profiles[0];
+      if (primaryProfile) {
+        setLocalReferenceStart(primaryProfile.referenceStart);
+        setLocalReferenceEnd(primaryProfile.referenceEnd);
+      }
+      setTargetTextExtractionMessage(`已识别 ${segments.length} 段台词和 ${events.length} 个语气事件，正在逐句翻译…`);
+      await translateTimedSingleSpeakerDialogue(segments, localTargetLanguage, requestId, events.length);
     } catch (extractionError: any) {
       if (targetTextRequestRef.current !== requestId) return;
       extractedSourceTextRef.current = '';
+      setMultiSpeakerSegments([]);
+      setMultiSpeakerAudioEvents([]);
+      setMultiSpeakerProfiles([]);
       setTargetTextExtractionMessage(extractionError?.message || '自动提取失败，请手动输入台词。');
     } finally {
       if (targetTextRequestRef.current === requestId) setIsExtractingTargetText(false);
@@ -958,7 +1018,11 @@ export default function CrossLanguageDubbing({
     const requestId = ++targetTextRequestRef.current;
     setIsExtractingTargetText(true);
     setTargetTextExtractionMessage('正在按新的目标语言翻译台词…');
-    void translateExtractedTargetText(sourceText, localTargetLanguage, requestId)
+    const translationPromise = multiSpeakerSegments.length > 0
+      && multiSpeakerSegments.every(segment => segment.speakerId === 'speaker_0')
+      ? translateTimedSingleSpeakerDialogue(multiSpeakerSegments, localTargetLanguage, requestId, multiSpeakerAudioEvents.length)
+      : translateExtractedTargetText(sourceText, localTargetLanguage, requestId);
+    void translationPromise
       .catch((translationError: any) => {
         if (targetTextRequestRef.current !== requestId) return;
         setTargetTextExtractionMessage(translationError?.message || '重新翻译失败，请手动修改台词。');
@@ -1136,26 +1200,33 @@ export default function CrossLanguageDubbing({
     }
   };
 
-  const generateMultiSpeakerDubbing = async () => {
+  const generateTimedLocalDubbing = async (dialogueMode: LocalDialogueMode) => {
     if (!sourceFile || !multiSpeakerTargetReady) {
-      throw new Error('请先识别说话人，并确认每段目标语言台词。');
+      throw new Error('请先提取带时间码的台词，并确认每段目标语言内容。');
     }
     const selectedPreset = localPerformancePresets.find(item => item.value === localPerformancePreset)
       || localPerformancePresets[0];
     const alternatePreset = localPerformancePresets.find(item => (
       item.value === (selectedPreset.value === 'stable' ? 'natural' : 'stable')
     )) || localPerformancePresets[0];
-    setMultiSpeakerGenerationProgress(`正在为 ${multiSpeakerProfiles.length} 位角色批量生成 A/B 两版，共 ${multiSpeakerSegments.length} 个内部轮次…`);
-    const batchResult = await cloneMultiSpeakerVoicesLocally(sourceFile, {
+    setMultiSpeakerGenerationProgress(dialogueMode === 'single'
+      ? `正在按原时间线生成单人配音 A/B 两版，共 ${multiSpeakerSegments.length} 段台词…`
+      : `正在为 ${multiSpeakerProfiles.length} 位角色批量生成 A/B 两版，共 ${multiSpeakerSegments.length} 个内部轮次…`);
+      const batchResult = await cloneMultiSpeakerVoicesLocally(sourceFile, {
       engine: localVoiceEngine,
+      dialogueMode,
       language: localTargetLanguage,
       sourceDuration: sourceDuration || undefined,
-      profiles: multiSpeakerProfiles.map(profile => ({
-        id: profile.id,
-        referenceStart: profile.referenceStart,
-        referenceEnd: profile.referenceEnd,
-        referenceRanges: profile.referenceRanges,
-      })),
+      profiles: multiSpeakerProfiles.map(profile => {
+        return {
+          id: profile.id,
+          referenceStart: dialogueMode === 'single' ? localReferenceStart : profile.referenceStart,
+          referenceEnd: dialogueMode === 'single' ? localReferenceEnd : profile.referenceEnd,
+          referenceRanges: dialogueMode === 'single'
+            ? [{ start: localReferenceStart, end: localReferenceEnd }]
+            : profile.referenceRanges,
+        };
+      }),
       segments: multiSpeakerSegments,
       events: multiSpeakerAudioEvents,
       versions: [selectedPreset, alternatePreset].map((preset, index) => ({
@@ -1206,15 +1277,20 @@ export default function CrossLanguageDubbing({
       const alternateLocalPreset = localPerformancePresets.find(item => (
         item.value === (selectedLocalPreset.value === 'stable' ? 'natural' : 'stable')
       )) || localPerformancePresets[0];
-      const multiSpeakerBatch = dubbingMode === 'self_hosted' && localDialogueMode === 'multi'
-        ? await generateMultiSpeakerDubbing()
+      const shouldUseTimedLocalBatch = dubbingMode === 'self_hosted'
+        && multiSpeakerTargetReady
+        && (localDialogueMode === 'multi' || localVoiceEngine === 'chatterbox');
+      const timedLocalBatch = shouldUseTimedLocalBatch
+        ? await generateTimedLocalDubbing(localDialogueMode)
         : null;
       const dataA = dubbingMode === 'dubbing_v2'
         ? await translateDubbingV2Audio(sourceFile, { sourceLanguage, targetLanguage, cloningStrength, outputFormat })
         : dubbingMode === 'self_hosted'
           ? localDialogueMode === 'multi'
-            ? multiSpeakerBatch!.options.find(option => option.id === 'A')!.data
-            : await cloneVoiceLocally(sourceFile, {
+            ? timedLocalBatch!.options.find(option => option.id === 'A')!.data
+            : timedLocalBatch
+              ? timedLocalBatch.options.find(option => option.id === 'A')!.data
+              : await cloneVoiceLocally(sourceFile, {
               engine: localVoiceEngine,
               language: localTargetLanguage,
               text: localTargetText.trim(),
@@ -1235,8 +1311,10 @@ export default function CrossLanguageDubbing({
         });
       const dataB = dubbingMode === 'self_hosted'
         ? localDialogueMode === 'multi'
-          ? multiSpeakerBatch!.options.find(option => option.id === 'B')!.data
-          : await cloneVoiceLocally(sourceFile, {
+          ? timedLocalBatch!.options.find(option => option.id === 'B')!.data
+          : timedLocalBatch
+            ? timedLocalBatch.options.find(option => option.id === 'B')!.data
+            : await cloneVoiceLocally(sourceFile, {
           engine: localVoiceEngine,
           language: localTargetLanguage,
           text: localTargetText.trim(),
@@ -1542,17 +1620,8 @@ export default function CrossLanguageDubbing({
                 <Languages className="w-4 h-4 text-emerald-600" />
                 跨语种转换
               </h3>
-              <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                {dubbingMode === 'self_hosted'
-                  ? '使用本机显卡克隆参考音色，并把目标语言台词生成成新的配音。'
-                  : '上传音频或视频，自动识别台词并翻译成目标语言。'}
-              </p>
             </div>
-            {dubbingMode === 'self_hosted' ? (
-              <span className="shrink-0 rounded-full border border-sky-200 bg-sky-50 px-2.5 py-1 text-[10px] font-bold text-sky-700">
-                本机克隆 · 不使用 Dubbing v2
-              </span>
-            ) : (
+            {dubbingMode !== 'self_hosted' && (
               <span className="shrink-0 rounded-full border border-emerald-100 bg-emerald-50 px-2.5 py-1 text-[10px] font-bold text-emerald-700">
                 Pro 模式会自动跟随设置
               </span>
@@ -1562,9 +1631,9 @@ export default function CrossLanguageDubbing({
           <div className="rounded-2xl border border-emerald-200 bg-emerald-50/60 p-3.5 space-y-3">
             <div className="grid grid-cols-3 gap-1.5 rounded-xl bg-white/80 p-1">
               {([
-                { value: 'dubbing_v2' as const, label: 'Dubbing v2 · 保留原声线' },
-                { value: 'manual_tts' as const, label: '指定声音 · 兼容模式' },
-                { value: 'self_hosted' as const, label: '自研模式 · 本地克隆' },
+                { value: 'self_hosted' as const, label: '自研模式 克隆转换' },
+                { value: 'manual_tts' as const, label: '匹配相似声音' },
+                { value: 'dubbing_v2' as const, label: 'Dubbing v2' },
               ]).map(option => (
                 <button
                   key={option.value}
@@ -1663,7 +1732,12 @@ export default function CrossLanguageDubbing({
                 {isSourcePlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
               </button>
               <div className="min-w-0 flex-1">
-                <p className="truncate text-xs font-bold text-slate-750">{sourceFile?.name}</p>
+                <div className="flex items-center gap-2">
+                  <p className="truncate text-xs font-bold text-slate-750">{sourceFile?.name}</p>
+                  <span className="shrink-0 rounded-full border border-slate-200 bg-white px-1.5 py-0.5 text-[9px] font-bold text-slate-500">
+                    原始上传音频
+                  </span>
+                </div>
                 <p className="text-[10px] text-slate-400">{sourceFile ? `${(sourceFile.size / 1024 / 1024).toFixed(2)} MB` : '源音频'}</p>
               </div>
               <button
@@ -1730,10 +1804,18 @@ export default function CrossLanguageDubbing({
                           key={option.value}
                           type="button"
                           onClick={() => {
+                            if (option.value === localDialogueMode) return;
                             setLocalDialogueMode(option.value);
                             setError(null);
                             setResult(null);
                             setPendingResultOptions({ optionA: null, optionB: null });
+                            targetTextRequestRef.current += 1;
+                            extractedSourceTextRef.current = '';
+                            setLocalTargetText('');
+                            setMultiSpeakerSegments([]);
+                            setMultiSpeakerAudioEvents([]);
+                            setMultiSpeakerProfiles([]);
+                            setMultiSpeakerTimelineSummary(null);
                             setTargetTextExtractionMessage(sourceFile
                               ? option.value === 'multi'
                                 ? '点击识别说话人与台词'
@@ -1815,7 +1897,7 @@ export default function CrossLanguageDubbing({
                   )}
                   <textarea
                     value={localTargetText}
-                    onChange={(event) => setLocalTargetText(event.target.value.slice(0, 800))}
+                    onChange={(event) => updateSingleSpeakerDialogue(event.target.value)}
                     rows={4}
                     placeholder="输入或粘贴已经翻译好的目标语言台词..."
                     className="w-full resize-y rounded-lg border border-sky-200 bg-white px-3 py-2.5 text-xs leading-relaxed text-slate-800 outline-none transition-colors placeholder:text-slate-400 focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
@@ -1852,7 +1934,9 @@ export default function CrossLanguageDubbing({
                   <div className="space-y-2">
                     <div className="flex items-center justify-between gap-3">
                       <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">角色与参考音色</span>
-                      <span className="text-[9px] text-slate-400">自动拼接每位角色的多段干净台词</span>
+                      <span className="text-[9px] text-slate-400">
+                        {localVoiceEngine === 'cosyvoice3' ? '每位角色使用一段连续主参考音' : '自动拼接每位角色的多段干净台词'}
+                      </span>
                     </div>
                     <div className="divide-y divide-sky-100 border-y border-sky-100">
                       {multiSpeakerProfiles.map(profile => (
@@ -1866,12 +1950,15 @@ export default function CrossLanguageDubbing({
                               className="h-8 w-full min-w-0 rounded-md border border-sky-200 bg-white px-2 text-xs font-bold text-slate-800 outline-none focus:border-sky-500"
                             />
                             {(() => {
-                              const referenceDuration = profile.referenceRanges.reduce((sum, range) => sum + range.end - range.start, 0);
+                              const referenceDuration = localVoiceEngine === 'cosyvoice3'
+                                ? profile.referenceEnd - profile.referenceStart
+                                : profile.referenceRanges.reduce((sum, range) => sum + range.end - range.start, 0);
+                              const referenceCount = localVoiceEngine === 'cosyvoice3' ? 1 : profile.referenceRanges.length;
                               return (
                                 <span className={`mt-1 block text-[9px] ${referenceDuration < 4 ? 'font-bold text-amber-600' : 'text-emerald-600'}`}>
                                   {referenceDuration < 4
                                     ? `参考音仅 ${referenceDuration.toFixed(1)} 秒，音色可能不稳定`
-                                    : `${profile.referenceRanges.length} 段参考音 · 共 ${referenceDuration.toFixed(1)} 秒`}
+                                    : `${referenceCount} 段参考音 · 共 ${referenceDuration.toFixed(1)} 秒`}
                                 </span>
                               );
                             })()}
@@ -2485,7 +2572,7 @@ export default function CrossLanguageDubbing({
               <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-sky-600" />
               <span>
                 {localDialogueMode === 'multi'
-                  ? '多人模式让每位角色独立对齐原时间线，完整保留模型的自然停顿，不做任何语速处理；连续笑声会合并并保留自然尾音。'
+                  ? '多人模式让每位角色独立对齐原时间线。CosyVoice 会在模型内按原轮次轻微贴合语速（最多 ±8%），不使用 FFmpeg 后期变速；连续笑声会合并并保留自然尾音。'
                   : '本机生成两个版本通常约 60–120 秒；当前版本输出 WAV，不会自动翻译或替换视频音轨。'}
               </span>
             </div>
@@ -2495,7 +2582,7 @@ export default function CrossLanguageDubbing({
             <div className="border-t border-sky-100 pt-3">
               <div className="flex items-center gap-1.5 text-[10px] font-black text-sky-900">
                 <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
-                自然语速 · 未变速
+                原声语速贴合
               </div>
               <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
                 {multiSpeakerTimelineSummary.versions.map(version => (
@@ -2503,6 +2590,7 @@ export default function CrossLanguageDubbing({
                     <span className="font-black text-slate-700">版本 {version.id}</span>
                     <span>顺延 {version.shiftedClipCount} 段</span>
                     <span>最多 {version.maxShiftSeconds.toFixed(1)} 秒</span>
+                    <span>语速贴合 {version.paceAdjustedClipCount} 段</span>
                     <span>保留事件 {version.preservedEventCount} 个</span>
                     {version.droppedEventCount > 0 && <span className="font-bold text-amber-600">漏掉 {version.droppedEventCount} 个事件</span>}
                     <span>总时长 {formatDuration(version.outputDuration)}</span>
@@ -2510,7 +2598,7 @@ export default function CrossLanguageDubbing({
                 ))}
               </div>
               <p className="mt-2 text-[9px] leading-relaxed text-slate-400">
-                每位角色分别锚定原始开始时间；只有同一角色上一句确实没有说完时，下一句才会顺延。
+                每位角色分别锚定原始开始时间；语速只做小幅模型内贴合，超出范围时保留自然度并允许顺延。
               </p>
             </div>
           )}
@@ -2683,10 +2771,14 @@ export default function CrossLanguageDubbing({
                             : option.data.dubbingModel === 'local_chatterbox'
                               ? `本机克隆原音色 · ${localTargetLanguageOptions.find(item => item.value === localTargetLanguage)?.label || localTargetLanguage}`
                               : option.data.dubbingModel === 'local_cosyvoice3'
-                                ? `CosyVoice 3 克隆原音色 · ${localTargetLanguageOptions.find(item => item.value === localTargetLanguage)?.label || localTargetLanguage}`
+                              ? `CosyVoice 3 克隆原音色 · ${localTargetLanguageOptions.find(item => item.value === localTargetLanguage)?.label || localTargetLanguage}`
                                 : option.data.dubbingModel === 'local_multispeaker'
                                   ? `${multiSpeakerProfiles.length} 位独立音色 · 分角色对齐时间线`
                               : `${selectedVoice?.name || '目标声音'} · ${targetLanguage}`}
+                          {(option.data.dubbingModel === 'local_chatterbox' || option.data.dubbingModel === 'local_cosyvoice3')
+                            && (typeof option.data.speakerSimilarity === 'number'
+                              ? ` · 克隆验证 ${Math.round(option.data.speakerSimilarity * 100)}%`
+                              : ' · 克隆验证未返回')}
                         </p>
                       </div>
                     </div>

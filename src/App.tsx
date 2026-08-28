@@ -71,8 +71,12 @@ function WorkspaceLoading() {
 }
 
 export default function App() {
-  const [currentTab, setCurrentTab] = useState<TabType>('workbench');
-  const [visitedTabs, setVisitedTabs] = useState<Set<TabType>>(() => new Set(['workbench']));
+  const sharedTool = typeof window !== 'undefined'
+    ? new URLSearchParams(window.location.search).get('tool')
+    : null;
+  const isVoiceConversionShare = sharedTool === 'voice-conversion';
+  const [currentTab, setCurrentTab] = useState<TabType>(isVoiceConversionShare ? 'dubbing-studio' : 'workbench');
+  const [visitedTabs, setVisitedTabs] = useState<Set<TabType>>(() => new Set(isVoiceConversionShare ? ['dubbing-studio'] : ['workbench']));
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   const [assistantAudioRequest, setAssistantAudioRequest] = useState<AssistantAudioRequest | null>(null);
   const [assistantVideoRequest, setAssistantVideoRequest] = useState<AssistantVideoRequest | null>(null);

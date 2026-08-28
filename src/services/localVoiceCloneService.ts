@@ -75,6 +75,7 @@ export interface LocalMultiSpeakerAudioEvent {
 
 export interface LocalMultiSpeakerCloneOptions {
   engine: LocalVoiceCloneEngine;
+  dialogueMode?: 'single' | 'multi';
   language: string;
   sourceDuration?: number;
   profiles: LocalMultiSpeakerProfile[];
@@ -94,11 +95,14 @@ export interface LocalMultiSpeakerCloneResult {
     id: 'A' | 'B';
     data: TranslateDubbingResult;
     performance: 'natural' | 'expressive' | 'stable';
+    speakerSimilarity?: number;
   }>;
   referenceDurations: Record<string, number>;
   timeline: {
     shiftedClipCount: number;
     maxShiftSeconds: number;
+    paceAdjustedClipCount: number;
+    maxPaceAdjustment: number;
     preservedEventCount: number;
     droppedEventCount: number;
     outputDuration: number;
@@ -106,6 +110,8 @@ export interface LocalMultiSpeakerCloneResult {
       id: 'A' | 'B';
       shiftedClipCount: number;
       maxShiftSeconds: number;
+      paceAdjustedClipCount: number;
+      maxPaceAdjustment: number;
       preservedEventCount: number;
       droppedEventCount: number;
       outputDuration: number;

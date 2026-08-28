@@ -1619,20 +1619,37 @@ async function startServer() {
   };
 
   const getMediaDurationSeconds = (filePath: string) => new Promise<number>((resolve, reject) => {
+    const parseDuration = (value: string) => {
+      const match = String(value || '').match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/i);
+      if (!match) return 0;
+      const duration = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+      return Number.isFinite(duration) && duration > 0 ? duration : 0;
+    };
+    const fallbackToFfmpeg = (detail: string) => {
+      execFile(
+        FFMPEG_BINARY,
+        ['-hide_banner', '-i', filePath, '-f', 'null', '-'],
+        { timeout: 30_000, maxBuffer: 2 * 1024 * 1024 },
+        (fallbackError, fallbackStdout, fallbackStderr) => {
+          const duration = parseDuration(`${fallbackStderr}\n${fallbackStdout}`);
+          if (duration > 0) {
+            resolve(duration);
+            return;
+          }
+          reject(new Error(detail || fallbackError?.message || 'Unable to read media duration'));
+        },
+      );
+    };
     execFile(
       'ffprobe',
       ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', filePath],
       (error, stdout, stderr) => {
-        if (error) {
-          reject(new Error(stderr || error.message));
-          return;
-        }
         const duration = Number.parseFloat(stdout.trim());
-        if (!Number.isFinite(duration) || duration <= 0) {
-          reject(new Error('Unable to read media duration'));
+        if (!error && Number.isFinite(duration) && duration > 0) {
+          resolve(duration);
           return;
         }
-        resolve(duration);
+        fallbackToFfmpeg(String(stderr || error?.message || 'Unable to read media duration'));
       },
     );
   });
@@ -3474,6 +3491,46 @@ ${JSON.stringify(normalizedVoices)}
     process.env.COSYVOICE_MODEL_DIR,
     path.join('tools', 'cosyvoice', 'models', 'Fun-CosyVoice3-0.5B'),
   );
+  const seedVcPython = resolveLocalToolPath(
+    process.env.SEED_VC_PYTHON,
+    path.join('tools', 'seed-vc', '.venv', ...(process.platform === 'win32' ? ['Scripts', 'python.exe'] : ['bin', 'python'])),
+  );
+  const seedVcScript = resolveLocalToolPath(
+    process.env.SEED_VC_SCRIPT,
+    path.join('tools', 'seed-vc', 'voice_convert.py'),
+  );
+  const seedVcRepoDir = resolveLocalToolPath(
+    process.env.SEED_VC_REPO_DIR,
+    path.join('tools', 'seed-vc', 'repo'),
+  );
+  const seedVcModelsDir = resolveLocalToolPath(
+    process.env.SEED_VC_MODELS_DIR,
+    path.join('tools', 'seed-vc', 'repo', 'checkpoints'),
+  );
+  const seamlessExpressivePython = resolveLocalToolPath(
+    process.env.SEAMLESS_EXPRESSIVE_PYTHON,
+    path.join('tools', 'seamless-expressive', '.venv', ...(process.platform === 'win32' ? ['Scripts', 'python.exe'] : ['bin', 'python'])),
+  );
+  const seamlessExpressiveScript = resolveLocalToolPath(
+    process.env.SEAMLESS_EXPRESSIVE_SCRIPT,
+    path.join('tools', 'seamless-expressive', 'translate.py'),
+  );
+  const seamlessExpressiveRepoDir = resolveLocalToolPath(
+    process.env.SEAMLESS_EXPRESSIVE_REPO_DIR,
+    path.join('tools', 'seamless-expressive', 'repo'),
+  );
+  const seamlessExpressiveModelDir = resolveLocalToolPath(
+    process.env.SEAMLESS_EXPRESSIVE_MODEL_DIR,
+    path.join('tools', 'seamless-expressive', 'models'),
+  );
+  const seamlessExpressiveLanguages = [
+    { code: 'eng', label: '英语', experimental: false, recommendedDurationFactor: 1 },
+    { code: 'spa', label: '西班牙语', experimental: false, recommendedDurationFactor: 1 },
+    { code: 'fra', label: '法语', experimental: false, recommendedDurationFactor: 1.2 },
+    { code: 'deu', label: '德语', experimental: false, recommendedDurationFactor: 1.1 },
+    { code: 'cmn', label: '中文', experimental: true, recommendedDurationFactor: 1 },
+    { code: 'ita', label: '意大利语', experimental: true, recommendedDurationFactor: 1 },
+  ] as const;
   type LocalVoiceCloneEngineStatus = {
     available: boolean;
     model: string;
@@ -3488,12 +3545,45 @@ ${JSON.stringify(normalizedVoices)}
   };
   let localVoiceCloneQueue: Promise<void> = Promise.resolve();
   let localVoiceCloneStatusCache: { expiresAt: number; value: LocalVoiceCloneServerStatus } | null = null;
+  let seamlessExpressiveQueue: Promise<void> = Promise.resolve();
 
   const runLocalVoiceCloneQueued = async <T,>(task: () => Promise<T>): Promise<T> => {
     const run = localVoiceCloneQueue.catch(() => undefined).then(task);
     localVoiceCloneQueue = run.then(() => undefined, () => undefined);
     return run;
   };
+
+  const runSeamlessExpressiveQueued = async <T,>(task: () => Promise<T>): Promise<T> => {
+    const run = seamlessExpressiveQueue.catch(() => undefined).then(task);
+    seamlessExpressiveQueue = run.then(() => undefined, () => undefined);
+    return run;
+  };
+
+  const runSeamlessExpressiveProcess = (args: string[], timeout: number) => new Promise<string>((resolve, reject) => {
+    execFile(
+      seamlessExpressivePython,
+      args,
+      {
+        cwd: process.cwd(),
+        timeout,
+        windowsHide: true,
+        maxBuffer: 32 * 1024 * 1024,
+      },
+      (error, stdout, stderr) => {
+        if (!error) {
+          resolve(String(stdout || ''));
+          return;
+        }
+        const detail = String(stderr || stdout || error.message).trim().split(/\r?\n/).slice(-8).join(' ');
+        const message = /out of memory|CUDA.*memory/i.test(detail)
+          ? 'SeamlessExpressive 显存不足。请缩短素材，并关闭其他占用显卡的程序后重试。'
+          : /ENOENT|not found|cannot find|No such file/i.test(`${error.message} ${detail}`)
+            ? 'SeamlessExpressive 运行环境或受限模型文件不完整。'
+            : `SeamlessExpressive 转换失败：${detail || error.message}`;
+        reject(Object.assign(new Error(message), { status: 503, cause: error }));
+      },
+    );
+  });
 
   const runLocalVoiceCloneProcess = (pythonPath: string, args: string[], timeout: number) => new Promise<string>((resolve, reject) => {
     execFile(
@@ -3608,6 +3698,417 @@ ${JSON.stringify(normalizedVoices)}
     return res.json(await readLocalVoiceCloneStatus());
   }));
 
+  type SeamlessExpressiveStatus = {
+    available: boolean;
+    model: 'SeamlessExpressive';
+    platform: string;
+    runtimeSupported: boolean;
+    pythonFound: boolean;
+    repoFound: boolean;
+    scriptFound: boolean;
+    modelFilesFound: boolean;
+    gpu?: string;
+    supportedLanguages: typeof seamlessExpressiveLanguages;
+    license: string;
+    gated: true;
+    reason?: string;
+  };
+  let seamlessExpressiveStatusCache: { expiresAt: number; value: SeamlessExpressiveStatus } | null = null;
+
+  const readSeamlessExpressiveStatus = async (): Promise<SeamlessExpressiveStatus> => {
+    if (seamlessExpressiveStatusCache && seamlessExpressiveStatusCache.expiresAt > Date.now()) {
+      return seamlessExpressiveStatusCache.value;
+    }
+    const platform = `${process.platform}-${process.arch}`;
+    const runtimeSupported = (process.platform === 'linux' && process.arch === 'x64')
+      || (process.platform === 'darwin' && process.arch === 'arm64');
+    const pythonFound = fs.existsSync(seamlessExpressivePython);
+    const scriptFound = fs.existsSync(seamlessExpressiveScript);
+    const repoFound = fs.existsSync(path.join(
+      seamlessExpressiveRepoDir,
+      'src',
+      'seamless_communication',
+      'cli',
+      'expressivity',
+      'predict',
+      'predict.py',
+    ));
+    const modelFilesFound = [
+      'm2m_expressive_unity.pt',
+      'pretssel_melhifigan_wm.pt',
+    ].every(fileName => fs.existsSync(path.join(seamlessExpressiveModelDir, fileName)));
+    const baseStatus = {
+      model: 'SeamlessExpressive' as const,
+      platform,
+      runtimeSupported,
+      pythonFound,
+      repoFound,
+      scriptFound,
+      modelFilesFound,
+      supportedLanguages: seamlessExpressiveLanguages,
+      license: 'Seamless License - noncommercial research only',
+      gated: true as const,
+    };
+
+    let value: SeamlessExpressiveStatus;
+    if (!runtimeSupported) {
+      value = {
+        ...baseStatus,
+        available: false,
+        reason: '官方 fairseq2 不支持原生 Windows。请安装 WSL 2 Linux，并在 WSL 内运行本项目。',
+      };
+    } else if (!pythonFound || !scriptFound || !repoFound) {
+      value = {
+        ...baseStatus,
+        available: false,
+        reason: !pythonFound
+          ? 'SeamlessExpressive Python 环境尚未安装。'
+          : !repoFound
+            ? 'Seamless Communication 官方代码目录不完整。'
+            : 'SeamlessExpressive 适配脚本不存在。',
+      };
+    } else if (!modelFilesFound) {
+      value = {
+        ...baseStatus,
+        available: false,
+        reason: '受限模型权重尚未就绪。请先取得 Meta 与 Hugging Face 授权，再放入 models 目录。',
+      };
+    } else {
+      try {
+        const probeArgs = ['-c', 'import json, torch, fairseq2; print(json.dumps({"cuda": torch.cuda.is_available(), "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None}))'];
+        const { stdout } = await runExternalFile(
+          seamlessExpressivePython,
+          probeArgs,
+          30_000,
+          'SeamlessExpressive runtime probe',
+        );
+        const runtime = JSON.parse(stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) || '{}') as { cuda?: boolean; gpu?: string };
+        value = {
+          ...baseStatus,
+          available: runtime.cuda === true,
+          gpu: runtime.gpu,
+          ...(runtime.cuda ? {} : { reason: '未检测到可用的 NVIDIA CUDA 显卡；该大型模型不启用 CPU 推理。' }),
+        };
+      } catch (error: any) {
+        value = {
+          ...baseStatus,
+          available: false,
+          reason: error?.message || '无法启动 SeamlessExpressive Python 环境。',
+        };
+      }
+    }
+
+    seamlessExpressiveStatusCache = { expiresAt: Date.now() + 30_000, value };
+    return value;
+  };
+
+  app.get('/api/ai/local/seamless-expressive/status', asyncRoute(async (_req, res) => {
+    return res.json(await readSeamlessExpressiveStatus());
+  }));
+
+  app.post('/api/ai/local/seamless-expressive/convert', aiUpload.single('source'), asyncRoute(async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: '请上传需要翻译的视频或音频。' });
+    const targetLanguage = String(req.body?.targetLanguage || '').trim().toLowerCase();
+    if (!seamlessExpressiveLanguages.some(language => language.code === targetLanguage)) {
+      return res.status(400).json({ error: 'SeamlessExpressive 不支持这个目标语言。' });
+    }
+    const status = await readSeamlessExpressiveStatus();
+    if (!status.available) return res.status(503).json({ error: status.reason || 'SeamlessExpressive 本地环境不可用。' });
+
+    const durationFactor = parseNumber(req.body?.durationFactor, 1, 0.8, 1.35);
+    const jobId = randomUUID();
+    const sourceExtension = getSafeUploadExtension(req.file.originalname, req.file.mimetype, '.wav');
+    const sourcePath = path.resolve(uploadsDir, `seamless_expressive_source_${jobId}${sourceExtension}`);
+    const sourceWavPath = path.resolve(uploadsDir, `seamless_expressive_source_${jobId}.wav`);
+    const outputFileName = `seamless_expressive_${targetLanguage}_${jobId}.wav`;
+    const outputPath = path.resolve(uploadsDir, outputFileName);
+    if (![sourcePath, sourceWavPath, outputPath].every(filePath => isPathInside(uploadsDir, filePath))) {
+      throw Object.assign(new Error('SeamlessExpressive 文件路径无效。'), { status: 500 });
+    }
+
+    fs.writeFileSync(sourcePath, req.file.buffer);
+    let keepOutput = false;
+    try {
+      await runFfmpegFile([
+        '-y',
+        '-i', sourcePath,
+        '-map', '0:a:0',
+        '-vn',
+        '-ac', '1',
+        '-ar', '16000',
+        '-c:a', 'pcm_s16le',
+        sourceWavPath,
+      ], 120_000);
+      const sourceDuration = await getMediaDurationSeconds(sourceWavPath).catch(() => 0);
+      if (sourceDuration > 300) {
+        return res.status(422).json({ error: '单次素材不能超过 5 分钟。请先拆成较短的语音段，以避免显存不足和翻译遗漏。' });
+      }
+      const stdout = await runSeamlessExpressiveQueued(() => runSeamlessExpressiveProcess([
+        seamlessExpressiveScript,
+        '--input', sourceWavPath,
+        '--output', outputPath,
+        '--target-language', targetLanguage,
+        '--duration-factor', String(durationFactor),
+        '--repo-dir', seamlessExpressiveRepoDir,
+        '--model-dir', seamlessExpressiveModelDir,
+      ], 30 * 60 * 1000));
+      const metadata = JSON.parse(stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) || '{}') as {
+        model?: string;
+        gpu?: string;
+        duration_seconds?: number;
+        translated_text?: string;
+      };
+      if (!fs.existsSync(outputPath)) {
+        throw Object.assign(new Error('SeamlessExpressive 未生成可用的输出音频。'), { status: 502 });
+      }
+      keepOutput = true;
+      return res.json({
+        audioUrl: `/uploads/${outputFileName}`,
+        sourceDuration: sourceDuration || undefined,
+        generatedDuration: metadata.duration_seconds || await getMediaDurationSeconds(outputPath).catch(() => undefined),
+        targetLanguage,
+        translatedText: metadata.translated_text || undefined,
+        durationFactor,
+        model: metadata.model || 'SeamlessExpressive',
+        gpu: metadata.gpu || status.gpu,
+      });
+    } finally {
+      await Promise.all([
+        safeUnlink(sourcePath),
+        safeUnlink(sourceWavPath),
+        keepOutput ? Promise.resolve() : safeUnlink(outputPath),
+      ]);
+    }
+  }));
+
+  const readSeedVcStatus = async (): Promise<{
+    available: boolean;
+    model: string;
+    pythonFound: boolean;
+    scriptFound: boolean;
+    modelCached: boolean;
+    gpu?: string;
+    reason?: string;
+  }> => {
+    const pythonFound = fs.existsSync(seedVcPython);
+    const scriptFound = fs.existsSync(seedVcScript);
+    const repoFound = fs.existsSync(path.join(seedVcRepoDir, 'inference_v2.py'))
+      || fs.existsSync(path.join(seedVcRepoDir, 'inference.py'));
+    const modelCached = fs.existsSync(seedVcModelsDir)
+      && fs.readdirSync(seedVcModelsDir, { recursive: true }).length > 0;
+    if (!pythonFound || !scriptFound || !repoFound) {
+      return {
+        available: false,
+        model: 'Seed-VC V2',
+        pythonFound,
+        scriptFound,
+        modelCached,
+        reason: !repoFound ? 'Seed-VC 官方仓库尚未配置到 tools/seed-vc/repo。' : 'Seed-VC 本地 Python 运行时或适配脚本尚未配置。',
+      };
+    }
+    if (!modelCached) {
+      return {
+        available: false,
+        model: 'Seed-VC V2',
+        pythonFound,
+        scriptFound,
+        modelCached,
+        reason: 'Seed-VC 模型权重尚未下载完成。',
+      };
+    }
+    try {
+      const stdout = await runLocalVoiceCloneProcess(seedVcPython, [
+        '-c',
+        'import json, torch; print(json.dumps({"cuda": torch.cuda.is_available(), "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None}))',
+      ], 30_000);
+      const runtime = JSON.parse(stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) || '{}') as { cuda?: boolean; gpu?: string };
+      return {
+        available: runtime.cuda === true,
+        model: 'Seed-VC V2',
+        pythonFound,
+        scriptFound,
+        modelCached,
+        gpu: runtime.gpu,
+        ...(runtime.cuda ? {} : { reason: '未检测到可用的 NVIDIA CUDA 显卡。' }),
+      };
+    } catch (error: any) {
+      return {
+        available: false,
+        model: 'Seed-VC V2',
+        pythonFound,
+        scriptFound,
+        modelCached,
+        reason: error?.message || '无法启动 Seed-VC 运行环境。',
+      };
+    }
+  };
+
+  type SeedVcStatusValue = Awaited<ReturnType<typeof readSeedVcStatus>>;
+  let seedVcStatusCache: { expiresAt: number; value: SeedVcStatusValue } | null = null;
+  let seedVcStatusProbe: Promise<SeedVcStatusValue> | null = null;
+
+  app.get('/api/ai/local/seed-vc/status', asyncRoute(async (_req, res) => {
+    if (seedVcStatusCache && seedVcStatusCache.expiresAt > Date.now()) {
+      return res.json(seedVcStatusCache.value);
+    }
+    if (!seedVcStatusProbe) {
+      seedVcStatusProbe = readSeedVcStatus().then((value) => {
+        seedVcStatusCache = { expiresAt: Date.now() + 60_000, value };
+        return value;
+      }).finally(() => {
+        seedVcStatusProbe = null;
+      });
+    }
+    return res.json(await seedVcStatusProbe);
+  }));
+
+  app.post('/api/ai/local/seed-vc/convert', aiUpload.fields([
+    { name: 'source', maxCount: 1 },
+    { name: 'reference', maxCount: 1 },
+    { name: 'timelineSource', maxCount: 1 },
+  ]), asyncRoute(async (req, res) => {
+    const uploaded = (req.files || {}) as Record<string, Express.Multer.File[]>;
+    const sourceFile = uploaded.source?.[0];
+    const referenceFile = uploaded.reference?.[0];
+    const timelineSourceFile = uploaded.timelineSource?.[0];
+    if (!sourceFile || !referenceFile) return res.status(400).json({ error: '请同时上传内容语音和原始参考音。' });
+    const status = seedVcStatusCache && seedVcStatusCache.expiresAt > Date.now()
+      ? seedVcStatusCache.value
+      : await (seedVcStatusProbe || (seedVcStatusProbe = readSeedVcStatus().then((value) => {
+        seedVcStatusCache = { expiresAt: Date.now() + 60_000, value };
+        return value;
+      }).finally(() => {
+        seedVcStatusProbe = null;
+      })));
+    if (!status.available) return res.status(503).json({ error: status.reason || 'Seed-VC 本地运行环境不可用。' });
+
+    const jobId = randomUUID();
+    const sourceExt = getSafeUploadExtension(sourceFile.originalname, sourceFile.mimetype, '.wav');
+    const referenceExt = getSafeUploadExtension(referenceFile.originalname, referenceFile.mimetype, '.wav');
+    const timelineSourceExt = timelineSourceFile
+      ? getSafeUploadExtension(timelineSourceFile.originalname, timelineSourceFile.mimetype, '.wav')
+      : '.wav';
+    const sourcePath = path.resolve(uploadsDir, `seed_vc_source_${jobId}${sourceExt}`);
+    const referencePath = path.resolve(uploadsDir, `seed_vc_reference_${jobId}${referenceExt}`);
+    const timelineSourcePath = path.resolve(uploadsDir, `seed_vc_timeline_source_${jobId}${timelineSourceExt}`);
+    const sourceWavPath = path.resolve(uploadsDir, `seed_vc_source_${jobId}.wav`);
+    const referenceWavPath = path.resolve(uploadsDir, `seed_vc_reference_${jobId}.wav`);
+    const timelineSourceWavPath = path.resolve(uploadsDir, `seed_vc_timeline_source_${jobId}.wav`);
+    const rawOutputPath = path.resolve(uploadsDir, `seed_vc_raw_${jobId}.wav`);
+    const outputFileName = `seed_vc_converted_${jobId}.wav`;
+    const outputPath = path.resolve(uploadsDir, outputFileName);
+    if (![sourcePath, referencePath, timelineSourcePath, sourceWavPath, referenceWavPath, timelineSourceWavPath, rawOutputPath, outputPath].every(filePath => isPathInside(uploadsDir, filePath))) {
+      throw Object.assign(new Error('Seed-VC 文件路径无效。'), { status: 500 });
+    }
+    fs.writeFileSync(sourcePath, sourceFile.buffer);
+    fs.writeFileSync(referencePath, referenceFile.buffer);
+    if (timelineSourceFile) fs.writeFileSync(timelineSourcePath, timelineSourceFile.buffer);
+    let keepOutput = false;
+    try {
+      const conversionInputs = [
+        runFfmpegFile(['-y', '-i', sourcePath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', sourceWavPath], 120_000),
+        runFfmpegFile(['-y', '-i', referencePath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', referenceWavPath], 120_000),
+      ];
+      if (timelineSourceFile) {
+        conversionInputs.push(runFfmpegFile(['-y', '-i', timelineSourcePath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', timelineSourceWavPath], 120_000));
+      }
+      await Promise.all(conversionInputs);
+      const sourceDuration = await getMediaDurationSeconds(sourceWavPath).catch(() => 0);
+      const targetDuration = parseNumber(req.body?.targetDuration, sourceDuration, 0.5, 24 * 60 * 60);
+      const model = String(req.body?.model || 'v2').toLowerCase() === 'v1' ? 'v1' : 'v2';
+      const processArgs = [
+        seedVcScript,
+        '--source', sourceWavPath,
+        '--target', referenceWavPath,
+        '--output', rawOutputPath,
+        '--repo-dir', seedVcRepoDir,
+        '--model', model,
+        '--diffusion-steps', String(parseNumber(req.body?.diffusionSteps, 12, 8, 80)),
+        '--length-adjust', String(parseNumber(req.body?.lengthAdjust, 1, 0.5, 1.5)),
+        '--intelligibility-cfg-rate', String(parseNumber(req.body?.intelligibilityCfgRate, 0.7, 0, 1)),
+        '--similarity-cfg-rate', String(parseNumber(req.body?.similarityCfgRate, 0.7, 0, 1)),
+        '--temperature', String(parseNumber(req.body?.temperature, 0.7, 0.05, 2)),
+        '--top-p', String(parseNumber(req.body?.topP, 0.9, 0.05, 1)),
+        '--repetition-penalty', String(parseNumber(req.body?.repetitionPenalty, 1.1, 0.5, 2)),
+      ];
+      if (String(req.body?.convertStyle).toLowerCase() === 'true') processArgs.push('--convert-style');
+      const stdout = await runLocalVoiceCloneQueued(() => runLocalVoiceCloneProcess(seedVcPython, processArgs, 15 * 60 * 1000));
+      const metadata = JSON.parse(stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) || '{}') as { duration_seconds?: number; model?: string; gpu?: string };
+      if (!fs.existsSync(rawOutputPath)) throw Object.assign(new Error('Seed-VC 未生成可用的输出音频。'), { status: 502 });
+
+      const supportedEvents = new Set(['laughter', 'breath', 'quick_breath', 'cough', 'sigh', 'noise', 'mn']);
+      let requestedEvents: Array<{ start: number; end: number; type: string }> = [];
+      try {
+        const parsed = JSON.parse(String(req.body?.events || '[]'));
+        if (Array.isArray(parsed)) {
+          requestedEvents = parsed
+            .filter(event => supportedEvents.has(String(event?.type || '')))
+            .map(event => ({
+              start: Number(event.start),
+              end: Number(event.end),
+              type: String(event.type),
+            }))
+            .filter(event => Number.isFinite(event.start) && Number.isFinite(event.end) && event.end > event.start)
+            .slice(0, 80);
+        }
+      } catch {
+        requestedEvents = [];
+      }
+      const preservedEvents = timelineSourceFile
+        ? requestedEvents.filter(event => event.start < targetDuration && event.end > 0)
+        : [];
+      const finalInputArgs = ['-y', '-i', rawOutputPath] as string[];
+      const filterParts = [
+        `[0:a]apad=whole_dur=${targetDuration.toFixed(3)},atrim=duration=${targetDuration.toFixed(3)},asetpts=PTS-STARTPTS[base]`,
+      ];
+      if (preservedEvents.length > 0) {
+        finalInputArgs.push('-i', timelineSourceWavPath);
+        const eventLabels: string[] = [];
+        preservedEvents.forEach((event, index) => {
+          // Audio-event timestamps are often conservative. Keep a natural tail
+          // for laughter so the last syllable/chuckle is not cut off abruptly.
+          const extension = event.type === 'laughter' ? 0.58 : 0.12;
+          const start = Math.max(0, event.start - (event.type === 'laughter' ? 0.06 : 0.025));
+          const end = Math.min(targetDuration, event.end + extension);
+          const duration = Math.max(0.05, end - start);
+          const fadeOutStart = Math.max(0.01, duration - (event.type === 'laughter' ? 0.28 : 0.08));
+          const label = `event${index}`;
+          filterParts.push(`[1:a]atrim=start=${start.toFixed(3)}:end=${end.toFixed(3)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.025,afade=t=out:st=${fadeOutStart.toFixed(3)}:d=${(duration - fadeOutStart).toFixed(3)},adelay=${Math.round(start * 1000)}:all=1,volume=${event.type === 'laughter' ? '0.82' : '0.78'}[${label}]`);
+          eventLabels.push(`[${label}]`);
+        });
+        filterParts.push(`[base]${eventLabels.join('')}amix=inputs=${eventLabels.length + 1}:duration=longest:normalize=0:dropout_transition=0,alimiter=limit=0.95,apad=whole_dur=${targetDuration.toFixed(3)},atrim=duration=${targetDuration.toFixed(3)}[out]`);
+      } else {
+        filterParts.push('[base]anull[out]');
+      }
+      finalInputArgs.push('-filter_complex', filterParts.join(';'), '-map', '[out]', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', outputPath);
+      await runFfmpegFile(finalInputArgs, 120_000);
+      if (!fs.existsSync(outputPath)) throw Object.assign(new Error('Seed-VC 时间线输出失败。'), { status: 502 });
+      keepOutput = true;
+      return res.json({
+        audioUrl: `/uploads/${outputFileName}`,
+        sourceDuration: sourceDuration || undefined,
+        generatedDuration: await getMediaDurationSeconds(outputPath).catch(() => targetDuration),
+        rawGeneratedDuration: metadata.duration_seconds || await getMediaDurationSeconds(rawOutputPath).catch(() => undefined),
+        model: metadata.model || `Seed-VC ${model.toUpperCase()}`,
+        gpu: metadata.gpu || status.gpu,
+        timingMode: 'timeline',
+        preservedEventCount: preservedEvents.length,
+        timelineAligned: Math.abs((await getMediaDurationSeconds(outputPath).catch(() => targetDuration)) - targetDuration) < 0.08,
+      });
+    } finally {
+      await Promise.all([
+        safeUnlink(sourcePath),
+        safeUnlink(referencePath),
+        safeUnlink(timelineSourcePath),
+        safeUnlink(sourceWavPath),
+        safeUnlink(referenceWavPath),
+        safeUnlink(timelineSourceWavPath),
+        safeUnlink(rawOutputPath),
+        keepOutput ? Promise.resolve() : safeUnlink(outputPath),
+      ]);
+    }
+  }));
+
   app.post('/api/ai/local/voice-clone', aiUpload.single('reference'), asyncRoute(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: '请上传一段参考音频或视频。' });
     const text = String(req.body?.text || '').trim();
@@ -3706,6 +4207,8 @@ ${JSON.stringify(normalizedVoices)}
         duration_seconds?: number;
         model?: string;
         gpu?: string;
+        speaker_similarity?: number;
+        jobs?: Array<{ speaker_similarity?: number }>;
       };
       if (!fs.existsSync(outputPath)) {
         throw Object.assign(new Error('本地模型没有生成可用的音频文件。'), { status: 502 });
@@ -3726,6 +4229,11 @@ ${JSON.stringify(normalizedVoices)}
           ? String(metadata.model || 'Fun-CosyVoice3-0.5B-2512')
           : metadata.model === 'v3' ? 'Chatterbox Multilingual V3' : String(metadata.model || 'Chatterbox Multilingual'),
         gpu: metadata.gpu || status.gpu,
+        speakerSimilarity: Number.isFinite(metadata.speaker_similarity)
+          ? metadata.speaker_similarity
+          : Number.isFinite(metadata.jobs?.[0]?.speaker_similarity)
+            ? metadata.jobs?.[0]?.speaker_similarity
+            : undefined,
         referenceStart,
         referenceDuration,
       });
@@ -3752,6 +4260,7 @@ ${JSON.stringify(normalizedVoices)}
       return res.status(400).json({ error: '不支持的本地声音克隆模型。' });
     }
     const language = String(payload.language || '').trim().toLowerCase();
+    const dialogueMode = payload.dialogueMode === 'single' ? 'single' : 'multi';
     const engineLanguages = engine === 'cosyvoice3' ? cosyVoiceLanguages : localVoiceCloneLanguages;
     if (!engineLanguages[language]) return res.status(400).json({ error: '当前模型不支持这个目标语言。' });
 
@@ -3812,22 +4321,94 @@ ${JSON.stringify(normalizedVoices)}
         ...events.map((event: any) => Number(event.end) || 0),
       );
       const referencePaths = new Map<string, string>();
+      const referenceTexts = new Map<string, string>();
       const referenceDurations: Record<string, number> = {};
+
+      // Keep one deterministic sampling stream per speaker. CosyVoice samples
+      // prosody from this stream, so changing it for every line can make one
+      // diarized speaker sound like several different people.
+      const speakerSeeds = new Map<string, number>();
+      const getSpeakerSeed = (speakerId: string) => {
+        const existing = speakerSeeds.get(speakerId);
+        if (existing) return existing;
+        let hash = 2166136261;
+        for (const character of speakerId) {
+          hash ^= character.charCodeAt(0);
+          hash = Math.imul(hash, 16777619);
+        }
+        const seed = (hash >>> 0) % 2_147_483_646 + 1;
+        speakerSeeds.set(speakerId, seed);
+        return seed;
+      };
 
       for (let profileIndex = 0; profileIndex < profiles.length; profileIndex += 1) {
         const profile = profiles[profileIndex];
         const profileId = String(profile.id || '').trim();
         if (!profileId) throw Object.assign(new Error('角色标识无效。'), { status: 400 });
-        const requestedRanges = Array.isArray(profile.referenceRanges) && profile.referenceRanges.length > 0
-          ? profile.referenceRanges
-          : [{ start: profile.referenceStart, end: profile.referenceEnd }];
+        const isSingleChatterbox = dialogueMode === 'single' && engine === 'chatterbox';
+        const requestedRanges = engine === 'cosyvoice3'
+          ? [{ start: profile.referenceStart, end: profile.referenceEnd }]
+          : isSingleChatterbox
+            ? (() => {
+              const requestedStart = parseNumber(profile.referenceStart, 0, 0, Math.max(0, sourceDuration - 0.2));
+              const requestedEnd = parseNumber(profile.referenceEnd, requestedStart + 0.5, requestedStart + 0.2, sourceDuration);
+              const candidateSegments = segments
+                .filter((segment: any) => String(segment.speakerId || '') === profileId)
+                .map((segment: any) => ({ start: Number(segment.start), end: Number(segment.end) }))
+                .filter(segment => Number.isFinite(segment.start) && Number.isFinite(segment.end))
+                .filter(segment => Math.min(requestedEnd, segment.end) - Math.max(requestedStart, segment.start) >= 0.5)
+                .sort((left, right) => (
+                  (Math.min(requestedEnd, right.end) - Math.max(requestedStart, right.start))
+                  - (Math.min(requestedEnd, left.end) - Math.max(requestedStart, left.start))
+                ));
+              const selectedRanges: Array<{ start: number; end: number }> = [];
+              let selectedDuration = 0;
+              for (const candidate of candidateSegments) {
+                if (selectedRanges.length >= 4 || selectedDuration >= 8) break;
+                const start = Math.max(requestedStart, candidate.start + 0.03);
+                const end = Math.min(requestedEnd, candidate.end - 0.03);
+                const duration = end - start;
+                if (duration < 0.5) continue;
+                const remaining = 8 - selectedDuration;
+                selectedRanges.push({ start, end: Math.min(end, start + remaining) });
+                selectedDuration += Math.min(duration, remaining);
+              }
+              return selectedRanges.length > 0
+                ? selectedRanges.sort((left, right) => left.start - right.start)
+                : [{ start: requestedStart, end: requestedEnd }];
+            })()
+          : Array.isArray(profile.referenceRanges) && profile.referenceRanges.length > 0
+            ? profile.referenceRanges
+            : [{ start: profile.referenceStart, end: profile.referenceEnd }];
         const ranges: Array<{ start: number; end: number }> = [];
         let totalReferenceDuration = 0;
         for (const requestedRange of requestedRanges.slice(0, 5)) {
           if (totalReferenceDuration >= 15) break;
-          const start = parseNumber(requestedRange?.start, 0, 0, Math.max(0, sourceDuration - 0.2));
+          let start = parseNumber(requestedRange?.start, 0, 0, Math.max(0, sourceDuration - 0.2));
           const requestedEnd = parseNumber(requestedRange?.end, start + 0.5, start + 0.2, sourceDuration);
-          const end = Math.min(requestedEnd, start + Math.min(8, 15 - totalReferenceDuration));
+          let end = Math.min(requestedEnd, start + Math.min(8, 15 - totalReferenceDuration));
+          if (engine === 'cosyvoice3') {
+            const matchingSegment = segments
+              .filter((segment: any) => String(segment.speakerId || '') === profileId)
+              .map((segment: any) => ({
+                start: Number(segment.start),
+                end: Number(segment.end),
+              }))
+              .filter(segment => Number.isFinite(segment.start) && Number.isFinite(segment.end))
+              .filter(segment => Math.min(end, segment.end) - Math.max(start, segment.start) >= 0.15)
+              .sort((left, right) => (
+                Math.min(end, right.end) - Math.max(start, right.start)
+                - (Math.min(end, left.end) - Math.max(start, left.start))
+              ))[0];
+            if (matchingSegment) {
+              // Never let a CosyVoice reference cross a diarization boundary.
+              // A short clean clip is more reliable than a longer clip with a
+              // neighboring speaker or background speech mixed in.
+              const edge = matchingSegment.end - matchingSegment.start >= 0.5 ? 0.03 : 0.015;
+              start = Math.max(start, matchingSegment.start + edge);
+              end = Math.min(end, matchingSegment.end - edge);
+            }
+          }
           if (end - start < 0.2) continue;
           ranges.push({ start, end });
           totalReferenceDuration += end - start;
@@ -3851,10 +4432,75 @@ ${JSON.stringify(normalizedVoices)}
           '-map', '[out]', '-vn', '-c:a', 'pcm_s16le', referencePath,
         ], 120_000);
         referencePaths.set(profileId, referencePath);
+        const referenceText = engine === 'cosyvoice3'
+          ? (() => {
+            const range = ranges[0];
+            const matchingSegment = segments
+              .filter((segment: any) => String(segment.speakerId || '') === profileId)
+              .map((segment: any) => ({
+                ...segment,
+                overlap: Math.min(range.end, Number(segment.end)) - Math.max(range.start, Number(segment.start)),
+              }))
+              .filter((segment: any) => Number.isFinite(segment.overlap) && segment.overlap >= 0.15)
+              .sort((left: any, right: any) => right.overlap - left.overlap)[0];
+            return String(matchingSegment?.sourceText || '').replace(/\s+/g, ' ').trim().slice(0, 1200);
+          })()
+          : (() => {
+            const seenReferenceSegmentIds = new Set<string>();
+            return ranges.flatMap(range => (
+              segments
+                .filter((segment: any) => {
+                  if (String(segment.speakerId || '') !== profileId) return false;
+                  const segmentStart = Number(segment.start);
+                  const segmentEnd = Number(segment.end);
+                  if (!Number.isFinite(segmentStart) || !Number.isFinite(segmentEnd)) return false;
+                  return Math.min(range.end, segmentEnd) - Math.max(range.start, segmentStart) >= 0.15;
+                })
+                .sort((left: any, right: any) => Number(left.start) - Number(right.start))
+            )).flatMap((segment: any) => {
+              const segmentId = String(segment.id || `${segment.start}-${segment.end}`);
+              if (seenReferenceSegmentIds.has(segmentId)) return [];
+              seenReferenceSegmentIds.add(segmentId);
+              const sourceText = String(segment.sourceText || '').replace(/\s+/g, ' ').trim();
+              return sourceText ? [sourceText] : [];
+            }).join(' ').slice(0, 1200);
+          })();
+        if (referenceText) referenceTexts.set(profileId, referenceText);
         referenceDurations[profileId] = await getMediaDurationSeconds(referencePath).catch(() => totalReferenceDuration);
       }
 
+      // Long source lines carry useful local delivery cues. Reuse those lines as
+      // style prompts when they are long enough to remain a reliable speaker
+      // reference; short lines continue to use the profile-level reference.
+      const segmentReferencePaths = new Map<string, string>();
+      if (dialogueMode === 'single' && engine === 'chatterbox') {
+        for (const segment of segments) {
+          const segmentId = String(segment.id || '');
+          const segmentStart = Number(segment.start);
+          const segmentEnd = Number(segment.end);
+          const segmentDuration = segmentEnd - segmentStart;
+          if (!segmentId || !Number.isFinite(segmentStart) || !Number.isFinite(segmentEnd) || segmentDuration < 2.5) continue;
+          const segmentReferencePath = path.resolve(uploadsDir, `local_multi_segment_reference_${jobId}_${segmentId.replace(/[^a-zA-Z0-9_-]/g, '_')}.wav`);
+          temporaryPaths.push(segmentReferencePath);
+          try {
+            await runFfmpegFile([
+              '-y', '-ss', Math.max(0, segmentStart + 0.03).toFixed(3),
+              '-t', Math.min(8, Math.max(0.5, segmentDuration - 0.06)).toFixed(3),
+              '-i', sourcePath,
+              '-af', 'aresample=24000,aformat=sample_fmts=s16:channel_layouts=mono',
+              '-vn', '-c:a', 'pcm_s16le', segmentReferencePath,
+            ], 120_000);
+            if (await getMediaDurationSeconds(segmentReferencePath).catch(() => 0) >= 1.5) {
+              segmentReferencePaths.set(segmentId, segmentReferencePath);
+            }
+          } catch {
+            await safeUnlink(segmentReferencePath);
+          }
+        }
+      }
+
       const eventClips: Array<{ path: string; event: any; eventIndex: number; duration: number; start: number }> = [];
+      const synthesizedEvents: Array<{ event: any; eventIndex: number; duration: number; start: number; text: string }> = [];
       const sourceTimelineRanges = [
         ...segments.map((segment: any) => ({ start: Number(segment.start), end: Number(segment.end) })),
         ...events.map((event: any) => ({ start: Number(event.start), end: Number(event.end) })),
@@ -3865,18 +4511,50 @@ ${JSON.stringify(normalizedVoices)}
         const rawStart = parseNumber(event.start, 0, 0, Math.max(0, sourceDuration - 0.02));
         const rawEnd = parseNumber(event.end, rawStart + 0.1, rawStart + 0.02, sourceDuration);
         const isLaughter = String(event.type || '') === 'laughter';
+        const overlapsDialogue = segments.some((segment: any) => (
+          Math.min(rawEnd, Number(segment.end)) - Math.max(rawStart, Number(segment.start)) >= 0.04
+        ));
+        if (engine === 'cosyvoice3' && overlapsDialogue) {
+          const eventType = String(event.type || '');
+          const eventTag = eventType === 'breath'
+            ? '[breath]'
+            : eventType === 'quick_breath'
+              ? '[quick_breath]'
+              : eventType === 'cough'
+                ? '[cough]'
+                : eventType === 'sigh'
+                  ? '[sigh]'
+                  : eventType === 'mn'
+                    ? '[mn]'
+                    : eventType === 'noise'
+                      ? '[vocalized-noise]'
+                      : '[laughter]';
+          const eventDuration = Math.max(0.2, rawEnd - rawStart);
+          const repeatCount = isLaughter ? Math.max(1, Math.min(3, Math.ceil(eventDuration / 0.75))) : 1;
+          synthesizedEvents.push({
+            event,
+            eventIndex,
+            duration: eventDuration,
+            start: rawStart,
+            text: Array.from({ length: repeatCount }, () => eventTag).join(''),
+          });
+          continue;
+        }
+        const boundaryRanges = isLaughter
+          ? segments.map((segment: any) => ({ start: Number(segment.start), end: Number(segment.end) }))
+          : sourceTimelineRanges;
         const previousEnd = Math.max(
           0,
-          ...sourceTimelineRanges
+          ...boundaryRanges
             .filter(range => range.end <= rawStart - 0.01)
             .map(range => range.end),
         );
-        const nextStarts = sourceTimelineRanges
+        const nextStarts = boundaryRanges
           .filter(range => range.start >= rawEnd + 0.01)
           .map(range => range.start);
         const nextStart = nextStarts.length > 0 ? Math.min(...nextStarts) : sourceDuration;
-        const start = Math.max(previousEnd + 0.01, rawStart - (isLaughter ? 0.12 : 0.06), 0);
-        const end = Math.min(sourceDuration, nextStart - 0.01, rawEnd + (isLaughter ? 0.35 : 0.14));
+        const start = Math.max(previousEnd + 0.01, rawStart - (isLaughter ? 0.18 : 0.06), 0);
+        const end = Math.min(sourceDuration, nextStart - 0.01, rawEnd + (isLaughter ? 0.65 : 0.14));
         const duration = end - start;
         if (duration < 0.02) {
           droppedEventCount += 1;
@@ -3884,7 +4562,7 @@ ${JSON.stringify(normalizedVoices)}
         }
         const eventPath = path.resolve(uploadsDir, `local_multi_event_${jobId}_${eventIndex}.wav`);
         temporaryPaths.push(eventPath);
-        const fadeDuration = Math.min(isLaughter ? 0.09 : 0.05, duration / 5);
+        const fadeDuration = Math.min(isLaughter ? 0.16 : 0.05, duration / 4);
         try {
           await runFfmpegFile([
             '-y', '-ss', start.toFixed(3), '-t', duration.toFixed(3), '-i', sourcePath,
@@ -3900,12 +4578,18 @@ ${JSON.stringify(normalizedVoices)}
       }
 
       const manifestJobs: any[] = [];
+      const synthesizeableEvents = synthesizedEvents.filter(synthesizedEvent => (
+        referencePaths.has(String(synthesizedEvent.event.speakerId || ''))
+      ));
+      droppedEventCount += synthesizedEvents.length - synthesizeableEvents.length;
       const generatedClipsByVersion = new Map<string, Array<{ path: string; segment: any; segmentIndex: number }>>();
+      const generatedEventClipsByVersion = new Map<string, Array<{ path: string; event: any; eventIndex: number; start: number }>>();
       versions.forEach((version: any, versionIndex: number) => {
         const versionId = versionIndex === 0 ? 'A' : 'B';
         const clips: Array<{ path: string; segment: any; segmentIndex: number }> = [];
         segments.forEach((segment: any, segmentIndex: number) => {
-          const referencePath = referencePaths.get(String(segment.speakerId || ''));
+          const profileReferencePath = referencePaths.get(String(segment.speakerId || ''));
+          const referencePath = segmentReferencePaths.get(String(segment.id || '')) || profileReferencePath;
           if (!referencePath) throw Object.assign(new Error(`第 ${segmentIndex + 1} 段台词没有对应角色参考音。`), { status: 400 });
           const rawPath = path.resolve(uploadsDir, `local_multi_raw_${jobId}_${versionId}_${segmentIndex}.wav`);
           temporaryPaths.push(rawPath);
@@ -3913,17 +4597,46 @@ ${JSON.stringify(normalizedVoices)}
           manifestJobs.push({
             id: `${versionId}-${segmentIndex}`,
             reference: referencePath,
+            prompt_text: referenceTexts.get(String(segment.speakerId || '')) || '',
             text: String(segment.targetText).trim().slice(0, 800),
             language,
             output: rawPath,
+            target_duration: Math.max(0.35, Number(segment.end) - Number(segment.start)),
             performance: ['natural', 'expressive', 'stable'].includes(String(version.performance)) ? version.performance : 'natural',
             exaggeration: parseNumber(version.exaggeration, 0.5, 0.25, 2),
             cfg_weight: parseNumber(version.cfgWeight, 0.3, 0, 1),
             temperature: Math.min(0.78, parseNumber(version.temperature, 0.75, 0.05, 2)),
-            seed: Math.floor(Math.random() * 2_147_483_647),
+            seed: getSpeakerSeed(String(segment.speakerId || '')),
+            diagnostic_similarity: segmentIndex === 0,
           });
         });
         generatedClipsByVersion.set(versionId, clips);
+        const generatedEvents = synthesizeableEvents.flatMap(synthesizedEvent => {
+          const speakerId = String(synthesizedEvent.event.speakerId || '');
+          const referencePath = referencePaths.get(speakerId);
+          if (!referencePath) return [];
+          const rawPath = path.resolve(uploadsDir, `local_multi_event_generated_${jobId}_${versionId}_${synthesizedEvent.eventIndex}.wav`);
+          temporaryPaths.push(rawPath);
+          manifestJobs.push({
+            id: `${versionId}-event-${synthesizedEvent.eventIndex}`,
+            reference: referencePath,
+            prompt_text: '',
+            text: synthesizedEvent.text,
+            language,
+            output: rawPath,
+            target_duration: synthesizedEvent.duration,
+            performance: 'natural',
+            event_only: true,
+            seed: getSpeakerSeed(speakerId),
+          });
+          return [{
+            path: rawPath,
+            event: synthesizedEvent.event,
+            eventIndex: synthesizedEvent.eventIndex,
+            start: synthesizedEvent.start,
+          }];
+        });
+        generatedEventClipsByVersion.set(versionId, generatedEvents);
       });
       fs.writeFileSync(manifestPath, JSON.stringify({ jobs: manifestJobs }), 'utf8');
 
@@ -3934,16 +4647,29 @@ ${JSON.stringify(normalizedVoices)}
       const stdout = await runLocalVoiceCloneQueued(() => runLocalVoiceCloneProcess(
         pythonPath,
         processArgs,
-        Math.max(10 * 60 * 1000, segments.length * versions.length * 90_000),
+        Math.max(10 * 60 * 1000, manifestJobs.length * 90_000),
       ));
       const lastLine = stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) || '{}';
       const metadata = JSON.parse(lastLine) as {
         model?: string;
         gpu?: string;
-        jobs?: Array<{ id?: string; duration_seconds?: number }>;
+        jobs?: Array<{
+          id?: string;
+          duration_seconds?: number;
+          natural_duration_seconds?: number;
+          target_duration_seconds?: number;
+          speed?: number;
+          speaker_similarity?: number;
+        }>;
       };
       const generatedDurations = new Map(
         (metadata.jobs || []).map(job => [String(job.id || ''), Number(job.duration_seconds) || 0]),
+      );
+      const paceAdjustments = new Map(
+        (metadata.jobs || []).map(job => [String(job.id || ''), Number(job.speed) || 1]),
+      );
+      const speakerSimilarities = new Map(
+        (metadata.jobs || []).map(job => [String(job.id || ''), Number(job.speaker_similarity)]),
       );
 
       const options = [];
@@ -3951,6 +4677,8 @@ ${JSON.stringify(normalizedVoices)}
         id: 'A' | 'B';
         shiftedClipCount: number;
         maxShiftSeconds: number;
+        paceAdjustedClipCount: number;
+        maxPaceAdjustment: number;
         preservedEventCount: number;
         droppedEventCount: number;
         outputDuration: number;
@@ -3965,6 +4693,15 @@ ${JSON.stringify(normalizedVoices)}
         if (clips.some(clip => !fs.existsSync(clip.path))) {
           throw Object.assign(new Error(`本地模型没有完整生成版本 ${versionId} 的全部台词。`), { status: 502 });
         }
+        const generatedEventClips = (generatedEventClipsByVersion.get(versionId) || []).map(clip => ({
+          ...clip,
+          duration: generatedDurations.get(`${versionId}-event-${clip.eventIndex}`)
+            || Math.max(0.2, Number(clip.event.end) - Number(clip.event.start)),
+        }));
+        if (generatedEventClips.some(clip => !fs.existsSync(clip.path))) {
+          throw Object.assign(new Error(`本地模型没有完整生成版本 ${versionId} 的语气事件。`), { status: 502 });
+        }
+        const versionEventClips = [...eventClips, ...generatedEventClips];
         const timelineItems = [
           ...clips.map(clip => ({
             kind: 'speech' as const,
@@ -3976,7 +4713,7 @@ ${JSON.stringify(normalizedVoices)}
               || Math.max(0.2, Number(clip.segment.end) - Number(clip.segment.start)),
             stableIndex: clip.segmentIndex,
           })),
-          ...eventClips.map(clip => ({
+          ...versionEventClips.map(clip => ({
             kind: 'event' as const,
             path: clip.path,
             speakerId: String(clip.event.speakerId || ''),
@@ -4035,6 +4772,9 @@ ${JSON.stringify(normalizedVoices)}
         ));
         const shiftedClipCount = shiftedSpeechClips.length;
         const maxShiftSeconds = Math.max(0, ...shiftedSpeechClips.map(clip => clip.scheduledStart - clip.originalStart));
+        const versionSpeeds = clips.map(clip => paceAdjustments.get(`${versionId}-${clip.segmentIndex}`) || 1);
+        const paceAdjustedClipCount = versionSpeeds.filter(speed => Math.abs(speed - 1) >= 0.001).length;
+        const maxPaceAdjustment = Math.max(0, ...versionSpeeds.map(speed => Math.abs(speed - 1)));
         const outputDuration = Math.max(
           sourceDuration,
           ...scheduledClips.map(clip => clip.scheduledEnd + 0.15),
@@ -4044,7 +4784,9 @@ ${JSON.stringify(normalizedVoices)}
           id: versionId,
           shiftedClipCount,
           maxShiftSeconds,
-          preservedEventCount: eventClips.length,
+          paceAdjustedClipCount,
+          maxPaceAdjustment,
+          preservedEventCount: versionEventClips.length,
           droppedEventCount,
           outputDuration,
         });
@@ -4061,30 +4803,47 @@ ${JSON.stringify(normalizedVoices)}
         const performance = ['natural', 'expressive', 'stable'].includes(String(versions[versionIndex].performance))
           ? versions[versionIndex].performance
           : 'natural';
+        const versionSimilarities = clips
+          .map(clip => speakerSimilarities.get(`${versionId}-${clip.segmentIndex}`) || 0)
+          .filter(similarity => Number.isFinite(similarity) && similarity > 0);
         options.push({
           id: versionId,
           performance,
+          speakerSimilarity: versionSimilarities.length > 0
+            ? Number((versionSimilarities.reduce((sum, similarity) => sum + similarity, 0) / versionSimilarities.length).toFixed(4))
+            : undefined,
           data: {
             audioUrl: `/uploads/${outputFileName}`,
-            sourceText: segments.map((segment: any) => `${segment.speakerId}: ${segment.sourceText}`).join('\n'),
-            translatedText: segments.map((segment: any) => `${segment.speakerId}: ${segment.targetText}`).join('\n'),
+            sourceText: segments.map((segment: any) => (
+              dialogueMode === 'single' ? segment.sourceText : `${segment.speakerId}: ${segment.sourceText}`
+            )).join('\n'),
+            translatedText: segments.map((segment: any) => (
+              dialogueMode === 'single' ? segment.targetText : `${segment.speakerId}: ${segment.targetText}`
+            )).join('\n'),
             sourceDuration,
             generatedDuration,
             outputDuration: generatedDuration,
             timingMode: 'natural',
-            dubbingModel: 'local_multispeaker',
+            dubbingModel: dialogueMode === 'single'
+              ? engine === 'cosyvoice3' ? 'local_cosyvoice3' : 'local_chatterbox'
+              : 'local_multispeaker',
             outputFormat: 'wav',
             model: engine === 'cosyvoice3'
               ? String(metadata.model || 'Fun-CosyVoice3-0.5B-2512')
               : metadata.model === 'v3' ? 'Chatterbox Multilingual V3' : String(metadata.model || 'Chatterbox Multilingual'),
             gpu: metadata.gpu || status.gpu,
+            speakerSimilarity: versionSimilarities.length > 0
+              ? Number((versionSimilarities.reduce((sum, similarity) => sum + similarity, 0) / versionSimilarities.length).toFixed(4))
+              : undefined,
           },
         });
       }
       const timeline = {
         shiftedClipCount: versionTimelines.reduce((sum, version) => sum + version.shiftedClipCount, 0),
         maxShiftSeconds: Math.max(0, ...versionTimelines.map(version => version.maxShiftSeconds)),
-        preservedEventCount: eventClips.length,
+        paceAdjustedClipCount: versionTimelines.reduce((sum, version) => sum + version.paceAdjustedClipCount, 0),
+        maxPaceAdjustment: Math.max(0, ...versionTimelines.map(version => version.maxPaceAdjustment)),
+        preservedEventCount: Math.max(0, ...versionTimelines.map(version => version.preservedEventCount)),
         droppedEventCount,
         outputDuration: Math.max(0, ...versionTimelines.map(version => version.outputDuration)),
         versions: versionTimelines,

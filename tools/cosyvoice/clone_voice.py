@@ -12,9 +12,9 @@ DEFAULT_MODEL_DIR = TOOL_DIR / "models" / "Fun-CosyVoice3-0.5B"
 
 SUPPORTED_LANGUAGES = {"zh", "en", "ja", "ko", "de", "es", "fr", "it", "ru"}
 PERFORMANCE_INSTRUCTIONS = {
-    "natural": "Speak naturally and preserve the reference voice's tone and cadence. Read the supplied text exactly once without repeating, omitting, or adding words.<|endofprompt|>",
-    "expressive": "Use vivid emotion and expressive intonation while preserving the reference voice. Read the supplied text exactly once without repeating, omitting, or adding words.<|endofprompt|>",
-    "stable": "Speak clearly, steadily, and with consistent pacing while preserving the reference voice. Read the supplied text exactly once without repeating, omitting, or adding words.<|endofprompt|>",
+    "natural": "You are a helpful assistant. 请保持参考音色，自然地朗读。<|endofprompt|>",
+    "expressive": "You are a helpful assistant. 请保持参考音色，用富有情绪的语气朗读。<|endofprompt|>",
+    "stable": "You are a helpful assistant. 请保持参考音色，用清晰、平稳的语气朗读。<|endofprompt|>",
 }
 
 
@@ -83,29 +83,57 @@ def main() -> None:
         seed = int(job.get("seed", 42))
         reference = Path(job["reference"])
         output = Path(job["output"])
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
         instruction = PERFORMANCE_INSTRUCTIONS[performance]
-        with torch.inference_mode():
-            if performance == "natural":
-                chunks = model.inference_cross_lingual(
-                    f"You are a helpful assistant.<|endofprompt|>{job['text']}",
-                    str(reference.resolve()),
-                    stream=False,
-                )
-            else:
-                chunks = model.inference_instruct2(
-                    job["text"],
-                    instruction,
-                    str(reference.resolve()),
-                    stream=False,
-                )
-            waveforms = [chunk["tts_speech"].detach().float().cpu() for chunk in chunks]
-        if not waveforms:
-            raise RuntimeError(f"CosyVoice 3 returned no audio for job {job.get('id')}.")
-        audio = torch.cat(waveforms, dim=-1).squeeze().numpy()
+        prompt_text = str(job.get("prompt_text", "")).strip()
+
+        def infer(speed: float):
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            with torch.inference_mode():
+                if prompt_text:
+                    chunks = model.inference_zero_shot(
+                        f"You are a helpful assistant.<|endofprompt|>{job['text']}",
+                        f"You are a helpful assistant.<|endofprompt|>{prompt_text}",
+                        str(reference.resolve()),
+                        stream=False,
+                        speed=speed,
+                    )
+                elif performance == "natural" or bool(job.get("event_only")):
+                    chunks = model.inference_cross_lingual(
+                        f"You are a helpful assistant.<|endofprompt|>{job['text']}",
+                        str(reference.resolve()),
+                        stream=False,
+                        speed=speed,
+                    )
+                else:
+                    chunks = model.inference_instruct2(
+                        job["text"],
+                        instruction,
+                        str(reference.resolve()),
+                        stream=False,
+                        speed=speed,
+                    )
+                waveforms = [chunk["tts_speech"].detach().float().cpu() for chunk in chunks]
+            if not waveforms:
+                raise RuntimeError(f"CosyVoice 3 returned no audio for job {job.get('id')}.")
+            return torch.cat(waveforms, dim=-1).squeeze().numpy()
+
+        audio = infer(1.0)
+        natural_duration = len(audio) / model.sample_rate
+        target_duration = max(0.0, float(job.get("target_duration", 0.0)))
+        speed = 1.0
+        if target_duration >= 0.35 and natural_duration > 0:
+            requested_speed = natural_duration / target_duration
+            if abs(requested_speed - 1.0) >= 0.035:
+                speed = max(0.92, min(1.08, requested_speed))
+                audio = infer(speed)
+        if bool(job.get("event_only")) and audio.size:
+            fade_samples = min(int(model.sample_rate * 0.12), len(audio) // 4)
+            if fade_samples > 1:
+                audio[:fade_samples] *= np.linspace(0.0, 1.0, fade_samples, dtype=audio.dtype)
+                audio[-fade_samples:] *= np.linspace(1.0, 0.0, fade_samples, dtype=audio.dtype)
         peak = float(np.max(np.abs(audio))) if audio.size else 0.0
         if peak > 0.95:
             audio = audio * (0.95 / peak)
@@ -115,6 +143,9 @@ def main() -> None:
             "id": job.get("id"),
             "output": str(output.resolve()),
             "duration_seconds": round(len(audio) / model.sample_rate, 3),
+            "natural_duration_seconds": round(natural_duration, 3),
+            "target_duration_seconds": round(target_duration, 3),
+            "speed": round(speed, 4),
             "performance": performance,
         })
     print(json.dumps({

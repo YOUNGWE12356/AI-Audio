@@ -1395,7 +1395,7 @@ export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceReq
           role="dialog"
           aria-modal="false"
           aria-label="全局智能助手"
-          className={`${embedded ? 'relative mx-auto flex min-h-[360px] max-h-[460px] w-full max-w-2xl' : 'pointer-events-auto absolute bottom-8 right-4 flex w-[min(440px,calc(100vw-2rem))] max-h-[min(720px,calc(100dvh-2rem))] sm:bottom-10 sm:right-6'} flex-col overflow-hidden text-slate-700 ${embedded ? 'rounded-none border-0 bg-transparent shadow-none backdrop-blur-0' : 'rounded-[22px] border border-emerald-200/65 bg-white/45 shadow-[0_20px_70px_rgba(15,23,42,0.14),0_0_0_1px_rgba(16,185,129,0.07)] backdrop-blur-2xl'}`}
+          className={`${embedded ? 'relative mx-auto flex min-h-[360px] w-full max-w-2xl' : 'pointer-events-auto absolute bottom-8 right-4 flex w-[min(440px,calc(100vw-2rem))] max-h-[min(720px,calc(100dvh-2rem))] sm:bottom-10 sm:right-6'} flex-col overflow-hidden text-slate-700 ${embedded ? 'rounded-none border-0 bg-transparent shadow-none backdrop-blur-0' : 'rounded-[22px] border border-emerald-200/65 bg-white/45 shadow-[0_20px_70px_rgba(15,23,42,0.14),0_0_0_1px_rgba(16,185,129,0.07)] backdrop-blur-2xl'}`}
         >
           {!embedded && <header className="relative flex items-center justify-between border-b border-emerald-200/55 bg-white/52 px-5 py-4 text-slate-800">
             <div className="absolute inset-x-0 top-0 h-px bg-emerald-400/80" aria-hidden="true" />
@@ -1440,7 +1440,7 @@ export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceReq
                 ref={conversationLogRef}
                 role="log"
                 aria-label="助手任务会话"
-                className="max-h-[220px] shrink-0 space-y-2 overflow-y-auto rounded-2xl border border-emerald-200/55 bg-white/24 p-2.5"
+                className={`${embedded ? 'overflow-visible' : 'max-h-[220px] overflow-y-auto'} shrink-0 space-y-2 rounded-2xl border border-emerald-200/55 bg-white/24 p-2.5`}
               >
                 <div className="flex items-center gap-1.5 px-1 text-[10px] font-bold text-emerald-700">
                   <MessageCircle className="h-3.5 w-3.5" />
@@ -1460,11 +1460,12 @@ export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceReq
               </div>
             )}
 
+            <div className="relative">
             <div
               onClick={() => fileInputRef.current?.click()}
               aria-label="上传音频、视频、图片或文档"
               title={file ? file.name : '上传文件'}
-              className="cursor-pointer p-1 text-emerald-600 transition hover:text-emerald-700"
+              className="pointer-events-none absolute inset-x-2 bottom-2 z-10 p-1 text-emerald-600 transition"
             >
               <input
                 ref={fileInputRef}
@@ -1473,8 +1474,8 @@ export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceReq
                 className="hidden"
                 onChange={(event) => setFile(event.target.files?.[0])}
               />
-              <div className="flex items-center justify-start">
-                <div className="flex h-9 w-9 items-center justify-center text-emerald-600">
+              <div className="flex items-center justify-start gap-2">
+                <div className="pointer-events-auto flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-full border border-emerald-200/70 bg-white/75 text-emerald-600 shadow-sm transition hover:border-emerald-300 hover:bg-white hover:text-emerald-700">
                   <Plus className="h-5 w-5" strokeWidth={2.25} />
                 </div>
                 <div className={`${file ? 'min-w-0 flex-1' : 'hidden'}`}>
@@ -1482,7 +1483,7 @@ export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceReq
                   <p className="mt-0.5 text-[10px] text-slate-400">{file ? `${Math.max(1, Math.round(file.size / 1024))} KB · 点击替换` : '也可以只输入文字任务'}</p>
                 </div>
                 {file && (
-                  <div className="flex shrink-0 items-center gap-2">
+                  <div className="pointer-events-auto flex shrink-0 items-center gap-2">
                     <Check className="h-4 w-4 text-emerald-600" aria-hidden="true" />
                     <button
                       type="button"
@@ -1509,8 +1510,9 @@ export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceReq
                 if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') analyzeRequest();
               }}
               placeholder="告诉我你想完成什么……"
-              className="min-h-28 w-full resize-y rounded-2xl border border-emerald-200/65 bg-white/26 px-3 py-3 text-xs leading-relaxed text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100"
+              className="min-h-28 w-full resize-y rounded-2xl border border-emerald-200/65 bg-white/26 px-3 py-3 pb-12 text-xs leading-relaxed text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100"
             />
+            </div>
             {file && (
               <p className="px-1 text-[10px] text-slate-400">
                 已保留当前文件和会话，可直接说“继续”“下一步”或指定新的片段任务。

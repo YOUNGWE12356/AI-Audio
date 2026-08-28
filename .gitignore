@@ -22,3 +22,9 @@ tools/python-3.10*-embed-amd64.zip
 tools/cosyvoice/repo/
 tools/cosyvoice/models/
 tools/cosyvoice/output/
+tools/seed-vc/repo/
+tools/seed-vc/.venv/
+tools/seed-vc/models/
+tools/seamless-expressive/repo/
+tools/seamless-expressive/.venv/
+tools/seamless-expressive/models/

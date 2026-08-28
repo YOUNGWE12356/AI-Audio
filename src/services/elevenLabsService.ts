@@ -41,6 +41,8 @@ export interface TranslateDubbingResult {
   qualityMode?: ElevenLabsQualityMode;
   dubbingModel?: 'dubbing_v2' | 'manual_tts' | 'local_chatterbox' | 'local_cosyvoice3' | 'local_multispeaker';
   cloningStrength?: number;
+  /** Diagnostic cosine similarity from the local speaker encoder (0..1). */
+  speakerSimilarity?: number;
   outputFormat?: 'mp3' | 'mp4' | 'wav';
 }
 

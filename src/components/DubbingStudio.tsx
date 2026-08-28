@@ -25,7 +25,8 @@ import {
   Info,
   Languages,
   UploadCloud,
-  FileAudio
+  FileAudio,
+  RefreshCw
 } from 'lucide-react';
 import { HistoryItem } from '../types';
 import { ELEVENLABS_VOICES, VoiceItem } from '../data/voices';
@@ -33,6 +34,7 @@ import { fetchAvailableVoices, generateSpeechToSpeech, generateVoice } from '../
 import SpeechToSpeech from './SpeechToSpeech';
 import SpeechToText from './SpeechToText';
 import CrossLanguageDubbing from './CrossLanguageDubbing';
+import VoiceConversion from './VoiceConversion';
 import { downloadAudioHelper } from '../utils/downloadHelper';
 import GeneratedAudioPlayer, { sanitizeAudioFileName } from './GeneratedAudioPlayer';
 import { enhanceVoicePromptForElevenV3 } from '../services/geminiService';
@@ -574,9 +576,17 @@ export default function DubbingStudio({
   const [v3EnhancementLoading, setV3EnhancementLoading] = useState(false);
   const [v3EnhancementError, setV3EnhancementError] = useState<string | null>(null);
 
-  // Active sub-tab state ('tts' = Text-to-Speech, 'sts' = Speech-to-Speech, 'stt' = Speech-to-Text)
-  const [activeSubTab, setActiveSubTab] = useState<'tts' | 'sts' | 'translate' | 'stt'>('tts');
-  const [visitedSubTabs, setVisitedSubTabs] = useState<Set<'tts' | 'sts' | 'translate' | 'stt'>>(() => new Set(['tts']));
+  // Active sub-tab state ('tts' = Text-to-Speech, 'sts' = Speech-to-Speech, 'convert' = Voice Conversion, 'stt' = Speech-to-Text)
+  const [activeSubTab, setActiveSubTab] = useState<'tts' | 'sts' | 'convert' | 'translate' | 'stt'>(() => (
+    typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('tool') === 'voice-conversion'
+      ? 'convert'
+      : 'tts'
+  ));
+  const [visitedSubTabs, setVisitedSubTabs] = useState<Set<'tts' | 'sts' | 'convert' | 'translate' | 'stt'>>(() => new Set(
+    typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('tool') === 'voice-conversion'
+      ? ['convert']
+      : ['tts'],
+  ));
   const [ttsInputMode, setTtsInputMode] = useState<'single' | 'batch'>('single');
   const [subNavWidth, setSubNavWidth] = useState(() => {
     if (typeof window === 'undefined') return DUBBING_SUBNAV_DEFAULT_WIDTH;
@@ -1632,11 +1642,11 @@ export default function DubbingStudio({
             <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>语音转语音</span>
           </button>
 
-          {/* Subtab Button 3: 跨语种转换 */}
+          {/* Subtab Button 3: 声音克隆转换 */}
           <button
             type="button"
-            title="跨语种转换"
-            aria-label="跨语种转换"
+            title="声音克隆转换"
+            aria-label="声音克隆转换"
             onClick={() => {
               setActiveSubTab('translate');
               if (standaloneVoiceAudioRef.current) standaloneVoiceAudioRef.current.pause();
@@ -1651,7 +1661,29 @@ export default function DubbingStudio({
             }`}
           >
             <Languages className={`w-4 h-4 shrink-0 transition-colors ${activeSubTab === 'translate' ? 'text-emerald-600' : 'text-slate-400'}`} />
-            <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>跨语种转换</span>
+            <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>声音克隆转换</span>
+          </button>
+
+          {/* Subtab Button 4: 声音转换 */}
+          <button
+            type="button"
+            title="声音转换"
+            aria-label="声音转换"
+            onClick={() => {
+              setActiveSubTab('convert');
+              if (standaloneVoiceAudioRef.current) standaloneVoiceAudioRef.current.pause();
+              setIsPlaying(false);
+            }}
+            className={`w-full flex items-center overflow-hidden whitespace-nowrap rounded-xl text-xs font-semibold transition-all duration-200 cursor-pointer ${
+              isSubNavCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
+            } ${
+              activeSubTab === 'convert'
+                ? 'bg-emerald-50 text-emerald-700 shadow-sm border border-emerald-100'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+            }`}
+          >
+            <RefreshCw className={`w-4 h-4 shrink-0 transition-colors ${activeSubTab === 'convert' ? 'text-emerald-600' : 'text-slate-400'}`} />
+            <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>声音转换</span>
           </button>
 
           <button
@@ -2699,6 +2731,11 @@ export default function DubbingStudio({
                   }
                 }}
               />
+            </div>
+          )}
+          {visitedSubTabs.has('convert') && (
+            <div hidden={activeSubTab !== 'convert'} className="min-h-full">
+              <VoiceConversion displayVoices={displayVoices} />
             </div>
           )}
           {visitedSubTabs.has('stt') && (
