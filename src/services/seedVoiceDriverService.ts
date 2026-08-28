@@ -187,11 +187,13 @@ export async function renderSeedVoiceDriver(
     const nextStart = segments[index + 1]?.start ?? renderDuration;
     const availableDuration = Math.max(segment.end - segment.start, nextStart - segment.start - 0.05, 0.3);
     const requiredRate = buffer.duration / availableDuration;
-    const playbackRate = requiredRate > 1 ? Math.min(1.08, requiredRate) : 1;
+    // Translated speech is often longer than the source language. Use the
+    // following silence first, then fit the complete generated clip back into
+    // its slot. This avoids aborting the whole conversion because of one long
+    // translated line. The upper bound is a last-resort guard for pathological
+    // sub-second slots; normal lines remain at or below a modest compression.
+    const playbackRate = requiredRate > 1 ? Math.min(1.6, requiredRate) : 1;
     const renderedSegmentDuration = buffer.duration / playbackRate;
-    if (renderedSegmentDuration > availableDuration + 0.18) {
-      throw new Error(`第 ${index + 1} 段目标台词超出原时间槽，请缩短这段译文后重试。`);
-    }
     if (playbackRate > 1.005) paceAdjustedCount += 1;
     maxPlaybackRate = Math.max(maxPlaybackRate, playbackRate);
 

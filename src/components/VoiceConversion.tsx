@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, CheckCircle2, Download, FileAudio, Loader2, Pause, Play, RefreshCw, UploadCloud, Volume2 } from 'lucide-react';
-import { convertWithSeedVc, getSeedVcStatus, type SeedVcConvertOptions, type SeedVcModel, type SeedVcStatus } from '../services/seedVoiceConversionService';
+import { AlertCircle, CheckCircle2, FileAudio, Loader2, Play, RefreshCw, UploadCloud, Volume2 } from 'lucide-react';
+import { convertWithSeedVc, getSeedVcStatus, type SeedVcConvertOptions, type SeedVcConvertResult, type SeedVcModel, type SeedVcStatus } from '../services/seedVoiceConversionService';
 import { transcribeSpeech, generateVoice } from '../services/elevenLabsService';
 import { translateTextToLanguage } from '../services/geminiService';
 import type { VoiceItem } from '../data/voices';
 import SeamlessExpressivePanel from './SeamlessExpressivePanel';
 import AdvancedVoiceConversionPanel from './AdvancedVoiceConversionPanel';
+import GeneratedAudioPlayer from './GeneratedAudioPlayer';
 import {
   buildSeedVoiceTimeline,
   readMediaDuration,
@@ -101,6 +102,8 @@ interface VoiceConversionProps {
 
 type ConversionPlan = 'plan1' | 'plan2' | 'plan3' | 'plan4';
 
+type SeedVcResultOption = SeedVcConvertResult & { id: 'A' | 'B' };
+
 const conversionPlans: Array<{
   id: ConversionPlan;
   label: string;
@@ -108,7 +111,7 @@ const conversionPlans: Array<{
   description: string;
   tone: string;
 }> = [
-  { id: 'plan1', label: '方案一 · Seed-VC', title: '目标语言驱动 + Seed-VC', description: '自动提取台词、翻译并生成目标语言驱动音频，再由 Seed-VC 迁移原始音色与表达。', tone: 'border-emerald-200 bg-emerald-50/60 text-emerald-800' },
+  { id: 'plan1', label: '方案一 · Seed-VC', title: '单人转换', description: '自动提取台词、翻译并生成目标语言驱动音频，再由 Seed-VC 迁移原始音色与表达。', tone: 'border-emerald-200 bg-emerald-50/60 text-emerald-800' },
   { id: 'plan2', label: '方案二', title: '多人角色分轨转换', description: '先识别说话人，再为每个角色单独建立音色和台词轨道，避免多人对话串音。', tone: 'border-violet-200 bg-violet-50/60 text-violet-800' },
   { id: 'plan3', label: '方案三', title: '语音与声音事件混合', description: '在台词转换之外保留笑声、呼吸、语气词和环境声等非语言事件。', tone: 'border-amber-200 bg-amber-50/60 text-amber-800' },
   { id: 'plan4', label: '方案四 · SeamlessExpressive（开发中）', title: '表达式语音翻译（开发中）', description: '原始语音直接翻译成目标语言语音，迁移语速、停顿与表达风格。', tone: 'border-sky-200 bg-sky-50/60 text-sky-800' },
@@ -141,11 +144,8 @@ export default function VoiceConversion({ displayVoices = [] }: VoiceConversionP
   const [options, setOptions] = useState(DEFAULT_OPTIONS);
   const [isConverting, setIsConverting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [resultUrl, setResultUrl] = useState<string | null>(null);
-  const [resultDuration, setResultDuration] = useState<number | undefined>();
-  const [resultTimelineInfo, setResultTimelineInfo] = useState<{ preservedEvents: number; aligned: boolean } | null>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const resultAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [resultOptions, setResultOptions] = useState<SeedVcResultOption[]>([]);
+  const [activeAudioId, setActiveAudioId] = useState<string | null>(null);
   const activePlanConfig = conversionPlans.find(plan => plan.id === activePlan) || conversionPlans[0];
 
   useEffect(() => {
@@ -182,28 +182,36 @@ export default function VoiceConversion({ displayVoices = [] }: VoiceConversionP
 
   const handleConvert = async () => {
     if (!sourceFile || !referenceFile) return;
-    setError(null); setResultUrl(null); setResultTimelineInfo(null); setIsConverting(true); setIsPlaying(false);
+    setError(null); setResultOptions([]); setActiveAudioId(null); setIsConverting(true);
     try {
-      const result = await convertWithSeedVc(sourceFile, referenceFile, options, {
+      const timelineOptions = {
         timelineSource: originalFile || undefined,
         targetDuration: originalDuration || undefined,
         events: audioEvents,
-      });
-      setResultUrl(result.audioUrl); setResultDuration(result.generatedDuration);
-      setResultTimelineInfo({
-        preservedEvents: result.preservedEventCount || 0,
-        aligned: result.timelineAligned === true,
-      });
+      };
+      const variantOptions: SeedVcConvertOptions[] = [
+        options,
+        {
+          ...options,
+          diffusionSteps: Math.min(80, options.diffusionSteps + 4),
+          temperature: Math.min(2, options.temperature + 0.08),
+          topP: Math.max(0.05, options.topP - 0.04),
+        },
+      ];
+      const results = await Promise.all(variantOptions.map((variant) => (
+        convertWithSeedVc(sourceFile, referenceFile, variant, timelineOptions)
+      )));
+      setResultOptions(results.map((result, index) => ({ ...result, id: index === 0 ? 'A' : 'B' })));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '声音转换失败');
     } finally { setIsConverting(false); }
   };
 
-  const handleTranscribe = async () => {
-    if (!originalFile) return;
+  const handleTranscribe = async (file: File | null = originalFile) => {
+    if (!file) return;
     setError(null); setTextLoading('transcribe');
     try {
-      const result = await transcribeSpeech(originalFile, undefined, true);
+      const result = await transcribeSpeech(file, undefined, true);
       const timeline = buildSeedVoiceTimeline(result);
       const text = timeline.segments.length > 0
         ? timeline.segments.map(segment => segment.sourceText).join('\n\n')
@@ -288,8 +296,10 @@ export default function VoiceConversion({ displayVoices = [] }: VoiceConversionP
     setAudioEvents([]);
     setOriginalDuration(0);
     setDriverPaceSummary(null);
-    setResultUrl(null);
+    setResultOptions([]);
     if (file) {
+      // Transcribe immediately after upload so no separate extraction click is needed.
+      void handleTranscribe(file);
       void readMediaDuration(file).then(duration => {
         if (Number.isFinite(duration) && duration > 0) setOriginalDuration(duration);
       }).catch(() => undefined);
@@ -325,11 +335,6 @@ export default function VoiceConversion({ displayVoices = [] }: VoiceConversionP
     setDriverPaceSummary(null);
   };
 
-  const togglePlayback = () => {
-    const audio = resultAudioRef.current; if (!audio) return;
-    if (audio.paused) { void audio.play(); } else { audio.pause(); }
-  };
-
   return (
     <div className="mx-auto max-w-6xl space-y-5 pb-8" aria-label="声音转换工作台">
       <div className="flex flex-col gap-3 border-b border-slate-200 pb-5 md:flex-row md:items-end md:justify-between">
@@ -362,12 +367,31 @@ export default function VoiceConversion({ displayVoices = [] }: VoiceConversionP
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-12 lg:items-start">
         <div className="space-y-5 lg:col-span-7">
           <div className="rounded-2xl border border-emerald-200 bg-emerald-50/50 p-5 shadow-sm">
-            <div className="flex items-start justify-between gap-3"><div><p className="text-xs font-black text-emerald-900">第一步：上传原始素材</p><p className="mt-1 text-[10px] leading-relaxed text-emerald-800/80">上传原始视频或音频，系统会从这里自动提取台词。你不需要先准备目标语言音频。</p></div><FileAudio className="h-5 w-5 text-emerald-600" /></div>
+            <div className="flex items-start justify-between gap-3"><div><p className="text-xs font-black text-emerald-900">第一步：上传素材并选择目标语种</p><p className="mt-1 text-[10px] leading-relaxed text-emerald-800/80">上传后系统会自动提取原始台词、时间码和声音事件，无需再单独点击提取按钮。</p></div><FileAudio className="h-5 w-5 text-emerald-600" /></div>
             <UploadCard title="原始素材（视频 / 音频）" hint="包含原始人物声音和完整对白的素材。上传后会提取逐句时间码、停顿和笑声，并默认用它作为参考音。" file={originalFile} accept="audio/*,video/*" onFile={updateOriginalFile} />
-            <div className="mt-3 flex flex-wrap items-center gap-2"><button type="button" disabled={!originalFile || Boolean(textLoading)} onClick={handleTranscribe} className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-2 text-[10px] font-black text-white disabled:cursor-not-allowed disabled:opacity-40">{textLoading === 'transcribe' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}自动提取台词</button>{originalUrl && <audio controls src={originalUrl} className="h-8 min-w-[180px] flex-1" />}</div>
+            <div className="mt-3 flex flex-wrap items-center gap-2">{textLoading === 'transcribe' ? <span className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-100 px-3 py-2 text-[10px] font-black text-emerald-800"><Loader2 className="h-3.5 w-3.5 animate-spin" />正在自动提取台词…</span> : null}{originalUrl && <audio controls src={originalUrl} className="h-8 min-w-[180px] flex-1" />}</div>
             {timedSegments.length > 0 ? <p className="mt-3 text-[10px] font-bold text-emerald-800">已建立 {timedSegments.length} 段台词时间槽 · {audioEvents.length} 个笑声/呼吸事件 · 原时长 {formatTime(originalDuration)}</p> : null}
           </div>
-          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-center justify-between gap-3"><div><p className="text-xs font-black text-slate-800">第二步：确认目标语言台词</p><p className="mt-1 text-[10px] text-slate-500">每个空行对应一段原时间槽；笑声不会写成台词，而是保留原声。</p></div><span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-500">逐句时间线</span></div><textarea value={sourceText} onChange={(event) => updateSourceDialogue(event.target.value)} placeholder="点击“自动提取台词”后，原始台词会显示在这里" className="mt-4 min-h-20 w-full resize-y rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-800 outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200" /><div className="mt-3 flex flex-col gap-2 sm:flex-row"><select value={targetLanguage} onChange={(event) => { setTargetLanguage(event.target.value); setTargetText(''); setSourceFile(null); setTimedSegments(current => current.map(segment => ({ ...segment, targetText: '' }))); }} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-[11px] font-bold text-slate-700 outline-none focus:border-emerald-400">{targetLanguages.map(([code, label]) => <option key={code} value={code}>{label}</option>)}</select><button type="button" disabled={!sourceText.trim() || Boolean(textLoading)} onClick={handleTranslate} className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-[10px] font-black text-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">{textLoading === 'translate' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Volume2 className="h-3.5 w-3.5" />}逐句翻译</button></div><textarea value={targetText} onChange={(event) => updateTargetDialogue(event.target.value)} placeholder="逐句翻译会保留空行和原始时间槽，也可以手动修改" className="mt-3 min-h-20 w-full resize-y rounded-xl border border-emerald-100 bg-emerald-50/40 p-3 text-xs text-slate-800 outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200" /><button type="button" disabled={!targetText.trim() || displayVoices.length === 0 || Boolean(textLoading)} onClick={handleDraft} className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-2 text-[10px] font-black text-white disabled:cursor-not-allowed disabled:opacity-40">{textLoading === 'draft' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Volume2 className="h-3.5 w-3.5" />}生成时间线驱动音频{displayVoices.length === 0 ? '（暂无可用 TTS 声线）' : ''}</button>{driverProgress ? <p className="mt-2 text-[10px] font-bold text-emerald-700">{driverProgress}</p> : null}</div>
+          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-black text-slate-800">第二步：翻译并生成目标语音</p>
+                <p className="mt-1 text-[10px] leading-relaxed text-slate-500">按下面 2A → 2B 的顺序操作。原始台词已经按时间槽分段，每个空行对应一段台词。</p>
+              </div>
+              <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-500">逐句时间线</span>
+            </div>
+            <label className="mt-4 block text-[10px] font-black text-slate-700">原始台词（可检查）</label>
+            <textarea value={sourceText} onChange={(event) => updateSourceDialogue(event.target.value)} placeholder="上传素材后，原始台词会自动显示在这里" className="mt-2 min-h-20 w-full resize-y rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-800 outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200" />
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">
+              <label className="block flex-1 text-[10px] font-black text-slate-700">2A · 目标语种<select value={targetLanguage} onChange={(event) => { setTargetLanguage(event.target.value); setTargetText(''); setSourceFile(null); setTimedSegments(current => current.map(segment => ({ ...segment, targetText: '' }))); }} className="mt-1 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-[11px] font-bold text-slate-700 outline-none focus:border-emerald-400">{targetLanguages.map(([code, label]) => <option key={code} value={code}>{label}</option>)}</select></label>
+              <button type="button" disabled={!sourceText.trim() || Boolean(textLoading)} onClick={handleTranslate} className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-[10px] font-black text-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">{textLoading === 'translate' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Volume2 className="h-3.5 w-3.5" />}逐句翻译</button>
+            </div>
+            <p className="mt-2 text-[10px] text-slate-500">{targetText.trim() ? '2A 已完成：请检查下面的目标台词，确认无误后继续 2B。' : sourceText.trim() ? '下一步：选择目标语种并点击“逐句翻译”。' : '请先在第一步上传素材，系统会自动提取原始台词。'}</p>
+            <label className="mt-3 block text-[10px] font-black text-slate-700">2B · 目标台词（可修改）</label>
+            <textarea value={targetText} onChange={(event) => updateTargetDialogue(event.target.value)} placeholder="完成 2A 翻译后，目标台词会显示在这里；保留空行可保持原始停顿" className="mt-2 min-h-20 w-full resize-y rounded-xl border border-emerald-100 bg-emerald-50/40 p-3 text-xs text-slate-800 outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200" />
+            <button type="button" disabled={!targetText.trim() || displayVoices.length === 0 || Boolean(textLoading)} onClick={handleDraft} className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-2 text-[10px] font-black text-white disabled:cursor-not-allowed disabled:opacity-40">{textLoading === 'draft' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Volume2 className="h-3.5 w-3.5" />}2B · 生成时间线驱动音频{displayVoices.length === 0 ? '（暂无可用 TTS 声线）' : ''}</button>
+            {driverProgress ? <p className="mt-2 text-[10px] font-bold text-emerald-700">{driverProgress}</p> : null}
+          </div>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <UploadCard title="待转换语音（时间线驱动）" hint="自动生成与原素材等长的目标语音；未说话的位置保持空白，不做整段拉伸。" file={sourceFile} accept="audio/*,video/*" onFile={setSourceFile} />
             <UploadCard title="原始参考音（自动使用，可替换）" hint="默认使用上面的原始素材。若有更干净的同一人物语音片段，可在这里替换以提升音色稳定性。" file={referenceFile} accept="audio/*,video/*" onFile={setReferenceFile} />
@@ -385,18 +409,18 @@ export default function VoiceConversion({ displayVoices = [] }: VoiceConversionP
           </div>
           {!statusLoading && !status?.available && <div className="flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-[11px] leading-relaxed text-amber-800"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><div><p className="font-black">本地 Seed-VC 尚未就绪</p><p className="mt-1">{status?.reason || '请配置 Python 运行时、Seed-VC 脚本和模型依赖。界面已准备好，环境可用后无需更改操作流程。'}</p></div></div>}
           {error && <div className="flex items-start gap-2 rounded-2xl border border-red-200 bg-red-50 p-4 text-[11px] leading-relaxed text-red-700"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span>{error}</span></div>}
-          <button type="button" disabled={!canConvert} onClick={handleConvert} className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-3 text-xs font-black text-white shadow-sm transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45">{isConverting ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}{isConverting ? 'Seed-VC 转换并恢复时间线…' : '开始声音转换'}</button>
+          <button type="button" disabled={!canConvert} onClick={handleConvert} className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-3 text-xs font-black text-white shadow-sm transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45">{isConverting ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}{isConverting ? 'Seed-VC 正在生成 A / B…' : '开始声音转换 · 生成 A / B'}</button>
         </div>
 
         <div className="space-y-5 lg:col-span-5">
-          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-center gap-2"><CheckCircle2 className="h-4 w-4 text-emerald-600" /><p className="text-xs font-black text-slate-800">转换结果</p></div>{resultUrl ? <div className="mt-4 space-y-3"><audio ref={resultAudioRef} src={resultUrl} onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} onEnded={() => setIsPlaying(false)} /><div className="flex items-center gap-3 rounded-xl bg-slate-50 p-3"><button type="button" onClick={togglePlayback} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-white">{isPlaying ? <Pause className="h-4 w-4" /> : <Play className="ml-0.5 h-4 w-4 fill-current" />}</button><div className="min-w-0 flex-1"><p className="truncate text-[11px] font-bold text-slate-800">Seed-VC {options.model.toUpperCase()} 转换结果</p><p className="mt-1 text-[10px] text-slate-500">原始 {formatTime(originalDuration)} · 输出 {formatTime(resultDuration || 0)}{resultTimelineInfo?.aligned ? ' · 已对齐' : ''}</p><p className="mt-0.5 text-[10px] text-slate-400">保留原声事件 {resultTimelineInfo?.preservedEvents || 0} 个</p></div><a href={resultUrl} download="seed-vc-converted.wav" className="rounded-lg p-2 text-slate-500 hover:bg-emerald-50 hover:text-emerald-700" title="下载结果"><Download className="h-4 w-4" /></a></div></div> : <div className="mt-4 rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-12 text-center"><Play className="mx-auto h-7 w-7 text-slate-300" /><p className="mt-2 text-[11px] font-bold text-slate-500">完成一次转换后，结果会显示在这里</p><p className="mt-1 text-[10px] text-slate-400">输出会保持原时长、逐句位置和原始笑声</p></div>}</div>
+          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-center gap-2"><CheckCircle2 className="h-4 w-4 text-emerald-600" /><p className="text-xs font-black text-slate-800">转换结果</p></div>{resultOptions.length > 0 ? <div className="mt-4 space-y-3">{resultOptions.map((result) => <GeneratedAudioPlayer key={result.id} id={`seed-vc-${result.id}`} url={result.audioUrl} title={`${result.model || `Seed-VC ${options.model.toUpperCase()}`} · 版本 ${result.id}`} titleBadge={`版本 ${result.id}`} meta={`原始 ${formatTime(originalDuration)} · 输出 ${formatTime(result.generatedDuration || originalDuration)}${result.timelineAligned ? ' · 已对齐' : ' · 请检查时长'} · 保留原声事件 ${result.preservedEventCount || 0} 个`} durationHint={result.generatedDuration || originalDuration} downloadFileName={`seed-vc-${result.id}.wav`} downloadLabel="下载 WAV" activeId={activeAudioId} setActiveId={setActiveAudioId} stopEventName="seed-vc-result-stop-others" />)}</div> : <div className="mt-4 rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-12 text-center"><Play className="mx-auto h-7 w-7 text-slate-300" /><p className="mt-2 text-[11px] font-bold text-slate-500">完成一次转换后，A / B 两个结果会显示在这里</p><p className="mt-1 text-[10px] text-slate-400">每个版本都保留原时长、逐句位置和原始声音事件</p></div>}</div>
           <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><p className="text-xs font-black text-slate-800">处理流程</p><div className="mt-3 space-y-3 text-[10px] leading-relaxed text-slate-500"><p><span className="mr-2 inline-flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 font-black text-emerald-700">1</span>逐句识别时间码，台词之间的停顿保持空白。</p><p><span className="mr-2 inline-flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 font-black text-emerald-700">2</span>目标语言按段并行生成，再放回原说话位置后交给 Seed-VC。</p><p><span className="mr-2 inline-flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 font-black text-emerald-700">3</span>笑声、呼吸直接从原素材提取并带尾音混回，不再让 TTS 模仿。</p></div></div>
         </div>
       </div>
       </div>
-      {activePlan === 'plan4' ? <SeamlessExpressivePanel /> : null}
-      {activePlan === 'plan2' ? <AdvancedVoiceConversionPanel mode="speakers" /> : null}
-      {activePlan === 'plan3' ? <AdvancedVoiceConversionPanel mode="events" /> : null}
+      <div hidden={activePlan !== 'plan4'}><SeamlessExpressivePanel /></div>
+      <div hidden={activePlan !== 'plan2'}><AdvancedVoiceConversionPanel mode="speakers" /></div>
+      <div hidden={activePlan !== 'plan3'}><AdvancedVoiceConversionPanel mode="events" /></div>
     </div>
   );
 }

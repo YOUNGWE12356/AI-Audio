@@ -15,6 +15,12 @@ import tempfile
 from pathlib import Path
 
 
+for _proxy_key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+    _proxy_value = os.environ.get(_proxy_key, "").strip().lower()
+    if _proxy_value.startswith(("socks://", "socks4://", "socks5://")):
+        os.environ.pop(_proxy_key, None)
+
+
 def parse_bool(value: str) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 

@@ -8,6 +8,13 @@ from pathlib import Path
 TOOL_DIR = Path(__file__).resolve().parent
 os.environ.setdefault("HF_HOME", str(TOOL_DIR / "models"))
 
+# Avoid httpx startup failures when the desktop has an unsupported SOCKS
+# proxy configured. HTTP(S) proxies are still allowed for model downloads.
+for _proxy_key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+    _proxy_value = os.environ.get(_proxy_key, "").strip().lower()
+    if _proxy_value.startswith(("socks://", "socks4://", "socks5://")):
+        os.environ.pop(_proxy_key, None)
+
 import numpy as np
 import librosa
 import perth

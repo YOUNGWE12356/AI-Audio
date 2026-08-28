@@ -1821,7 +1821,7 @@ export async function createEnglishMusicPromptForElevenLabs(
 export async function translateTextToLanguage(
   text: string,
   targetLanguage: string,
-  options?: { preserveTone?: boolean; maxDurationSeconds?: number }
+  options?: { preserveTone?: boolean; preserveInterjections?: boolean; maxDurationSeconds?: number }
 ): Promise<string> {
   const normalizedText = text.trim();
   if (!normalizedText) return '';
@@ -1833,6 +1833,7 @@ export async function translateTextToLanguage(
       text: normalizedText,
       targetLanguage: normalizedTargetLanguage,
       preserveTone: options?.preserveTone !== false,
+      preserveInterjections: options?.preserveInterjections !== false,
       maxDurationSeconds: options?.maxDurationSeconds,
     });
     return result.text;
@@ -1841,14 +1842,18 @@ export async function translateTextToLanguage(
   try {
     const { ai, ThinkingLevel } = await getAI();
     const durationInstruction = typeof options?.maxDurationSeconds === 'number' && Number.isFinite(options.maxDurationSeconds)
-      ? `Aim to speak naturally within about ${Math.max(0.5, options.maxDurationSeconds).toFixed(1)} seconds when possible. Never omit, summarize, merge, or remove spoken content to fit the duration. Preserve repetitions, fillers, interjections, hesitations, and conversational emphasis. If timing and completeness conflict, prioritize complete dialogue.`
+      ? `Aim to speak naturally within about ${Math.max(0.5, options.maxDurationSeconds).toFixed(1)} seconds. Use concise spoken phrasing and do not add detail that is absent from the source. Do not omit essential meaning, repetitions, fillers, interjections, hesitations, or conversational emphasis; preserve all of them when they carry meaning.`
+      : '';
+    const interjectionInstruction = options?.preserveInterjections !== false
+      ? 'Preserve every filler, interjection, hesitation, vocalization, and repeated syllable. Keep the same type and repetition count (for example, 哦哦哦 must not become 啊啊啊). Translate a vocalization only to its direct target-language equivalent; never invent, normalize, or replace it with a different sound.'
       : '';
     const prompt = `You are a professional dubbing translator.
 Translate the source dialogue into ${normalizedTargetLanguage}.
 Preserve the original meaning, emotion, tone, speaking intention, and natural spoken rhythm.
 Make the translated line sound like a real voice actor would say it, not like a literal subtitle.
+${interjectionInstruction}
 ${durationInstruction}
-The output language MUST be ${normalizedTargetLanguage}. Do not return the source language unless the source is already ${normalizedTargetLanguage}.
+The output language MUST be ${normalizedTargetLanguage}. Do not return the source language unless the source is already ${normalizedTargetLanguage}. Do not answer with the original text as a placeholder. Preserve punctuation and repetition structure.
 Return only the translated dialogue. Do not add explanations, labels, quotation marks, or markdown.
 
 Source dialogue:

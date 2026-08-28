@@ -8,7 +8,6 @@ import {
   RefreshCw,
   UploadCloud,
   Users,
-  Volume2,
   Waves,
 } from 'lucide-react';
 import { transcribeSpeech, type SpeechTranscriptionResult } from '../services/elevenLabsService';
@@ -33,6 +32,9 @@ const EVENT_LABELS: Record<string, string> = {
 
 const LANGUAGES = [
   ['zh', '中文'], ['en', '英文'], ['ja', '日文'], ['ko', '韩文'], ['fr', '法文'], ['de', '德文'], ['es', '西班牙文'],
+  ['pt', '葡萄牙文'], ['it', '意大利文'], ['ru', '俄文'], ['ar', '阿拉伯文'], ['hi', '印地文'], ['tr', '土耳其文'],
+  ['nl', '荷兰文'], ['pl', '波兰文'], ['sv', '瑞典文'], ['da', '丹麦文'], ['fi', '芬兰文'], ['no', '挪威文'],
+  ['el', '希腊文'], ['he', '希伯来文'], ['ms', '马来文'], ['sw', '斯瓦希里文'],
 ];
 
 type PanelProfile = LocalMultiSpeakerProfile & { name: string };
@@ -118,7 +120,7 @@ export default function AdvancedVoiceConversionPanel({ mode }: { mode: AdvancedV
   const [profiles, setProfiles] = useState<PanelProfile[]>([]);
   const [status, setStatus] = useState<LocalVoiceCloneStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(true);
-  const [working, setWorking] = useState<'analyze' | 'translate' | 'generate' | null>(null);
+  const [working, setWorking] = useState<'analyze' | 'generate' | null>(null);
   const [progress, setProgress] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<LocalMultiSpeakerCloneResult | null>(null);
@@ -143,8 +145,12 @@ export default function AdvancedVoiceConversionPanel({ mode }: { mode: AdvancedV
 
   const engine = status?.defaultEngine || 'chatterbox';
   const engineStatus = status?.engines?.[engine];
+  const languageOptions = useMemo(() => {
+    const supported = engineStatus?.supportedLanguages;
+    if (!supported) return LANGUAGES;
+    return LANGUAGES.filter(([code]) => Object.prototype.hasOwnProperty.call(supported, code));
+  }, [engineStatus]);
   const canAnalyze = Boolean(sourceFile && !working);
-  const canTranslate = segments.length > 0 && !working;
   const canGenerate = Boolean(sourceFile && segments.length > 0 && profiles.length > 0 && segments.every(segment => segment.sourceText.trim()) && !working && engineStatus?.available);
   const enabledEvents = events.filter(event => selectedEventIds.has(event.id));
 
@@ -169,22 +175,26 @@ export default function AdvancedVoiceConversionPanel({ mode }: { mode: AdvancedV
         const first = speakerSegments[0];
         return { id: speakerId, name: `角色 ${index + 1}`, referenceStart: first.start, referenceEnd: Math.min(sourceDuration || first.end, Math.max(first.end, first.start + 4)), referenceRanges: [{ start: first.start, end: Math.min(sourceDuration || first.end, Math.max(first.end, first.start + 8)) }] };
       });
-      setSegments(detectedSegments); setEvents(detectedEvents); setProfiles(nextProfiles); setSelectedEventIds(new Set(detectedEvents.map(event => event.id)));
-    } catch (reason) { setError(reason instanceof Error ? reason.message : '说话人分析失败。'); }
-    finally { setWorking(null); }
-  };
-
-  const translate = async () => {
-    if (!segments.length) return;
-    setWorking('translate'); setError(null);
-    try {
-      const response = await Promise.all(segments.map(async segment => {
-        const translated = await translateTextToLanguage(segment.sourceText, LANGUAGES.find(item => item[0] === language)?.[1] || language, { preserveTone: true, maxDurationSeconds: Math.max(0.5, segment.end - segment.start) });
-        return { ...segment, targetText: translated.trim() };
+      setSegments(detectedSegments);
+      setEvents(detectedEvents); setProfiles(nextProfiles); setSelectedEventIds(new Set(detectedEvents.map(event => event.id)));
+      setProgress('正在自动翻译识别到的台词…');
+      const translatedResults = await Promise.allSettled(detectedSegments.map(async segment => {
+        const translated = await translateTextToLanguage(
+          segment.sourceText,
+          languageOptions.find(item => item[0] === language)?.[1] || language,
+          { preserveTone: true, preserveInterjections: true, maxDurationSeconds: Math.max(0.5, segment.end - segment.start) },
+        );
+        return translated.trim();
       }));
-      setSegments(response);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : '台词翻译失败。'); }
-    finally { setWorking(null); }
+      const translatedSegments = detectedSegments.map((segment, index) => {
+        const translation = translatedResults[index];
+        return translation?.status === 'fulfilled' ? { ...segment, targetText: translation.value } : segment;
+      });
+      const failedTranslations = translatedResults.filter(translation => translation.status === 'rejected').length;
+      if (failedTranslations > 0) setError(`已显示原始台词，${failedTranslations} 段译文暂未完成，可直接编辑目标文本。`);
+      setSegments(translatedSegments);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '说话人分析失败。'); }
+    finally { setProgress(''); setWorking(null); }
   };
 
   const generate = async () => {
@@ -199,7 +209,7 @@ export default function AdvancedVoiceConversionPanel({ mode }: { mode: AdvancedV
           const translated = await translateTextToLanguage(
             segment.sourceText,
             LANGUAGES.find(item => item[0] === language)?.[1] || language,
-            { preserveTone: true, maxDurationSeconds: Math.max(0.5, segment.end - segment.start) },
+            { preserveTone: true, preserveInterjections: true, maxDurationSeconds: Math.max(0.5, segment.end - segment.start) },
           );
           return { ...segment, targetText: translated.trim() };
         }));
@@ -234,26 +244,37 @@ export default function AdvancedVoiceConversionPanel({ mode }: { mode: AdvancedV
   const title = isSpeakerMode ? '多人角色分轨转换' : '语音与声音事件混合';
   const statusLabel = statusLoading ? '检查本地引擎…' : engineStatus?.available ? `${engineStatus.model}${engineStatus.gpu ? ` · ${engineStatus.gpu}` : ''}` : '本地引擎未就绪';
   const detectedSpeakerCount = useMemo(() => new Set(segments.map(segment => segment.speakerId)).size, [segments]);
+  const workflowStep = !sourceFile ? 1 : segments.length === 0 ? 2 : segments.some(segment => !segment.targetText.trim()) ? 3 : 4;
 
   return (
     <div className="grid grid-cols-1 gap-5 lg:grid-cols-12 lg:items-start" aria-label={`${title}工作台`}>
       <section className="space-y-5 lg:col-span-8">
+        <div className="rounded-2xl border border-violet-200 bg-violet-50/70 p-4">
+          <div className="flex items-center justify-between gap-2"><p className="text-xs font-black text-violet-900">操作流程</p><span className="text-[10px] font-bold text-violet-600">第 {Math.min(workflowStep, 3)} 步 / 共 3 步</span></div>
+          <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+            {[['1', '选择目标语种', '上传原始视频或音频'], ['2', '分析台词', '识别说话人和时间码'], ['3', '翻译并生成', '翻译台词后生成 A / B']].map(([number, label, detail], index) => {
+              const active = workflowStep === index + 1 || (workflowStep === 4 && index === 2);
+              const complete = workflowStep > index + 1;
+              return <div key={number} className={`rounded-xl border px-3 py-2 ${active ? 'border-violet-400 bg-white shadow-sm' : complete ? 'border-emerald-200 bg-emerald-50/60' : 'border-violet-100 bg-violet-50'}`}><div className="flex items-center gap-2"><span className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-black ${complete ? 'bg-emerald-500 text-white' : active ? 'bg-violet-600 text-white' : 'bg-violet-100 text-violet-500'}`}>{complete ? '✓' : number}</span><span className="text-[11px] font-black text-slate-800">{label}</span></div><p className="mt-1 pl-7 text-[10px] text-slate-500">{detail}</p></div>;
+            })}
+          </div>
+        </div>
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <div className="flex items-center justify-between gap-3"><div><p className="text-xs font-black text-slate-800">1. 上传并分析素材</p><p className="mt-1 text-[10px] text-slate-500">建议使用包含完整对白的原始视频或音频，系统会保留原始时间结构。</p></div><FileAudio className="h-5 w-5 text-violet-600" /></div>
+          <div className="flex items-center justify-between gap-3"><div><p className="text-xs font-black text-slate-800">1. 选择目标语种并上传素材</p><p className="mt-1 text-[10px] text-slate-500">先选择要输出的语言，再上传包含完整对白的原始视频或音频。</p></div><FileAudio className="h-5 w-5 text-violet-600" /></div>
           <div className="mt-4"><UploadBox file={sourceFile} onChange={resetSource} /></div>
-          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center"><select value={language} onChange={event => setLanguage(event.target.value)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-[11px] font-bold text-slate-700">{LANGUAGES.map(item => <option key={item[0]} value={item[0]}>{item[1]}</option>)}</select>{isSpeakerMode ? <select value={speakerCount} onChange={event => setSpeakerCount(event.target.value === 'auto' ? 'auto' : Number(event.target.value))} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-[11px] font-bold text-slate-700"><option value="auto">自动识别说话人</option>{[2, 3, 4, 5, 6, 7, 8].map(value => <option key={value} value={value}>{value} 位说话人</option>)}</select> : null}<button type="button" disabled={!canAnalyze} onClick={() => void analyze()} className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-slate-900 px-3 py-2 text-[10px] font-black text-white disabled:cursor-not-allowed disabled:opacity-40">{working === 'analyze' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}分析台词与声音事件</button></div>
+          <div className="mt-3 flex flex-wrap items-center gap-2 sm:flex-nowrap"><label className="inline-flex w-full items-center gap-2 sm:w-auto"><span className="shrink-0 text-[10px] font-black text-slate-600">目标语种</span><select value={language} onChange={event => setLanguage(event.target.value)} title={`当前引擎支持 ${languageOptions.length} 种语言`} className="w-24 min-w-0 rounded-lg border border-slate-200 bg-white px-2 py-2 text-[11px] font-bold text-slate-700">{languageOptions.map(item => <option key={item[0]} value={item[0]}>{item[1]}</option>)}</select></label>{isSpeakerMode ? <label className="inline-flex w-full items-center gap-2 sm:w-auto"><span className="shrink-0 text-[10px] font-black text-slate-600">说话人数</span><select value={speakerCount} onChange={event => setSpeakerCount(event.target.value === 'auto' ? 'auto' : Number(event.target.value))} className="w-32 min-w-0 rounded-lg border border-slate-200 bg-white px-2 py-2 text-[11px] font-bold text-slate-700"><option value="auto">自动识别说话人</option>{[2, 3, 4, 5, 6, 7, 8].map(value => <option key={value} value={value}>{value} 位说话人</option>)}</select></label> : null}<button type="button" disabled={!canAnalyze} onClick={() => void analyze()} className="inline-flex w-full items-center justify-center gap-1.5 whitespace-nowrap rounded-lg bg-slate-900 px-2 py-2 text-[10px] font-black text-white disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto">{working === 'analyze' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}第 2 步：分析台词</button></div>
           {sourceUrl ? <audio controls preload="metadata" src={sourceUrl} className="mt-3 h-8 w-full" /> : null}
         </div>
 
-        {segments.length > 0 ? <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs font-black text-slate-800">2. 确认角色与台词</p><p className="mt-1 text-[10px] text-slate-500">已识别 {detectedSpeakerCount} 个角色、{segments.length} 段台词；可以直接修改目标语言文本。</p></div><button type="button" disabled={!canTranslate} onClick={() => void translate()} className="inline-flex items-center gap-1.5 rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-[10px] font-black text-violet-700 disabled:opacity-40">{working === 'translate' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Volume2 className="h-3.5 w-3.5" />}翻译全部台词</button></div><div className="mt-4 space-y-3">{segments.map((segment, index) => <div key={segment.id} className="rounded-xl border border-slate-200 bg-slate-50 p-3"><div className="flex items-center justify-between gap-2 text-[10px] text-slate-500"><span className="font-black text-violet-700">{profiles.find(profile => profile.id === segment.speakerId)?.name || segment.speakerId}</span><span>{formatSeconds(segment.start)} - {formatSeconds(segment.end)}</span></div><p className="mt-2 text-[11px] leading-relaxed text-slate-600">{segment.sourceText}</p><textarea value={segment.targetText} onChange={event => updateSegmentTarget(segment.id, event.target.value)} placeholder={`第 ${index + 1} 段目标语言台词`} className="mt-2 min-h-12 w-full resize-y rounded-lg border border-violet-100 bg-white p-2 text-[11px] text-slate-800 outline-none focus:border-violet-400" /></div>)}</div></div> : null}
+        {segments.length > 0 ? <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs font-black text-slate-800">3. 翻译并确认台词</p><p className="mt-1 text-[10px] text-slate-500">已识别 {detectedSpeakerCount} 个角色、{segments.length} 段台词；分析完成后自动生成译文，也可以直接修改。</p></div></div><div className="mt-4 space-y-3">{segments.map((segment, index) => <div key={segment.id} className="rounded-xl border border-slate-200 bg-slate-50 p-3"><div className="flex items-center justify-between gap-2 text-[10px] text-slate-500"><span className="font-black text-violet-700">{profiles.find(profile => profile.id === segment.speakerId)?.name || segment.speakerId}</span><span>{formatSeconds(segment.start)} - {formatSeconds(segment.end)}</span></div><p className="mt-2 text-[11px] leading-relaxed text-slate-600">{segment.sourceText}</p><textarea value={segment.targetText} onChange={event => updateSegmentTarget(segment.id, event.target.value)} placeholder={`第 ${index + 1} 段目标语言台词`} className="mt-2 min-h-12 w-full resize-y rounded-lg border border-violet-100 bg-white p-2 text-[11px] text-slate-800 outline-none focus:border-violet-400" /></div>)}</div></div> : null}
 
-        {profiles.length > 0 ? <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><div><p className="text-xs font-black text-slate-800">3. 角色音色</p><p className="mt-1 text-[10px] text-slate-500">参考音默认取每个角色的第一段对白，生成前可重命名角色。</p></div><Users className="h-4 w-4 text-violet-600" /></div><div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">{profiles.map(profile => <label key={profile.id} className="rounded-xl border border-slate-200 bg-slate-50 p-3"><span className="text-[10px] font-black text-slate-500">{profile.id} · 参考 {formatSeconds(profile.referenceStart)}</span><input value={profile.name} onChange={event => updateProfileName(profile.id, event.target.value)} className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs font-bold text-slate-800 outline-none focus:border-violet-400" /></label>)}</div></div> : null}
+        {profiles.length > 0 ? <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><div><p className="text-xs font-black text-slate-800">生成前确认角色音色</p><p className="mt-1 text-[10px] text-slate-500">系统已为每个角色提取参考音；确认无误后即可生成 A / B。</p></div><Users className="h-4 w-4 text-violet-600" /></div><div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">{profiles.map(profile => <label key={profile.id} className="rounded-xl border border-slate-200 bg-slate-50 p-3"><span className="text-[10px] font-black text-slate-500">{profile.id} · 参考 {formatSeconds(profile.referenceStart)}</span><input value={profile.name} onChange={event => updateProfileName(profile.id, event.target.value)} className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs font-bold text-slate-800 outline-none focus:border-violet-400" /></label>)}</div></div> : null}
 
         {events.length > 0 ? <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><div><p className="text-xs font-black text-slate-800">声音事件</p><p className="mt-1 text-[10px] text-slate-500">勾选要保留的事件；事件不会被翻译成普通台词。</p></div><Waves className="h-4 w-4 text-amber-600" /></div><div className="mt-3 flex flex-wrap gap-2">{events.map(event => <button key={event.id} type="button" onClick={() => toggleEvent(event.id)} className={`rounded-lg border px-2.5 py-1.5 text-[10px] font-bold ${selectedEventIds.has(event.id) ? 'border-amber-300 bg-amber-50 text-amber-800' : 'border-slate-200 bg-slate-50 text-slate-400'}`}>{EVENT_LABELS[event.type] || event.type} · {formatSeconds(event.start)}</button>)}</div><p className="mt-3 text-[10px] text-slate-500">将保留 {enabledEvents.length}/{events.length} 个事件</p></div> : null}
 
         {error ? <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 p-3 text-[11px] leading-relaxed text-red-700"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{error}</div> : null}
         {progress ? <p className="rounded-xl bg-violet-50 px-3 py-2 text-[10px] font-bold text-violet-700">{progress}</p> : null}
-        <button type="button" disabled={!canGenerate} onClick={() => void generate()} className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-xs font-black text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-40 ${isSpeakerMode ? 'bg-violet-600 hover:bg-violet-700' : 'bg-amber-600 hover:bg-amber-700'}`}>{working === 'generate' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}{working === 'generate' ? '正在生成两个混音版本…' : '生成 A / B 两个试听版本'}</button>
+        <button type="button" disabled={!canGenerate} onClick={() => void generate()} className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-xs font-black text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-40 ${isSpeakerMode ? 'bg-violet-600 hover:bg-violet-700' : 'bg-amber-600 hover:bg-amber-700'}`}>{working === 'generate' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}{working === 'generate' ? '正在生成两个试听版本…' : '完成流程：生成 A / B 两个试听版本'}</button>
       </section>
 
       <aside className="space-y-4 lg:col-span-4">

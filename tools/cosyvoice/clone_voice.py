@@ -10,6 +10,11 @@ TOOL_DIR = Path(__file__).resolve().parent
 DEFAULT_REPO_DIR = TOOL_DIR / "repo"
 DEFAULT_MODEL_DIR = TOOL_DIR / "models" / "Fun-CosyVoice3-0.5B"
 
+for _proxy_key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+    _proxy_value = os.environ.get(_proxy_key, "").strip().lower()
+    if _proxy_value.startswith(("socks://", "socks4://", "socks5://")):
+        os.environ.pop(_proxy_key, None)
+
 SUPPORTED_LANGUAGES = {"zh", "en", "ja", "ko", "de", "es", "fr", "it", "ru"}
 PERFORMANCE_INSTRUCTIONS = {
     "natural": "You are a helpful assistant. 请保持参考音色，自然地朗读。<|endofprompt|>",

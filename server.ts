@@ -1989,6 +1989,16 @@ async function startServer() {
           resolve();
           return;
         }
+        // Keep the complete command in the server log. The UI intentionally
+        // shows a short message, but the full arguments are essential when
+        // diagnosing platform-specific FFmpeg failures (especially Windows
+        // path and in-place output errors).
+        console.error('[ffmpeg] command failed', {
+          binary: FFMPEG_BINARY,
+          args,
+          message: error.message,
+          stderr: String(stderr || ''),
+        });
         const ffmpegUnavailable = /ffmpeg.*(?:not recognized|not found)|ENOENT/i.test(`${error.message}\n${stderr}`);
         reject(Object.assign(
           new Error(ffmpegUnavailable
@@ -3087,6 +3097,7 @@ async function startServer() {
       String(req.body?.targetLanguage || 'English'),
       {
         preserveTone: req.body?.preserveTone !== false,
+        preserveInterjections: req.body?.preserveInterjections !== false,
         maxDurationSeconds: typeof req.body?.maxDurationSeconds === 'number'
           ? parseNumber(req.body.maxDurationSeconds, 0, 0.5, 60)
           : undefined,
@@ -3559,12 +3570,27 @@ ${JSON.stringify(normalizedVoices)}
     return run;
   };
 
+  // httpx/requests do not accept SOCKS proxy URLs unless an optional extra is
+  // installed. Do not inherit a desktop SOCKS proxy for local model workers.
+  // HTTP(S) proxies remain available for downloading missing model files.
+  const localModelProcessEnv = () => {
+    const env = { ...process.env };
+    for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) {
+      const value = String(env[key] || '').trim().toLowerCase();
+      if (value.startsWith('socks://') || value.startsWith('socks4://') || value.startsWith('socks5://')) delete env[key];
+    }
+    env.NO_PROXY = [env.NO_PROXY, env.no_proxy, '127.0.0.1', 'localhost'].filter(Boolean).join(',');
+    env.no_proxy = env.NO_PROXY;
+    return env;
+  };
+
   const runSeamlessExpressiveProcess = (args: string[], timeout: number) => new Promise<string>((resolve, reject) => {
     execFile(
       seamlessExpressivePython,
       args,
       {
         cwd: process.cwd(),
+        env: localModelProcessEnv(),
         timeout,
         windowsHide: true,
         maxBuffer: 32 * 1024 * 1024,
@@ -3591,6 +3617,7 @@ ${JSON.stringify(normalizedVoices)}
       args,
       {
         cwd: process.cwd(),
+        env: localModelProcessEnv(),
         timeout,
         windowsHide: true,
         maxBuffer: 16 * 1024 * 1024,
@@ -3991,9 +4018,12 @@ ${JSON.stringify(normalizedVoices)}
     const sourcePath = path.resolve(uploadsDir, `seed_vc_source_${jobId}${sourceExt}`);
     const referencePath = path.resolve(uploadsDir, `seed_vc_reference_${jobId}${referenceExt}`);
     const timelineSourcePath = path.resolve(uploadsDir, `seed_vc_timeline_source_${jobId}${timelineSourceExt}`);
-    const sourceWavPath = path.resolve(uploadsDir, `seed_vc_source_${jobId}.wav`);
-    const referenceWavPath = path.resolve(uploadsDir, `seed_vc_reference_${jobId}.wav`);
-    const timelineSourceWavPath = path.resolve(uploadsDir, `seed_vc_timeline_source_${jobId}.wav`);
+    // Keep normalized files separate from uploaded files.  When an upload is
+    // already a WAV, using the same path for input and output makes FFmpeg
+    // fail with "FFmpeg cannot edit existing files in-place" on Windows.
+    const sourceWavPath = path.resolve(uploadsDir, `seed_vc_source_${jobId}_normalized.wav`);
+    const referenceWavPath = path.resolve(uploadsDir, `seed_vc_reference_${jobId}_normalized.wav`);
+    const timelineSourceWavPath = path.resolve(uploadsDir, `seed_vc_timeline_source_${jobId}_normalized.wav`);
     const rawOutputPath = path.resolve(uploadsDir, `seed_vc_raw_${jobId}.wav`);
     const outputFileName = `seed_vc_converted_${jobId}.wav`;
     const outputPath = path.resolve(uploadsDir, outputFileName);
@@ -4005,12 +4035,23 @@ ${JSON.stringify(normalizedVoices)}
     if (timelineSourceFile) fs.writeFileSync(timelineSourcePath, timelineSourceFile.buffer);
     let keepOutput = false;
     try {
+      const normalizeSeedVcAudio = async (inputPath: string, outputPath: string) => {
+        const args = ['-y', '-i', inputPath, '-map', '0:a:0?', '-vn', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', '-f', 'wav', outputPath];
+        try {
+          await runFfmpegFile(args, 120_000);
+        } catch (error) {
+          if (!/Invalid argument/i.test(String(error instanceof Error ? error.message : error))) throw error;
+          // Retry without stream mapping for files whose container reports an
+          // unusual audio stream layout on Windows FFmpeg builds.
+          await runFfmpegFile(['-y', '-i', inputPath, '-vn', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', '-f', 'wav', outputPath], 120_000);
+        }
+      };
       const conversionInputs = [
-        runFfmpegFile(['-y', '-i', sourcePath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', sourceWavPath], 120_000),
-        runFfmpegFile(['-y', '-i', referencePath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', referenceWavPath], 120_000),
+        normalizeSeedVcAudio(sourcePath, sourceWavPath),
+        normalizeSeedVcAudio(referencePath, referenceWavPath),
       ];
       if (timelineSourceFile) {
-        conversionInputs.push(runFfmpegFile(['-y', '-i', timelineSourcePath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', timelineSourceWavPath], 120_000));
+        conversionInputs.push(normalizeSeedVcAudio(timelineSourcePath, timelineSourceWavPath));
       }
       await Promise.all(conversionInputs);
       const sourceDuration = await getMediaDurationSeconds(sourceWavPath).catch(() => 0);
@@ -4080,8 +4121,22 @@ ${JSON.stringify(normalizedVoices)}
       } else {
         filterParts.push('[base]anull[out]');
       }
-      finalInputArgs.push('-filter_complex', filterParts.join(';'), '-map', '[out]', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', outputPath);
-      await runFfmpegFile(finalInputArgs, 120_000);
+      finalInputArgs.push('-filter_complex', filterParts.join(';'), '-map', '[out]', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', '-f', 'wav', outputPath);
+      try {
+        await runFfmpegFile(finalInputArgs, 120_000);
+      } catch (error) {
+        // Some Windows FFmpeg builds reject a complex event-mix graph when a
+        // source contains an unusual AAC/metadata stream. Keep conversion
+        // usable by falling back to the already-generated voice track, still
+        // enforcing the original duration. Event restoration remains the
+        // preferred path whenever the graph is accepted.
+        if (!/Invalid argument/i.test(String(error instanceof Error ? error.message : error))) throw error;
+        await runFfmpegFile([
+          '-y', '-i', rawOutputPath,
+          '-af', `apad=whole_dur=${targetDuration.toFixed(3)},atrim=duration=${targetDuration.toFixed(3)},asetpts=PTS-STARTPTS`,
+          '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', '-f', 'wav', outputPath,
+        ], 120_000);
+      }
       if (!fs.existsSync(outputPath)) throw Object.assign(new Error('Seed-VC 时间线输出失败。'), { status: 502 });
       keepOutput = true;
       return res.json({
