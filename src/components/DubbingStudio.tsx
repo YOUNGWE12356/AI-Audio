@@ -2724,6 +2724,7 @@ export default function DubbingStudio({
                 setHistoryList={setHistoryList}
                 playingVoiceId={playingVoiceId}
                 handlePlayVoicePreview={handlePlayVoicePreview}
+                hideSelfHosted
                 onAudioPlay={() => {
                   if (standaloneVoiceAudioRef.current) {
                     standaloneVoiceAudioRef.current.pause();
@@ -2735,7 +2736,21 @@ export default function DubbingStudio({
           )}
           {visitedSubTabs.has('convert') && (
             <div hidden={activeSubTab !== 'convert'} className="min-h-full">
-              <VoiceConversion displayVoices={displayVoices} />
+              <VoiceConversion
+                displayVoices={displayVoices}
+                initialFile={assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.file : undefined}
+                assistantRequestId={assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.id : undefined}
+                initialTargetLanguage={assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.language : undefined}
+                setHistoryList={setHistoryList}
+                playingVoiceId={playingVoiceId}
+                handlePlayVoicePreview={handlePlayVoicePreview}
+                onAudioPlay={() => {
+                  if (standaloneVoiceAudioRef.current) {
+                    standaloneVoiceAudioRef.current.pause();
+                    setIsPlaying(false);
+                  }
+                }}
+              />
             </div>
           )}
           {visitedSubTabs.has('stt') && (

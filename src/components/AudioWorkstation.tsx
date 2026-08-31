@@ -149,6 +149,10 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
   const [tracks, setTracks] = useState<AudioTrack[]>([
     { id: 'track-1', name: '音频轨 1', volume: DEFAULT_TRACK_VOLUME_DB, pan: 0, muted: false, solo: false, clips: [] },
     { id: 'track-2', name: '音频轨 2', volume: DEFAULT_TRACK_VOLUME_DB, pan: 0, muted: false, solo: false, clips: [] },
+    { id: 'track-3', name: '音频轨 3', volume: DEFAULT_TRACK_VOLUME_DB, pan: 0, muted: false, solo: false, clips: [] },
+    { id: 'track-4', name: '音频轨 4', volume: DEFAULT_TRACK_VOLUME_DB, pan: 0, muted: false, solo: false, clips: [] },
+    { id: 'track-5', name: '音频轨 5', volume: DEFAULT_TRACK_VOLUME_DB, pan: 0, muted: false, solo: false, clips: [] },
+    { id: 'track-6', name: '音频轨 6', volume: DEFAULT_TRACK_VOLUME_DB, pan: 0, muted: false, solo: false, clips: [] },
   ]);
 
   // Global Transport States

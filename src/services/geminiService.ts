@@ -1053,16 +1053,171 @@ export interface SfxRequirementRow {
   [key: string]: string | number;
 }
 
+const JINN_NAMING_GUIDE = `
+      【Jinn 项目命名规范（优先级最高）】
+      以下规则来自 Jinn 现有需求表，覆盖通用小写 snake_case 和 FMOD event:/ 路径规则：
+      - ID 事件名与资源工程名采用 PascalCase 英文分段，并用下划线连接，结构为“[类别]_[对象/模块]_[动作或状态]”。首段禁止使用 SFX、Sfx、Audio 或 Sound；禁止输出 sfx_xxx、lower_snake_case、event:/SFX/... 或 Play_xxx。
+      - 类别前缀按现有项目语义使用 Item、Loot、Weapon、Monster。不要擅自增加 Sfx、Audio、Sound 等通用前缀。
+      - 参考命名必须作为风格锚点：Item_Pinata_DonkeyBray、Loot_Pinata_Use、Loot_Pinata_Success、Loot_WoodenPlank_Pickup、Loot_WoodenPlank_Attack、Loot_WoodenPlank_Hit、Loot_WoodenPlank_HitWall、Loot_Crowbar_Pickup、Weapon_Saif_Combo_1、Weapon_Saif_Combo_2、Weapon_Saif_ChargeMax、Weapon_Saif_AttackMax、Weapon_Saif_Hit、Weapon_Saif_HitWall、Weapon_Saif_UmmDuwais_ExecuteMonster、Monster_Spider_Idle、Monster_Spider_Walk、Monster_Spider_Webbing、Monster_Spider_Lock、Monster_Spider_Chase、Monster_Spider_BeAttacked、Monster_Spider_Attack、Monster_Spider_EnterAmbush、Monster_Spider_Ambush、Monster_Spider_StopAmbush、Monster_Spider_Dizziness、Monster_Spider_Died。
+      - 动作词保持参考表中的写法与时态，例如 Pickup、Use、Success、Attack、Hit、HitWall、Idle、Walk、Webbing、Lock、Chase、BeAttacked、EnterAmbush、Ambush、StopAmbush、Dizziness、Died、Combo_1、ChargeMax、AttackMax、ExecuteMonster。不要改成同义词，也不要加入华丽形容词。
+      - event_name 必须逐字复制 filename，二者使用完全相同的工程命名；禁止自行添加 Event_、SFX_、Play_ 或 event:/ 前缀。多个资源文件可以在 filename 末尾保留编号（如 _1、_2、_3 或参考文件中的 _1234），event_name 也必须保留相同编号。单个资源不要凭空补编号。
+      - 若参考素材明确提供专有资源前缀，必须保留差异。例如 ID 事件名 Monster_Spider_Idle 对应的资源工程名可以是 Monster_NewSpider_Idle；没有明确前缀时不要自行添加 New。
+      - 物件、战斗、怪物动作等世界声音默认填写 3D。怪物相关条目 distance_3d 默认 35，道具和武器相关条目默认 20，无法明确归类时也默认 20；只有明确是 UI 等屏幕声时才使用 2D 和“-”。playback_logic 必须明确填写 Loop 或 Once：Idle、Walk、Chase、Ambush、Dizziness 等持续状态通常为 Loop，其余瞬时动作通常为 Once。
+      - 中文需求名称、描述、备注保持中文；filename 字段表示资源工程名，event_name 字段表示 ID 事件名，两者必须遵循上述英文格式。
+`;
+
+const AVATAR_NAMING_GUIDE = `
+      【Avatar 项目命名规范（优先级最高）】
+      - Avatar filename 只能使用以下固定模板，禁止任何其他命名形式、额外前缀或解释性词语：
+        1) 三星以下且无配乐：audio_avatar_show_<CostumeName>_<CostumeId>_<Girl|Boy>
+        2) 三星以上且有配乐：audio_avatar_bgm_<CostumeName>_<CostumeId>_<Girl|Boy>
+        3) 三星以上且有配乐的双人：audio_avatar_bgm_<CostumeName>_<CostumeId>_Double
+      - 例：服装名“秋叶”、服装 ID“20011”时，三星以下无配乐：男声必须命名为 audio_avatar_show_Qiuye_20011_Girl，女声必须命名为 audio_avatar_show_Qiuye_20011_Boy；三星以上有配乐：女声必须命名为 audio_avatar_bgm_Qiuye_20011_Girl，男声必须命名为 audio_avatar_bgm_Qiuye_20011_Boy，双人使用 audio_avatar_bgm_Qiuye_20011_Double。
+      - 严格保留参考素材中的服装名和服装 ID；服装名使用首字母大写的英文单词，ID 原样保留。不要凭空编造名称或 ID。
+      - 后缀映射必须按星级和配乐分档执行：三星以下无配乐时男→Girl、女→Boy；三星以上有配乐时女→Girl、男→Boy；双人始终→Double。若模板包含 event_name，必须与 filename 完全相同，不要输出 event:/、Event_、SFX_ 或 Play_。
+      - 当用户提供了服装名和服装 ID 时，必须一次性输出全部有效变体，不得只输出一个：三星以下同时给出男、女 2 个命名；三星以上同时给出女、男、双人 3 个命名。三星以下没有双人模板，禁止虚构 audio_avatar_show_*_Double。
+`;
+
+const SUNNY_ISLAND_NAMING_GUIDE = `
+      【小岛有晴天项目命名规范（优先级最高）】
+      - 文件命名使用项目现有的类别前缀，并采用下划线分段、每个单词首字母大写：Ani、Tool、Pet、Char、Music、Npc、FWSH。
+      - 保留参考表中的数字 ID 和动作写法，例如 Ani_60019_PersonalShow_Time、Pet_10070_Skill、Tool_StoreTree、Tool_RestoreTree、Char_Kingkong_Pound、Music_Suit_60024、Music_Jungle_Admin02、Npc_MonthlyPass01。
+      - 单个资源不要凭空增加编号；同一动作存在多个样本时，使用末尾 _01、_02、_03。配音/台词可以把动作和变体连写，例如 Npc_MonthlyPass01_CloseA01、Npc_MonthlyPass01_CloseB01、Npc_MonthlyPass01_Collect01。
+      - FWSH 是固定全大写前缀，编号格式为 FWSH_01、FWSH_02；Npc 使用 Npc（不要改成 NPC），Ani、Pet、Tool、Char、Music 也保持参考表大小写。
+      - 如果参考文件名带有 .mp3 等扩展名且用户希望保留文件名，应保留扩展名；小岛有晴天命名不需要开头的 SFX 前缀，遇到 SFX_、sfx_ 或 SFX- 时必须删除；也不要新增 Audio、Sound、event:/、Play_ 等前缀，也不要输出全小写 snake_case。
+      - 只要参考表、截图或用户输入中出现动作 ID、资源 ID 或明确的数字 ID，就必须把该 ID 原样放进音效 filename 的对应位置；不能只写动作名称而丢弃 ID，也不能自行改写、补造或省略 ID。
+      - 事件命名优先沿用同一资源命名；如果模板包含 event_name，除非参考表明确有不同规则，否则让事件名与文件命名保持一致。
+      - 命名应优先从用户给出的原始名称、类别、ID 和动作中提取信息，不要擅自改写成通用或华丽词汇。`;
+
+const extractSunnyIslandReferenceNames = async (
+  ai: any,
+  Type: any,
+  referenceFile: { data: string; mimeType: string },
+): Promise<string[]> => {
+  if (!referenceFile.mimeType.toLowerCase().startsWith('image/')) return [];
+
+  try {
+    const response = await generateGeminiContent(ai, {
+      model: GEMINI_PRIMARY_MODEL,
+      contents: [{
+        parts: [
+          {
+            text: `Inspect this screenshot of an audio requirement table for the Sunny Island project. Perform OCR on the audio naming column only. Return JSON with a names array containing every visible filename or naming token, preserving exact capitalization, underscores, numeric IDs, suffixes, and file extensions. Do not translate, normalize, summarize, or invent names. If no naming tokens are readable, return an empty array.`,
+          },
+          {
+            inlineData: {
+              data: referenceFile.data.split(',')[1] || referenceFile.data,
+              mimeType: referenceFile.mimeType,
+            },
+          },
+        ],
+      }],
+      config: {
+        responseMimeType: 'application/json',
+        maxOutputTokens: 4096,
+        responseSchema: {
+          type: Type.OBJECT,
+          required: ['names'],
+          properties: {
+            names: { type: Type.ARRAY, items: { type: Type.STRING } },
+          },
+        },
+      },
+    });
+    const parsed = JSON.parse(response.text || '{}');
+    return Array.isArray(parsed.names)
+      ? parsed.names.filter((name: unknown): name is string => typeof name === 'string' && Boolean(name.trim())).slice(0, 200)
+      : [];
+  } catch (error) {
+    console.warn('Sunny Island reference-name OCR skipped:', error);
+    return [];
+  }
+};
+
+const AVATAR_COSTUME_NAME_ALIASES: Record<string, string> = {
+  '元宝': 'Yuanbao',
+  '秋叶': 'Qiuye',
+};
+
+const normalizeAvatarCostumeName = (value: string) => {
+  const trimmed = value.trim().replace(/[.。]+$/g, '');
+  if (!trimmed) return '';
+  const aliased = AVATAR_COSTUME_NAME_ALIASES[trimmed];
+  if (aliased) return aliased;
+  if (/[^a-zA-Z0-9 _-]/.test(trimmed)) return '';
+  return trimmed
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map(segment => `${segment.charAt(0).toUpperCase()}${segment.slice(1)}`)
+    .join('_');
+};
+
+const extractAvatarCostumeDetails = (inputText: string) => {
+  const match = inputText.trim().match(
+    /(?:服装名?\s*[:：]\s*)?([^\s:：,，;；]+)\s*(?:服装\s*)?ID\s*[:：]?\s*([A-Za-z0-9_-]+)/i,
+  );
+  if (!match) return null;
+  const costumeName = normalizeAvatarCostumeName(match[1]);
+  const costumeId = match[2].trim();
+  if (!costumeName || !costumeId) return null;
+  return { costumeName, costumeId };
+};
+
+const createAvatarRequirementItems = (inputText: string) => {
+  const details = extractAvatarCostumeDetails(inputText);
+  if (!details) return null;
+
+  const variants = [
+    { prefix: 'show', suffix: 'Girl', tier: '三星以下无配乐（男声）' },
+    { prefix: 'show', suffix: 'Boy', tier: '三星以下无配乐（女声）' },
+    { prefix: 'bgm', suffix: 'Girl', tier: '三星以上有配乐（女声）' },
+    { prefix: 'bgm', suffix: 'Boy', tier: '三星以上有配乐（男声）' },
+    { prefix: 'bgm', suffix: 'Double', tier: '三星以上有配乐（双人）' },
+  ];
+
+  return variants.map((variant, index) => {
+    const filename = `audio_avatar_${variant.prefix}_${details.costumeName}_${details.costumeId}_${variant.suffix}`;
+    return {
+      index: index + 1,
+      filename,
+      event_name: filename,
+      duration: '-',
+      scene: `Avatar ${variant.tier}服装语音转换`,
+      description: '按 Avatar 固定命名模板生成的角色声音资源。',
+      remarks: '事件名与文件名保持完全一致。',
+      video_link: '-',
+      reference: '-',
+      playback_logic: 'Once',
+      distance_3d: '-',
+    };
+  });
+};
+
 export async function generateSfxRequirements(
   inputText: string,
   referenceFile: { data: string; mimeType: string } | null,
-  templateType: 'game_sfx_general' | 'game_sfx_middleware' | 'voiceover_general' | 'voiceover_multilang'
+  templateType: 'game_sfx_general' | 'game_sfx_middleware' | 'voiceover_general' | 'voiceover_multilang',
+  projectName: string | null = null,
 ): Promise<{ items: any[] }> {
+  const normalizedProjectName = projectName?.trim().toLowerCase() || '';
+  const isJinnProject = normalizedProjectName === 'jinn';
+  const isAvatarProject = normalizedProjectName === 'avatar';
+  const isSunnyIslandProject = ['小岛有晴天', 'sunny_island', 'sunny island'].includes(normalizedProjectName);
+
+  // Avatar names are a strict five-row template. Generate them locally when
+  // the user supplied an explicit costume name and ID, so a long AI response
+  // cannot be truncated before the deterministic names reach the table.
+  if (isAvatarProject && !referenceFile) {
+    const avatarItems = createAvatarRequirementItems(inputText);
+    if (avatarItems) return { items: avatarItems };
+  }
+
   if (isBrowser) {
     return postJson<{ items: any[] }>('/api/ai/gemini/sfx-requirements', {
       inputText,
       screenshot: referenceFile,
       templateType,
+      projectName,
     });
   }
 
@@ -1076,7 +1231,7 @@ export async function generateSfxRequirements(
       该模板主要包含以下字段，请在输出 JSON 时填充：
       - index (序号): 整数，从1开始递增。
       - audio_type (类型): 必须填写 "SFX"、"BGM" 或 "VO"。音效为 SFX，背景音乐为 BGM，角色台词/旁白/字幕配音为 VO。
-      - filename (文件命名): 采用下划线小写英文命名规范。例如 sfx_ui_button, bgm_battle, sfx_foley_footstep_wood_01。只有同一基础音效存在多个变体/随机样本时才使用 _01/_02/_03；如果该类型只有一个音效，不要添加尾号。
+      - filename (文件命名): 采用下划线英文命名规范，且每个单词首字母大写。例如 Sfx_Ui_Button, Bgm_Battle, Sfx_Foley_Footstep_Wood_01。只有同一基础音效存在多个变体/随机样本时才使用 _01/_02/_03；如果该类型只有一个音效，不要添加尾号。
       - duration_logic (时长&播放逻辑): 声效时长描述及触发/播放逻辑，例如 "1s, 单次播放", "10s, 循环播放", "3s, 随机多样本触发"。
       - scene (应用场景): 音效触发的具体场景与时机描述，如 "通用与主界面&游戏内的ui点击按键"。
       - description (描述): 对声音声学物理表现与听觉感受的文字描述，如 "清脆的交互点击声，带有科技高频感"。
@@ -1113,8 +1268,8 @@ export async function generateSfxRequirements(
       【游戏音效需求表模板参考2（应用到FMOD,WWISE音频中间件引擎的需求表）】
       该模板主要包含以下字段，请在输出 JSON 时填充：
       - index (序号): 整数，从1开始递增。
-      - filename (文件命名): 采用下划线小写英文命名规范。如 sfx_player_dash。只有同一基础音效存在多个变体/随机样本时才使用 _01/_02/_03，例如 sfx_footstep_grass_01。
-      - event_name (事件命名): 音频中间件事件路径规范。如 "event:/SFX/Player/dash" 或 "Play_sfx_player_dash"；只有多个变体时才在末尾编号。
+      - filename (文件命名): ${isJinnProject ? 'Jinn 资源工程名，严格遵循文末 Jinn 项目命名规范。' : isAvatarProject ? 'Avatar 服装音频名，只能使用文末 Avatar 固定模板。' : isSunnyIslandProject ? '小岛有晴天资源名，严格遵循文末小岛有晴天项目命名规范。' : '采用下划线英文命名规范，且每个单词首字母大写。如 Sfx_Player_Dash。只有同一基础音效存在多个变体/随机样本时才使用 _01/_02/_03，例如 Sfx_Footstep_Grass_01。'}
+       - event_name (事件命名): ${isJinnProject ? 'Jinn ID 事件名必须逐字复制 filename，不使用 event:/、Event_、SFX_ 或 Play_ 前缀；多个编号资源也保留与 filename 相同的编号。' : isAvatarProject ? 'Avatar ID 事件名必须逐字复制 filename，只能使用文末 Avatar 固定模板，不使用 event:/ 路径。' : isSunnyIslandProject ? '小岛有晴天事件名优先沿用同一资源命名；除非参考表明确不同，否则与 filename 保持一致。' : '音频中间件事件路径规范。如 "event:/SFX/Player/dash" 或 "Play_sfx_player_dash"；只有多个变体时才在末尾编号。'}
       - duration (时长): 预估的时长，如 "0.5s", "12s", "loop"。
       - scene (应用场景): 音效在游戏/关卡/引擎中的应用时机，如 "玩家瞬间前冲闪避时"。
       - description (描述): 对声效材质、空间、力量感的详细描述，如 "带有疾风气流破空声，以及微弱的粒子汇聚声"。
@@ -1122,7 +1277,7 @@ export async function generateSfxRequirements(
       - video_link (动效视频): 占位说明或对应动效分镜视频。
       - reference (参考): 参考音频链接或灵感来源，如 "参考《尼尔：机械纪元》闪避声效"。
       - playback_logic (播放逻辑): 音频在引擎中的播放/触发参数逻辑，如 "3D 空间，设置随机音高 (Pitch)"。
-      - distance_3d (3D距离): 3D空间最大衰减距离（如果是3D事件，必须增加一个3D距离，默认是 "20"；如果是2D事件则设置为 "-"）。
+      - distance_3d (3D距离): ${isJinnProject ? '遵循 Jinn 参考表：怪物相关默认 35，道具和武器相关默认 20，无法明确归类时也默认 20；2D 屏幕声填写 "-"。' : '3D空间最大衰减距离（如果是3D事件，必须增加一个3D距离，默认是 "20"；如果是2D事件则设置为 "-"）。'}
     `;
     schema = {
       type: Type.OBJECT,
@@ -1135,8 +1290,14 @@ export async function generateSfxRequirements(
             required: ["index", "filename", "event_name", "duration", "scene", "description", "remarks", "video_link", "reference", "playback_logic", "distance_3d"],
             properties: {
               index: { type: Type.INTEGER },
-              filename: { type: Type.STRING },
-              event_name: { type: Type.STRING },
+              filename: {
+                type: Type.STRING,
+                description: isJinnProject ? 'Jinn 资源工程名，例如 Loot_WoodenPlank_HitWall' : isAvatarProject ? 'Avatar 固定模板，例如 audio_avatar_show_Qiuye_20011_Girl' : isSunnyIslandProject ? '小岛有晴天资源名，例如 Pet_10070_Skill 或 Npc_MonthlyPass01_CloseA01' : undefined,
+              },
+              event_name: {
+                type: Type.STRING,
+                description: isJinnProject ? 'Jinn ID 事件名必须与 filename 完全相同，例如 Loot_WoodenPlank_HitWall_1234；禁止 Event_、SFX_ 和 event:/ 前缀' : isAvatarProject ? 'Avatar ID 事件名必须与 filename 完全相同，例如 audio_avatar_bgm_Qiuye_20011_Double' : isSunnyIslandProject ? '小岛有晴天事件名优先与 filename 完全相同，例如 Npc_MonthlyPass01_Collect01' : undefined,
+              },
               duration: { type: Type.STRING },
               scene: { type: Type.STRING },
               description: { type: Type.STRING },
@@ -1157,7 +1318,7 @@ export async function generateSfxRequirements(
       - index (序号): 整数，从1开始递增。
       - scene (应用场景): 触发台词的具体关卡、动画或时机，如 "主角击杀首领后的剧情独白"。
       - tone (语气描述): 语气与角色心理描述，如 "沉重而略带自嘲，缓缓道来"。
-      - filename (文件命名): 配音文件下划线英文命名规范，如 "vo_chapter1_monologue"。只有同一角色/场景下有多句同类变体时才使用 _01/_02/_03。
+      - filename (文件命名): 配音文件使用下划线英文命名规范，且每个单词首字母大写，如 "Vo_Chapter1_Monologue"。只有同一角色/场景下有多句同类变体时才使用 _01/_02/_03。
       - script (台词文案): 角色要说的中文台词内容。
     `;
     schema = {
@@ -1185,7 +1346,7 @@ export async function generateSfxRequirements(
       【配音需求表模板2（多语种）】
       该模板主要包含以下字段，请在输出 JSON 时填充：
       - index (序号): 整数，从1开始递增。
-      - filename (文件命名): 配音文件英文下划线命名规范，如 "vo_npc_guide_greet"。只有同一角色/场景下有多句同类变体时才使用 _01/_02/_03。
+      - filename (文件命名): 配音文件使用英文下划线命名规范，且每个单词首字母大写，如 "Vo_Npc_Guide_Greet"。只有同一角色/场景下有多句同类变体时才使用 _01/_02/_03。
       - scene (应用场景): 触发场景，如 "新手村向导NPC首次与玩家对话"。
       - tone (语气描述): 语气描述，如 "热情、亲切，带有温暖的笑意"。
       - script_zh (台词文案（简中）): 简体中文台词文案，如 "旅行者，欢迎来到晨曦之城！这里的阳光永远璀璨。"。
@@ -1238,11 +1399,23 @@ export async function generateSfxRequirements(
     如果也没有上传参考文件，请按所选模板生成一套 6-10 条典型专业示例需求；如果上传了参考文件，请以参考文件内容为主。
     `;
 
+  const sunnyIslandReferenceNames = isSunnyIslandProject && referenceFile
+    ? await extractSunnyIslandReferenceNames(ai, Type, referenceFile)
+    : [];
+  const sunnyIslandReferenceContext = sunnyIslandReferenceNames.length > 0
+    ? `
+    SUNNY ISLAND OCR NAMING LOCK:
+    The following names were read from the uploaded screenshot. Treat them as source-of-truth naming tokens. Preserve every visible numeric ID in the corresponding generated filename; do not drop an ID merely because it is not part of the action word. Match rows by their visible object/action context and keep variants such as _01, CloseA01, Collect01. Never add an SFX prefix.
+    ${JSON.stringify(sunnyIslandReferenceNames)}
+  `
+    : '';
+
   const prompt = `
     你是一个顶级的游戏音频总监、声音设计师和配音导演。
     你的任务是：根据用户输入的文字描述、或上传的参考文件（图片/截图、音频、视频），进行高品质的识别、结构化重构、工程化规范命名、以及专业化的填充和优化。最终生成一张完美格式的、可以直接用于项目开发、给外包和合作团队看的专业“音效/配音需求表”。
 
     ${inputInterpretationInstruction}
+    ${sunnyIslandReferenceContext}
 
     请严格遵守以下规则进行处理：
     1. **多模态输入识别与需求数量控制**：
@@ -1250,32 +1423,32 @@ export async function generateSfxRequirements(
        - **普通图片/视觉参考图**：如果上传文件不是表格，而是画面、角色、场景、UI 或概念图，请根据画面内容生成适合当前模板的音乐/音效/配音需求，不要求 1:1。
        - **音频文件**：音频通常作为 BGM/音乐参考处理。请聆听并分析风格、情绪、速度、节奏密度、配器、音色、段落结构、循环/无缝衔接需求和适用场景；优先生成 BGM 或音乐方向需求。如果用户文字另有说明，再结合文字修正。
        - **视频文件**：视频默认只分析画面、镜头节奏、角色动作、UI变化、场景氛围和画面中的可见字幕；请忽略视频内嵌音频，因为它大概率与画面无关。不要根据视频原声推断音乐或音效。
-       - **视频字幕 / 配音需求混合输出**：如果视频画面中有字幕，或用户文字/参考文件里出现角色台词、旁白、对白、播报、引导语、口语化文案等配音需求，必须识别字幕内容和语境，并生成对应 VO 配音需求。即使当前选择的是“游戏音效配乐通用表”或其它音效/BGM模板，也不能忽略配音需求；通用表里请把音效、BGM、VO 放在同一个 items 数组中，VO 行使用 \`vo_\` 文件名，\`audio_type\` 填 \`VO\`，\`script_tone\` 直接填写文案和语气，不要在开头加“台词：”。
+       - **视频字幕 / 配音需求混合输出**：如果视频画面中有字幕，或用户文字/参考文件里出现角色台词、旁白、对白、播报、引导语、口语化文案等配音需求，必须识别字幕内容和语境，并生成对应 VO 配音需求。即使当前选择的是“游戏音效配乐通用表”或其它音效/BGM模板，也不能忽略配音需求；通用表里请把音效、BGM、VO 放在同一个 items 数组中，VO 行使用 \`Vo_\` 文件名，\`audio_type\` 填 \`VO\`，\`script_tone\` 直接填写文案和语气，不要在开头加“台词：”。
        - **同一素材的一次性综合需求**：同一个视频、图片或文字需求可能同时包含 SFX、BGM 和 VO。除非用户明确只要某一种类型，否则请一次性输出素材中可识别的所有音频需求，避免让用户反复切模板才能得到完整结果。
        - **空泛输入或只选模板**：当用户没有提供具体列表、表格或参考文件，只选择模板或输入非常抽象的提示词时，自动头脑风暴生成 6-10 行典型专业条目。
 
     2. **文件名命名优化与直接保留**：
        - 如果用户输入或上传的参考文件/草稿表格中**本身就带有文件命名或名称**（如 \`sfx_click\`, \`bg_battle\`, \`刀剑砍击声\` 等）：
-         - 你可以根据专业的下划线英文命名规范（如：\`[sfx / bgm / vo]_[模块]_[动作/角色]_[描述]\`，多变体时才追加 \`_[序号]\`）来智能优化重构这些命名；
+         - ${isJinnProject ? '必须按 Jinn 参考规范优化为 PascalCase 分段命名，并优先保留素材中已经出现的 Item、Loot、Weapon、Monster、对象名和动作词。' : isAvatarProject ? '必须按 Avatar 固定模板生成小写 audio_avatar_show 或 audio_avatar_bgm 命名，并保留服装名、服装 ID 与性别/双人后缀；禁止任何其他格式。' : isSunnyIslandProject ? '必须按小岛有晴天参考规范保留 Ani、Tool、Pet、Char、Music、Npc、FWSH 前缀、数字 ID 和动作词；多变体才追加 `_[序号]`，配音可使用 CloseA01、Collect01 等组合。' : '必须使用下划线分隔的英文命名，并确保每个单词首字母大写（如 `Sfx_Ui_Button_Click`）；多变体时才追加 `_[序号]`。'}
          - 如果用户提供的命名已经相当成熟、合理或带有特定的版本代号，你应当**直接使用和保留**给到的命名；
          - 确保优化的命名与原始名称的意图保持强关联，不得凭空捏造全新的无关名称。
 
     3. **专业化设计与规范**：
-       - **工程化文件命名 (filename)**：禁止用中文命名文件。所有文件名必须是标准的下划线英文小写结构。
-         格式：\`[sfx / bgm / vo]_[模块]_[动作/角色]_[描述]\`；只有同一基础音效/台词存在多个变体、随机样本、连号资产时，才追加 \`_[序号]\`。
-         例如：单个确认点击用 \`sfx_ui_confirm\`，单个战斗 BGM 用 \`bgm_battle_loop\`，单句旁白用 \`vo_narrator_intro\`；多个脚步随机样本才用 \`sfx_footstep_grass_01\`、\`sfx_footstep_grass_02\`、\`sfx_footstep_grass_03\`。
+       ${isJinnProject ? JINN_NAMING_GUIDE : isAvatarProject ? AVATAR_NAMING_GUIDE : isSunnyIslandProject ? SUNNY_ISLAND_NAMING_GUIDE : `- **工程化文件命名 (filename)**：禁止用中文命名文件。所有文件名必须使用下划线分隔，并确保每个单词首字母大写。
+         格式：\`[Sfx / Bgm / Vo]_[模块]_[动作/角色]_[描述]\`；只有同一基础音效/台词存在多个变体、随机样本、连号资产时，才追加 \`_[序号]\`。
+         例如：单个确认点击用 \`Sfx_Ui_Confirm\`，单个战斗 BGM 用 \`Bgm_Battle_Loop\`，单句旁白用 \`Vo_Narrator_Intro\`；多个脚步随机样本才用 \`Sfx_Footstep_Grass_01\`、\`Sfx_Footstep_Grass_02\`、\`Sfx_Footstep_Grass_03\`。
        - **命名必须简约、明确、语义准确**：filename 必须优先从“应用场景/触发时机”里提取真实模块、页面、对象和动作；“描述”只用于理解音色、材质、情绪和制作方式，不能把描述里的装饰性词汇误当成文件名主体。
          命名优先级：应用场景/触发时机 > 原始名称 > 描述。除非“应用场景”明确说是金币、奖励、宝箱、道具拾取，否则不要因为描述中出现“金色闪光、金币质感、奖励感”等词，就在 filename 里加入 \`gold\`、\`coin\`、\`reward\`。
-         例如应用场景是“升级成功提示/升级完成反馈”，即使描述里写了“金色粒子、奖励闪光”，也应命名为 \`sfx_ui_upgrade_success\`，不要命名为 \`sfx_ui_upgrade_gold\` 或 \`sfx_ui_upgrade_success_gold\`。
-       UI 音效推荐格式：\`sfx_ui_[screen_or_widget]_[action]\`，例如“升级页打开”应命名为 \`sfx_ui_upgrade_page_open\`，而不是 \`sfx_ui_button\` 或 \`sfx_ui_click_01\`。
+         例如应用场景是“升级成功提示/升级完成反馈”，即使描述里写了“金色粒子、奖励闪光”，也应命名为 \`Sfx_Ui_Upgrade_Success\`，不要命名为 \`Sfx_Ui_Upgrade_Gold\` 或 \`Sfx_Ui_Upgrade_Success_Gold\`。
+       UI 音效推荐格式：\`Sfx_Ui_[ScreenOrWidget]_[Action]\`，例如“升级页打开”应命名为 \`Sfx_Ui_Upgrade_Page_Open\`，而不是 \`Sfx_Ui_Button\` 或 \`Sfx_Ui_Click_01\`。
          常用 action 词优先使用：\`open\`, \`close\`, \`click\`, \`confirm\`, \`cancel\`, \`select\`, \`switch\`, \`unlock\`, \`upgrade\`, \`reward\`, \`popup\`, \`warning\`, \`error\`。
-         BGM 推荐格式：\`bgm_[scene]_[style_or_state]\`；配音推荐格式：\`vo_[speaker_or_role]_[intent]\`。
-         所有单词必须小写 snake_case，不使用 CamelCase / PascalCase，例如使用 \`sfx_ui_upgrade_page_open\`，不要输出 \`sfx_ui_UpgradePage_Open\`。
-       - **FMOD/Wwise 事件路径命名 (event_name)**：如果是音频中间件模板，对应的事件必须有规范的虚空间路径格式，例如：\`event:/SFX/Player/jump\` 或 \`event:/VO/Hero/attack\`。
+         BGM 推荐格式：\`Bgm_[Scene]_[StyleOrState]\`；配音推荐格式：\`Vo_[SpeakerOrRole]_[Intent]\`。
+         所有单词首字母必须大写，使用下划线分隔，不输出全小写 snake_case。
+       - **FMOD/Wwise 事件路径命名 (event_name)**：如果是音频中间件模板，对应的事件必须有规范的虚空间路径格式，例如：\`event:/SFX/Player/jump\` 或 \`event:/VO/Hero/attack\`。`}
        - **时长与播放逻辑**：用声效术语编写，例如 "1s, 单次播放", "loop, 循环播放"。
-       - **3D 距离规范 (distance_3d)**：对于 FMOD/Wwise 中间件需求表，如果是 3D 事件（如备注或播放逻辑里包含 3D 空间、3D 空间定位等），必须在 \`distance_3d\` 中增加一个 3D 距离，默认值为 \`"20"\`（或根据音量、场景大小评估为 "15", "30" 等数字字符串）；如果是 2D 事件，则该字段输出为 \`"-"\`。
+       - **3D 距离规范 (distance_3d)**：${isJinnProject ? '严格使用 Jinn 参考规则：怪物相关默认 `"35"`，道具和武器相关默认 `"20"`，无法明确归类时也默认 `"20"`；明确的 2D 屏幕声填写 `"-"`。' : '对于 FMOD/Wwise 中间件需求表，如果是 3D 事件（如备注或播放逻辑里包含 3D 空间、3D 空间定位等），必须在 `distance_3d` 中增加一个 3D 距离，默认值为 `"20"`（或根据音量、场景大小评估为 "15", "30" 等数字字符串）；如果是 2D 事件，则该字段输出为 `"-"`。'}
        - **多语种台词生成**：在多语种配音模板下，根据简中台词，翻译并创作出对应的英语台词和韩语台词。台词要带有文学色彩、符合游戏中的魔幻/科幻/写实风格，不能是粗暴的机器人机翻。
-       - **通用表中的 VO 行**：当模板是“游戏音效配乐通用表”时，配音需求不要丢弃；请把配音行作为普通综合音频需求行输出，\`audio_type\` 为 \`VO\`，\`filename\` 使用 \`vo_[speaker_or_role]_[intent]\`，\`description\` 写声音角色/声线方向，\`script_tone\` 直接写台词文案与语气，\`remarks\` 写配音制作、口型、情绪或交付注意事项。
+       - **通用表中的 VO 行**：当模板是“游戏音效配乐通用表”时，配音需求不要丢弃；请把配音行作为普通综合音频需求行输出，\`audio_type\` 为 \`VO\`，\`filename\` 使用 \`Vo_[SpeakerOrRole]_[Intent]\`，\`description\` 写声音角色/声线方向，\`script_tone\` 直接写台词文案与语气，\`remarks\` 写配音制作、口型、情绪或交付注意事项。
        - **通用表排序规则**：当模板是“游戏音效配乐通用表”时，输出顺序不要跟随用户文字描述顺序；必须先集中输出所有 SFX，再输出所有 BGM，最后输出所有 VO/人声/配音/台词需求。同一大类内部再保留需求的自然逻辑顺序。
 
     4. **输出格式**：
@@ -1283,6 +1456,16 @@ export async function generateSfxRequirements(
        - 为避免生成结果过长导致 JSON 截断，每个字段都要简洁：description、remarks、script_tone 尽量控制在 120 个中文字符内；除非用户原始表格本身包含更多条目，否则一次最多输出 24 行。
        - 视频字幕类 VO 行不要重复写长段分析；优先保留台词、语气、时间/场景和制作注意事项。
        ${templateDescription}
+
+    ${isJinnProject
+      ? '当前项目：Jinn。严格执行上方“Jinn 项目命名规范（优先级最高）”，不得回退到通用命名。'
+      : isAvatarProject
+        ? '当前项目：Avatar。严格执行上方“Avatar 项目命名规范（优先级最高）”，不得回退到通用命名。'
+        : isSunnyIslandProject
+          ? '当前项目：小岛有晴天。严格执行上方“小岛有晴天项目命名规范（优先级最高）”，不得回退到通用命名。'
+        : projectName
+          ? `当前项目：${projectName}。请优先参考该项目的专有命名习惯；目前尚未提供该项目的具体规则，不要凭空捏造专有词汇，先沿用通用工程命名规范，并保留项目名称作为上下文。`
+          : '当前未指定项目，请使用通用工程命名规范。'}
 
     用户输入要求：${inputText || "请根据上传参考文件生成；如果没有参考文件，则自动生成该类型游戏的标准专业需求表"}
   `;

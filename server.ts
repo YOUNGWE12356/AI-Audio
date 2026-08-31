@@ -3058,12 +3058,13 @@ async function startServer() {
   }));
 
   app.post('/api/ai/gemini/sfx-requirements', asyncRoute(async (req, res) => {
-    const { inputText = '', screenshot = null, templateType } = req.body || {};
+    const { inputText = '', screenshot = null, templateType, projectName = null } = req.body || {};
     const allowedTemplates = ['game_sfx_general', 'game_sfx_middleware', 'voiceover_general', 'voiceover_multilang'];
     if (!allowedTemplates.includes(templateType)) {
       return res.status(400).json({ error: 'Invalid templateType' });
     }
-    const result = await generateSfxRequirements(String(inputText), screenshot, templateType);
+    const normalizedProjectName = typeof projectName === 'string' ? projectName.trim().slice(0, 80) : null;
+    const result = await generateSfxRequirements(String(inputText), screenshot, templateType, normalizedProjectName || null);
     return res.json(result);
   }));
 
@@ -3518,30 +3519,6 @@ ${JSON.stringify(normalizedVoices)}
     process.env.SEED_VC_MODELS_DIR,
     path.join('tools', 'seed-vc', 'repo', 'checkpoints'),
   );
-  const seamlessExpressivePython = resolveLocalToolPath(
-    process.env.SEAMLESS_EXPRESSIVE_PYTHON,
-    path.join('tools', 'seamless-expressive', '.venv', ...(process.platform === 'win32' ? ['Scripts', 'python.exe'] : ['bin', 'python'])),
-  );
-  const seamlessExpressiveScript = resolveLocalToolPath(
-    process.env.SEAMLESS_EXPRESSIVE_SCRIPT,
-    path.join('tools', 'seamless-expressive', 'translate.py'),
-  );
-  const seamlessExpressiveRepoDir = resolveLocalToolPath(
-    process.env.SEAMLESS_EXPRESSIVE_REPO_DIR,
-    path.join('tools', 'seamless-expressive', 'repo'),
-  );
-  const seamlessExpressiveModelDir = resolveLocalToolPath(
-    process.env.SEAMLESS_EXPRESSIVE_MODEL_DIR,
-    path.join('tools', 'seamless-expressive', 'models'),
-  );
-  const seamlessExpressiveLanguages = [
-    { code: 'eng', label: '英语', experimental: false, recommendedDurationFactor: 1 },
-    { code: 'spa', label: '西班牙语', experimental: false, recommendedDurationFactor: 1 },
-    { code: 'fra', label: '法语', experimental: false, recommendedDurationFactor: 1.2 },
-    { code: 'deu', label: '德语', experimental: false, recommendedDurationFactor: 1.1 },
-    { code: 'cmn', label: '中文', experimental: true, recommendedDurationFactor: 1 },
-    { code: 'ita', label: '意大利语', experimental: true, recommendedDurationFactor: 1 },
-  ] as const;
   type LocalVoiceCloneEngineStatus = {
     available: boolean;
     model: string;
@@ -3556,17 +3533,9 @@ ${JSON.stringify(normalizedVoices)}
   };
   let localVoiceCloneQueue: Promise<void> = Promise.resolve();
   let localVoiceCloneStatusCache: { expiresAt: number; value: LocalVoiceCloneServerStatus } | null = null;
-  let seamlessExpressiveQueue: Promise<void> = Promise.resolve();
-
   const runLocalVoiceCloneQueued = async <T,>(task: () => Promise<T>): Promise<T> => {
     const run = localVoiceCloneQueue.catch(() => undefined).then(task);
     localVoiceCloneQueue = run.then(() => undefined, () => undefined);
-    return run;
-  };
-
-  const runSeamlessExpressiveQueued = async <T,>(task: () => Promise<T>): Promise<T> => {
-    const run = seamlessExpressiveQueue.catch(() => undefined).then(task);
-    seamlessExpressiveQueue = run.then(() => undefined, () => undefined);
     return run;
   };
 
@@ -3583,33 +3552,6 @@ ${JSON.stringify(normalizedVoices)}
     env.no_proxy = env.NO_PROXY;
     return env;
   };
-
-  const runSeamlessExpressiveProcess = (args: string[], timeout: number) => new Promise<string>((resolve, reject) => {
-    execFile(
-      seamlessExpressivePython,
-      args,
-      {
-        cwd: process.cwd(),
-        env: localModelProcessEnv(),
-        timeout,
-        windowsHide: true,
-        maxBuffer: 32 * 1024 * 1024,
-      },
-      (error, stdout, stderr) => {
-        if (!error) {
-          resolve(String(stdout || ''));
-          return;
-        }
-        const detail = String(stderr || stdout || error.message).trim().split(/\r?\n/).slice(-8).join(' ');
-        const message = /out of memory|CUDA.*memory/i.test(detail)
-          ? 'SeamlessExpressive 显存不足。请缩短素材，并关闭其他占用显卡的程序后重试。'
-          : /ENOENT|not found|cannot find|No such file/i.test(`${error.message} ${detail}`)
-            ? 'SeamlessExpressive 运行环境或受限模型文件不完整。'
-            : `SeamlessExpressive 转换失败：${detail || error.message}`;
-        reject(Object.assign(new Error(message), { status: 503, cause: error }));
-      },
-    );
-  });
 
   const runLocalVoiceCloneProcess = (pythonPath: string, args: string[], timeout: number) => new Promise<string>((resolve, reject) => {
     execFile(
@@ -3723,189 +3665,6 @@ ${JSON.stringify(normalizedVoices)}
 
   app.get('/api/ai/local/voice-clone/status', asyncRoute(async (_req, res) => {
     return res.json(await readLocalVoiceCloneStatus());
-  }));
-
-  type SeamlessExpressiveStatus = {
-    available: boolean;
-    model: 'SeamlessExpressive';
-    platform: string;
-    runtimeSupported: boolean;
-    pythonFound: boolean;
-    repoFound: boolean;
-    scriptFound: boolean;
-    modelFilesFound: boolean;
-    gpu?: string;
-    supportedLanguages: typeof seamlessExpressiveLanguages;
-    license: string;
-    gated: true;
-    reason?: string;
-  };
-  let seamlessExpressiveStatusCache: { expiresAt: number; value: SeamlessExpressiveStatus } | null = null;
-
-  const readSeamlessExpressiveStatus = async (): Promise<SeamlessExpressiveStatus> => {
-    if (seamlessExpressiveStatusCache && seamlessExpressiveStatusCache.expiresAt > Date.now()) {
-      return seamlessExpressiveStatusCache.value;
-    }
-    const platform = `${process.platform}-${process.arch}`;
-    const runtimeSupported = (process.platform === 'linux' && process.arch === 'x64')
-      || (process.platform === 'darwin' && process.arch === 'arm64');
-    const pythonFound = fs.existsSync(seamlessExpressivePython);
-    const scriptFound = fs.existsSync(seamlessExpressiveScript);
-    const repoFound = fs.existsSync(path.join(
-      seamlessExpressiveRepoDir,
-      'src',
-      'seamless_communication',
-      'cli',
-      'expressivity',
-      'predict',
-      'predict.py',
-    ));
-    const modelFilesFound = [
-      'm2m_expressive_unity.pt',
-      'pretssel_melhifigan_wm.pt',
-    ].every(fileName => fs.existsSync(path.join(seamlessExpressiveModelDir, fileName)));
-    const baseStatus = {
-      model: 'SeamlessExpressive' as const,
-      platform,
-      runtimeSupported,
-      pythonFound,
-      repoFound,
-      scriptFound,
-      modelFilesFound,
-      supportedLanguages: seamlessExpressiveLanguages,
-      license: 'Seamless License - noncommercial research only',
-      gated: true as const,
-    };
-
-    let value: SeamlessExpressiveStatus;
-    if (!runtimeSupported) {
-      value = {
-        ...baseStatus,
-        available: false,
-        reason: '官方 fairseq2 不支持原生 Windows。请安装 WSL 2 Linux，并在 WSL 内运行本项目。',
-      };
-    } else if (!pythonFound || !scriptFound || !repoFound) {
-      value = {
-        ...baseStatus,
-        available: false,
-        reason: !pythonFound
-          ? 'SeamlessExpressive Python 环境尚未安装。'
-          : !repoFound
-            ? 'Seamless Communication 官方代码目录不完整。'
-            : 'SeamlessExpressive 适配脚本不存在。',
-      };
-    } else if (!modelFilesFound) {
-      value = {
-        ...baseStatus,
-        available: false,
-        reason: '受限模型权重尚未就绪。请先取得 Meta 与 Hugging Face 授权，再放入 models 目录。',
-      };
-    } else {
-      try {
-        const probeArgs = ['-c', 'import json, torch, fairseq2; print(json.dumps({"cuda": torch.cuda.is_available(), "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None}))'];
-        const { stdout } = await runExternalFile(
-          seamlessExpressivePython,
-          probeArgs,
-          30_000,
-          'SeamlessExpressive runtime probe',
-        );
-        const runtime = JSON.parse(stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) || '{}') as { cuda?: boolean; gpu?: string };
-        value = {
-          ...baseStatus,
-          available: runtime.cuda === true,
-          gpu: runtime.gpu,
-          ...(runtime.cuda ? {} : { reason: '未检测到可用的 NVIDIA CUDA 显卡；该大型模型不启用 CPU 推理。' }),
-        };
-      } catch (error: any) {
-        value = {
-          ...baseStatus,
-          available: false,
-          reason: error?.message || '无法启动 SeamlessExpressive Python 环境。',
-        };
-      }
-    }
-
-    seamlessExpressiveStatusCache = { expiresAt: Date.now() + 30_000, value };
-    return value;
-  };
-
-  app.get('/api/ai/local/seamless-expressive/status', asyncRoute(async (_req, res) => {
-    return res.json(await readSeamlessExpressiveStatus());
-  }));
-
-  app.post('/api/ai/local/seamless-expressive/convert', aiUpload.single('source'), asyncRoute(async (req, res) => {
-    if (!req.file) return res.status(400).json({ error: '请上传需要翻译的视频或音频。' });
-    const targetLanguage = String(req.body?.targetLanguage || '').trim().toLowerCase();
-    if (!seamlessExpressiveLanguages.some(language => language.code === targetLanguage)) {
-      return res.status(400).json({ error: 'SeamlessExpressive 不支持这个目标语言。' });
-    }
-    const status = await readSeamlessExpressiveStatus();
-    if (!status.available) return res.status(503).json({ error: status.reason || 'SeamlessExpressive 本地环境不可用。' });
-
-    const durationFactor = parseNumber(req.body?.durationFactor, 1, 0.8, 1.35);
-    const jobId = randomUUID();
-    const sourceExtension = getSafeUploadExtension(req.file.originalname, req.file.mimetype, '.wav');
-    const sourcePath = path.resolve(uploadsDir, `seamless_expressive_source_${jobId}${sourceExtension}`);
-    const sourceWavPath = path.resolve(uploadsDir, `seamless_expressive_source_${jobId}.wav`);
-    const outputFileName = `seamless_expressive_${targetLanguage}_${jobId}.wav`;
-    const outputPath = path.resolve(uploadsDir, outputFileName);
-    if (![sourcePath, sourceWavPath, outputPath].every(filePath => isPathInside(uploadsDir, filePath))) {
-      throw Object.assign(new Error('SeamlessExpressive 文件路径无效。'), { status: 500 });
-    }
-
-    fs.writeFileSync(sourcePath, req.file.buffer);
-    let keepOutput = false;
-    try {
-      await runFfmpegFile([
-        '-y',
-        '-i', sourcePath,
-        '-map', '0:a:0',
-        '-vn',
-        '-ac', '1',
-        '-ar', '16000',
-        '-c:a', 'pcm_s16le',
-        sourceWavPath,
-      ], 120_000);
-      const sourceDuration = await getMediaDurationSeconds(sourceWavPath).catch(() => 0);
-      if (sourceDuration > 300) {
-        return res.status(422).json({ error: '单次素材不能超过 5 分钟。请先拆成较短的语音段，以避免显存不足和翻译遗漏。' });
-      }
-      const stdout = await runSeamlessExpressiveQueued(() => runSeamlessExpressiveProcess([
-        seamlessExpressiveScript,
-        '--input', sourceWavPath,
-        '--output', outputPath,
-        '--target-language', targetLanguage,
-        '--duration-factor', String(durationFactor),
-        '--repo-dir', seamlessExpressiveRepoDir,
-        '--model-dir', seamlessExpressiveModelDir,
-      ], 30 * 60 * 1000));
-      const metadata = JSON.parse(stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) || '{}') as {
-        model?: string;
-        gpu?: string;
-        duration_seconds?: number;
-        translated_text?: string;
-      };
-      if (!fs.existsSync(outputPath)) {
-        throw Object.assign(new Error('SeamlessExpressive 未生成可用的输出音频。'), { status: 502 });
-      }
-      keepOutput = true;
-      return res.json({
-        audioUrl: `/uploads/${outputFileName}`,
-        sourceDuration: sourceDuration || undefined,
-        generatedDuration: metadata.duration_seconds || await getMediaDurationSeconds(outputPath).catch(() => undefined),
-        targetLanguage,
-        translatedText: metadata.translated_text || undefined,
-        durationFactor,
-        model: metadata.model || 'SeamlessExpressive',
-        gpu: metadata.gpu || status.gpu,
-      });
-    } finally {
-      await Promise.all([
-        safeUnlink(sourcePath),
-        safeUnlink(sourceWavPath),
-        keepOutput ? Promise.resolve() : safeUnlink(outputPath),
-      ]);
-    }
   }));
 
   const readSeedVcStatus = async (): Promise<{

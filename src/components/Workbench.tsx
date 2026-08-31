@@ -13,7 +13,8 @@ import {
   Film,
   SlidersHorizontal,
   ClipboardList,
-  Database
+  Database,
+  RefreshCw,
 } from 'lucide-react';
 import { HistoryItem, TabType } from '../types';
 
@@ -28,7 +29,7 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
     {
       id: 'audio-director' as const,
       name: 'AI 音频设计',
-      desc: '智能解析多模态素材，一键规划并生成完整影片/游戏音效排程与音乐方案',
+      desc: '解析文字、图片、音频与视频参考，规划影片或游戏的音效、配乐和配音制作方案',
       icon: Sparkles,
       color: 'from-emerald-500/20 to-teal-500/20 text-emerald-400 border-emerald-500/15',
       badge: '核心模块',
@@ -36,7 +37,7 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
     {
       id: 'music-studio' as const,
       name: 'AI 音乐',
-      desc: '支持通过输入文字关键词与节奏风格，高速生成高品质背景音乐Demo（带词或纯音乐）',
+      desc: '根据风格、情绪、速度、乐器和歌词生成纯音乐或带人声的双版本音乐',
       icon: Music,
       color: 'from-indigo-500/20 to-purple-500/20 text-indigo-400 border-indigo-500/15',
       badge: 'AI 作曲',
@@ -44,7 +45,7 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
     {
       id: 'sfx-studio' as const,
       name: 'AI 音效',
-      desc: '专为音效师打造的快捷生成通道，输入场景描述即可生成各类自然、科幻、战争等音效',
+      desc: '输入声音对象、动作、材质和空间，生成可对比、试听和下载的双版本音效',
       icon: Waves,
       color: 'from-blue-500/20 to-cyan-500/20 text-blue-400 border-blue-500/15',
       badge: 'Foley 音效',
@@ -52,7 +53,7 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
     {
       id: 'dubbing-studio' as const,
       name: 'AI 配音',
-      desc: '拟真多语种情感配音，提供男女各色声线与开心、忧伤、严肃等情感语气调节',
+      desc: '覆盖文本配音、语音转语音、声音克隆、声音转换和语音转文本完整流程',
       icon: Mic,
       color: 'from-pink-500/20 to-rose-500/20 text-pink-400 border-pink-500/15',
       badge: 'TTS 角色配音',
@@ -66,9 +67,9 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
       tag: '视频配声',
       icon: Film,
       accent: 'bg-amber-50 text-amber-700 border-amber-100',
-      intro: '围绕视频片段组织配音、音效、音乐和时间线，适合做短片、广告、游戏演示的完整声音层。',
-      usage: '导入视频或素材后，按画面段落添加声音需求，逐步完成角色配音、环境声、强调音效和背景音乐。',
-      functions: ['视频声轨规划', '时间线式整理', '多类型声音组合'],
+      intro: '在同一条视频时间线上组织原声、配音、音效和音乐，完成从素材分析到最终混音。',
+      usage: '导入视频，识别字幕与对白片段；在轨道中补充配音、环境声、动作音效和 BGM，检查时间与音量后导出。',
+      functions: ['字幕/对白识别', '多轨时间线', '混音与导出'],
     },
     {
       id: 'audio-director' as const,
@@ -76,9 +77,9 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
       tag: '总策划',
       icon: Sparkles,
       accent: 'bg-emerald-50 text-emerald-700 border-emerald-100',
-      intro: '把场景、画面或创意描述拆成可执行的声音方案，帮助先确定整体声音风格和制作清单。',
-      usage: '输入项目背景、情绪、场景节奏或参考方向，让系统生成声音设计建议，再进入具体模块制作。',
-      functions: ['声音方案规划', '素材需求拆解', '音乐与音效排程'],
+      intro: '把文字、图片、音频或视频参考拆成可执行的声音方向、素材清单与时间排程。',
+      usage: '上传参考素材并补充项目目标，生成整体声音方案；确认后把音乐、音效或配音提示发送到对应模块继续制作。',
+      functions: ['多模态解析', '声音方案规划', '跨模块发送'],
     },
     {
       id: 'music-studio' as const,
@@ -86,9 +87,9 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
       tag: '作曲',
       icon: Music,
       accent: 'bg-indigo-50 text-indigo-700 border-indigo-100',
-      intro: '根据文字提示生成背景音乐 Demo，可用于氛围铺底、片头片尾、宣传片和游戏循环音乐。',
-      usage: '描述风格、速度、情绪、乐器和时长；需要人声时补充歌词或演唱方向。',
-      functions: ['纯音乐生成', '带词音乐草稿', '风格/情绪控制'],
+      intro: '生成纯音乐或带歌词人声的音乐版本，可用于短片、宣传片、游戏循环与氛围铺底。',
+      usage: '描述曲风、情绪、速度、乐器和时长；需要人声时输入歌词。生成后在音波上点击定位，对比版本并下载。',
+      functions: ['纯音乐/带词', '双版本试听', '音波定位播放'],
     },
     {
       id: 'sfx-studio' as const,
@@ -96,19 +97,29 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
       tag: 'Foley',
       icon: Waves,
       accent: 'bg-blue-50 text-blue-700 border-blue-100',
-      intro: '快速生成单个或一组场景音效，适合动作、机械、自然、科幻、转场等声音素材。',
-      usage: '输入对象、动作、材质、空间和强度，例如“金属机器人缓慢脚步，近距离，厚重”。',
-      functions: ['独立音效生成', '场景氛围声', '动作/材质音色描述'],
+      intro: '生成动作、机械、自然、科幻、界面、转场和环境氛围等独立声音素材。',
+      usage: '按“对象 + 动作 + 材质 + 空间 + 强度”描述声音，选择自动或指定时长；试听两个版本后下载或归档。',
+      functions: ['自动/指定时长', '双版本生成', '历史归档'],
     },
     {
       id: 'dubbing-studio' as const,
       title: 'AI 配音',
-      tag: 'TTS',
+      tag: '配音中心',
       icon: Mic,
       accent: 'bg-pink-50 text-pink-700 border-pink-100',
-      intro: '把文本转成角色配音，适合旁白、角色对白、产品介绍、教学说明和情绪化表达。',
-      usage: '选择声线与语气，输入台词，按需要调整速度、情绪和语言，再生成并试听。',
-      functions: ['角色声线选择', '多语种配音', '情绪与语速控制'],
+      intro: '集中处理单条与批量 TTS、语音转语音、跨语言声音克隆，以及带时间码的语音转文本。',
+      usage: '先选择左侧任务类型，再导入语音或输入台词；设置语言、声线和表达方式，生成后通过音波试听并下载。',
+      functions: ['单条/批量 TTS', '语音转语音', '克隆与转写'],
+    },
+    {
+      id: 'dubbing-studio' as const,
+      title: '声音转换',
+      tag: '四套方案',
+      icon: RefreshCw,
+      accent: 'bg-violet-50 text-violet-700 border-violet-100',
+      intro: '支持直接表达式翻译、Seed-VC 音色迁移、多人角色分轨，以及对白与笑声/呼吸等事件混合。',
+      usage: '进入 AI 配音后选择“声音转换”，再选择方案一至四；上传素材，分析台词与角色，确认目标文本后生成 A/B 版本。',
+      functions: ['跨语言音色迁移', '多人角色分轨', '声音事件保留'],
     },
     {
       id: 'audio-tools' as const,
@@ -116,9 +127,9 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
       tag: '工作站',
       icon: SlidersHorizontal,
       accent: 'bg-cyan-50 text-cyan-700 border-cyan-100',
-      intro: '提供多轨音频工作站和常用处理工具，用来导入、剪辑、移调、导出和整理音频。',
-      usage: '进入音频工作站后，可拖拽音频进轨道，选中片段进行剪切、淡入淡出、移调和混音导出。',
-      functions: ['多轨编辑', '拖拽导入', '移调/剪切/导出'],
+      intro: '提供多轨工作站、音频分析、批量格式/压缩/响度处理和 AI 人声分离。',
+      usage: '根据任务选择左侧工具：在工作站剪辑混音，在分析页检查音频指标，或批量转成 WAV/MP3 并统一响度。',
+      functions: ['多轨编辑', '分析与转码', '人声分离'],
     },
     {
       id: 'sfx-requirements' as const,
@@ -126,9 +137,9 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
       tag: '清单',
       icon: ClipboardList,
       accent: 'bg-teal-50 text-teal-700 border-teal-100',
-      intro: '用于整理项目里的音效条目，把每个镜头或段落需要的声音变成可跟踪清单。',
-      usage: '按场景、时间点、描述、优先级记录需求，方便后续生成、替换、确认和交付。',
-      functions: ['需求记录', '镜头/时间点管理', '制作进度跟踪'],
+      intro: '从描述、截图、音频或视频中整理标准化音效、配乐和配音制作需求。',
+      usage: '选择表格模板，输入需求或上传参考素材；生成后逐行校对、继续追加，再导出 CSV 交给 Excel、WPS 或团队协作。',
+      functions: ['多模态识别', '模板化需求表', '追加与 CSV 导出'],
     },
     {
       id: 'sfx-library' as const,
@@ -136,10 +147,17 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
       tag: '资产',
       icon: Database,
       accent: 'bg-slate-50 text-slate-700 border-slate-200',
-      intro: '集中管理已生成或导入的音效资产，方便按类型、用途和项目复用。',
-      usage: '把常用音效保存到库中，通过分类和关键词查找，再下载或放入后续项目。',
-      functions: ['资产归档', '分类检索', '项目复用'],
+      intro: '集中管理生成或导入的声音资产，用统一名称、分类和关键词支持长期复用。',
+      usage: '上传或归档常用声音，补充分类与关键词；按名称和标签检索，试听确认后下载或用于后续项目。',
+      functions: ['上传与归档', '搜索/分类管理', '试听与下载'],
     },
+  ];
+
+  const workflowSteps = [
+    ['1', '选择任务', '从生成、转换、剪辑或资产管理中选择入口'],
+    ['2', '准备输入', '输入需求文字，或导入图片、音频与视频素材'],
+    ['3', '生成与调整', '检查识别结果和参数，对比 A/B 版本并修改'],
+    ['4', '试听与交付', '点击音波定位检查，下载音频或导出需求表'],
   ];
 
   return (
@@ -206,16 +224,25 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
             <h3 className="mt-1 text-lg font-black text-slate-800">功能说明与使用方法</h3>
           </div>
           <p className="max-w-xl text-xs leading-relaxed text-slate-500">
-            从创意规划到生成、剪辑、资产管理，AI Audio 把音频制作拆成清晰模块；根据当前任务选择入口即可开始。
+            从需求规划、声音生成和音色转换，到时间线剪辑与资产交付；先按任务选择入口，再按照卡片中的步骤操作。
           </p>
         </div>
 
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-1 border-b border-slate-100 pb-4 sm:grid-cols-2 xl:grid-cols-4">
+          {workflowSteps.map(([number, title, description], index) => (
+            <div key={number} className={`flex gap-3 px-3 py-2 ${index > 0 ? 'sm:border-l sm:border-slate-100' : ''}`}>
+              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-[10px] font-black text-emerald-700">{number}</span>
+              <div><p className="text-[11px] font-black text-slate-800">{title}</p><p className="mt-0.5 text-[10px] leading-relaxed text-slate-500">{description}</p></div>
+            </div>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
           {featureGuide.map((item) => {
             const Icon = item.icon;
             return (
               <button
-                key={item.id}
+                key={`${item.id}-${item.title}`}
                 type="button"
                 onClick={() => setCurrentTab(item.id)}
                 className="group flex h-full flex-col rounded-2xl border border-slate-200 bg-slate-50/60 p-4 text-left transition-all hover:-translate-y-0.5 hover:border-emerald-200 hover:bg-white hover:shadow-md"

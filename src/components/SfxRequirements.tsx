@@ -27,6 +27,13 @@ import type { AssistantRequirementsRequest } from './GlobalAssistant';
 
 type TemplateType = 'game_sfx_general' | 'game_sfx_middleware' | 'voiceover_general' | 'voiceover_multilang';
 type GenerateMode = 'replace' | 'append';
+type ProjectOption = '' | 'jinn' | 'sunny_island' | 'avatar';
+
+const PROJECT_OPTIONS: Array<{ id: Exclude<ProjectOption, ''>; name: string }> = [
+  { id: 'jinn', name: 'Jinn' },
+  { id: 'sunny_island', name: '小岛有晴天' },
+  { id: 'avatar', name: 'Avatar' },
+];
 
 interface SfxRequirementsProps {
   hasGeminiKey: boolean;
@@ -173,6 +180,16 @@ const TEMPLATE_INFO = {
     keys: ["index", "filename", "scene", "tone", "script_zh", "script_en", "script_ko"]
   }
 };
+
+const DEFAULT_COLUMN_WIDTHS: Record<TemplateType, number[]> = {
+  game_sfx_general: [52, 88, 150, 128, 180, 220, 180, 180, 140],
+  game_sfx_middleware: [52, 150, 165, 90, 180, 220, 180, 140, 120, 140, 90],
+  voiceover_general: [52, 190, 150, 170, 300],
+  voiceover_multilang: [52, 150, 190, 150, 260, 220, 220],
+};
+
+const MIN_COLUMN_WIDTH = 52;
+const MAX_COLUMN_WIDTH = 560;
 
 const LOADING_STEPS = [
   "AI 正在识别用户上传的参考文件与文字...",
@@ -373,8 +390,140 @@ const simplifySingletonFilenameSuffixes = (items: any[]) => {
   });
 };
 
+const capitalizeEngineeringNameSegments = (value: string) => value
+  .split('_')
+  .map(segment => segment ? `${segment.charAt(0).toUpperCase()}${segment.slice(1)}` : segment)
+  .join('_');
+
+const normalizeGeneralEngineeringName = (value: unknown) => {
+  if (typeof value !== 'string') return '';
+  const normalized = value
+    .trim()
+    .replace(/\.[a-z0-9]+$/i, '')
+    .replace(/[^a-zA-Z0-9_]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return capitalizeEngineeringNameSegments(normalized);
+};
+
+const normalizeGeneralRequirementItems = (items: any[]) => items.map((item) => {
+  const filename = normalizeGeneralEngineeringName(item?.filename);
+  const normalizedItem = {
+    ...item,
+    filename: filename || item?.filename || '',
+  };
+  if (typeof item?.event_name === 'string') {
+    normalizedItem.event_name = normalizeGeneralEngineeringName(item.event_name) || item.event_name;
+  }
+  return normalizedItem;
+});
+
+const normalizeJinnEngineeringName = (value: unknown) => {
+  if (typeof value !== 'string') return '';
+  const normalized = value
+    .trim()
+    .replace(/\.[a-z0-9]+$/i, '')
+    .replace(/[^a-zA-Z0-9_]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .replace(/^sfx_/i, '');
+  return capitalizeEngineeringNameSegments(normalized);
+};
+
+const normalizeJinnRequirementItems = (items: any[]) => items.map((item) => {
+  const filename = normalizeJinnEngineeringName(item?.filename);
+  const eventName = normalizeJinnEngineeringName(item?.event_name);
+  return {
+    ...item,
+    filename: filename || item?.filename || '',
+    // Jinn requires the event ID to copy the resource filename exactly.
+    event_name: filename || eventName || item?.event_name || '',
+  };
+});
+
+const SUNNY_ISLAND_PREFIXES: Record<string, string> = {
+  ani: 'Ani',
+  tool: 'Tool',
+  pet: 'Pet',
+  char: 'Char',
+  music: 'Music',
+  npc: 'Npc',
+  fwsh: 'FWSH',
+};
+
+const normalizeSunnyIslandEngineeringName = (value: unknown) => {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  const extension = trimmed.match(/(\.[a-z0-9]{1,8})$/i)?.[1] || '';
+  const normalized = trimmed
+    .slice(0, extension ? -extension.length : undefined)
+    .replace(/[\\/\s-]+/g, '_')
+    .replace(/[^a-zA-Z0-9_]+/g, '_')
+    .replace(/^sfx_+/i, '')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  if (!normalized) return '';
+  const segments = normalized.split('_').filter(Boolean);
+  const prefix = SUNNY_ISLAND_PREFIXES[segments[0].toLowerCase()];
+  if (prefix) segments[0] = prefix;
+  return `${segments.map((segment, index) => {
+    if (index === 0 && prefix === 'FWSH') return segment;
+    if (/^\d+$/.test(segment)) return segment;
+    return `${segment.charAt(0).toUpperCase()}${segment.slice(1)}`;
+  }).join('_')}${extension}`;
+};
+
+const normalizeSunnyIslandRequirementItems = (items: any[]) => items.map((item) => {
+  const filename = normalizeSunnyIslandEngineeringName(item?.filename);
+  return {
+    ...item,
+    filename: filename || item?.filename || '',
+    event_name: filename || normalizeSunnyIslandEngineeringName(item?.event_name) || item?.event_name || '',
+  };
+});
+
+const normalizeAvatarEngineeringName = (value: unknown) => {
+  if (typeof value !== 'string') return '';
+  const normalized = value
+    .trim()
+    .replace(/\.[a-z0-9]+$/i, '')
+    .replace(/[\\/]+/g, '_')
+    .replace(/\s+/g, '_');
+  const prefix = normalized.match(/^audio_avatar_(show|bgm)_/i);
+  if (!prefix) return '';
+  const remainder = normalized.slice(prefix[0].length);
+  const segments = remainder.split('_').filter(Boolean);
+  if (segments.length < 3) return '';
+  const suffix = segments.pop() || '';
+  const costumeId = segments.pop() || '';
+  const costumeName = segments.map(segment => segment ? `${segment.charAt(0).toUpperCase()}${segment.slice(1)}` : segment).join('_');
+  const normalizedSuffix = suffix.toLowerCase() === 'double' ? 'Double' : suffix.toLowerCase() === 'girl' ? 'Girl' : suffix.toLowerCase() === 'boy' ? 'Boy' : '';
+  if (!costumeName || !costumeId || !normalizedSuffix) return '';
+  if (prefix[1].toLowerCase() === 'show' && normalizedSuffix === 'Double') return '';
+  return `audio_avatar_${prefix[1].toLowerCase()}_${costumeName}_${costumeId}_${normalizedSuffix}`;
+};
+
+const isAvatarEngineeringName = (value: string) => (
+  /^(?:audio_avatar_show_.+_(Boy|Girl)|audio_avatar_bgm_.+_(Boy|Girl|Double))$/.test(value)
+);
+
+const normalizeAvatarRequirementItems = (items: any[]) => items.map((item) => {
+  const filename = normalizeAvatarEngineeringName(item?.filename);
+  if (!isAvatarEngineeringName(filename)) return item;
+  const normalizedItem = {
+    ...item,
+    filename,
+  };
+  if (typeof item?.event_name === 'string') {
+    normalizedItem.event_name = filename;
+  }
+  return normalizedItem;
+});
+
 export default function SfxRequirements({ hasGeminiKey, assistantRequest = null }: SfxRequirementsProps) {
   const [templateType, setTemplateType] = useState<TemplateType>('game_sfx_general');
+  const [selectedProject, setSelectedProject] = useState<ProjectOption>('');
+  const [columnWidthsByTemplate, setColumnWidthsByTemplate] = useState<Record<TemplateType, number[]>>(DEFAULT_COLUMN_WIDTHS);
   const [inputText, setInputText] = useState('');
   const [rowsByTemplate, setRowsByTemplate] = useState<Record<TemplateType, any[]>>(() => ({
     game_sfx_general: [],
@@ -406,8 +555,57 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const consumedAssistantRequestRef = useRef<string | null>(null);
+  const columnResizeRef = useRef<{ templateType: TemplateType; index: number; startX: number; startWidth: number } | null>(null);
+  const [resizingColumn, setResizingColumn] = useState<number | null>(null);
   const rows = rowsByTemplate[templateType] || [];
   const hasCurrentRequirementDraft = draftByTemplate[templateType] || false;
+  const selectedProjectName = PROJECT_OPTIONS.find(project => project.id === selectedProject)?.name || null;
+
+  useEffect(() => {
+    if (!success || rows.length === 0) return;
+    const table = document.getElementById('req-table-element');
+    if (!table) return;
+    const frame = window.requestAnimationFrame(() => {
+      table.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [success, rows.length, templateType]);
+
+  useEffect(() => {
+    if (resizingColumn === null) return;
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const resize = columnResizeRef.current;
+      if (!resize) return;
+      const width = Math.max(
+        resize.index === 0 ? MIN_COLUMN_WIDTH : MIN_COLUMN_WIDTH + 8,
+        Math.min(MAX_COLUMN_WIDTH, resize.startWidth + event.clientX - resize.startX),
+      );
+      setColumnWidthsByTemplate(previous => {
+        const current = previous[resize.templateType] || [];
+        if (current[resize.index] === width) return previous;
+        const next = [...current];
+        next[resize.index] = width;
+        return { ...previous, [resize.templateType]: next };
+      });
+    };
+
+    const finishResize = () => {
+      columnResizeRef.current = null;
+      setResizingColumn(null);
+    };
+
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', finishResize);
+    window.addEventListener('pointercancel', finishResize);
+    return () => {
+      document.body.style.userSelect = '';
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', finishResize);
+      window.removeEventListener('pointercancel', finishResize);
+    };
+  }, [resizingColumn]);
 
   useEffect(() => {
     if (!assistantRequest || consumedAssistantRequestRef.current === assistantRequest.id) return;
@@ -456,9 +654,38 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
     setSuccessMessage('已切换模板，之前生成的其它模板需求已保留。');
   };
 
+  const handleColumnResizeStart = (event: React.PointerEvent, index: number) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const currentWidths = columnWidthsByTemplate[templateType] || DEFAULT_COLUMN_WIDTHS[templateType];
+    columnResizeRef.current = {
+      templateType,
+      index,
+      startX: event.clientX,
+      startWidth: currentWidths[index] || 140,
+    };
+    setResizingColumn(index);
+  };
+
+  const handleProjectChange = (project: ProjectOption) => {
+    setSelectedProject(project);
+    if (project === 'jinn' && templateType !== 'game_sfx_middleware') {
+      handleTemplateChange('game_sfx_middleware');
+      setSuccessMessage('已切换到 FMOD / Wwise 引擎中间件需求表，适配 Jinn 项目。');
+    }
+  };
+
   // Restore defaults
   const handleRestoreDefaults = () => {
-    setCurrentRows(DEMO_ROWS[templateType].map(row => ({ ...row })), false);
+    const defaultRows = DEMO_ROWS[templateType].map(row => ({ ...row }));
+    const normalizedRows = selectedProject === 'jinn'
+      ? normalizeJinnRequirementItems(defaultRows)
+      : selectedProject === 'avatar'
+        ? normalizeAvatarRequirementItems(defaultRows)
+        : selectedProject === 'sunny_island'
+          ? normalizeSunnyIslandRequirementItems(defaultRows)
+        : normalizeGeneralRequirementItems(defaultRows);
+    setCurrentRows(normalizedRows, false);
     setSuccess(false);
     setSuccessMessage('已恢复当前模板的示例内容。');
   };
@@ -581,7 +808,7 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
         if (key === 'audio_type') {
           newRow[key] = "SFX";
         } else if (key === 'filename') {
-          newRow[key] = templateType.startsWith('voiceover') ? `vo_character_new_${newIndex}` : `sfx_module_new_${newIndex}`;
+          newRow[key] = templateType.startsWith('voiceover') ? `Vo_Character_New_${newIndex}` : `Sfx_Module_New_${newIndex}`;
         } else if (key === 'event_name') {
           newRow[key] = `event:/SFX/Module/new_${newIndex}`;
         } else if (key === 'duration' || key === 'duration_logic') {
@@ -785,15 +1012,30 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
         : Promise.resolve([]);
 
       const [response, detectedVoRows] = await Promise.all([
-        generateSfxRequirements(inputText.trim(), imageObj, requestTemplateType),
+        generateSfxRequirements(inputText.trim(), imageObj, requestTemplateType, selectedProjectName),
         detectedVoRowsPromise,
       ]);
       
-      if (response && Array.isArray(response.items)) {
-        const generatedItems = mergeGeneralRowsWithDetectedVoRows(
-          simplifySingletonFilenameSuffixes(response.items),
+      if (response && Array.isArray(response.items) && response.items.length > 0) {
+        const normalizedItems = simplifySingletonFilenameSuffixes(response.items);
+        const projectAwareItems = selectedProject === 'jinn'
+          ? normalizeJinnRequirementItems(response.items)
+          : selectedProject === 'avatar'
+            ? normalizeAvatarRequirementItems(normalizedItems)
+            : selectedProject === 'sunny_island'
+              ? normalizeSunnyIslandRequirementItems(normalizedItems)
+            : normalizedItems;
+        const mergedItems = mergeGeneralRowsWithDetectedVoRows(
+          projectAwareItems,
           detectedVoRows,
         );
+        const generatedItems = selectedProject === 'jinn'
+          ? normalizeJinnRequirementItems(mergedItems)
+          : selectedProject === 'avatar'
+            ? normalizeAvatarRequirementItems(mergedItems)
+            : selectedProject === 'sunny_island'
+              ? normalizeSunnyIslandRequirementItems(mergedItems)
+            : normalizeGeneralRequirementItems(mergedItems);
         if (mode === 'append') {
           setRowsForTemplate(requestTemplateType, prevRows => [
             ...prevRows,
@@ -806,7 +1048,7 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
         }
         setSuccess(true);
       } else {
-        throw new Error('AI 返回了不完整的数据，请稍后重试');
+        throw new Error('AI 未生成任何需求，请确认服装名和 ID 格式，或检查 Gemini API 配置后重试。');
       }
     } catch (err: any) {
       console.error('Error generating SFX requirements:', err);
@@ -921,6 +1163,48 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
                   </button>
                 );
               })}
+            </div>
+
+            <div className="border-t border-slate-100 pt-4 space-y-2.5">
+              <div className="flex items-center gap-2">
+                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500 border border-slate-200">可选</span>
+                <span className="text-xs font-semibold text-slate-700">项目命名风格</span>
+                <span className="text-[10px] text-slate-400">后续可补充各项目的命名规则</span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <button
+                  type="button"
+                  id="project-btn-none"
+                  aria-pressed={!selectedProject}
+                  onClick={() => handleProjectChange('')}
+                  className={`rounded-xl border px-2.5 py-2 text-left transition-all ${
+                    !selectedProject
+                      ? 'border-emerald-500 bg-emerald-50/45 shadow-sm shadow-emerald-500/5'
+                      : 'border-slate-200 bg-slate-50 hover:border-slate-300'
+                  }`}
+                >
+                  <span className={`block text-xs font-bold ${!selectedProject ? 'text-emerald-700' : 'text-slate-700'}`}>不指定项目</span>
+                </button>
+                {PROJECT_OPTIONS.map(project => {
+                  const isSelected = selectedProject === project.id;
+                  return (
+                    <button
+                      type="button"
+                      key={project.id}
+                      id={`project-btn-${project.id}`}
+                      aria-pressed={isSelected}
+                      onClick={() => handleProjectChange(project.id)}
+                      className={`rounded-xl border px-2.5 py-2 text-left transition-all ${
+                        isSelected
+                          ? 'border-emerald-500 bg-emerald-50/45 shadow-sm shadow-emerald-500/5'
+                          : 'border-slate-200 bg-slate-50 hover:border-slate-300'
+                      }`}
+                    >
+                      <span className={`block text-xs font-bold ${isSelected ? 'text-emerald-700' : 'text-slate-700'}`}>{project.name}</span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </div>
 
@@ -1198,7 +1482,7 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
         </div>
 
         {/* Scrollable Table Stage */}
-        <div className="overflow-x-auto w-full custom-scrollbar border border-slate-200 rounded-xl bg-white">
+        <div className={`overflow-x-auto w-full custom-scrollbar border border-slate-200 rounded-xl bg-white ${resizingColumn !== null ? 'select-none' : ''}`}>
           {rows.length === 0 ? (
             <div className="p-12 text-center flex flex-col items-center justify-center space-y-3">
               <ClipboardList className="w-10 h-10 text-slate-200" />
@@ -1214,17 +1498,35 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
               </button>
             </div>
           ) : (
-            <table id="req-table-element" className="w-full text-left border-collapse table-auto min-w-[800px]">
+            <table id="req-table-element" className="w-full text-left border-collapse table-fixed min-w-[800px]">
+              <colgroup>
+                {currentTemplate.keys.map((key, idx) => (
+                  <col
+                    key={key}
+                    style={{ width: `${(columnWidthsByTemplate[templateType] || DEFAULT_COLUMN_WIDTHS[templateType])[idx] || 140}px` }}
+                  />
+                ))}
+                <col style={{ width: '64px' }} />
+              </colgroup>
               <thead>
                 <tr className="bg-slate-50 border-b border-slate-200">
                   {currentTemplate.headers.map((h, idx) => (
                     <th 
                       key={idx} 
-                      className={`px-3.5 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-wider ${
+                      className={`relative px-3.5 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-wider ${
                         h === "序号" ? "w-[50px]" : ""
                       }`}
                     >
                       {h}
+                      <button
+                        type="button"
+                        aria-label={`调整列宽：${h}`}
+                        title={`拖动调整“${h}”列宽`}
+                        onPointerDown={(event) => handleColumnResizeStart(event, idx)}
+                        className="group absolute inset-y-0 right-0 z-10 w-2 translate-x-1/2 cursor-col-resize touch-none"
+                      >
+                        <span className="absolute inset-y-2 left-1/2 w-px bg-transparent transition-colors group-hover:bg-emerald-400" />
+                      </button>
                     </th>
                   ))}
                   <th className="px-3.5 py-3 text-[10px] font-bold text-slate-500 text-center w-[50px]">操作</th>

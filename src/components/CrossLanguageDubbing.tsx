@@ -45,6 +45,8 @@ interface CrossLanguageDubbingProps {
   initialFile?: File;
   assistantRequestId?: string;
   initialTargetLanguage?: string;
+  cloneModeOnly?: boolean;
+  hideSelfHosted?: boolean;
   displayVoices: VoiceItem[];
   setHistoryList: React.Dispatch<React.SetStateAction<HistoryItem[]>>;
   onAudioPlay?: () => void;
@@ -566,6 +568,8 @@ export default function CrossLanguageDubbing({
   initialFile,
   assistantRequestId,
   initialTargetLanguage,
+  cloneModeOnly = false,
+  hideSelfHosted = false,
   displayVoices,
   setHistoryList,
   onAudioPlay,
@@ -576,7 +580,7 @@ export default function CrossLanguageDubbing({
   const [sourceFileUrl, setSourceFileUrl] = useState<string | null>(null);
   const [sourceLanguage, setSourceLanguage] = useState('auto');
   const [targetLanguage, setTargetLanguage] = useState('English');
-  const [dubbingMode, setDubbingMode] = useState<DubbingMode>('self_hosted');
+  const [dubbingMode, setDubbingMode] = useState<DubbingMode>(hideSelfHosted ? 'manual_tts' : 'self_hosted');
   const [localTargetLanguage, setLocalTargetLanguage] = useState('en');
   const [localTargetText, setLocalTargetText] = useState('');
   const [localDialogueMode, setLocalDialogueMode] = useState<LocalDialogueMode>('single');
@@ -1618,7 +1622,7 @@ export default function CrossLanguageDubbing({
             <div>
               <h3 className="text-sm font-black text-slate-850 flex items-center gap-2">
                 <Languages className="w-4 h-4 text-emerald-600" />
-                跨语种转换
+                {cloneModeOnly ? '克隆转换' : '跨语种转换'}
               </h3>
             </div>
             {dubbingMode !== 'self_hosted' && (
@@ -1629,9 +1633,9 @@ export default function CrossLanguageDubbing({
           </div>
 
           <div className="rounded-2xl border border-emerald-200 bg-emerald-50/60 p-3.5 space-y-3">
-            <div className="grid grid-cols-3 gap-1.5 rounded-xl bg-white/80 p-1">
+            {!cloneModeOnly && <div className={`grid ${hideSelfHosted ? 'grid-cols-2' : 'grid-cols-3'} gap-1.5 rounded-xl bg-white/80 p-1`}>
               {([
-                { value: 'self_hosted' as const, label: '自研模式 克隆转换' },
+                ...(!hideSelfHosted ? [{ value: 'self_hosted' as const, label: '自研模式 克隆转换' }] : []),
                 { value: 'manual_tts' as const, label: '匹配相似声音' },
                 { value: 'dubbing_v2' as const, label: 'Dubbing v2' },
               ]).map(option => (
@@ -1654,8 +1658,8 @@ export default function CrossLanguageDubbing({
                 >
                   {option.label}
                 </button>
-              ))}
-            </div>
+                ))}
+            </div>}
             {dubbingMode === 'self_hosted' && (
               <LocalVoiceEngineSelector
                 selectedEngine={localVoiceEngine}
