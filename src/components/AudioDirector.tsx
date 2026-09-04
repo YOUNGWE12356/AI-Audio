@@ -23,11 +23,12 @@ import {
   Sparkles,
   DownloadCloud,
   Clock,
-  Sun
+  Sun,
+  Gauge
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { FileItem } from '../types';
-import { AudioDesignResult } from '../services/geminiService';
+import { AudioDesignResult, AudioDesignScope } from '../services/geminiService';
 import { generateSoundEffect, generateMusic } from '../services/elevenLabsService';
 
 // Self-contained ElevenLabs Player for Demo Sound Effects inside table
@@ -164,6 +165,21 @@ const filmDemoResult: AudioDesignResult = {
     suggestedInstruments: ["立式钢琴", "爱尔兰竖琴", "管弦乐交响合唱团", "空灵女声吟唱", "低频大鼓"],
     emotionalCurve: "0-5s 宁静神秘；5-12s 悬念递增；12-20s 气势磅礴；20-24s 戛然而止留下无尽回味。"
   },
+  videoMotionTempo: {
+    detected: true,
+    primaryBpm: 116,
+    bpmRangeMin: 112,
+    bpmRangeMax: 120,
+    alternateBpms: [58, 232],
+    confidence: "中",
+    motionPattern: "角色挥动法杖与身体重心起伏形成规律动作脉冲",
+    analysisBasis: "12-20 秒内连续挥臂、蓄力和身体起伏约每 0.52 秒出现一次明显动作重音，前后循环存在少量加速。",
+    syncGuidance: "以法杖挥至最外侧和脚步落地作为强拍，蓄力抬手可对齐弱拍；高潮动作前允许逐步加速。",
+    segments: [
+      { timecode: "00:12-00:16", motion: "蓄力抬手与身体起伏", bpm: 112, confidence: "中" },
+      { timecode: "00:16-00:20", motion: "连续挥杖与重心摆动", bpm: 120, confidence: "中" }
+    ]
+  },
   sfxSchemes: [
     {
       title: "「影视/广告」时码高精度音效 Foley 制作排程表",
@@ -293,7 +309,7 @@ interface AudioDirectorProps {
   error: string | null;
   setError: (err: string | null) => void;
   result: AudioDesignResult | null;
-  onGenerate: () => void;
+  onGenerate: (scope: AudioDesignScope) => void;
   onCancel: () => void;
   copyToClipboard: (text: string, id?: string) => void;
   copyTableToClipboard: (scheme: any, id: string) => void;
@@ -350,6 +366,7 @@ export default function AudioDirector({
 }: AudioDirectorProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [pasteMessage, setPasteMessage] = useState<string | null>(null);
+  const [analysisScope, setAnalysisScope] = useState<AudioDesignScope>({ music: true, sfx: false });
   const isProfessionalTarget = Boolean(target.video || target.avatar);
   const isGameTrack = target.game && !target.video && !target.avatar && !target.sunnyIsland;
   const videoFileCount = files.filter(item => item.type.startsWith('video/')).length;
@@ -358,6 +375,21 @@ export default function AudioDirector({
     && videoFileCount > 0
     && (videoFileCount !== 1 || files.length !== 1);
   const usesProfessionalFallback = isProfessionalTarget && videoFileCount === 0;
+  const hasSfxResult = Boolean(result?.sfxSchemes?.length);
+  const hasMusicResult = Boolean(result?.bgmRecommendations?.length);
+
+  const toggleAnalysisScope = (kind: keyof AudioDesignScope) => {
+    const nextScope = { ...analysisScope, [kind]: !analysisScope[kind] };
+    if (!nextScope.music && !nextScope.sfx) return;
+    setAnalysisScope(nextScope);
+    if (!nextScope.sfx && activeTab === 'sfx') setActiveTab('bgm');
+    if (!nextScope.music && activeTab === 'bgm') setActiveTab('sfx');
+  };
+
+  const handleGenerate = () => {
+    setActiveTab(analysisScope.sfx ? 'sfx' : 'bgm');
+    onGenerate(analysisScope);
+  };
 
   const processFiles = async (selectedFiles: FileList | File[] | null, source: 'upload' | 'paste' = 'upload') => {
     if (selectedFiles && selectedFiles.length > 0) {
@@ -675,8 +707,42 @@ export default function AudioDirector({
               </div>
             </div>
 
-            {/* Instrumental/Vocal Toggle */}
             <div className="space-y-2">
+              <label className="text-[11px] font-bold text-slate-700">分析内容</label>
+              <div className="grid grid-cols-2 gap-3">
+                <label className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-semibold transition-all ${
+                  analysisScope.music
+                    ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
+                    : 'border-slate-200 bg-slate-50 text-slate-500 hover:text-slate-800'
+                }`}>
+                  <input
+                    type="checkbox"
+                    checked={analysisScope.music}
+                    onChange={() => toggleAnalysisScope('music')}
+                    className="h-3.5 w-3.5 accent-emerald-600"
+                  />
+                  <Music className="h-3.5 w-3.5 shrink-0" />
+                  <span>分析音乐</span>
+                </label>
+                <label className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-semibold transition-all ${
+                  analysisScope.sfx
+                    ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
+                    : 'border-slate-200 bg-slate-50 text-slate-500 hover:text-slate-800'
+                }`}>
+                  <input
+                    type="checkbox"
+                    checked={analysisScope.sfx}
+                    onChange={() => toggleAnalysisScope('sfx')}
+                    className="h-3.5 w-3.5 accent-emerald-600"
+                  />
+                  <Volume2 className="h-3.5 w-3.5 shrink-0" />
+                  <span>分析音效</span>
+                </label>
+              </div>
+            </div>
+
+            {/* Instrumental/Vocal Toggle */}
+            {analysisScope.music && <div className="space-y-2">
               <label className="text-[11px] font-bold text-slate-700">音乐轨道生成偏好</label>
               <div className="grid grid-cols-2 gap-3">
                 <button
@@ -702,7 +768,7 @@ export default function AudioDirector({
                   带歌词/伴奏 (Vocal)
                 </button>
               </div>
-            </div>
+            </div>}
 
             {/* Custom Text Requirements */}
             <div className="space-y-2">
@@ -717,7 +783,7 @@ export default function AudioDirector({
 
             {/* Submit Action */}
             <button
-              onClick={onGenerate}
+              onClick={handleGenerate}
               disabled={loading || hasInvalidProfessionalSelection || (files.length === 0 && !requirements.trim())}
               className="w-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-bold py-3.5 rounded-xl text-xs tracking-wider uppercase transition-all shadow-md shadow-emerald-600/10 disabled:opacity-50 flex items-center justify-center gap-2 mt-2 cursor-pointer"
             >
@@ -729,7 +795,13 @@ export default function AudioDirector({
               ) : (
                 <>
                   <Sparkles className="w-4 h-4" />
-                  <span>{hasInvalidProfessionalSelection ? '请先调整专业视频素材' : '开始生成设计方案'}</span>
+                  <span>{hasInvalidProfessionalSelection
+                    ? '请先调整专业视频素材'
+                    : analysisScope.music && analysisScope.sfx
+                      ? '开始生成设计方案'
+                      : analysisScope.music
+                        ? '开始分析音乐'
+                        : '开始分析音效'}</span>
                 </>
               )}
             </button>
@@ -784,6 +856,8 @@ export default function AudioDirector({
                     onClick={() => {
                       setTarget({ game: false, video: true, avatar: false, sunnyIsland: false });
                       setIsInstrumental(false);
+                      setAnalysisScope({ music: true, sfx: true });
+                      setActiveTab('sfx');
                       onLoadDemo(filmDemoResult);
                     }}
                     className="bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 text-xs font-bold px-4 py-2.5 rounded-xl transition-all flex items-center gap-2 shadow-sm cursor-pointer"
@@ -800,7 +874,7 @@ export default function AudioDirector({
           {!loading && result && (
             <div className="space-y-5">
               {/* Output Tabs Selection */}
-              <div className="bg-white border border-slate-200 p-1.5 rounded-xl flex shadow-sm">
+              {hasSfxResult && hasMusicResult && <div className="bg-white border border-slate-200 p-1.5 rounded-xl flex shadow-sm">
                 <button
                   onClick={() => setActiveTab('sfx')}
                   className={`flex-1 py-2 px-4 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 ${
@@ -823,10 +897,10 @@ export default function AudioDirector({
                   <Music className="w-3.5 h-3.5" />
                   <span>背景音乐配乐方案</span>
                 </button>
-              </div>
+              </div>}
 
               {/* TAB 1: SFX CUE SHEET TABLE */}
-              {activeTab === 'sfx' && (
+              {activeTab === 'sfx' && hasSfxResult && (
                 <div className="space-y-4">
                   {/* Summary Overview */}
                   <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3 shadow-sm">
@@ -898,8 +972,93 @@ export default function AudioDirector({
               )}
 
               {/* TAB 2: BGM RECOMMENDATIONS */}
-              {activeTab === 'bgm' && (
+              {activeTab === 'bgm' && hasMusicResult && (
                 <div className="space-y-4">
+                  {result.videoMotionTempo && (
+                    <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm space-y-4" data-testid="video-motion-tempo">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="flex items-start gap-2.5">
+                          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-amber-50 text-amber-600 border border-amber-100">
+                            <Gauge className="h-4 w-4" />
+                          </div>
+                          <div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h4 className="text-xs font-black text-slate-800">视频动作速度分析</h4>
+                              <span className="rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-700">独立于推荐配乐 BPM</span>
+                            </div>
+                            <p className="mt-1 text-[10px] leading-relaxed text-slate-500">根据人物或主体的重复动作周期估算，用于查找卡点音乐，不代表下方配乐方案的速度。</p>
+                          </div>
+                        </div>
+                        <span className="w-fit shrink-0 whitespace-nowrap rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-bold text-slate-600">
+                          可信度：{result.videoMotionTempo.confidence}
+                        </span>
+                      </div>
+
+                      {result.videoMotionTempo.detected ? (
+                        <>
+                          <div className="grid grid-cols-2 border-y border-slate-200 sm:grid-cols-4 sm:divide-x sm:divide-slate-200">
+                            <div className="p-3">
+                              <p className="text-[9px] font-bold text-amber-700">主要动作速度</p>
+                              <p className="mt-1 text-xl font-black text-slate-800">{result.videoMotionTempo.primaryBpm}<span className="ml-1 text-[10px] font-bold text-slate-500">BPM</span></p>
+                            </div>
+                            <div className="border-l border-slate-200 p-3 sm:border-l-0">
+                              <p className="text-[9px] font-bold text-slate-500">稳定区间</p>
+                              <p className="mt-1 text-sm font-black text-slate-800">{result.videoMotionTempo.bpmRangeMin}-{result.videoMotionTempo.bpmRangeMax} BPM</p>
+                            </div>
+                            <div className="border-t border-slate-200 p-3 sm:border-t-0">
+                              <p className="text-[9px] font-bold text-slate-500">动作间隔</p>
+                              <p className="mt-1 text-sm font-black text-slate-800">{Math.round(60000 / result.videoMotionTempo.primaryBpm)} ms</p>
+                            </div>
+                            <div className="border-l border-t border-slate-200 p-3 sm:border-l-0 sm:border-t-0">
+                              <p className="text-[9px] font-bold text-slate-500">半速 / 倍速候选</p>
+                              <p className="mt-1 text-sm font-black text-slate-800">{result.videoMotionTempo.alternateBpms.length > 0 ? result.videoMotionTempo.alternateBpms.join(' / ') : '无'}</p>
+                            </div>
+                          </div>
+                          <div className="grid divide-y divide-slate-200 md:grid-cols-2 md:divide-x md:divide-y-0">
+                            <div className="pb-3.5 md:pb-0 md:pr-4">
+                              <p className="text-[9px] font-bold text-slate-500">识别动作与分析依据</p>
+                              <p className="mt-1.5 text-[11px] font-semibold leading-relaxed text-slate-700">{result.videoMotionTempo.motionPattern}</p>
+                              <p className="mt-1 text-[10px] leading-relaxed text-slate-500">{result.videoMotionTempo.analysisBasis}</p>
+                            </div>
+                            <div className="pt-3.5 md:pl-4 md:pt-0">
+                              <p className="text-[9px] font-bold text-slate-500">卡点建议</p>
+                              <p className="mt-1.5 text-[11px] font-semibold leading-relaxed text-slate-700">{result.videoMotionTempo.syncGuidance}</p>
+                            </div>
+                          </div>
+                          {result.videoMotionTempo.segments.length > 0 && (
+                            <div className="overflow-x-auto rounded-xl border border-slate-200">
+                              <table className="w-full min-w-[420px] text-left text-[10px]">
+                                <thead className="bg-slate-50 text-slate-500">
+                                  <tr>
+                                    <th className="px-3 py-2 font-bold">时间段</th>
+                                    <th className="px-3 py-2 font-bold">画面动作</th>
+                                    <th className="px-3 py-2 font-bold">局部速度</th>
+                                    <th className="px-3 py-2 font-bold">可信度</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100 text-slate-700">
+                                  {result.videoMotionTempo.segments.map((segment, index) => (
+                                    <tr key={`${segment.timecode}-${index}`}>
+                                      <td className="whitespace-nowrap px-3 py-2 font-mono font-bold">{segment.timecode}</td>
+                                      <td className="px-3 py-2 font-semibold">{segment.motion}</td>
+                                      <td className="whitespace-nowrap px-3 py-2 font-bold text-amber-700">{segment.bpm} BPM</td>
+                                      <td className="whitespace-nowrap px-3 py-2">{segment.confidence}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5">
+                          <p className="text-xs font-bold text-slate-700">暂时无法稳定估算视频动作速度</p>
+                          <p className="mt-1 text-[10px] leading-relaxed text-slate-500">{result.videoMotionTempo.analysisBasis}</p>
+                          <p className="mt-1 text-[10px] leading-relaxed text-slate-500">{result.videoMotionTempo.syncGuidance}</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {!isGameTrack && <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm space-y-1">
                     <h5 className="text-[10px] font-bold text-slate-450 uppercase">画面整体情绪基线（两套方案共同参考）</h5>
                     <p className="text-xs text-slate-700 leading-relaxed font-semibold">
@@ -930,7 +1089,7 @@ export default function AudioDirector({
                             <p className="text-slate-700 font-semibold mt-0.5 truncate">{bgm.instrumentation}</p>
                           </div>
                           <div>
-                            <p className="text-[10px] text-slate-450 uppercase font-bold">估算速度</p>
+                            <p className="text-[10px] text-slate-450 uppercase font-bold">推荐配乐速度</p>
                             <p className="text-slate-700 font-semibold mt-0.5">{bgm.sunoPrompt.bpm} BPM</p>
                           </div>
                           <div>
@@ -950,7 +1109,7 @@ export default function AudioDirector({
                               <p className="text-slate-700 font-semibold mt-0.5 leading-relaxed">{bgm.instrumentation}</p>
                             </div>
                             <div>
-                              <p className="text-[10px] text-slate-450 uppercase font-bold">建议速度</p>
+                              <p className="text-[10px] text-slate-450 uppercase font-bold">推荐配乐速度</p>
                               <p className="text-slate-700 font-semibold mt-0.5">{bgm.sunoPrompt.bpm} BPM</p>
                             </div>
                             <div>

@@ -3056,7 +3056,7 @@ async function startServer() {
   }));
 
   app.post('/api/ai/gemini/audio-design', asyncRoute(async (req, res) => {
-    const { files, requirements = '', target = {}, isInstrumental = true } = req.body || {};
+    const { files, requirements = '', target = {}, isInstrumental = true, scope } = req.body || {};
     if (!Array.isArray(files)) {
       return res.status(400).json({ error: 'files must be an array' });
     }
@@ -3076,7 +3076,7 @@ async function startServer() {
     if (decodedLength > MAX_INLINE_MEDIA_BYTES) {
       return res.status(413).json({ error: '素材总量过大，请减少文件数量或压缩素材。' });
     }
-    const result = await analyzeAudioDesign(files, String(requirements), target, Boolean(isInstrumental));
+    const result = await analyzeAudioDesign(files, String(requirements), target, Boolean(isInstrumental), { scope });
     return res.json(result);
   }));
 
@@ -3176,6 +3176,7 @@ async function startServer() {
       target: rawTarget = {},
       isInstrumental = true,
       analysisMode = 'professional',
+      scope,
     } = req.body || {};
     if (typeof uploadId !== 'string' || !/^[0-9a-f-]{36}$/i.test(uploadId)) {
       return res.status(400).json({ error: '视频预上传标识无效，请重新上传视频。' });
@@ -3208,9 +3209,9 @@ async function startServer() {
       mimeType: cachedVideo.mimeType,
       label: `完整视频：${cachedVideo.displayName}`,
       videoMetadata: {
-        fps: target.avatar ? 2 : 1,
+        fps: 4,
       },
-    }], String(requirements), target, Boolean(isInstrumental));
+    }], String(requirements), target, Boolean(isInstrumental), { scope });
     return res.json(result);
   }));
 
@@ -3234,8 +3235,10 @@ async function startServer() {
         }
 
         let rawTarget: any;
+        let rawScope: any;
         try {
           rawTarget = JSON.parse(String(req.body?.target || '{}'));
+          rawScope = JSON.parse(String(req.body?.scope || 'null'));
         } catch {
           return res.status(400).json({ error: '视频分析模式参数无效。' });
         }
@@ -3264,6 +3267,7 @@ async function startServer() {
           String(req.body?.requirements || ''),
           target,
           String(req.body?.isInstrumental) !== 'false',
+          rawScope,
         );
         return res.json(result);
       } finally {

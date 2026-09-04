@@ -9,6 +9,7 @@ import {
   analyzeAudioDesign,
   analyzeAudioDesignPreuploadedVideo,
   analyzeAudioDesignVideo,
+  AudioDesignScope,
   AudioDesignResult,
   createEnglishMusicPromptForElevenLabs,
   preuploadAudioDesignVideo,
@@ -969,7 +970,7 @@ export default function App() {
   }, [assistantMusicAutoRunId, standaloneMusicPrompt, standaloneMusicLoading, updateAssistantTaskRunning]);
 
   // AI Multimodal director planner handler
-  const onGenerate = async () => {
+  const onGenerate = async (scope: AudioDesignScope) => {
     if (analysisRunningRef.current) return;
 
     if (files.length === 0 && !requirements.trim()) {
@@ -1054,6 +1055,7 @@ export default function App() {
             {
               signal: controller.signal,
               analysisMode: 'professional',
+              scope,
             },
           );
         } else {
@@ -1068,6 +1070,7 @@ export default function App() {
             {
               signal: controller.signal,
               onProgress: setAnalysisStage,
+              scope,
             },
           );
         }
@@ -1085,6 +1088,7 @@ export default function App() {
             {
               signal: controller.signal,
               analysisMode: 'fallback',
+              scope,
             },
           );
         } else {
@@ -1112,6 +1116,7 @@ export default function App() {
               signal: controller.signal,
               onProgress: setAnalysisStage,
               analysisMode: 'fallback',
+              scope,
             },
           );
         }
@@ -1123,17 +1128,25 @@ export default function App() {
             requirements,
             target,
             isInstrumental,
-            { signal: controller.signal },
+            { signal: controller.signal, scope },
           );
         }
         }
       }
       
-      if (!res || (!res.sfxSchemes && !res.bgmRecommendations)) {
+      if (
+        !res
+        || (scope.sfx && !res.sfxSchemes?.length)
+        || (scope.music && !res.bgmRecommendations?.length)
+      ) {
         throw new Error('多模态解析未返回合理的音频排程推荐，请尝试修改您的输入。');
       }
       
-      setAnalysisStage('正在整理音效与配乐结果...');
+      setAnalysisStage(scope.music && scope.sfx
+        ? '正在整理音效与配乐结果...'
+        : scope.music
+          ? '正在整理音乐分析结果...'
+          : '正在整理音效分析结果...');
       setResult(res);
 
       // Save plan result to history log
@@ -1144,7 +1157,11 @@ export default function App() {
         prompt: requirements || '根据上传媒体文件进行全片音轨规划',
         url: '#',
         timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
-        details: `${res.sfxSchemes?.[0]?.items?.length || 0}项音效排程 · 1项BGM推荐${files.length ? ` · ${files.length} 个参考文件` : ''}`,
+        details: [
+          scope.sfx ? `${res.sfxSchemes[0]?.items?.length || 0}项音效排程` : '',
+          scope.music ? `${res.bgmRecommendations?.length || 0}项BGM推荐` : '',
+          files.length ? `${files.length} 个参考文件` : '',
+        ].filter(Boolean).join(' · '),
         inputText: requirements,
         attachments: files.map(file => ({
           name: file.file.name,
