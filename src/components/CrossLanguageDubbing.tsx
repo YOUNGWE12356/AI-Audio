@@ -18,7 +18,6 @@ import {
   Pause,
   Play,
   RefreshCw,
-  Search,
   SlidersHorizontal,
   Sparkles,
   UploadCloud,
@@ -27,8 +26,7 @@ import {
   X,
 } from 'lucide-react';
 import { HistoryItem } from '../types';
-import { VoiceItem } from '../data/voices';
-import { transcribeSpeech, translateDubbingAudio, translateDubbingV2Audio, TranslateDubbingResult } from '../services/elevenLabsService';
+import { transcribeSpeech, translateDubbingV2Audio, TranslateDubbingResult } from '../services/elevenLabsService';
 import { translateTextToLanguage } from '../services/geminiService';
 import {
   cloneMultiSpeakerVoicesLocally,
@@ -38,7 +36,7 @@ import {
   LocalVoiceCloneEngine,
   LocalVoiceCloneStatus,
 } from '../services/localVoiceCloneService';
-import { getElevenLabsQualityMode } from '../utils/elevenLabsQuality';
+import { convertWithSeedVc, type SeedVcConvertOptions, type SeedVcConvertResult } from '../services/seedVoiceConversionService';
 import { downloadAudioHelper } from '../utils/downloadHelper';
 
 interface CrossLanguageDubbingProps {
@@ -46,24 +44,16 @@ interface CrossLanguageDubbingProps {
   assistantRequestId?: string;
   initialTargetLanguage?: string;
   cloneModeOnly?: boolean;
-  hideSelfHosted?: boolean;
-  displayVoices: VoiceItem[];
   setHistoryList: React.Dispatch<React.SetStateAction<HistoryItem[]>>;
   onAudioPlay?: () => void;
-  playingVoiceId: string | null;
-  handlePlayVoicePreview: (voiceId: string, url: string, e: React.MouseEvent) => void;
 }
 
-interface SimilarVoiceRecommendation {
-  voiceId: string;
-  score: number;
-  reason: string;
-}
-
-type SimilarVoiceGenderPreference = 'auto' | 'male' | 'female';
 type TranslateDubbingOptionId = 'A' | 'B';
-type DubbingMode = 'dubbing_v2' | 'manual_tts' | 'self_hosted';
+type DubbingMode = 'dubbing_v2' | 'self_hosted';
 type LocalDialogueMode = 'single' | 'multi';
+
+const DUBBING_V2_AVAILABLE = false;
+type LocalCloneInputMode = 'text' | 'speech_to_speech';
 
 interface MultiSpeakerSegment {
   id: string;
@@ -112,6 +102,31 @@ const audioEventLabels: Record<MultiSpeakerAudioEventType, string> = {
   noise: '其他原声',
   mn: '语气声',
 };
+
+const localSpeechToSpeechOptions: SeedVcConvertOptions = {
+  model: 'v2',
+  diffusionSteps: 12,
+  lengthAdjust: 1,
+  intelligibilityCfgRate: 0.7,
+  similarityCfgRate: 0.7,
+  convertStyle: true,
+  temperature: 0.7,
+  topP: 0.9,
+  repetitionPenalty: 1.1,
+};
+
+const mapSeedVcResultToDubbingResult = (result: SeedVcConvertResult): TranslateDubbingResult => ({
+  audioUrl: result.audioUrl,
+  sourceText: '',
+  translatedText: '',
+  sourceDuration: result.sourceDuration,
+  generatedDuration: result.generatedDuration,
+  outputDuration: result.generatedDuration,
+  timingMode: 'natural',
+  dubbingModel: 'local_seed_vc',
+  outputFormat: 'wav',
+  speakerSimilarity: undefined,
+});
 
 const normalizeAudioEvent = (value: string): MultiSpeakerAudioEventType => {
   const event = value.toLowerCase().replace(/[\[\]()<>]/g, ' ').replace(/[_-]+/g, ' ').trim();
@@ -385,12 +400,6 @@ const targetLanguageOptions = [
   { value: 'Tamil', label: '泰米尔文' },
 ];
 
-const timingModeOptions = [
-  { value: 'natural', label: '自然配音', description: '优先自然表达，时长允许变化' },
-  { value: 'match', label: '尽量贴合原时长', description: '轻微变速，适合大多数视频替换' },
-  { value: 'strict', label: '严格对齐', description: '更强时长贴合，可能牺牲一点自然度' },
-] as const;
-
 const localTargetLanguageOptions: ReadonlyArray<{ value: string; label: string }> = [
   { value: 'zh', label: '中文' },
   { value: 'en', label: '英文' },
@@ -569,18 +578,19 @@ export default function CrossLanguageDubbing({
   assistantRequestId,
   initialTargetLanguage,
   cloneModeOnly = false,
-  hideSelfHosted = false,
-  displayVoices,
   setHistoryList,
   onAudioPlay,
-  playingVoiceId,
-  handlePlayVoicePreview,
 }: CrossLanguageDubbingProps) {
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [sourceFileUrl, setSourceFileUrl] = useState<string | null>(null);
+  const [speechInputFile, setSpeechInputFile] = useState<File | null>(null);
+  const [speechInputFileUrl, setSpeechInputFileUrl] = useState<string | null>(null);
+  const [scriptFile, setScriptFile] = useState<File | null>(null);
+  const [isTranscribingScript, setIsTranscribingScript] = useState(false);
   const [sourceLanguage, setSourceLanguage] = useState('auto');
   const [targetLanguage, setTargetLanguage] = useState('English');
-  const [dubbingMode, setDubbingMode] = useState<DubbingMode>(hideSelfHosted ? 'manual_tts' : 'self_hosted');
+  const [dubbingMode, setDubbingMode] = useState<DubbingMode>('self_hosted');
+  const [localInputMode, setLocalInputMode] = useState<LocalCloneInputMode>('text');
   const [localTargetLanguage, setLocalTargetLanguage] = useState('en');
   const [localTargetText, setLocalTargetText] = useState('');
   const [localDialogueMode, setLocalDialogueMode] = useState<LocalDialogueMode>('single');
@@ -595,19 +605,12 @@ export default function CrossLanguageDubbing({
   const [localReferenceStart, setLocalReferenceStart] = useState(0);
   const [localReferenceEnd, setLocalReferenceEnd] = useState(20);
   const [localPerformancePreset, setLocalPerformancePreset] = useState<LocalPerformancePreset>('natural');
-  const [localVoiceEngine, setLocalVoiceEngine] = useState<LocalVoiceCloneEngine>('chatterbox');
+  const [localVoiceEngine, setLocalVoiceEngine] = useState<LocalVoiceCloneEngine>('cosyvoice3');
   const [localEngineStatus, setLocalEngineStatus] = useState<LocalVoiceCloneStatus | null>(null);
   const [isCheckingLocalEngine, setIsCheckingLocalEngine] = useState(false);
   const [cloningStrength, setCloningStrength] = useState(7);
   const [outputFormat, setOutputFormat] = useState<'mp3' | 'mp4'>('mp3');
-  const [timingMode, setTimingMode] = useState<'natural' | 'match' | 'strict'>('match');
-  const [voiceId, setVoiceId] = useState('');
-  const [voiceSearch, setVoiceSearch] = useState('');
-  const [voiceActiveCategory, setVoiceActiveCategory] = useState('全部');
-  const [voiceGenderFilter, setVoiceGenderFilter] = useState<'all' | 'male' | 'female'>('all');
-  const [showVoiceDropdown, setShowVoiceDropdown] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [isMatchingSimilarVoice, setIsMatchingSimilarVoice] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<TranslateDubbingResult | null>(null);
   const [pendingResultOptions, setPendingResultOptions] = useState<{
@@ -615,13 +618,9 @@ export default function CrossLanguageDubbing({
     optionB: PendingTranslateDubbingOption | null;
   }>({ optionA: null, optionB: null });
   const [resultAudioDurations, setResultAudioDurations] = useState<Record<string, number>>({});
+  const [resultAudioErrors, setResultAudioErrors] = useState<Record<string, string>>({});
   const [playingResultOptionId, setPlayingResultOptionId] = useState<TranslateDubbingOptionId | null>(null);
   const [sourceDuration, setSourceDuration] = useState<number | null>(null);
-  const [similarVoiceGenderPreference, setSimilarVoiceGenderPreference] = useState<SimilarVoiceGenderPreference>('auto');
-  const [similarVoiceDetectedGender, setSimilarVoiceDetectedGender] = useState<'unknown' | 'male' | 'female'>('unknown');
-  const [similarVoiceRecommendations, setSimilarVoiceRecommendations] = useState<SimilarVoiceRecommendation[]>([]);
-  const [similarVoiceSourceDescription, setSimilarVoiceSourceDescription] = useState('');
-  const [similarVoiceKeywords, setSimilarVoiceKeywords] = useState('');
   const [isSourcePlaying, setIsSourcePlaying] = useState(false);
 
   const sourceAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -653,57 +652,6 @@ export default function CrossLanguageDubbing({
   const targetTextRequestRef = useRef(0);
   const extractedSourceTextRef = useRef('');
 
-  const handleVoicePreviewClick = (previewVoiceId: string, previewUrl: string, event: React.MouseEvent) => {
-    sourceAudioRef.current?.pause();
-    setIsSourcePlaying(false);
-    resultOptionAudioRef.current?.pause();
-    setPlayingResultOptionId(null);
-    onAudioPlay?.();
-    handlePlayVoicePreview(previewVoiceId, previewUrl, event);
-  };
-
-  const similarVoiceRecommendationById = useMemo(() => (
-    new Map(similarVoiceRecommendations.map(recommendation => [recommendation.voiceId, recommendation]))
-  ), [similarVoiceRecommendations]);
-
-  const getVoiceSearchText = (voice: VoiceItem) => [
-    voice.name,
-    voice.englishName,
-    voice.category,
-    voice.description,
-    ...(Array.isArray(voice.tags) ? voice.tags : []),
-  ].map(value => String(value || '').toLowerCase()).join(' ');
-
-  const filteredVoices = useMemo(() => {
-    const query = voiceSearch.trim().toLowerCase();
-    const categoryFilteredVoices = displayVoices.filter(voice => {
-      if (similarVoiceRecommendations.length > 0 && !similarVoiceRecommendationById.has(voice.id)) return false;
-      if (voiceActiveCategory !== '全部' && voice.category !== voiceActiveCategory) return false;
-      if (voiceGenderFilter !== 'all' && voice.gender !== voiceGenderFilter) return false;
-      return true;
-    });
-    const searchedVoices = !query
-      ? categoryFilteredVoices
-      : categoryFilteredVoices.filter(voice => getVoiceSearchText(voice).includes(query));
-    if (similarVoiceRecommendations.length === 0) return searchedVoices;
-    return [...searchedVoices].sort((left, right) => (
-      (similarVoiceRecommendationById.get(right.id)?.score || 0)
-      - (similarVoiceRecommendationById.get(left.id)?.score || 0)
-    ));
-  }, [
-    displayVoices,
-    similarVoiceRecommendationById,
-    similarVoiceRecommendations.length,
-    voiceActiveCategory,
-    voiceGenderFilter,
-    voiceSearch,
-  ]);
-
-  const selectedVoice = displayVoices.find(voice => voice.id === voiceId);
-  const selectedVoiceRecommendation = selectedVoice ? similarVoiceRecommendationById.get(selectedVoice.id) : undefined;
-  const voiceCategories = useMemo(() => (
-    ['全部', ...Array.from(new Set(displayVoices.map(voice => String(voice.category || '')).filter(Boolean)))]
-  ), [displayVoices]);
   const resultOptionList = useMemo(() => ([
     pendingResultOptions.optionA,
     pendingResultOptions.optionB,
@@ -724,23 +672,31 @@ export default function CrossLanguageDubbing({
     && multiSpeakerSegments.every(segment => segment.targetText.trim());
   const localCloneDisabledReason = !sourceFile
     ? '请先上传参考音频或视频。'
-    : localDialogueMode === 'multi' && !multiSpeakerTargetReady
-      ? '请先识别说话人，并确认每段目标语言台词。'
-      : localDialogueMode === 'single' && !localTargetText.trim()
-        ? '请先选择目标语言并提取或填写目标语言台词。'
-      : selectedLocalEngineStatus?.available !== true
-        ? selectedLocalEngineStatus?.reason || '本机克隆由当前应用按需调用 Python，无需另启服务；请先检查本机依赖和 CUDA。'
-        : '';
-
-  useEffect(() => {
-    if (!voiceId && displayVoices.length > 0) {
-      setVoiceId(displayVoices[0].id);
-    }
-  }, [displayVoices, voiceId]);
+    : localInputMode === 'speech_to_speech' && !speechInputFile
+      ? '请先上传要转换的内容语音。'
+      : localInputMode === 'speech_to_speech'
+        ? ''
+        : localDialogueMode === 'multi' && !multiSpeakerTargetReady
+          ? '请先识别说话人，并确认每段目标语言台词。'
+          : localDialogueMode === 'single' && !localTargetText.trim()
+            ? '请先选择目标语言并提取或填写目标语言台词。'
+            : selectedLocalEngineStatus?.available !== true
+              ? selectedLocalEngineStatus?.reason || '本机克隆由当前应用按需调用 Python，无需另启服务；请先检查本机依赖和 CUDA。'
+              : '';
 
   useEffect(() => () => {
     if (sourceFileUrl) URL.revokeObjectURL(sourceFileUrl);
   }, [sourceFileUrl]);
+
+  useEffect(() => {
+    if (DUBBING_V2_AVAILABLE || dubbingMode !== 'dubbing_v2') return;
+    setDubbingMode('self_hosted');
+    setError(null);
+  }, [dubbingMode]);
+
+  useEffect(() => () => {
+    if (speechInputFileUrl) URL.revokeObjectURL(speechInputFileUrl);
+  }, [speechInputFileUrl]);
 
   useEffect(() => {
     if (!sourceFileUrl) {
@@ -802,10 +758,10 @@ export default function CrossLanguageDubbing({
   };
 
   useEffect(() => {
-    if (dubbingMode === 'self_hosted' && !localEngineStatus && !isCheckingLocalEngine) {
+    if (dubbingMode === 'self_hosted' && localInputMode === 'text' && !localEngineStatus && !isCheckingLocalEngine) {
       void refreshLocalEngineStatus();
     }
-  }, [dubbingMode, localEngineStatus, isCheckingLocalEngine]);
+  }, [dubbingMode, localInputMode, localEngineStatus, isCheckingLocalEngine]);
 
   useEffect(() => {
     resultOptionList.forEach((option) => {
@@ -821,7 +777,13 @@ export default function CrossLanguageDubbing({
           [audioUrl]: media.duration,
         }));
       };
-      media.onerror = () => media.removeAttribute('src');
+      media.onerror = () => {
+        setResultAudioErrors(prev => ({
+          ...prev,
+          [audioUrl]: '生成的音频无法加载。请确认服务仍在运行，或点击重试。',
+        }));
+        media.removeAttribute('src');
+      };
     });
   }, [resultOptionList, resultAudioDurations]);
 
@@ -998,6 +960,79 @@ export default function CrossLanguageDubbing({
     setTargetTextExtractionMessage('已选择目标语种，请点击“提取目标语种台词”');
   };
 
+  const handleScriptFileChange = async (file: File) => {
+    const isAudio = file.type.startsWith('audio/') || /\.(wav|mp3|m4a|aac|ogg|opus|flac|aif|aiff)$/i.test(file.name);
+    if (!isAudio) {
+      setError('台词音频请上传 WAV、MP3、M4A 或其他音频文件。');
+      return;
+    }
+    setScriptFile(file);
+    setIsTranscribingScript(true);
+    setError(null);
+    setTargetTextExtractionMessage('正在识别台词音频…');
+    try {
+      const transcription = await transcribeSpeech(file, undefined, true);
+      const text = String(transcription.text || transcription.segments?.map(segment => segment.text).join(' ') || '').trim();
+      if (!text) throw new Error('没有识别到清晰台词，请换一段人声更清楚的音频。');
+      setLocalTargetText(text.slice(0, 800));
+      setTargetTextExtractionMessage(`已从台词音频识别 ${Math.min(text.length, 800)} 个字符，可继续编辑后生成。`);
+    } catch (transcriptionError: any) {
+      setTargetTextExtractionMessage('');
+      setError(transcriptionError?.message || '台词音频识别失败，请重试。');
+    } finally {
+      setIsTranscribingScript(false);
+    }
+  };
+
+  const handleSpeechInputFileChange = (file: File) => {
+    const isAudio = file.type.startsWith('audio/') || /\.(wav|mp3|m4a|aac|ogg|opus|flac|aif|aiff)$/i.test(file.name);
+    if (!isAudio) {
+      setError('语音转语音内容请上传 WAV、MP3、M4A 或其他音频文件。');
+      return;
+    }
+    if (speechInputFileUrl) URL.revokeObjectURL(speechInputFileUrl);
+    setSpeechInputFile(file);
+    setSpeechInputFileUrl(URL.createObjectURL(file));
+    setError(null);
+    setLocalTargetText('');
+    extractedSourceTextRef.current = '';
+    setTargetTextExtractionMessage('已准备待转换语音，无需填写目标语音或台词。');
+  };
+
+  const clearSpeechInputFile = () => {
+    if (speechInputFileUrl) URL.revokeObjectURL(speechInputFileUrl);
+    setSpeechInputFile(null);
+    setSpeechInputFileUrl(null);
+    setLocalTargetText('');
+    extractedSourceTextRef.current = '';
+    setTargetTextExtractionMessage('');
+    setError(null);
+  };
+
+  const handleLocalInputModeChange = (mode: LocalCloneInputMode) => {
+    if (mode === localInputMode) return;
+    setLocalInputMode(mode);
+    setError(null);
+    setResult(null);
+    setPendingResultOptions({ optionA: null, optionB: null });
+    targetTextRequestRef.current += 1;
+    extractedSourceTextRef.current = '';
+    setLocalTargetText('');
+    setScriptFile(null);
+    setTargetTextExtractionMessage(sourceFile
+      ? mode === 'speech_to_speech'
+        ? speechInputFile ? '已准备待转换语音，可直接生成' : '请上传要转换的内容语音'
+        : '请选择目标语种后点击“提取目标语种台词”'
+      : '');
+    if (mode === 'speech_to_speech') {
+      setLocalDialogueMode('single');
+      setMultiSpeakerSegments([]);
+      setMultiSpeakerAudioEvents([]);
+      setMultiSpeakerProfiles([]);
+      setMultiSpeakerTimelineSummary(null);
+    }
+  };
+
   const handleLocalVoiceEngineChange = (engine: LocalVoiceCloneEngine) => {
     setLocalVoiceEngine(engine);
     setError(null);
@@ -1008,14 +1043,15 @@ export default function CrossLanguageDubbing({
   };
 
   const handleExtractTargetTextClick = () => {
-    if (!sourceFile || isExtractingTargetText) return;
+    const dialogueSourceFile = localInputMode === 'speech_to_speech' ? speechInputFile : sourceFile;
+    if (!dialogueSourceFile || isExtractingTargetText) return;
     if (localDialogueMode === 'multi') {
-      void extractMultiSpeakerDialogue(sourceFile);
+      if (sourceFile) void extractMultiSpeakerDialogue(sourceFile);
       return;
     }
     const sourceText = extractedSourceTextRef.current;
     if (!sourceText) {
-      void extractTargetTextFromFile(sourceFile);
+      void extractTargetTextFromFile(dialogueSourceFile);
       return;
     }
 
@@ -1055,9 +1091,6 @@ export default function CrossLanguageDubbing({
     setPendingResultOptions({ optionA: null, optionB: null });
     setPlayingResultOptionId(null);
     setError(null);
-    setSimilarVoiceRecommendations([]);
-    setSimilarVoiceSourceDescription('');
-    setSimilarVoiceDetectedGender('unknown');
     setIsSourcePlaying(false);
     setLocalReferenceStart(0);
     extractedSourceTextRef.current = '';
@@ -1110,100 +1143,6 @@ export default function CrossLanguageDubbing({
     setIsSourcePlaying(true);
   };
 
-  const uploadSourceAudioForMatching = async (file: File) => {
-    const formData = new FormData();
-    formData.append('file', file);
-
-    const response = await fetch('/api/sfx/upload', {
-      method: 'POST',
-      body: formData,
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(String(data.error || '上传参考音频失败，无法匹配相近声音。'));
-    }
-    if (!data.url) {
-      throw new Error('上传参考音频后没有返回可用地址。');
-    }
-    return String(data.url);
-  };
-
-  const requestSimilarVoiceRecommendations = async (referenceAudioUrl: string) => {
-    const response = await fetch('/api/video/match-similar-voices', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        audioUrl: referenceAudioUrl,
-        voices: displayVoices,
-        preferredGender: similarVoiceGenderPreference === 'auto' ? undefined : similarVoiceGenderPreference,
-        matchingKeywords: similarVoiceKeywords.trim() || undefined,
-      }),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(String(data.error || '匹配相近声音失败，请稍后重试。'));
-    }
-    const recommendations: SimilarVoiceRecommendation[] = Array.isArray(data.recommendations)
-      ? data.recommendations
-        .map((item: any) => ({
-          voiceId: String(item?.voiceId || ''),
-          score: Math.max(0, Math.min(100, Number.isFinite(Number(item?.score)) ? Number(item.score) : 0)),
-          reason: String(item?.reason || '音色、语气和用途接近。'),
-        }))
-        .filter((item: SimilarVoiceRecommendation) => (
-          item.voiceId && item.score > 0 && displayVoices.some(voice => voice.id === item.voiceId)
-        ))
-      : [];
-    if (recommendations.length === 0) {
-      throw new Error('没有在当前声音库中找到相近声音，请刷新 ElevenLabs 声音库后再试。');
-    }
-    return {
-      recommendations,
-      sourceDescription: String(data.sourceDescription || '已根据原始配音音色匹配相近声音。'),
-      detectedGender: data.gender === 'male' || data.gender === 'female' ? data.gender : 'unknown',
-    };
-  };
-
-  const handleMatchSimilarVoice = async () => {
-    if (!sourceFile) {
-      setError('请先上传一段原始配音音频，再匹配相近声音。');
-      return;
-    }
-    if (displayVoices.length === 0) {
-      setError('当前配音声音库为空，请先同步或刷新 ElevenLabs 声音库。');
-      return;
-    }
-
-    sourceAudioRef.current?.pause();
-    resultOptionAudioRef.current?.pause();
-    setPlayingResultOptionId(null);
-    setIsSourcePlaying(false);
-    onAudioPlay?.();
-
-    setIsMatchingSimilarVoice(true);
-    setError(null);
-    try {
-      if (!sourceFileUrl) {
-        throw new Error('源音频还没有准备好，请重新上传后再匹配。');
-      }
-      const referenceAudioUrl = await uploadSourceAudioForMatching(sourceFile);
-      const { recommendations, sourceDescription, detectedGender } = await requestSimilarVoiceRecommendations(referenceAudioUrl);
-      const bestVoiceId = recommendations[0]?.voiceId;
-      setSimilarVoiceRecommendations(recommendations);
-      setSimilarVoiceSourceDescription(sourceDescription);
-      setSimilarVoiceDetectedGender(detectedGender);
-      setVoiceSearch('');
-      setVoiceActiveCategory('全部');
-      setVoiceGenderFilter('all');
-      if (bestVoiceId) setVoiceId(bestVoiceId);
-      setShowVoiceDropdown(true);
-    } catch (err: any) {
-      setError(err.message || '匹配相近声音失败，请稍后重试。');
-    } finally {
-      setIsMatchingSimilarVoice(false);
-    }
-  };
-
   const generateTimedLocalDubbing = async (dialogueMode: LocalDialogueMode) => {
     if (!sourceFile || !multiSpeakerTargetReady) {
       throw new Error('请先提取带时间码的台词，并确认每段目标语言内容。');
@@ -1247,15 +1186,19 @@ export default function CrossLanguageDubbing({
 
   const handleGenerate = async () => {
     if (!sourceFile) {
-      setError('请先上传一段原始配音音频。');
+      setError('请先上传一段克隆参考音频。');
       return;
     }
     if (dubbingMode === 'self_hosted') {
-      if (localDialogueMode === 'single' && !localTargetText.trim()) {
+      if (localInputMode === 'speech_to_speech' && !speechInputFile) {
+        setError('请先上传要转换的内容语音。');
+        return;
+      }
+      if (localInputMode === 'text' && localDialogueMode === 'single' && !localTargetText.trim()) {
         setError('请输入需要生成的目标语言台词。');
         return;
       }
-      if (localDialogueMode === 'multi' && !multiSpeakerTargetReady) {
+      if (localInputMode === 'text' && localDialogueMode === 'multi' && !multiSpeakerTargetReady) {
         setError('请先识别说话人，并确认每段目标语言台词。');
         return;
       }
@@ -1264,37 +1207,45 @@ export default function CrossLanguageDubbing({
         return;
       }
     }
-    if (dubbingMode === 'manual_tts' && !voiceId) {
-      setError('请先选择目标语言使用的配音声音。');
-      return;
-    }
-
     setLoading(true);
     setError(null);
     try {
+      const isLocalSpeechToSpeech = dubbingMode === 'self_hosted' && localInputMode === 'speech_to_speech';
       const targetLabel = dubbingMode === 'self_hosted'
         ? localTargetLanguageOptions.find(item => item.value === localTargetLanguage)?.label || localTargetLanguage
         : targetLanguageOptions.find(item => item.value === targetLanguage)?.label || targetLanguage;
-      const qualityMode = getElevenLabsQualityMode();
       const selectedLocalPreset = localPerformancePresets.find(item => item.value === localPerformancePreset)
         || localPerformancePresets[0];
       const alternateLocalPreset = localPerformancePresets.find(item => (
         item.value === (selectedLocalPreset.value === 'stable' ? 'natural' : 'stable')
       )) || localPerformancePresets[0];
       const shouldUseTimedLocalBatch = dubbingMode === 'self_hosted'
+        && localInputMode === 'text'
         && multiSpeakerTargetReady
-        && (localDialogueMode === 'multi' || localVoiceEngine === 'chatterbox');
+        && localDialogueMode === 'multi';
       const timedLocalBatch = shouldUseTimedLocalBatch
         ? await generateTimedLocalDubbing(localDialogueMode)
         : null;
-      const dataA = dubbingMode === 'dubbing_v2'
+      const speechToSpeechResults = isLocalSpeechToSpeech
+        ? await Promise.all([
+          convertWithSeedVc(speechInputFile!, sourceFile, localSpeechToSpeechOptions),
+          convertWithSeedVc(speechInputFile!, sourceFile, {
+            ...localSpeechToSpeechOptions,
+            diffusionSteps: Math.min(80, localSpeechToSpeechOptions.diffusionSteps + 4),
+            temperature: Math.min(2, localSpeechToSpeechOptions.temperature + 0.08),
+            topP: Math.max(0.05, localSpeechToSpeechOptions.topP - 0.04),
+          }),
+        ])
+        : null;
+      const dataA = isLocalSpeechToSpeech
+        ? mapSeedVcResultToDubbingResult(speechToSpeechResults![0])
+        : dubbingMode === 'dubbing_v2'
         ? await translateDubbingV2Audio(sourceFile, { sourceLanguage, targetLanguage, cloningStrength, outputFormat })
-        : dubbingMode === 'self_hosted'
-          ? localDialogueMode === 'multi'
-            ? timedLocalBatch!.options.find(option => option.id === 'A')!.data
-            : timedLocalBatch
-              ? timedLocalBatch.options.find(option => option.id === 'A')!.data
-              : await cloneVoiceLocally(sourceFile, {
+        : localDialogueMode === 'multi'
+          ? timedLocalBatch!.options.find(option => option.id === 'A')!.data
+          : timedLocalBatch
+            ? timedLocalBatch.options.find(option => option.id === 'A')!.data
+            : await cloneVoiceLocally(sourceFile, {
               engine: localVoiceEngine,
               language: localTargetLanguage,
               text: localTargetText.trim(),
@@ -1305,65 +1256,56 @@ export default function CrossLanguageDubbing({
               cfgWeight: selectedLocalPreset.cfgWeight,
               temperature: selectedLocalPreset.temperature,
               performance: selectedLocalPreset.value,
-            })
-          : await translateDubbingAudio(sourceFile, {
-            sourceLanguage,
-            targetLanguage,
-            voiceId,
-            timingMode,
-          qualityMode,
-        });
-      const dataB = dubbingMode === 'self_hosted'
+            });
+      const dataB = isLocalSpeechToSpeech
+        ? mapSeedVcResultToDubbingResult(speechToSpeechResults![1])
+        : dubbingMode === 'self_hosted'
         ? localDialogueMode === 'multi'
           ? timedLocalBatch!.options.find(option => option.id === 'B')!.data
           : timedLocalBatch
             ? timedLocalBatch.options.find(option => option.id === 'B')!.data
             : await cloneVoiceLocally(sourceFile, {
-          engine: localVoiceEngine,
-          language: localTargetLanguage,
-          text: localTargetText.trim(),
-          referenceStart: localReferenceStart,
-          referenceDuration: localReferenceInterval,
-          sourceDuration: sourceDuration || undefined,
-          exaggeration: alternateLocalPreset.exaggeration,
-          cfgWeight: alternateLocalPreset.cfgWeight,
-          temperature: alternateLocalPreset.temperature,
-          performance: alternateLocalPreset.value,
-          })
-        : dubbingMode === 'manual_tts'
-          ? await translateDubbingAudio(sourceFile, {
-            sourceLanguage,
-            targetLanguage,
-            voiceId,
-            timingMode,
-            qualityMode,
-          })
-          : null;
-      const voiceLabel = selectedVoice?.name || '目标声音';
+              engine: localVoiceEngine,
+              language: localTargetLanguage,
+              text: localTargetText.trim(),
+              referenceStart: localReferenceStart,
+              referenceDuration: localReferenceInterval,
+              sourceDuration: sourceDuration || undefined,
+              exaggeration: alternateLocalPreset.exaggeration,
+              cfgWeight: alternateLocalPreset.cfgWeight,
+              temperature: alternateLocalPreset.temperature,
+              performance: alternateLocalPreset.value,
+            })
+        : null;
       const optionA: PendingTranslateDubbingOption = {
         id: 'A',
         data: dataA,
-        displayName: dubbingMode === 'dubbing_v2'
+        displayName: isLocalSpeechToSpeech
+          ? `语音转语音 - Seed-VC V2（版本 A）`
+          : dubbingMode === 'dubbing_v2'
           ? `ElevenLabs Dubbing v2 - ${targetLabel}`
           : dubbingMode === 'self_hosted'
             ? localDialogueMode === 'multi'
               ? `多人配音 - ${targetLabel}（版本 A · ${selectedLocalPreset.label}）`
-              : `${localVoiceEngine === 'cosyvoice3' ? 'CosyVoice 3' : 'Chatterbox V3'} - ${targetLabel}（${selectedLocalPreset.label}）`
-            : `跨语种转换 - ${targetLabel} - ${voiceLabel}（版本 A）`,
+              : `${localInputMode === 'speech_to_speech' ? '语音转语音' : localVoiceEngine === 'cosyvoice3' ? 'CosyVoice 3' : 'Chatterbox V3'} - ${targetLabel}（${selectedLocalPreset.label}）`
+            : `Dubbing v2 - ${targetLabel}`,
       };
       const optionB: PendingTranslateDubbingOption | null = dataB ? {
         id: 'B',
         data: dataB,
-        displayName: dubbingMode === 'self_hosted'
+        displayName: isLocalSpeechToSpeech
+          ? `语音转语音 - Seed-VC V2（版本 B）`
+          : dubbingMode === 'self_hosted'
           ? localDialogueMode === 'multi'
             ? `多人配音 - ${targetLabel}（版本 B · ${alternateLocalPreset.label}）`
-            : `${localVoiceEngine === 'cosyvoice3' ? 'CosyVoice 3' : 'Chatterbox V3'} - ${targetLabel}（${alternateLocalPreset.label}）`
-          : `跨语种转换 - ${targetLabel} - ${voiceLabel}（版本 B）`,
+            : `${localInputMode === 'speech_to_speech' ? '语音转语音' : localVoiceEngine === 'cosyvoice3' ? 'CosyVoice 3' : 'Chatterbox V3'} - ${targetLabel}（${alternateLocalPreset.label}）`
+          : `Dubbing v2 - ${targetLabel}（版本 B）`,
       } : null;
       waveformProgressRatiosRef.current.A = 0;
       waveformProgressRatiosRef.current.B = 0;
       activeResultOptionRef.current = null;
       activeResultAudioUrlRef.current = '';
+      setResultAudioErrors({});
       setResult(dataA);
       setPendingResultOptions({ optionA, optionB });
       addTranslateResultToHistory(optionA);
@@ -1383,7 +1325,8 @@ export default function CrossLanguageDubbing({
   const addTranslateResultToHistory = (option: PendingTranslateDubbingOption) => {
     const isLocalClone = option.data.dubbingModel === 'local_chatterbox'
       || option.data.dubbingModel === 'local_cosyvoice3'
-      || option.data.dubbingModel === 'local_multispeaker';
+      || option.data.dubbingModel === 'local_multispeaker'
+      || option.data.dubbingModel === 'local_seed_vc';
     const targetLabel = isLocalClone
       ? localTargetLanguageOptions.find(item => item.value === localTargetLanguage)?.label || localTargetLanguage
       : targetLanguageOptions.find(item => item.value === targetLanguage)?.label || targetLanguage;
@@ -1395,10 +1338,17 @@ export default function CrossLanguageDubbing({
       url: option.data.audioUrl,
       timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
       details: isLocalClone
-        ? `${targetLabel} · ${option.data.dubbingModel === 'local_multispeaker'
+        ? `${option.data.dubbingModel === 'local_seed_vc' ? '直接音色迁移' : targetLabel} · ${option.data.dubbingModel === 'local_multispeaker'
           ? `多人配音（${multiSpeakerProfiles.length} 位）`
-          : option.data.dubbingModel === 'local_cosyvoice3' ? 'CosyVoice 3' : 'Chatterbox V3'} · ${localPerformancePresets.find(item => item.value === localPerformancePreset)?.label || '自然'}表现`
-        : `${targetLabel} · ${timingModeOptions.find(item => item.value === option.data.timingMode)?.label || '时长贴合'}`,
+          : option.data.dubbingModel === 'local_seed_vc' ? 'Seed-VC V2' : option.data.dubbingModel === 'local_cosyvoice3' ? 'CosyVoice 3' : 'Chatterbox V3'}${option.data.dubbingModel === 'local_seed_vc' ? '' : ` · ${localPerformancePresets.find(item => item.value === localPerformancePreset)?.label || '自然'}表现`}`
+        : `${targetLabel} · Dubbing v2`,
+      inputText: option.data.translatedText,
+      attachments: sourceFile ? [{
+        name: sourceFile.name,
+        type: sourceFile.type,
+        size: sourceFile.size,
+        file: sourceFile,
+      }] : [],
     };
     setHistoryList(prev => [newHistoryItem, ...prev]);
   };
@@ -1441,6 +1391,12 @@ export default function CrossLanguageDubbing({
     }
 
     activeResultOptionRef.current = optionId;
+    setResultAudioErrors(prev => {
+      if (!prev[audioUrl]) return prev;
+      const next = { ...prev };
+      delete next[audioUrl];
+      return next;
+    });
     const startPlayback = () => {
       const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
       const targetRatio = seekRatio ?? waveformProgressRatiosRef.current[optionId] ?? 0;
@@ -1449,7 +1405,13 @@ export default function CrossLanguageDubbing({
       updateWaveformProgress(optionId, targetTime, duration);
       audio.play()
         .then(() => setPlayingResultOptionId(optionId))
-        .catch(console.error);
+        .catch(() => {
+          setPlayingResultOptionId(null);
+          setResultAudioErrors(prev => ({
+            ...prev,
+            [audioUrl]: '音频播放失败，请检查服务器连接后重试。',
+          }));
+        });
     };
 
     audio.ontimeupdate = () => {
@@ -1460,6 +1422,13 @@ export default function CrossLanguageDubbing({
       updateWaveformProgress(optionId, 0, audio.duration);
       audio.currentTime = 0;
       setPlayingResultOptionId(null);
+    };
+    audio.onerror = () => {
+      setPlayingResultOptionId(null);
+      setResultAudioErrors(prev => ({
+        ...prev,
+        [audioUrl]: '生成的音频无法加载。请确认服务仍在运行，或点击重试。',
+      }));
     };
 
     if (activeResultAudioUrlRef.current !== audioUrl) {
@@ -1615,52 +1584,54 @@ export default function CrossLanguageDubbing({
   };
 
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
-      <div className="xl:col-span-7 space-y-5">
-        <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-5 shadow-sm">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <h3 className="text-sm font-black text-slate-850 flex items-center gap-2">
-                <Languages className="w-4 h-4 text-emerald-600" />
-                {cloneModeOnly ? '克隆转换' : '跨语种转换'}
-              </h3>
-            </div>
-            {dubbingMode !== 'self_hosted' && (
-              <span className="shrink-0 rounded-full border border-emerald-100 bg-emerald-50 px-2.5 py-1 text-[10px] font-bold text-emerald-700">
-                Pro 模式会自动跟随设置
-              </span>
-            )}
-          </div>
-
-          <div className="rounded-2xl border border-emerald-200 bg-emerald-50/60 p-3.5 space-y-3">
-            {!cloneModeOnly && <div className={`grid ${hideSelfHosted ? 'grid-cols-2' : 'grid-cols-3'} gap-1.5 rounded-xl bg-white/80 p-1`}>
-              {([
-                ...(!hideSelfHosted ? [{ value: 'self_hosted' as const, label: '自研模式 克隆转换' }] : []),
-                { value: 'manual_tts' as const, label: '匹配相似声音' },
-                { value: 'dubbing_v2' as const, label: 'Dubbing v2' },
-              ]).map(option => (
+    <div className="space-y-5">
+      {!cloneModeOnly && (
+        <nav
+          className="mx-auto w-full max-w-4xl rounded-2xl border border-emerald-200 bg-emerald-50/60 p-2"
+          aria-label="声音克隆方案"
+        >
+          <div className="grid grid-cols-2 gap-1 rounded-xl bg-white/80 p-1">
+            {([
+              { value: 'self_hosted' as const, label: '声音克隆', disabled: false },
+              { value: 'dubbing_v2' as const, label: 'Dubbing v2 · 暂停使用', disabled: !DUBBING_V2_AVAILABLE },
+            ]).map(option => {
+              const isActive = dubbingMode === option.value;
+              return (
                 <button
                   key={option.value}
                   type="button"
+                  disabled={option.disabled}
+                  title={option.disabled ? 'Dubbing v2 暂停使用' : undefined}
                   onClick={() => {
+                    if (option.disabled) return;
                     setDubbingMode(option.value);
                     setError(null);
                     if (option.value === 'self_hosted' && sourceFile) {
                       setTargetTextExtractionMessage('请选择目标语种后点击“提取目标语种台词”');
                     }
                   }}
-                  aria-pressed={dubbingMode === option.value}
-                  className={`rounded-lg px-2 py-2 text-[10px] font-black transition-colors ${
-                    dubbingMode === option.value
+                  aria-current={isActive ? 'page' : undefined}
+                  className={`flex h-10 min-w-0 items-center justify-center rounded-lg px-2 text-center text-[11px] font-black transition-colors ${
+                    option.disabled
+                      ? 'cursor-not-allowed text-slate-400 opacity-60'
+                      : isActive
                       ? 'bg-emerald-600 text-white shadow-sm'
-                      : 'text-slate-500 hover:bg-emerald-50'
+                      : 'text-slate-500 hover:bg-emerald-50 hover:text-emerald-700'
                   }`}
                 >
-                  {option.label}
+                  <span className="truncate">{option.label}</span>
                 </button>
-                ))}
-            </div>}
-            {dubbingMode === 'self_hosted' && (
+              );
+            })}
+          </div>
+        </nav>
+      )}
+
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+      <div className="xl:col-span-7 space-y-5">
+        <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-5 shadow-sm">
+          {dubbingMode === 'self_hosted' && localInputMode === 'text' && (
+            <div className="rounded-2xl border border-emerald-200 bg-emerald-50/60 p-3.5">
               <LocalVoiceEngineSelector
                 selectedEngine={localVoiceEngine}
                 status={localEngineStatus}
@@ -1669,9 +1640,40 @@ export default function CrossLanguageDubbing({
                 onSelect={handleLocalVoiceEngineChange}
                 onRefresh={() => void refreshLocalEngineStatus()}
               />
-            )}
-            {dubbingMode === 'dubbing_v2' && (
-              <label className="block space-y-1.5">
+            </div>
+          )}
+          {dubbingMode === 'self_hosted' && (
+            <nav className="rounded-xl border border-sky-200 bg-sky-50/50 p-1.5" aria-label="声音克隆输入方式">
+              <div className="grid grid-cols-2 gap-1 rounded-lg bg-white/80 p-1">
+                {([
+                  { value: 'text' as const, label: '台词合成' },
+                  { value: 'speech_to_speech' as const, label: '语音转语音' },
+                ]).map(option => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    aria-current={localInputMode === option.value ? 'page' : undefined}
+                    onClick={() => handleLocalInputModeChange(option.value)}
+                    className={`flex h-9 items-center justify-center rounded-md px-2 text-[10px] font-black transition-colors ${
+                      localInputMode === option.value
+                        ? 'bg-sky-600 text-white shadow-sm'
+                        : 'text-slate-500 hover:bg-sky-50 hover:text-sky-700'
+                    }`}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </nav>
+          )}
+          {dubbingMode === 'self_hosted' && localInputMode === 'speech_to_speech' && (
+            <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50/60 px-3.5 py-3 text-[10px] text-emerald-800">
+              <RefreshCw className="h-4 w-4 shrink-0 text-emerald-600" />
+              <span><strong>Seed-VC V2 直接音色迁移</strong> · 只需参考音频和待转换语音，不需要目标语音或台词。</span>
+            </div>
+          )}
+          {dubbingMode === 'dubbing_v2' && (
+              <label className="block space-y-1.5 rounded-2xl border border-emerald-200 bg-emerald-50/60 p-3.5">
                 <span className="flex items-center justify-between text-[10px] font-bold text-slate-600">
                   <span>说话人相似度</span>
                   <span className="font-mono text-emerald-700">{cloningStrength}/10</span>
@@ -1687,8 +1689,7 @@ export default function CrossLanguageDubbing({
                 />
                 <span className="block text-[9px] leading-relaxed text-slate-500">默认 7；提高相似度可能牺牲部分目标语言的自然度。</span>
               </label>
-            )}
-          </div>
+          )}
 
           <label
             className="group flex min-h-36 cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50/80 p-5 text-center transition-all hover:border-emerald-300 hover:bg-emerald-50/40"
@@ -1714,17 +1715,60 @@ export default function CrossLanguageDubbing({
               {sourceFile
                 ? sourceFile.name
                 : dubbingMode === 'self_hosted'
-                  ? '上传一段参考声音或含人声的视频'
+                  ? '上传一段克隆参考声音或含人声的视频'
                   : '上传中文/任意语种配音音频或视频'}
             </p>
             <p className="mt-1 text-[10px] text-slate-400">
               {dubbingMode === 'self_hosted'
-                ? localDialogueMode === 'multi'
-                  ? '上传完整对话；系统会识别说话人，并为每位角色选择独立参考片段。'
+                ? localInputMode === 'speech_to_speech'
+                  ? '这段声音会作为目标克隆音色；建议使用 10–20 秒、单人且干净的片段。'
+                  : localDialogueMode === 'multi'
+                    ? '上传完整对话；系统会识别说话人，并为每位角色选择独立参考片段。'
                   : '建议使用 10–20 秒、单人、干净且情绪明确的片段。音频只在本机处理。'
                 : '支持拖拽上传；视频可输出带新配音的 MP4，也可只导出音频。'}
             </p>
           </label>
+
+          {dubbingMode === 'self_hosted' && localInputMode === 'speech_to_speech' && (
+            <div className="space-y-2 rounded-xl border border-sky-200 bg-sky-50/40 p-3.5">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-bold text-slate-700">上传待转换语音</p>
+                  <p className="mt-1 text-[10px] leading-relaxed text-slate-400">直接把这段语音转换成上面的克隆参考音色，保留原有内容、节奏和情绪。</p>
+                </div>
+                <label className="inline-flex h-9 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-sky-200 bg-white px-3 text-[10px] font-bold text-sky-700 transition-colors hover:border-sky-400 hover:bg-sky-50">
+                  <input
+                    type="file"
+                    accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.opus,.flac,.aif,.aiff"
+                    className="hidden"
+                    disabled={isTranscribingScript || loading}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) void handleSpeechInputFileChange(file);
+                      event.currentTarget.value = '';
+                    }}
+                  />
+                  {isTranscribingScript ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <UploadCloud className="h-3.5 w-3.5" />}
+                  <span>{speechInputFile ? '更换语音' : '选择语音'}</span>
+                </label>
+              </div>
+              {speechInputFile && (
+                <div className="flex items-center gap-2 rounded-lg border border-sky-100 bg-white px-2.5 py-2">
+                  <FileAudio className="h-4 w-4 shrink-0 text-sky-600" />
+                  <span className="min-w-0 flex-1 truncate text-[10px] font-bold text-slate-700">{speechInputFile.name}</span>
+                  <button
+                    type="button"
+                    onClick={clearSpeechInputFile}
+                    disabled={isTranscribingScript || loading}
+                    className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-[10px] font-bold text-slate-500 transition-colors hover:bg-slate-100 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <X className="h-3 w-3" />
+                    清除
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
 
           {sourceFileUrl && (
             <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-3">
@@ -1739,7 +1783,7 @@ export default function CrossLanguageDubbing({
                 <div className="flex items-center gap-2">
                   <p className="truncate text-xs font-bold text-slate-750">{sourceFile?.name}</p>
                   <span className="shrink-0 rounded-full border border-slate-200 bg-white px-1.5 py-0.5 text-[9px] font-bold text-slate-500">
-                    原始上传音频
+                    {dubbingMode === 'self_hosted' ? '克隆参考音频' : '原始上传音频'}
                   </span>
                 </div>
                 <p className="text-[10px] text-slate-400">{sourceFile ? `${(sourceFile.size / 1024 / 1024).toFixed(2)} MB` : '源音频'}</p>
@@ -1759,9 +1803,6 @@ export default function CrossLanguageDubbing({
                   setPendingResultOptions({ optionA: null, optionB: null });
                   setPlayingResultOptionId(null);
                   setIsSourcePlaying(false);
-                  setSimilarVoiceRecommendations([]);
-                  setSimilarVoiceSourceDescription('');
-                  setSimilarVoiceDetectedGender('unknown');
                   targetTextRequestRef.current += 1;
                   extractedSourceTextRef.current = '';
                   setLocalTargetText('');
@@ -1792,7 +1833,7 @@ export default function CrossLanguageDubbing({
             </div>
           )}
 
-          {dubbingMode === 'self_hosted' && (
+          {dubbingMode === 'self_hosted' && localInputMode === 'text' && (
             <div className="-mx-6 space-y-5 border-y border-sky-100 bg-sky-50/40 px-6 py-5">
               <div className="flex flex-col gap-3 border-b border-sky-100 pb-4 sm:flex-row sm:items-end sm:justify-between">
                 <div className="space-y-1.5">
@@ -1801,7 +1842,7 @@ export default function CrossLanguageDubbing({
                     {([
                       { value: 'single' as const, label: '单人配音', icon: Volume2 },
                       { value: 'multi' as const, label: '多人对话', icon: Users },
-                    ]).map(option => {
+                    ].filter(option => localInputMode === 'speech_to_speech' ? option.value === 'single' : true)).map(option => {
                       const Icon = option.icon;
                       return (
                         <button
@@ -1871,7 +1912,7 @@ export default function CrossLanguageDubbing({
                   <button
                     type="button"
                     onClick={handleExtractTargetTextClick}
-                    disabled={!sourceFile || isExtractingTargetText}
+                    disabled={!(localInputMode === 'speech_to_speech' ? speechInputFile : sourceFile) || isExtractingTargetText}
                     className="flex h-9 w-full items-center justify-center gap-1.5 rounded-lg border border-sky-200 bg-white px-2 text-[10px] font-bold text-sky-700 transition-colors hover:border-sky-400 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {isExtractingTargetText ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Languages className="h-3.5 w-3.5" />}
@@ -1882,9 +1923,9 @@ export default function CrossLanguageDubbing({
                 </label>
 
                 {localDialogueMode === 'single' ? (
-                <label className="space-y-1.5">
+                <div className="space-y-1.5">
                   <span className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                    <span>目标语言台词</span>
+                    <span>{localInputMode === 'speech_to_speech' ? '识别后的语音台词' : '目标语言台词'}</span>
                     <span className="font-mono font-medium text-slate-400">{localTargetText.length}/800</span>
                   </span>
                   {targetTextExtractionMessage && (
@@ -1903,10 +1944,45 @@ export default function CrossLanguageDubbing({
                     value={localTargetText}
                     onChange={(event) => updateSingleSpeakerDialogue(event.target.value)}
                     rows={4}
-                    placeholder="输入或粘贴已经翻译好的目标语言台词..."
+                    placeholder={localInputMode === 'speech_to_speech'
+                      ? '识别后的语音台词会显示在这里，也可以手动修改...'
+                      : '输入或粘贴已经翻译好的目标语言台词...'}
                     className="w-full resize-y rounded-lg border border-sky-200 bg-white px-3 py-2.5 text-xs leading-relaxed text-slate-800 outline-none transition-colors placeholder:text-slate-400 focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
                   />
-                </label>
+                  {localInputMode === 'text' && <div className="flex flex-wrap items-center gap-2">
+                    <label className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border border-sky-200 bg-white px-2.5 text-[10px] font-bold text-sky-700 transition-colors hover:border-sky-400 hover:bg-sky-50">
+                      <input
+                        type="file"
+                        accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.opus,.flac,.aif,.aiff"
+                        className="hidden"
+                        disabled={isTranscribingScript || loading}
+                        onChange={(event) => {
+                          const file = event.target.files?.[0];
+                          if (file) void handleScriptFileChange(file);
+                          event.currentTarget.value = '';
+                        }}
+                      />
+                      {isTranscribingScript ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <UploadCloud className="h-3.5 w-3.5" />}
+                      <span className="max-w-[220px] truncate">{scriptFile ? scriptFile.name : '上传台词音频并识别文字'}</span>
+                    </label>
+                    {scriptFile && (
+                      <button
+                        type="button"
+                        onClick={() => setScriptFile(null)}
+                        disabled={isTranscribingScript || loading}
+                        className="inline-flex h-8 items-center gap-1 rounded-lg px-2 text-[10px] font-bold text-slate-500 transition-colors hover:bg-slate-100 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <X className="h-3 w-3" />
+                        清除台词音频
+                      </button>
+                    )}
+                  </div>}
+                  <p className="text-[9px] leading-relaxed text-slate-400">
+                    {localInputMode === 'speech_to_speech'
+                      ? '上传待转换语音后会自动识别并翻译台词，确认文本后用克隆音色生成。'
+                      : '可直接输入台词，也可上传一段读台词的音频，识别文字后用克隆音色合成。'}
+                  </p>
+                </div>
                 ) : (
                   <div className="flex min-h-24 flex-col justify-center border-l-0 border-sky-100 sm:border-l sm:pl-4">
                     <div className="flex items-center gap-2">
@@ -2184,374 +2260,8 @@ export default function CrossLanguageDubbing({
               </label>
             )}
 
-            <label className={`space-y-1.5 ${dubbingMode !== 'manual_tts' ? 'hidden' : ''}`}>
-              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">时长策略</span>
-              <select
-                value={timingMode}
-                onChange={(event) => setTimingMode(event.target.value as 'natural' | 'match' | 'strict')}
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-700 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-              >
-                {timingModeOptions.map(option => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </select>
-            </label>
           </div>
           )}
-
-          <div className={`rounded-2xl border border-emerald-100 bg-emerald-50/40 p-3.5 space-y-2.5 ${dubbingMode !== 'manual_tts' ? 'hidden' : ''}`}>
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="text-[11px] font-black text-emerald-900">匹配相近声音</p>
-                <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
-                  根据上传的原始配音分析音色、性别倾向、年龄感、语气和能量，从当前配音声音库里推荐相近声音。
-                </p>
-              </div>
-              <Sparkles className="w-4 h-4 shrink-0 text-emerald-600" />
-            </div>
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="mr-1 text-[10px] font-bold text-slate-500">参考性别</span>
-              {[
-                { value: 'auto', label: '自动' },
-                { value: 'male', label: '男声' },
-                { value: 'female', label: '女声' },
-              ].map(option => (
-                <button
-                  key={option.value}
-                  type="button"
-                  onClick={() => {
-                    setSimilarVoiceGenderPreference(option.value as SimilarVoiceGenderPreference);
-                    setSimilarVoiceRecommendations([]);
-                    setSimilarVoiceSourceDescription('');
-                    setSimilarVoiceDetectedGender('unknown');
-                  }}
-                  aria-pressed={similarVoiceGenderPreference === option.value}
-                  className={`rounded-lg px-2.5 py-1 text-[10px] font-black transition-colors ${
-                    similarVoiceGenderPreference === option.value
-                      ? option.value === 'male'
-                        ? 'bg-blue-600 text-white'
-                        : option.value === 'female'
-                          ? 'bg-pink-600 text-white'
-                          : 'bg-emerald-600 text-white'
-                      : 'bg-white text-slate-500 hover:bg-slate-50'
-                  }`}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto]">
-              <label className="relative">
-                <span className="sr-only">匹配关键词（可选）</span>
-                <input
-                  type="text"
-                  value={similarVoiceKeywords}
-                  onChange={(event) => {
-                    setSimilarVoiceKeywords(event.target.value);
-                    setSimilarVoiceRecommendations([]);
-                    setSimilarVoiceSourceDescription('');
-                    setSimilarVoiceDetectedGender('unknown');
-                  }}
-                  maxLength={80}
-                  placeholder="关键词可选：甜美、年轻、磁性、广告旁白"
-                  className="h-9 w-full rounded-xl border border-emerald-100 bg-white px-3 text-[11px] font-semibold text-slate-700 outline-none transition-colors placeholder:text-slate-400 focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100"
-                />
-              </label>
-              <button
-                type="button"
-                onClick={() => void handleMatchSimilarVoice()}
-            disabled={dubbingMode !== 'manual_tts' || !sourceFile || displayVoices.length === 0 || isMatchingSimilarVoice || loading}
-                className="flex h-9 items-center justify-center gap-1.5 rounded-xl border border-emerald-200 bg-white px-3 text-[11px] font-black text-emerald-700 shadow-sm transition-colors hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {isMatchingSimilarVoice ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Sparkles className="w-3.5 h-3.5" />
-                )}
-                <span className="whitespace-nowrap">{isMatchingSimilarVoice ? '正在匹配...' : '匹配相近声音'}</span>
-              </button>
-            </div>
-            {similarVoiceRecommendations.length > 0 && (
-              <div className="rounded-xl border border-emerald-200 bg-white/70 p-2.5 text-[10px] leading-relaxed text-emerald-900">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-bold">
-                    已匹配到 {similarVoiceRecommendations.length} 个相近声音
-                    {similarVoiceDetectedGender !== 'unknown'
-                      ? `（按${similarVoiceDetectedGender === 'male' ? '男声' : '女声'}匹配）`
-                      : ''}
-                    ，已自动选中第一推荐。
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSimilarVoiceRecommendations([]);
-                      setSimilarVoiceSourceDescription('');
-                    }}
-                    className="shrink-0 rounded-lg border border-emerald-200 px-2 py-1 text-[9px] font-bold text-emerald-700 hover:bg-emerald-50"
-                  >
-                    清除
-                  </button>
-                </div>
-                {similarVoiceSourceDescription && (
-                  <p className="mt-1 text-emerald-800/70">{similarVoiceSourceDescription}</p>
-                )}
-              </div>
-            )}
-          </div>
-
-          <div className={`space-y-3 relative ${dubbingMode !== 'manual_tts' ? 'hidden' : ''}`}>
-            <label className="text-[11px] font-bold text-slate-700 flex items-center justify-between">
-              <span className="flex items-center gap-1">
-                <Volume2 className="w-3.5 h-3.5 text-emerald-600" />
-                <span>配音声音</span>
-              </span>
-              <span className="text-[10px] text-slate-450 font-semibold bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded">ElevenLabs 声音库</span>
-            </label>
-
-            <button
-              type="button"
-              onClick={() => setShowVoiceDropdown(!showVoiceDropdown)}
-              className="w-full bg-slate-50 hover:bg-slate-100/70 border border-slate-200 rounded-xl py-3 px-4 text-xs text-left text-slate-800 focus:outline-none transition-all flex items-center justify-between cursor-pointer shadow-sm"
-            >
-              {selectedVoice ? (
-                <div className="flex min-w-0 items-center gap-2.5">
-                  <span className={`w-2 h-2 rounded-full shrink-0 ${selectedVoice.gender === 'male' ? 'bg-blue-500' : 'bg-pink-500'}`} />
-                  <div className="min-w-0">
-                    <span className="font-bold text-slate-850 truncate block">已选：{selectedVoice.name}</span>
-                    <span className="text-[10px] text-slate-500 bg-slate-100 border border-slate-200 px-1.5 py-0.5 rounded font-bold">
-                      {selectedVoice.category}
-                    </span>
-                  </div>
-                </div>
-              ) : (
-                <span className="text-slate-400">请选择配音声音库里的声音...</span>
-              )}
-              <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform duration-200 ${showVoiceDropdown ? 'rotate-180' : ''}`} />
-            </button>
-
-            {showVoiceDropdown && (
-              <div className="absolute top-full left-0 right-0 mt-1.5 bg-white border border-slate-200 rounded-2xl shadow-xl z-50 p-4 space-y-3">
-                <div className="relative">
-                  <Search className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
-                  <input
-                    type="text"
-                    value={voiceSearch}
-                    onChange={(event) => setVoiceSearch(event.target.value)}
-                    placeholder="搜索声音名称、分类、标签或音色特点..."
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl py-2 pl-9 pr-8 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:outline-none transition-all placeholder-slate-400"
-                  />
-                  {voiceSearch && (
-                    <button
-                      type="button"
-                      onClick={() => setVoiceSearch('')}
-                      className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-600"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-                </div>
-
-                <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-100 pb-2">
-                  <span className="text-[9px] font-bold text-slate-400 uppercase mr-1">分类:</span>
-                  {voiceCategories.map(category => (
-                    <button
-                      key={category}
-                      type="button"
-                      onClick={() => setVoiceActiveCategory(category)}
-                      className={`text-[9px] px-2.5 py-0.5 rounded font-bold transition-all ${
-                        voiceActiveCategory === category
-                          ? 'bg-emerald-600 text-white'
-                          : 'bg-slate-50 hover:bg-slate-100 text-slate-600'
-                      }`}
-                    >
-                      {category}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="flex items-center gap-1.5 border-b border-slate-100 pb-2">
-                  <span className="text-[9px] font-bold text-slate-400 uppercase mr-1">性别:</span>
-                  {[
-                    { value: 'all', label: '全部', activeClassName: 'bg-emerald-600 text-white' },
-                    { value: 'male', label: '男声', activeClassName: 'bg-blue-600 text-white' },
-                    { value: 'female', label: '女声', activeClassName: 'bg-pink-600 text-white' },
-                  ].map(option => (
-                    <button
-                      key={option.value}
-                      type="button"
-                      onClick={() => setVoiceGenderFilter(option.value as 'all' | 'male' | 'female')}
-                      className={`text-[9px] px-2.5 py-0.5 rounded font-bold transition-all ${
-                        voiceGenderFilter === option.value
-                          ? option.activeClassName
-                          : 'bg-slate-50 hover:bg-slate-100 text-slate-600'
-                      }`}
-                    >
-                      {option.label}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="max-h-72 overflow-y-auto custom-scrollbar space-y-1 pr-1">
-                  {displayVoices.length === 0 ? (
-                    <div className="py-12 px-4 text-center flex flex-col items-center justify-center gap-3">
-                      <div className="w-10 h-10 rounded-full bg-amber-50 flex items-center justify-center text-amber-600 border border-amber-100">
-                        <Info className="w-5 h-5" />
-                      </div>
-                      <div className="space-y-1">
-                        <p className="text-xs font-bold text-slate-700">配音声音库为空</p>
-                        <p className="text-[11px] text-slate-500 max-w-xs leading-relaxed">
-                          请检查 ElevenLabs 服务状态，或先同步/添加可用声线。
-                        </p>
-                      </div>
-                    </div>
-                  ) : filteredVoices.length === 0 ? (
-                    <div className="py-8 text-center text-slate-400 text-xs">
-                      未找到匹配的声音，请换一个搜索词或筛选条件。
-                    </div>
-                  ) : filteredVoices.map(voice => {
-                    const isSelected = voiceId === voice.id;
-                    const similarRecommendation = similarVoiceRecommendationById.get(voice.id);
-                    return (
-                      <div
-                        key={voice.id}
-                        onClick={() => {
-                          setVoiceId(voice.id);
-                          setShowVoiceDropdown(false);
-                        }}
-                        className={`w-full py-2 px-2.5 rounded-xl flex items-start justify-between gap-3 cursor-pointer transition-colors text-left ${
-                          isSelected ? 'bg-emerald-50/60' : 'hover:bg-slate-50'
-                        }`}
-                      >
-                        <div className="min-w-0 flex-1 space-y-0.5">
-                          <div className="flex items-center flex-wrap gap-1">
-                            <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${voice.gender === 'male' ? 'bg-blue-500' : 'bg-pink-500'}`} />
-                            <span className="text-xs font-bold text-slate-850">{voice.name}</span>
-                            <span className="text-[9px] text-slate-400 bg-slate-50 px-1 py-0.2 rounded border border-slate-100 font-mono">
-                              {voice.category}
-                            </span>
-                            {similarRecommendation && (
-                              <span className="text-[9px] font-black text-emerald-700 bg-emerald-100 px-1.5 py-0.2 rounded-full">
-                                {Math.round(similarRecommendation.score)}%
-                              </span>
-                            )}
-                          </div>
-                          <p className="text-[10px] text-slate-500 truncate leading-normal">{voice.description}</p>
-                          {similarRecommendation && (
-                            <p className="text-[9px] text-emerald-700 leading-snug line-clamp-2">
-                              {similarRecommendation.reason}
-                            </p>
-                          )}
-                          <div className="flex flex-wrap gap-1">
-                            {(Array.isArray(voice.tags) ? voice.tags : []).slice(0, 3).map((tag, index) => (
-                              <span key={index} className="text-[9px] text-emerald-700 bg-emerald-50 px-1 rounded-sm">
-                                #{tag}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-
-                        <div className="flex shrink-0 items-center gap-1 mt-1">
-                          <button
-                            type="button"
-                            onClick={(event) => handleVoicePreviewClick(voice.id, voice.previewUrl || '', event)}
-                            aria-label={`试听 ${voice.name}`}
-                            title="试听"
-                            className={`w-5.5 h-5.5 rounded-full flex items-center justify-center border transition-colors ${
-                              playingVoiceId === voice.id
-                                ? 'bg-emerald-600 border-emerald-500 text-white'
-                                : 'bg-white border-slate-200 hover:bg-slate-50 text-slate-500 hover:text-slate-700'
-                            }`}
-                          >
-                            {playingVoiceId === voice.id ? (
-                              <Pause className="w-2.5 h-2.5 fill-current" />
-                            ) : (
-                              <Play className="w-2.5 h-2.5 fill-current ml-0.2" />
-                            )}
-                          </button>
-
-                          <div className={`w-5 h-5 rounded-full flex items-center justify-center border ${
-                            isSelected ? 'bg-emerald-600 border-emerald-600 text-white' : 'border-slate-200 bg-white'
-                          }`}>
-                            {isSelected && <Check className="w-3 h-3 stroke-[3]" />}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <div className="mt-2 pt-2 border-t border-slate-100 flex items-center justify-between text-[10px] text-slate-400">
-                  <span>这里使用和文本转语音一致的配音声音库。</span>
-                  <span className="text-emerald-600 font-semibold flex items-center gap-1">
-                    <CheckCircle2 className="w-3 h-3" /> 已同步
-                  </span>
-              </div>
-              </div>
-            )}
-
-            {selectedVoice && (
-              <div className="bg-gradient-to-br from-emerald-50/50 to-teal-50/30 border border-emerald-500/20 rounded-2xl p-4 space-y-2.5 shadow-sm">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="text-xs font-black text-emerald-950">{selectedVoice.name}</span>
-                      <span className="text-[9px] text-slate-500 bg-slate-100 border border-slate-200 px-1.5 rounded-full font-semibold">
-                        {selectedVoice.category}
-                      </span>
-                      <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded-full ${
-                        selectedVoice.gender === 'male'
-                          ? 'bg-blue-50 text-blue-700 border border-blue-100'
-                          : 'bg-pink-50 text-pink-700 border border-pink-100'
-                      }`}>
-                        {selectedVoice.gender === 'male' ? '男声 (Male)' : '女声 (Female)'}
-                      </span>
-                      {selectedVoiceRecommendation && (
-                        <span className="text-[9px] font-black px-1.5 py-0.2 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-200">
-                          相似度 {Math.round(selectedVoiceRecommendation.score)}%
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-[10px] text-slate-600 mt-1 leading-relaxed">{selectedVoice.description}</p>
-                    {selectedVoiceRecommendation && (
-                      <p className="mt-1.5 rounded-lg bg-white/70 px-2 py-1.5 text-[10px] leading-relaxed text-emerald-800">
-                        {selectedVoiceRecommendation.reason}
-                      </p>
-                    )}
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={(event) => handleVoicePreviewClick(selectedVoice.id, selectedVoice.previewUrl || '', event)}
-                    aria-label={`试听 ${selectedVoice.name}`}
-                    title="试听"
-                    className={`w-8 h-8 rounded-full flex items-center justify-center border shrink-0 transition-all ${
-                      playingVoiceId === selectedVoice.id
-                        ? 'bg-emerald-600 text-white border-emerald-500 shadow-md animate-pulse'
-                        : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-150 shadow-sm'
-                    }`}
-                  >
-                    {playingVoiceId === selectedVoice.id ? (
-                      <Pause className="w-3.5 h-3.5 fill-current" />
-                    ) : (
-                      <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
-                    )}
-                  </button>
-                </div>
-
-                <div className="flex flex-wrap gap-1 pt-1.5 border-t border-emerald-500/10">
-                  {selectedVoice.tags.map((tag, index) => (
-                    <span
-                      key={index}
-                      className="text-[9px] font-semibold text-emerald-800 bg-emerald-100/50 px-2 py-0.5 rounded-full"
-                    >
-                      #{tag}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-
 
           {error && (
             <div className="flex items-start gap-2.5 rounded-xl border border-rose-200 bg-rose-50 p-3.5 text-xs text-rose-600">
@@ -2577,7 +2287,9 @@ export default function CrossLanguageDubbing({
               <span>
                 {localDialogueMode === 'multi'
                   ? '多人模式让每位角色独立对齐原时间线。CosyVoice 会在模型内按原轮次轻微贴合语速（最多 ±8%），不使用 FFmpeg 后期变速；连续笑声会合并并保留自然尾音。'
-                  : '本机生成两个版本通常约 60–120 秒；当前版本输出 WAV，不会自动翻译或替换视频音轨。'}
+                  : localInputMode === 'speech_to_speech'
+                    ? '语音转语音会直接把内容语音迁移到参考声音的音色；当前版本输出两个 WAV 版本。'
+                    : '本机生成两个版本通常约 60–120 秒；当前版本输出 WAV，不会自动翻译或替换视频音轨。'}
               </span>
             </div>
           )}
@@ -2615,7 +2327,6 @@ export default function CrossLanguageDubbing({
               loading
               || !sourceFile
               || (dubbingMode === 'self_hosted' && Boolean(localCloneDisabledReason))
-              || (dubbingMode === 'manual_tts' && !voiceId)
             }
             className={`flex w-full items-center justify-center gap-2 rounded-xl py-3.5 text-xs font-black text-white shadow-md transition-all disabled:cursor-not-allowed disabled:opacity-50 ${
               dubbingMode === 'self_hosted'
@@ -2623,7 +2334,7 @@ export default function CrossLanguageDubbing({
                 : 'bg-gradient-to-r from-emerald-600 to-teal-600 shadow-emerald-600/10 hover:from-emerald-700 hover:to-teal-700'
             }`}
           >
-            {loading ? (
+                {loading ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin" />
                 {dubbingMode === 'dubbing_v2'
@@ -2638,7 +2349,7 @@ export default function CrossLanguageDubbing({
               <>
                 {dubbingMode === 'self_hosted' ? <Cpu className="h-4 w-4" /> : <Sparkles className="h-4 w-4" />}
                 {dubbingMode === 'self_hosted'
-                  ? localDialogueMode === 'multi' ? '生成多人配音时间线' : '用本机生成克隆配音'
+                  ? localDialogueMode === 'multi' ? '生成多人配音时间线' : localInputMode === 'speech_to_speech' ? '生成语音转语音' : '用本机生成克隆配音'
                   : '生成跨语种转换'}
               </>
             )}
@@ -2745,6 +2456,7 @@ export default function CrossLanguageDubbing({
                             option.data.dubbingModel === 'local_chatterbox'
                             || option.data.dubbingModel === 'local_cosyvoice3'
                             || option.data.dubbingModel === 'local_multispeaker'
+                            || option.data.dubbingModel === 'local_seed_vc'
                               ? 'bg-sky-600'
                               : option.id === 'A' ? 'bg-emerald-600' : 'bg-teal-600'
                           }`}>
@@ -2756,7 +2468,9 @@ export default function CrossLanguageDubbing({
                                   ? '本地 CosyVoice 3'
                                   : option.data.dubbingModel === 'local_multispeaker'
                                     ? `多人 · ${multiSpeakerProfiles.length} 位`
-                                : `版本 ${option.id}`}
+                                    : option.data.dubbingModel === 'local_seed_vc'
+                                      ? 'Seed-VC V2'
+                                      : `版本 ${option.id}`}
                           </span>
                           <input
                             type="text"
@@ -2776,9 +2490,11 @@ export default function CrossLanguageDubbing({
                               ? `本机克隆原音色 · ${localTargetLanguageOptions.find(item => item.value === localTargetLanguage)?.label || localTargetLanguage}`
                               : option.data.dubbingModel === 'local_cosyvoice3'
                               ? `CosyVoice 3 克隆原音色 · ${localTargetLanguageOptions.find(item => item.value === localTargetLanguage)?.label || localTargetLanguage}`
-                                : option.data.dubbingModel === 'local_multispeaker'
+                              : option.data.dubbingModel === 'local_multispeaker'
                                   ? `${multiSpeakerProfiles.length} 位独立音色 · 分角色对齐时间线`
-                              : `${selectedVoice?.name || '目标声音'} · ${targetLanguage}`}
+                                  : option.data.dubbingModel === 'local_seed_vc'
+                                    ? 'Seed-VC V2 · 直接音色迁移'
+                                    : `Dubbing v2 · ${targetLanguage}`}
                           {(option.data.dubbingModel === 'local_chatterbox' || option.data.dubbingModel === 'local_cosyvoice3')
                             && (typeof option.data.speakerSimilarity === 'number'
                               ? ` · 克隆验证 ${Math.round(option.data.speakerSimilarity * 100)}%`
@@ -2803,6 +2519,13 @@ export default function CrossLanguageDubbing({
                       ratio => playResultOption(option.id, option.data.audioUrl, ratio),
                     )}
 
+                    {resultAudioErrors[option.data.audioUrl] && (
+                      <div className="flex items-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[10px] font-semibold text-rose-700">
+                        <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                        <span>{resultAudioErrors[option.data.audioUrl]}</span>
+                      </div>
+                    )}
+
                     <button
                       type="button"
                       onClick={() => downloadAudioHelper(option.data.audioUrl, `${sanitizeDownloadName(option.displayName)}.${option.data.outputFormat || 'mp3'}`)}
@@ -2815,7 +2538,6 @@ export default function CrossLanguageDubbing({
                           : option.data.outputFormat === 'wav'
                             ? '下载 WAV 克隆配音'
                             : '下载 MP3 配音'}
-                        {option.data.dubbingModel === 'manual_tts' ? `（版本 ${option.id}）` : ''}
                       </span>
                     </button>
                   </div>
@@ -2823,15 +2545,15 @@ export default function CrossLanguageDubbing({
               })}
 
               <div className="space-y-3">
-                {result.dubbingModel !== 'local_chatterbox' && result.dubbingModel !== 'local_cosyvoice3' && (
-                <div>
+                {result.dubbingModel !== 'local_chatterbox' && result.dubbingModel !== 'local_cosyvoice3' && result.dubbingModel !== 'local_seed_vc' && (
+                  <div>
                   <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">识别原文</p>
                   <div className="max-h-32 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs leading-relaxed text-slate-700 custom-scrollbar">
                     {result.sourceText}
                   </div>
-                </div>
+                  </div>
                 )}
-                <div>
+                {result.dubbingModel !== 'local_seed_vc' && <div>
                   <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
                     {result.dubbingModel === 'local_chatterbox' || result.dubbingModel === 'local_cosyvoice3'
                       ? '本次生成台词'
@@ -2840,7 +2562,10 @@ export default function CrossLanguageDubbing({
                   <div className="max-h-32 overflow-y-auto rounded-xl border border-emerald-100 bg-emerald-50/50 p-3 text-xs leading-relaxed text-slate-800 custom-scrollbar">
                     {result.translatedText}
                   </div>
-                </div>
+                </div>}
+                {result.dubbingModel === 'local_seed_vc' && (
+                  <p className="text-[10px] text-slate-500">参考音色已直接迁移到待转换语音，未经过台词或目标语音处理。</p>
+                )}
               </div>
             </div>
           )}
@@ -2854,6 +2579,7 @@ export default function CrossLanguageDubbing({
               : '广告、短视频口型替换建议用“尽量贴合原时长”；如果是独立配音文件，优先用“自然配音”，声音会更像真人。'}
           </p>
         </div>
+      </div>
       </div>
     </div>
   );

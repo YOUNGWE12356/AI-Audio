@@ -120,12 +120,23 @@ export interface LocalMultiSpeakerCloneResult {
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, init);
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(String(body.error || `本地声音克隆请求失败 (${response.status})`));
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 12 * 60 * 1000);
+  try {
+    const response = await fetch(path, { ...init, signal: init?.signal || controller.signal });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(String(body.error || `本地声音克隆请求失败 (${response.status})`));
+    }
+    return body as T;
+  } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      throw new Error('声音转换等待时间过长，服务可能仍在处理；请检查服务器状态后重试。');
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
   }
-  return body as T;
 }
 
 export function getLocalVoiceCloneStatus(): Promise<LocalVoiceCloneStatus> {

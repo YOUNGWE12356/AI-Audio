@@ -9,6 +9,7 @@ export interface SfxLibraryIndexEntry {
   fileName?: string;
   category?: string;
   subcategory?: string;
+  childCategory?: string;
   path?: string;
   tags?: string[];
   searchText: string;
@@ -85,6 +86,27 @@ export const buildSfxLibraryIndex = (
         searchText: makeSearchText(categoryName, subcategoryName, sub.english, sub.description),
       });
       seenDirectories.add(subcategoryKey);
+
+      const childCategories = Array.isArray(sub.childCategories) ? sub.childCategories : [];
+      childCategories.forEach((childCategory, childCategoryIndex) => {
+        if (!childCategory || typeof childCategory !== 'object') return;
+        const child = childCategory as Record<string, unknown>;
+        const childCategoryName = asText(child.name);
+        if (!childCategoryName) return;
+        const childCategoryId = asText(child.id) || `${subcategoryId}-child-${childCategoryIndex}`;
+        const childCategoryKey = `child:${normalizeIndexText(categoryName)}:${normalizeIndexText(subcategoryName)}:${normalizeIndexText(childCategoryName)}`;
+        if (seenDirectories.has(childCategoryKey)) return;
+        entries.push({
+          id: childCategoryId,
+          kind: 'directory',
+          name: childCategoryName,
+          category: categoryName,
+          subcategory: subcategoryName,
+          childCategory: childCategoryName,
+          searchText: makeSearchText(categoryName, subcategoryName, childCategoryName, child.english, child.description),
+        });
+        seenDirectories.add(childCategoryKey);
+      });
     });
   });
 
@@ -101,9 +123,10 @@ export const buildSfxLibraryIndex = (
       fileName: asText(item.fileName) || undefined,
       category: asText(item.category) || undefined,
       subcategory: asText(item.subcategory) || undefined,
+      childCategory: asText(item.childCategory) || undefined,
       path: asText(item.path) || undefined,
       tags,
-      searchText: makeSearchText(name, item.fileName, item.category, item.subcategory, item.path, tags),
+      searchText: makeSearchText(name, item.fileName, item.category, item.subcategory, item.childCategory, item.path, tags),
     });
   });
 

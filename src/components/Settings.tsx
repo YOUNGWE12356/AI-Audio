@@ -3,10 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState } from 'react';
-import { Database, LockKeyhole, LogOut, ShieldCheck, Trash2 } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Ban, Database, LockKeyhole, LogOut, Plus, ShieldCheck, Trash2 } from 'lucide-react';
 import UsageDashboard from './UsageDashboard';
 import { clearLocalStoragePreservingClientIdentity } from '../services/clientIdentity';
+import { fetchAccessBlacklist, saveAccessBlacklist } from '../services/accessBlacklistService';
 import {
   loginSfxLibraryAdmin,
   logoutSfxLibraryAdmin,
@@ -22,6 +23,27 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
   const [passwordFeedback, setPasswordFeedback] = useState<string | null>(null);
   const [isVerifying, setIsVerifying] = useState(false);
   const [cleared, setCleared] = useState(false);
+  const [blacklistedIps, setBlacklistedIps] = useState<string[]>([]);
+  const [blacklistInput, setBlacklistInput] = useState('');
+  const [blacklistLoading, setBlacklistLoading] = useState(false);
+  const [blacklistFeedback, setBlacklistFeedback] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isAuthorized) return;
+    let cancelled = false;
+    setBlacklistLoading(true);
+    fetchAccessBlacklist()
+      .then(ips => {
+        if (!cancelled) setBlacklistedIps(ips);
+      })
+      .catch(error => {
+        if (!cancelled) setBlacklistFeedback(error instanceof Error ? error.message : '无法读取 IP 黑名单。');
+      })
+      .finally(() => {
+        if (!cancelled) setBlacklistLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [isAuthorized]);
 
   const handleUnlockManager = async () => {
     if (!adminPassword.trim() || isVerifying) return;
@@ -45,6 +67,42 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
     setIsAuthorized(false);
     setPasswordFeedback(null);
     onKeysUpdated?.();
+  };
+
+  const handleAddBlacklistIp = async () => {
+    const ip = blacklistInput.trim();
+    if (!ip || blacklistLoading) return;
+    if (blacklistedIps.includes(ip)) {
+      setBlacklistFeedback('该 IP 已在黑名单中。');
+      return;
+    }
+    setBlacklistLoading(true);
+    setBlacklistFeedback(null);
+    try {
+      const nextIps = await saveAccessBlacklist([...blacklistedIps, ip]);
+      setBlacklistedIps(nextIps);
+      setBlacklistInput('');
+      setBlacklistFeedback('已加入黑名单。');
+    } catch (error) {
+      setBlacklistFeedback(error instanceof Error ? error.message : '保存 IP 黑名单失败。');
+    } finally {
+      setBlacklistLoading(false);
+    }
+  };
+
+  const handleRemoveBlacklistIp = async (ip: string) => {
+    if (blacklistLoading) return;
+    setBlacklistLoading(true);
+    setBlacklistFeedback(null);
+    try {
+      const nextIps = await saveAccessBlacklist(blacklistedIps.filter(item => item !== ip));
+      setBlacklistedIps(nextIps);
+      setBlacklistFeedback('已移出黑名单。');
+    } catch (error) {
+      setBlacklistFeedback(error instanceof Error ? error.message : '保存 IP 黑名单失败。');
+    } finally {
+      setBlacklistLoading(false);
+    }
   };
 
   const handleClearCache = async () => {
@@ -114,6 +172,61 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
       </header>
 
       <UsageDashboard />
+
+      <section className="mt-8 border-t border-slate-200 pt-6">
+        <div className="flex items-center gap-2">
+          <Ban className="h-4 w-4 text-slate-500" />
+          <h2 className="text-sm font-bold text-slate-800">设备 IP 黑名单</h2>
+        </div>
+        <p className="mt-2 max-w-3xl text-[11px] leading-5 text-slate-500">
+          被加入黑名单的设备会被服务端拒绝访问。这里使用服务器看到的连接 IP，不接受客户端自行修改的设备标识；请确认代理已正确传递真实来源 IP。
+        </p>
+        <div className="mt-4 flex max-w-xl gap-2">
+          <input
+            value={blacklistInput}
+            onChange={event => setBlacklistInput(event.target.value)}
+            onKeyDown={event => {
+              if (event.key === 'Enter') void handleAddBlacklistIp();
+            }}
+            placeholder="输入 IPv4 或 IPv6 地址"
+            className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-xs outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+          />
+          <button
+            type="button"
+            onClick={() => void handleAddBlacklistIp()}
+            disabled={blacklistLoading || !blacklistInput.trim()}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-2.5 text-xs font-bold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            加入
+          </button>
+        </div>
+        {blacklistFeedback ? <p className="mt-2 text-[11px] text-slate-500">{blacklistFeedback}</p> : null}
+        <div className="mt-4 max-w-xl overflow-hidden rounded-lg border border-slate-200 bg-white">
+          {blacklistLoading && blacklistedIps.length === 0 ? (
+            <p className="px-3 py-4 text-xs text-slate-400">正在读取黑名单...</p>
+          ) : blacklistedIps.length === 0 ? (
+            <p className="px-3 py-4 text-xs text-slate-400">暂无被禁止的设备 IP。</p>
+          ) : (
+            <ul className="divide-y divide-slate-100">
+              {blacklistedIps.map(ip => (
+                <li key={ip} className="flex items-center justify-between gap-3 px-3 py-2.5 text-xs text-slate-700">
+                  <code className="font-mono">{ip}</code>
+                  <button
+                    type="button"
+                    onClick={() => void handleRemoveBlacklistIp(ip)}
+                    disabled={blacklistLoading}
+                    className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-semibold text-rose-600 hover:bg-rose-50 disabled:opacity-50"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    移除
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </section>
 
       <section className="mt-8 border-t border-slate-200 pt-6">
         <div className="flex items-center gap-2">

@@ -39,7 +39,7 @@ export interface TranslateDubbingResult {
   timingMode: 'natural' | 'match' | 'strict';
   speedRatio?: number;
   qualityMode?: ElevenLabsQualityMode;
-  dubbingModel?: 'dubbing_v2' | 'manual_tts' | 'local_chatterbox' | 'local_cosyvoice3' | 'local_multispeaker';
+  dubbingModel?: 'dubbing_v2' | 'manual_tts' | 'local_chatterbox' | 'local_cosyvoice3' | 'local_multispeaker' | 'local_seed_vc';
   cloningStrength?: number;
   /** Diagnostic cosine similarity from the local speaker encoder (0..1). */
   speakerSimilarity?: number;

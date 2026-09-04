@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { 
   Upload, 
   FileText, 
@@ -349,6 +349,7 @@ export default function AudioDirector({
   onSendMusicPrompt,
 }: AudioDirectorProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [pasteMessage, setPasteMessage] = useState<string | null>(null);
   const isProfessionalTarget = Boolean(target.video || target.avatar);
   const isGameTrack = target.game && !target.video && !target.avatar && !target.sunnyIsland;
   const videoFileCount = files.filter(item => item.type.startsWith('video/')).length;
@@ -358,11 +359,12 @@ export default function AudioDirector({
     && (videoFileCount !== 1 || files.length !== 1);
   const usesProfessionalFallback = isProfessionalTarget && videoFileCount === 0;
 
-  const processFiles = async (selectedFiles: FileList | null) => {
+  const processFiles = async (selectedFiles: FileList | File[] | null, source: 'upload' | 'paste' = 'upload') => {
     if (selectedFiles && selectedFiles.length > 0) {
+      const filesToProcess = Array.from(selectedFiles);
       const MAX_VIDEO_SIZE = 100 * 1024 * 1024;
       const MAX_DIRECT_SIZE = 20 * 1024 * 1024;
-      const oversizedFiles = Array.from(selectedFiles).filter((file) => (
+      const oversizedFiles = filesToProcess.filter((file) => (
         file.type.startsWith('video/')
           ? file.size > MAX_VIDEO_SIZE
           : file.size > MAX_DIRECT_SIZE
@@ -375,8 +377,9 @@ export default function AudioDirector({
 
       setIsUploading(true);
       setError(null);
+      setPasteMessage(source === 'paste' ? '已从剪贴板导入截图，可直接开始分析。' : null);
 
-      const newFiles = Array.from(selectedFiles).map((file: File) => ({
+      const newFiles = filesToProcess.map((file: File) => ({
         id: typeof crypto !== 'undefined' && 'randomUUID' in crypto
           ? crypto.randomUUID()
           : `file-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
@@ -394,6 +397,37 @@ export default function AudioDirector({
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     processFiles(e.target.files);
   };
+
+  const getClipboardImageFile = (clipboardData: DataTransfer | null): File | null => {
+    if (!clipboardData) return null;
+    const imageItem = Array.from(clipboardData.items || [])
+      .find(item => item.kind === 'file' && item.type.startsWith('image/'));
+    const pastedFile = imageItem?.getAsFile();
+    if (pastedFile) {
+      const extension = pastedFile.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png';
+      return new File(
+        [pastedFile],
+        `pasted-screenshot-${Date.now()}.${extension}`,
+        { type: pastedFile.type || 'image/png' },
+      );
+    }
+    return Array.from(clipboardData.files || []).find(file => file.type.startsWith('image/')) || null;
+  };
+
+  const handlePaste = (e: React.ClipboardEvent | ClipboardEvent) => {
+    if (isUploading) return;
+    const imageFile = getClipboardImageFile(e.clipboardData);
+    if (!imageFile) return;
+    e.preventDefault();
+    e.stopPropagation();
+    void processFiles([imageFile], 'paste');
+  };
+
+  useEffect(() => {
+    const handleWindowPaste = (event: ClipboardEvent) => handlePaste(event);
+    window.addEventListener('paste', handleWindowPaste);
+    return () => window.removeEventListener('paste', handleWindowPaste);
+  }, [isUploading]);
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
@@ -443,6 +477,10 @@ export default function AudioDirector({
             <div
               onDrop={handleDrop}
               onDragOver={handleDragOver}
+              onPaste={handlePaste}
+              tabIndex={0}
+              role="button"
+              aria-label="上传、拖拽或粘贴创意素材"
               className={`border-2 border-dashed rounded-xl p-6 text-center transition-all cursor-pointer ${
                 isUploading 
                   ? 'border-emerald-500 bg-emerald-500/5' 
@@ -468,10 +506,17 @@ export default function AudioDirector({
                 <div className="flex flex-col items-center gap-2 group">
                   <Upload className="w-8 h-8 text-slate-400 group-hover:text-emerald-600 transition-colors" />
                   <p className="text-xs font-bold text-slate-700">拖拽文件到这里，或点击浏览</p>
-                  <p className="text-[10px] text-slate-400">视频最大 100MB；图片、音频与 PDF 最大 20MB</p>
+                  <p className="text-[10px] text-slate-400">视频最大 100MB；图片、音频与 PDF 最大 20MB；截图可直接 Ctrl+V 粘贴</p>
                 </div>
               )}
             </div>
+
+            {pasteMessage && (
+              <div className="flex items-center gap-1.5 rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-[10px] font-medium text-emerald-700">
+                <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                <span>{pasteMessage}</span>
+              </div>
+            )}
 
             {/* Uploaded Files Queue */}
             {files.length > 0 && (

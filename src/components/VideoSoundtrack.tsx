@@ -158,6 +158,14 @@ type ExportAudioFormat = 'mp3' | 'wav' | 'aac';
 type ExportBitDepth = 16 | 24 | 32;
 type ExportChannelMode = 'stereo' | 'mono';
 type OriginalAudioSplitStatus = 'idle' | 'running' | 'completed' | 'error';
+type DubbingTrackGenerationMode = 'pending' | 'regenerate';
+type DubbingTrackGenerationJob = {
+  trackId: string;
+  mode: DubbingTrackGenerationMode;
+  total: number;
+  completed: number;
+  failed: number;
+};
 type OriginalAudioSplitSegmentRequest = {
   id: string;
   startTime: number;
@@ -1093,6 +1101,10 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
   // AI analysis and mixing status
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
   const [analyzingTrackId, setAnalyzingTrackId] = useState<'bgm' | 'sfx' | 'dubbing' | null>(null);
+  const [dubbingTrackGenerationJob, setDubbingTrackGenerationJob] = useState<DubbingTrackGenerationJob | null>(null);
+  const [dubbingTrackRegenerationConfirmId, setDubbingTrackRegenerationConfirmId] = useState<string | null>(null);
+  const dubbingTrackGenerationLockRef = useRef(false);
+  const dubbingTrackRegenerationConfirmTimeoutRef = useRef<number | null>(null);
   const [analysisStage, setAnalysisStage] = useState<string>('准备解析画面...');
   const analysisAbortRef = useRef<AbortController | null>(null);
   const analysisLockRef = useRef(false);
@@ -1203,6 +1215,12 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
   const [similarVoiceSourceDescription, setSimilarVoiceSourceDescription] = useState<string>('');
   const [similarVoiceRecommendationsByTrackId, setSimilarVoiceRecommendationsByTrackId] = useState<TrackSimilarVoiceRecommendations>({});
   const [playingVoiceId, setPlayingVoiceId] = useState<string | null>(null);
+
+  useEffect(() => () => {
+    if (dubbingTrackRegenerationConfirmTimeoutRef.current !== null) {
+      window.clearTimeout(dubbingTrackRegenerationConfirmTimeoutRef.current);
+    }
+  }, []);
 
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const previewTokenRef = useRef(0);
@@ -3546,6 +3564,19 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
   const selectedTrackIsSplitAudioTrack = selectedTrack?.id === SPLIT_VOCAL_TRACK_ID;
   const selectedTrackShowsVoiceLibrary = selectedTrack?.type === 'dubbing'
     && !selectedTrackIsSplitAudioTrack;
+  const selectedDubbingTrackClips = selectedTrackShowsVoiceLibrary
+    ? clips.filter(clip => clip.trackId === selectedTrack.id && !isOriginalAudioClip(clip))
+    : [];
+  const selectedDubbingTrackPendingClips = selectedDubbingTrackClips.filter(clip => (
+    !clip.audioUrl || Boolean(clip.error) || Boolean(clip.voiceDirty) || Boolean(clip.timingDirty)
+  ));
+  const selectedDubbingTrackJob = selectedTrackShowsVoiceLibrary
+    && dubbingTrackGenerationJob?.trackId === selectedTrack.id
+    ? dubbingTrackGenerationJob
+    : null;
+  const selectedClipTrackGenerationRunning = Boolean(
+    selectedClip && dubbingTrackGenerationJob?.trackId === selectedClip.trackId,
+  );
   const hasOriginalAudioClip = clips.some(clip => (
     clip.trackId === ORIGINAL_AUDIO_TRACK_ID && Boolean(clip.audioUrl)
   ));
@@ -5054,6 +5085,9 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
           : mappedClips.filter((clip: TimelineClip) => (
             analysisTracks.find(track => track.id === clip.trackId)?.type === 'dubbing'
           )).length;
+        const dubbingSourceCueCount = typeof data.dubbingSourceCueCount === 'number'
+          ? data.dubbingSourceCueCount
+          : dubbingCueCount;
         const dubbingStatus = typeof data.dubbingStatus === 'string'
           ? data.dubbingStatus
           : '';
@@ -5065,7 +5099,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
           message: usingFullVideoDubbingAnalysis && dubbingCueCount === 0
             ? 'AI 分析完成，但没有识别到可配音字幕。'
             : usingFullVideoDubbingAnalysis
-            ? 'AI 分析完成：已识别字幕、对白与口型，并按字幕逐句建立配音片段。'
+            ? `AI 分析完成：已将 ${dubbingSourceCueCount} 条字幕整理为 ${dubbingCueCount} 个连续配音片段。`
             : autoSfxTrackCount > 1
             ? `AI 分析完成：重叠音效已自动分配到 ${autoSfxTrackCount} 条音效轨。`
             : usedNativeVideo
@@ -5300,7 +5334,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
         ? `配乐轨重新分析完成，已生成 ${mappedClips.length} 个片段。`
         : trackId === 'sfx'
           ? `音效轨重新分析完成，已生成 ${mappedClips.length} 个片段，并分配到 ${autoSfxTrackCount} 条无重叠音效轨。`
-          : `配音轨重新分析完成，已识别 ${mappedClips.length} 个片段。`;
+          : `配音轨重新分析完成：已将 ${typeof data.dubbingSourceCueCount === 'number' ? data.dubbingSourceCueCount : mappedClips.length} 条字幕整理为 ${mappedClips.length} 个连续配音片段。`;
       setToast({ message, type: 'success' });
       window.setTimeout(() => setToast(null), 4_000);
     } catch (err: any) {
@@ -5363,9 +5397,13 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
   ]);
 
   // Single timeline clip generator using ElevenLabs API on the server
-  const handleGenerateAudioClip = async (clipId: string) => {
+  const handleGenerateAudioClip = async (
+    clipId: string,
+    options: { suppressToast?: boolean; forceRegenerate?: boolean } = {},
+  ): Promise<boolean> => {
+    const { suppressToast = false, forceRegenerate = false } = options;
     const clip = clipsRef.current.find(c => c.id === clipId);
-    if (!clip) return;
+    if (!clip) return false;
     if (clip.trackId === SPLIT_VOCAL_TRACK_ID) {
       const targetTrack = getOrCreateSplitDubbingEditTrack();
       const editableClipId = `clip-editable-from-${clip.id}`;
@@ -5406,13 +5444,14 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
       setSelectedTrackId(null);
       setSelectedClipId(editableClipId);
       setSelectedClipIds([editableClipId]);
-      setToast({
-        message: '已保留拆分人声，并在“可编辑配音片段”轨生成新的配音片段。',
-        type: 'info',
-      });
-      window.setTimeout(() => setToast(null), 3_000);
-      await handleGenerateAudioClip(editableClipId);
-      return;
+      if (!suppressToast) {
+        setToast({
+          message: '已保留拆分人声，并在“可编辑配音片段”轨生成新的配音片段。',
+          type: 'info',
+        });
+        window.setTimeout(() => setToast(null), 3_000);
+      }
+      return handleGenerateAudioClip(editableClipId, options);
     }
     const generationTimingSignature = getDubbingTimingSignature(clip);
 
@@ -5436,6 +5475,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
         && !clip.timingDirty
         && clip.audioUrl
         && effectiveVoiceId
+        && !forceRegenerate
       ) {
         const conversionSourceFile = await fetchAudioUrlAsFile(
           clip.audioUrl,
@@ -5505,18 +5545,20 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
           getEffectiveClipSpeed(cachedClip),
           latestClip.trackId,
         );
-        setToast({
-          message: voiceChangedDuringGeneration
-            ? `“${clip.name}”已完成声音转换，但轨道声音在转换期间又发生变化，请再转换一次。`
-            : timingChangedDuringGeneration
-              ? `“${clip.name}”已完成声音转换，但台词/语种/时间在转换期间发生变化，请重新合成。`
-              : `“${clip.name}”已用新的轨道声音完成转换，已尽量保留原语气、语速和停顿。`,
-          type: voiceChangedDuringGeneration || timingChangedDuringGeneration ? 'info' : 'success',
-        });
-        setTimeout(() => {
-          setToast(current => current?.message.includes(clip.name) ? null : current);
-        }, 3500);
-        return;
+        if (!suppressToast) {
+          setToast({
+            message: voiceChangedDuringGeneration
+              ? `“${clip.name}”已完成声音转换，但轨道声音在转换期间又发生变化，请再转换一次。`
+              : timingChangedDuringGeneration
+                ? `“${clip.name}”已完成声音转换，但台词/语种/时间在转换期间发生变化，请重新合成。`
+                : `“${clip.name}”已用新的轨道声音完成转换，已尽量保留原语气、语速和停顿。`,
+            type: voiceChangedDuringGeneration || timingChangedDuringGeneration ? 'info' : 'success',
+          });
+          setTimeout(() => {
+            setToast(current => current?.message.includes(clip.name) ? null : current);
+          }, 3500);
+        }
+        return true;
       }
 
       const res = await fetch('/api/video/generate-clip', {
@@ -5634,25 +5676,28 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
       // Trigger success toast
       const displayTypeLabel = trackType === 'dubbing' ? '旁白配音' : trackType === 'bgm' ? '配乐BGM' : '专属音效';
       
-      setToast({
-        message: voiceChangedDuringGeneration
-          ? `“${clip.name}”已完成合成，但轨道声音已在生成期间变更，请重新合成一次。`
-          : timingChangedDuringGeneration
-            ? `“${clip.name}”已完成合成，但台词/语种/时间在生成期间发生变化，请重新合成。`
-            : durationReadFailed
-              ? `“${clip.name}”已完成合成，但未能读取自然时长，请重新合成或手动微调。`
-              : trackType === 'dubbing'
-                ? `“${clip.name}”已按 ${nextAutoSpeed.toFixed(2)}x 自动匹配字幕时长。`
-                : trackType === 'bgm'
-                  ? `“${clip.name}”已使用 ElevenLabs Music ${data.model || 'music_v2'} 生成，并匹配到视频结尾。`
-                  : `成功为“${clip.name}”合成 ${displayTypeLabel}！`,
-        type: voiceChangedDuringGeneration || timingChangedDuringGeneration || durationReadFailed
-          ? 'info'
-          : 'success'
-      });
-      setTimeout(() => {
-        setToast(current => current?.message.includes(clip.name) ? null : current);
-      }, 3500);
+      if (!suppressToast) {
+        setToast({
+          message: voiceChangedDuringGeneration
+            ? `“${clip.name}”已完成合成，但轨道声音已在生成期间变更，请重新合成一次。`
+            : timingChangedDuringGeneration
+              ? `“${clip.name}”已完成合成，但台词/语种/时间在生成期间发生变化，请重新合成。`
+              : durationReadFailed
+                ? `“${clip.name}”已完成合成，但未能读取自然时长，请重新合成或手动微调。`
+                : trackType === 'dubbing'
+                  ? `“${clip.name}”已按 ${nextAutoSpeed.toFixed(2)}x 自动匹配字幕时长。`
+                  : trackType === 'bgm'
+                    ? `“${clip.name}”已使用 ElevenLabs Music ${data.model || 'music_v2'} 生成，并匹配到视频结尾。`
+                    : `成功为“${clip.name}”合成 ${displayTypeLabel}！`,
+          type: voiceChangedDuringGeneration || timingChangedDuringGeneration || durationReadFailed
+            ? 'info'
+            : 'success'
+        });
+        setTimeout(() => {
+          setToast(current => current?.message.includes(clip.name) ? null : current);
+        }, 3500);
+      }
+      return true;
 
     } catch (err: any) {
       setClips(prev => prev.map(c => c.id === clipId ? { 
@@ -5661,14 +5706,126 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
         error: err.message 
       } : c));
       
-      setToast({
-        message: `“${clip.name}”合成失败：${err.message}`,
-        type: 'error'
-      });
-      setTimeout(() => {
-        setToast(current => current?.message.includes(clip.name) ? null : current);
-      }, 4500);
+      if (!suppressToast) {
+        setToast({
+          message: `“${clip.name}”合成失败：${err.message}`,
+          type: 'error'
+        });
+        setTimeout(() => {
+          setToast(current => current?.message.includes(clip.name) ? null : current);
+        }, 4500);
+      }
+      return false;
     }
+  };
+
+  const handleGenerateDubbingTrack = async (
+    trackId: string,
+    mode: DubbingTrackGenerationMode,
+  ) => {
+    if (dubbingTrackGenerationLockRef.current) return;
+
+    const track = tracksRef.current.find(item => item.id === trackId);
+    if (!track || track.type !== 'dubbing' || track.id === SPLIT_VOCAL_TRACK_ID) return;
+
+    const trackClips = clipsRef.current
+      .filter(clip => clip.trackId === trackId && !isOriginalAudioClip(clip))
+      .sort((a, b) => a.startTime - b.startTime);
+
+    if (trackClips.length === 0) {
+      setToast({ message: `“${track.name}”还没有可合成的配音片段。`, type: 'info' });
+      window.setTimeout(() => setToast(null), 3_000);
+      return;
+    }
+
+    if (trackClips.some(clip => clip.isGenerating)) {
+      setToast({ message: `“${track.name}”已有片段正在合成，请完成后再执行整轨操作。`, type: 'info' });
+      window.setTimeout(() => setToast(null), 3_000);
+      return;
+    }
+
+    const candidates = mode === 'regenerate'
+      ? trackClips
+      : trackClips.filter(clip => (
+        !clip.audioUrl || Boolean(clip.error) || Boolean(clip.voiceDirty) || Boolean(clip.timingDirty)
+      ));
+
+    if (candidates.length === 0) {
+      setToast({ message: `“${track.name}”的全部配音片段均已合成，无需更新。`, type: 'success' });
+      window.setTimeout(() => setToast(null), 3_000);
+      return;
+    }
+
+    dubbingTrackGenerationLockRef.current = true;
+    setDubbingTrackRegenerationConfirmId(null);
+    if (dubbingTrackRegenerationConfirmTimeoutRef.current !== null) {
+      window.clearTimeout(dubbingTrackRegenerationConfirmTimeoutRef.current);
+      dubbingTrackRegenerationConfirmTimeoutRef.current = null;
+    }
+    setDubbingTrackGenerationJob({
+      trackId,
+      mode,
+      total: candidates.length,
+      completed: 0,
+      failed: 0,
+    });
+
+    let completed = 0;
+    let failed = 0;
+    try {
+      setToast({
+        message: `正在${mode === 'regenerate' ? '重新生成' : '一键合成'}“${track.name}”的 ${candidates.length} 个配音片段...`,
+        type: 'info',
+      });
+
+      for (const clip of candidates) {
+        const succeeded = await handleGenerateAudioClip(clip.id, {
+          suppressToast: true,
+          forceRegenerate: mode === 'regenerate',
+        });
+        if (succeeded) completed += 1;
+        else failed += 1;
+        setDubbingTrackGenerationJob(current => current?.trackId === trackId
+          ? { ...current, completed, failed }
+          : current);
+      }
+
+      setToast({
+        message: failed > 0
+          ? `“${track.name}”整轨处理完成：成功 ${completed} 个，失败 ${failed} 个。可再次点击一键合成重试失败片段。`
+          : `“${track.name}”的 ${completed} 个配音片段已全部合成完成。`,
+        type: failed > 0 ? 'info' : 'success',
+      });
+      window.setTimeout(() => {
+        setToast(current => current?.message.includes(track.name) ? null : current);
+      }, 5_000);
+    } finally {
+      dubbingTrackGenerationLockRef.current = false;
+      setDubbingTrackGenerationJob(null);
+    }
+  };
+
+  const handleRequestRegenerateDubbingTrack = (trackId: string) => {
+    if (dubbingTrackGenerationLockRef.current) return;
+
+    if (dubbingTrackRegenerationConfirmId === trackId) {
+      setDubbingTrackRegenerationConfirmId(null);
+      if (dubbingTrackRegenerationConfirmTimeoutRef.current !== null) {
+        window.clearTimeout(dubbingTrackRegenerationConfirmTimeoutRef.current);
+        dubbingTrackRegenerationConfirmTimeoutRef.current = null;
+      }
+      void handleGenerateDubbingTrack(trackId, 'regenerate');
+      return;
+    }
+
+    setDubbingTrackRegenerationConfirmId(trackId);
+    if (dubbingTrackRegenerationConfirmTimeoutRef.current !== null) {
+      window.clearTimeout(dubbingTrackRegenerationConfirmTimeoutRef.current);
+    }
+    dubbingTrackRegenerationConfirmTimeoutRef.current = window.setTimeout(() => {
+      setDubbingTrackRegenerationConfirmId(current => current === trackId ? null : current);
+      dubbingTrackRegenerationConfirmTimeoutRef.current = null;
+    }, 6_000);
   };
 
   // Once assistant analysis has produced timeline clips, synthesize each
@@ -8619,6 +8776,123 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
 
                     {selectedTrackShowsVoiceLibrary ? (
                       <div className="space-y-3 border-t border-slate-800 pt-4">
+                        <div
+                          data-testid={`dubbing-track-batch-controls-${selectedTrack.id}`}
+                          className="space-y-3 rounded-xl border border-purple-500/30 bg-purple-950/25 p-3"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="text-[10px] font-bold uppercase tracking-wider text-purple-300">整轨配音合成</p>
+                              <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
+                                按时间顺序逐个合成本轨片段，避免逐条点击和并发请求过多。
+                              </p>
+                            </div>
+                            <AudioLines className="h-5 w-5 shrink-0 text-purple-400" />
+                          </div>
+
+                          <div className="flex items-center justify-between rounded-lg border border-purple-500/15 bg-slate-950/50 px-2.5 py-2 text-[9px] font-bold">
+                            <span className="text-slate-500">片段总数 {selectedDubbingTrackClips.length}</span>
+                            <span className={selectedDubbingTrackPendingClips.length > 0 ? 'text-amber-300' : 'text-emerald-300'}>
+                              {selectedDubbingTrackPendingClips.length > 0
+                                ? `待处理 ${selectedDubbingTrackPendingClips.length}`
+                                : '全部已完成'}
+                            </span>
+                          </div>
+
+                          {selectedDubbingTrackJob && (
+                            <div data-testid={`dubbing-track-generation-progress-${selectedTrack.id}`} className="space-y-1.5">
+                              <div className="flex items-center justify-between text-[9px] font-bold text-purple-200">
+                                <span>
+                                  {selectedDubbingTrackJob.mode === 'regenerate' ? '正在重新生成整轨' : '正在一键合成整轨'}
+                                </span>
+                                <span>
+                                  {selectedDubbingTrackJob.completed + selectedDubbingTrackJob.failed}/{selectedDubbingTrackJob.total}
+                                </span>
+                              </div>
+                              <div className="h-1.5 overflow-hidden rounded-full bg-slate-900">
+                                <div
+                                  className="h-full rounded-full bg-purple-500 transition-[width] duration-300"
+                                  style={{
+                                    width: `${Math.round(
+                                      ((selectedDubbingTrackJob.completed + selectedDubbingTrackJob.failed)
+                                        / Math.max(1, selectedDubbingTrackJob.total)) * 100,
+                                    )}%`,
+                                  }}
+                                />
+                              </div>
+                              {selectedDubbingTrackJob.failed > 0 && (
+                                <p className="text-[9px] text-amber-300">已有 {selectedDubbingTrackJob.failed} 个片段失败，任务结束后可再次重试。</p>
+                              )}
+                            </div>
+                          )}
+
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              data-testid={`generate-dubbing-track-${selectedTrack.id}`}
+                              onClick={() => void handleGenerateDubbingTrack(selectedTrack.id, 'pending')}
+                              disabled={
+                                Boolean(dubbingTrackGenerationJob)
+                                || selectedDubbingTrackClips.length === 0
+                                || selectedDubbingTrackPendingClips.length === 0
+                                || selectedDubbingTrackClips.some(clip => clip.isGenerating)
+                              }
+                              aria-label={`一键合成${selectedTrack.name}全部待处理片段`}
+                              title={selectedDubbingTrackPendingClips.length > 0
+                                ? `合成 ${selectedDubbingTrackPendingClips.length} 个未生成或需要更新的片段`
+                                : '本轨全部片段均已完成'}
+                              className="flex h-9 min-w-0 items-center justify-center gap-1.5 rounded-lg bg-purple-600 px-2 text-[10px] font-bold text-white shadow-sm shadow-purple-950/40 transition-colors hover:bg-purple-500 disabled:cursor-not-allowed disabled:opacity-45"
+                            >
+                              {selectedDubbingTrackJob?.mode === 'pending' ? (
+                                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                              ) : (
+                                <Sparkles className="h-3.5 w-3.5 shrink-0" />
+                              )}
+                              <span className="truncate">一键合成整轨</span>
+                            </button>
+                            <button
+                              type="button"
+                              data-testid={`regenerate-dubbing-track-${selectedTrack.id}`}
+                              onClick={() => handleRequestRegenerateDubbingTrack(selectedTrack.id)}
+                              disabled={
+                                Boolean(dubbingTrackGenerationJob)
+                                || selectedDubbingTrackClips.length === 0
+                                || selectedDubbingTrackClips.some(clip => clip.isGenerating)
+                              }
+                              aria-label={dubbingTrackRegenerationConfirmId === selectedTrack.id
+                                ? `确认重新生成${selectedTrack.name}全部片段`
+                                : `重新生成${selectedTrack.name}全部片段`}
+                              title={dubbingTrackRegenerationConfirmId === selectedTrack.id
+                                ? '再次点击后将替换本轨全部音频并产生新的模型用量'
+                                : '重新生成本轨全部配音片段，并替换现有音频'}
+                              className={`flex h-9 min-w-0 items-center justify-center gap-1.5 rounded-lg border px-2 text-[10px] font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
+                                dubbingTrackRegenerationConfirmId === selectedTrack.id
+                                  ? 'border-amber-400/60 bg-amber-500/20 text-amber-200 hover:bg-amber-500/30'
+                                  : 'border-purple-500/35 bg-purple-500/10 text-purple-200 hover:bg-purple-500/20 hover:text-white'
+                              }`}
+                            >
+                              {selectedDubbingTrackJob?.mode === 'regenerate' ? (
+                                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                              ) : dubbingTrackRegenerationConfirmId === selectedTrack.id ? (
+                                <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                              ) : (
+                                <RotateCcw className="h-3.5 w-3.5 shrink-0" />
+                              )}
+                              <span className="truncate">
+                                {dubbingTrackRegenerationConfirmId === selectedTrack.id ? '确认重新生成' : '重新生成整轨'}
+                              </span>
+                            </button>
+                          </div>
+                          {dubbingTrackRegenerationConfirmId === selectedTrack.id && (
+                            <p className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-2 text-[9px] leading-relaxed text-amber-200">
+                              再次点击将在 6 秒确认期内重新生成全部 {selectedDubbingTrackClips.length} 个片段，并替换现有音频。
+                            </p>
+                          )}
+                          <p className="text-[9px] leading-relaxed text-slate-600">
+                            一键合成只处理未生成、失败或已过期片段；重新生成会替换本轨全部音频并产生新的模型用量。
+                          </p>
+                        </div>
+
                         <div className="rounded-xl border border-purple-500/25 bg-purple-950/15 p-3">
                           <div className="flex items-center justify-between gap-3">
                             <div>
@@ -9270,6 +9544,12 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                                 <span className="font-mono text-slate-300">
                                   {formatSyncTime(selectedClip.subtitleStartTime)} – {formatSyncTime(selectedClip.subtitleEndTime)}
                                 </span>
+                                {selectedClip.subtitleCues && selectedClip.subtitleCues.length > 1 ? (
+                                  <>
+                                    <span className="text-slate-500">连续字幕</span>
+                                    <span className="text-slate-300">包含 {selectedClip.subtitleCues.length} 条，按整段连续合成</span>
+                                  </>
+                                ) : null}
                                 <span className="text-slate-500">口型区间</span>
                                 <span className="font-mono text-slate-300">
                                   {hasLipWindow
@@ -9437,10 +9717,10 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                           ) : (
                             <button
                               onClick={() => handleGenerateAudioClip(selectedClip.id)}
-                              disabled={selectedClip.isGenerating}
+                              disabled={selectedClip.isGenerating || selectedClipTrackGenerationRunning}
                               className="w-full flex cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 py-2 text-xs font-bold text-slate-300 hover:bg-slate-700 disabled:cursor-wait disabled:opacity-60"
                             >
-                              {selectedClip.isGenerating ? (
+                              {selectedClip.isGenerating || selectedClipTrackGenerationRunning ? (
                                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                               ) : (
                                 <RotateCcw className="h-3.5 w-3.5" />
@@ -9448,6 +9728,8 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                               <span>
                                 {selectedClip.isGenerating
                                   ? '合成音轨中...'
+                                  : selectedClipTrackGenerationRunning
+                                    ? '整轨合成进行中...'
                                   : selectedClip.timingDirty
                                     ? '按新台词 / 目标语种重新合成'
                                     : selectedClip.voiceDirty
@@ -9461,13 +9743,13 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                         <div>
                           <button
                             onClick={() => handleGenerateAudioClip(selectedClip.id)}
-                            disabled={selectedClip.isGenerating}
+                            disabled={selectedClip.isGenerating || selectedClipTrackGenerationRunning}
                             className="w-full flex items-center justify-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs py-2.5 rounded-lg shadow-lg shadow-indigo-500/20 disabled:opacity-50 cursor-pointer"
                           >
-                            {selectedClip.isGenerating ? (
+                            {selectedClip.isGenerating || selectedClipTrackGenerationRunning ? (
                               <>
                                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                <span>合成音轨中...</span>
+                                <span>{selectedClip.isGenerating ? '合成音轨中...' : '整轨合成进行中...'}</span>
                               </>
                             ) : (
                               <>
@@ -9476,7 +9758,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                               </>
                             )}
                           </button>
-                          {!selectedClip.isGenerating && (
+                          {!selectedClip.isGenerating && !selectedClipTrackGenerationRunning && (
                             <p className="mt-1.5 text-center text-[9px] leading-relaxed text-slate-600">只生成当前片段，不会重新分析画面或改动其他音轨。</p>
                           )}
                         </div>
@@ -9502,7 +9784,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                         <label className="flex flex-col items-center justify-center border border-dashed border-slate-800 hover:border-indigo-500/50 bg-slate-950/40 hover:bg-slate-950/80 rounded-xl p-3.5 text-center cursor-pointer transition-all group">
                           <Upload className="w-4 h-4 text-slate-500 group-hover:text-indigo-400 mb-1 transition-colors" />
                           <span className="text-[10.5px] font-bold text-slate-400 group-hover:text-slate-200">
-                            {selectedClip.isGenerating ? '正在上传音频...' : '选择本地音频上传'}
+                            {selectedClip.isGenerating || selectedClipTrackGenerationRunning ? '整轨合成进行中...' : '选择本地音频上传'}
                           </span>
                           <span className="text-[9px] text-slate-600 mt-0.5">支持 MP3, WAV, AAC, M4A 格式</span>
                           <input
@@ -9516,7 +9798,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                               // Reset input value to allow uploading the same file again if needed
                               e.target.value = '';
                             }}
-                            disabled={selectedClip.isGenerating}
+                            disabled={selectedClip.isGenerating || selectedClipTrackGenerationRunning}
                             className="hidden"
                           />
                         </label>

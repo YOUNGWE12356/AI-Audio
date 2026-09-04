@@ -21,6 +21,7 @@ import { FileItem, HistoryItem, TabType } from './types';
 import { ELEVENLABS_VOICES, VoiceItem } from './data/voices';
 import { fetchPlatformHealth } from './services/platformService';
 import { prepareFilesForGemini } from './utils/mediaPreparation';
+import { loadPersistentHistory, persistHistory } from './services/historyStorage';
 
 export interface PendingMusicOption {
   id: 'A' | 'B';
@@ -33,7 +34,7 @@ export interface PendingMusicOption {
   type: 'instrumental' | 'vocal';
 }
 
-const GENERATED_MEDIA_HISTORY_LIMIT = 10;
+const GENERATED_MEDIA_HISTORY_LIMIT = 100;
 
 const limitGeneratedMediaHistory = (items: HistoryItem[]) => {
   let generatedMediaCount = 0;
@@ -160,12 +161,34 @@ export default function App() {
       details: '12秒 · 平静自然'
     }
   ]);
+  const [historyHydrated, setHistoryHydrated] = useState(false);
   const setHistoryList = useCallback<React.Dispatch<React.SetStateAction<HistoryItem[]>>>((action) => {
     setHistoryListState((previous) => limitGeneratedMediaHistory(
       typeof action === 'function' ? action(previous) : action,
     ));
   }, []);
   const previousHistoryListRef = useRef(historyList);
+
+  useEffect(() => {
+    let active = true;
+    void loadPersistentHistory()
+      .then((storedHistory) => {
+        if (!active) return;
+        if (storedHistory.length > 0) setHistoryListState(limitGeneratedMediaHistory(storedHistory));
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (active) setHistoryHydrated(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!historyHydrated) return;
+    void persistHistory(historyList).catch(() => undefined);
+  }, [historyHydrated, historyList]);
 
   // Audio Director States
   const [files, setFiles] = useState<FileItem[]>([]);
@@ -712,6 +735,7 @@ export default function App() {
           url: urlA,
           timestamp,
           details,
+          inputText: processedText,
           speed: standaloneVoiceSpeed
         },
         {
@@ -722,6 +746,7 @@ export default function App() {
           url: urlB,
           timestamp,
           details,
+          inputText: processedText,
           speed: standaloneVoiceSpeed
         },
         ...prev,
@@ -804,6 +829,7 @@ export default function App() {
           url: urlA,
           timestamp,
           details,
+          inputText: prompt,
         },
         {
           id: `sfx-${Date.now()}-B`,
@@ -813,6 +839,7 @@ export default function App() {
           url: urlB,
           timestamp,
           details,
+          inputText: prompt,
         },
         ...prev,
       ]);
@@ -909,6 +936,7 @@ export default function App() {
         url: option.url,
         timestamp,
         details,
+        inputText: `${prompt}${standaloneMusicLyrics.trim() ? `\n歌词：${standaloneMusicLyrics.trim()}` : ''}`,
       }));
       setHistoryList(prev => [...historyItems, ...prev]);
 
@@ -1116,7 +1144,14 @@ export default function App() {
         prompt: requirements || '根据上传媒体文件进行全片音轨规划',
         url: '#',
         timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
-        details: `${res.sfxSchemes?.[0]?.items?.length || 0}项音效排程 · 1项BGM推荐`
+        details: `${res.sfxSchemes?.[0]?.items?.length || 0}项音效排程 · 1项BGM推荐${files.length ? ` · ${files.length} 个参考文件` : ''}`,
+        inputText: requirements,
+        attachments: files.map(file => ({
+          name: file.file.name,
+          type: file.file.type,
+          size: file.file.size,
+          file: file.file,
+        })),
       };
       setHistoryList(prev => [newHistoryItem, ...prev]);
 
@@ -1303,7 +1338,7 @@ export default function App() {
 
         {/* Right Side Workspace Frame */}
         <WorkspaceErrorBoundary>
-          <main id="app-workspace-viewport" className="relative min-h-0 min-w-0 flex-1 overflow-auto bg-slate-50 custom-scrollbar">
+          <main id="app-workspace-viewport" className="relative min-h-0 min-w-0 flex-1 overflow-auto bg-slate-50 [scrollbar-gutter:stable] custom-scrollbar">
             <Suspense fallback={<WorkspaceLoading />}>
             {visitedTabs.has('workbench') && (
               <section hidden={currentTab !== 'workbench'} className="min-h-full">

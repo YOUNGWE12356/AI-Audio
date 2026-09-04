@@ -69,6 +69,7 @@ interface ImportItem {
   fileName: string;
   category: string;
   subcategory?: string;
+  childCategory?: string;
   tags: string[];
   size: string;
   type: string;
@@ -84,12 +85,14 @@ const getAudioDirectoryFileKey = (
   category: string,
   subcategory: string | undefined,
   fileName: string,
+  childCategory?: string,
 ) => {
   const normalizedFileName = normalizeAudioFileName(fileName);
   if (!normalizedFileName) return '';
   return JSON.stringify([
     category.trim().normalize('NFC').toLocaleLowerCase(),
     (subcategory || '').trim().normalize('NFC').toLocaleLowerCase(),
+    (childCategory || '').trim().normalize('NFC').toLocaleLowerCase(),
     normalizedFileName,
   ]);
 };
@@ -128,7 +131,7 @@ interface AudioAssetLibraryStats {
 type FolderContextMenuState = {
   x: number;
   y: number;
-  kind: 'group' | 'sub';
+  kind: 'group' | 'sub' | 'child';
   groupId: string;
   groupName: string;
   groupIndex: number;
@@ -137,11 +140,16 @@ type FolderContextMenuState = {
   subName?: string;
   subIndex?: number;
   totalSubs?: number;
+  childId?: string;
+  childName?: string;
+  childIndex?: number;
+  totalChildren?: number;
 };
 
 type ImportTarget = {
   category: string;
   subcategory: string;
+  childCategory: string;
 };
 
 const isUploadedAudioAsset = (sound: SoundEffect) => {
@@ -153,7 +161,7 @@ const isUploadedAudioAsset = (sound: SoundEffect) => {
 
 const inferAudioAssetKind = (sound: SoundEffect): 'music' | 'sfx' => {
   if (sound.generatedKind) return sound.generatedKind;
-  const text = `${sound.category || ''} ${sound.subcategory || ''} ${sound.fileName || ''} ${sound.path || ''}`.toLowerCase();
+  const text = `${sound.category || ''} ${sound.subcategory || ''} ${sound.childCategory || ''} ${sound.fileName || ''} ${sound.path || ''}`.toLowerCase();
   return text.includes('music') || text.includes('bgm') || text.includes('配乐') || text.includes('音乐') || text.includes('闊充箰')
     ? 'music'
     : 'sfx';
@@ -636,6 +644,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     'music_all': true,
     'company_sfx': true
   });
+  const [expandedSubCategories, setExpandedSubCategories] = useState<Record<string, boolean>>({});
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchHistory, setSearchHistory] = useState<string[]>(['金属撞击', '科幻激光', 'Q版点击']);
@@ -669,9 +678,18 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
       setSelectedCategory(directory);
       const parentName = assistantCategory.trim();
       const parentGroup = categories.find(group => group.name === parentName)
-        || categories.find(group => group.subCategories.some(subcategory => subcategory.name === directory));
+        || categories.find(group => group.subCategories.some(subcategory => (
+          subcategory.name === directory
+          || (subcategory.childCategories || []).some(child => child.name === directory)
+        )));
       if (parentGroup) {
         setExpandedGroups(previous => ({ ...previous, [parentGroup.id]: true }));
+        const parentSubcategory = parentGroup.subCategories.find(subcategory => (
+          (subcategory.childCategories || []).some(child => child.name === directory)
+        ));
+        if (parentSubcategory) {
+          setExpandedSubCategories(previous => ({ ...previous, [parentSubcategory.id]: true }));
+        }
       }
       // Directory matches should filter by the directory itself. Keeping the
       // directory name in the free-text query would hide assets whose filename
@@ -683,9 +701,12 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   // Category management helper states
   const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
   const [editingSubCategoryId, setEditingSubCategoryId] = useState<string | null>(null);
+  const [editingChildCategoryId, setEditingChildCategoryId] = useState<string | null>(null);
   const [editNameInput, setEditNameInput] = useState<string>('');
   const [isAddingSubToId, setIsAddingSubToId] = useState<string | null>(null);
   const [newSubNameInput, setNewSubNameInput] = useState<string>('');
+  const [isAddingChildToId, setIsAddingChildToId] = useState<string | null>(null);
+  const [newChildNameInput, setNewChildNameInput] = useState<string>('');
   const [isAddingGroup, setIsAddingGroup] = useState<boolean>(false);
   const [newGroupNameInput, setNewGroupNameInput] = useState<string>('');
   const [isDirectoryManageMode, setIsDirectoryManageMode] = useState<boolean>(false);
@@ -706,7 +727,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     event.preventDefault();
     event.stopPropagation();
     const menuWidth = 220;
-    const menuHeight = 300;
+    const menuHeight = 360;
     setFolderContextMenu({
       ...menu,
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
@@ -724,7 +745,9 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
       setIsDirectoryManageMode(false);
       setEditingCategoryId(null);
       setEditingSubCategoryId(null);
+      setEditingChildCategoryId(null);
       setIsAddingSubToId(null);
+      setIsAddingChildToId(null);
       setIsAddingGroup(false);
       return;
     }
@@ -758,12 +781,22 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     setExpandedGroups(prev => ({ ...prev, [groupId]: true }));
   };
 
+  const startAddChildCategory = (groupId: string, subId: string) => {
+    if (!checkOwnerPermission()) return;
+    setIsAddingChildToId(subId);
+    setNewChildNameInput('');
+    setExpandedGroups(previous => ({ ...previous, [groupId]: true }));
+    setExpandedSubCategories(previous => ({ ...previous, [subId]: true }));
+  };
+
   useEffect(() => {
     if (isAuthorized) return;
     setIsDirectoryManageMode(false);
     setEditingCategoryId(null);
     setEditingSubCategoryId(null);
+    setEditingChildCategoryId(null);
     setIsAddingSubToId(null);
+    setIsAddingChildToId(null);
     setIsAddingGroup(false);
     setIsManageUnlockOpen(false);
     setManagePasswordInput('');
@@ -1118,19 +1151,41 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     document.body.removeChild(link);
   };
 
-  const downloadFolderAsZip = async (folderName: string, isGroup: boolean) => {
-    // Find all sounds that belong to this category or subcategory
+  const downloadFolderAsZip = async (
+    folderName: string,
+    isGroup: boolean,
+    groupId?: string,
+    subId?: string,
+    childId?: string,
+  ) => {
     const folderSounds = sounds.filter(sound => {
       if (isGroup) {
-        const matchedGroup = categories.find(g => g.name === folderName);
+        const matchedGroup = categories.find(group => group.id === groupId)
+          || categories.find(group => group.name === folderName);
         if (matchedGroup) {
           const subNames = matchedGroup.subCategories.map(s => s.name);
-          return sound.category === folderName || subNames.includes(sound.category) || (sound.subcategory && subNames.includes(sound.subcategory));
+          const childNames = matchedGroup.subCategories.flatMap(subcategory => (
+            (subcategory.childCategories || []).map(child => child.name)
+          ));
+          return sound.category === matchedGroup.name
+            || subNames.includes(sound.category)
+            || Boolean(sound.subcategory && subNames.includes(sound.subcategory))
+            || Boolean(sound.childCategory && childNames.includes(sound.childCategory));
         }
         return sound.category === folderName;
-      } else {
-        return sound.category === folderName || sound.subcategory === folderName;
       }
+      const matchedGroup = categories.find(group => group.id === groupId);
+      const matchedSubcategory = matchedGroup?.subCategories.find(subcategory => subcategory.id === subId);
+      if (childId) {
+        const matchedChild = matchedSubcategory?.childCategories?.find(child => child.id === childId);
+        return sound.category === matchedGroup?.name
+          && sound.subcategory === matchedSubcategory?.name
+          && sound.childCategory === matchedChild?.name;
+      }
+      if (matchedGroup && matchedSubcategory) {
+        return sound.category === matchedGroup.name && sound.subcategory === matchedSubcategory.name;
+      }
+      return sound.category === folderName || sound.subcategory === folderName || sound.childCategory === folderName;
     });
 
     if (folderSounds.length === 0) {
@@ -1292,15 +1347,20 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   };
 
   // Custom Confirmation Dialog state
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [customDialog, setCustomDialog] = useState<{
     isOpen: boolean;
     title: string;
     message: string;
     isConfirm: boolean;
-    onConfirm?: () => void;
+    onConfirm?: (password?: string) => void;
+    confirmTone?: 'warning' | 'danger';
+    confirmLabel?: string;
+    requiresPassword?: boolean;
   } | null>(null);
 
   const showCustomAlert = (title: string, message: string) => {
+    setConfirmPassword('');
     setCustomDialog({
       isOpen: true,
       title,
@@ -1309,13 +1369,22 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     });
   };
 
-  const showCustomConfirm = (title: string, message: string, onConfirm: () => void) => {
+  const showCustomConfirm = (
+    title: string,
+    message: string,
+    onConfirm: (password?: string) => void,
+    options?: { tone?: 'warning' | 'danger'; confirmLabel?: string; requiresPassword?: boolean },
+  ) => {
+    setConfirmPassword('');
     setCustomDialog({
       isOpen: true,
       title,
       message,
       isConfirm: true,
-      onConfirm
+      onConfirm,
+      confirmTone: options?.tone || 'warning',
+      confirmLabel: options?.confirmLabel || '确认',
+      requiresPassword: Boolean(options?.requiresPassword),
     });
   };
 
@@ -1392,6 +1461,26 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     });
   };
 
+  const moveChildCategory = (groupId: string, subId: string, childId: string, direction: 'up' | 'down') => {
+    if (!checkOwnerPermission()) return;
+    setCategories(previous => previous.map(group => {
+      if (group.id !== groupId) return group;
+      return {
+        ...group,
+        subCategories: group.subCategories.map(subcategory => {
+          if (subcategory.id !== subId) return subcategory;
+          const children = [...(subcategory.childCategories || [])];
+          const index = children.findIndex(child => child.id === childId);
+          if (index < 0) return subcategory;
+          const swapIndex = direction === 'up' ? index - 1 : index + 1;
+          if (swapIndex < 0 || swapIndex >= children.length) return subcategory;
+          [children[index], children[swapIndex]] = [children[swapIndex], children[index]];
+          return { ...subcategory, childCategories: children };
+        }),
+      };
+    }));
+  };
+
   const handleAddSubCategory = (groupId: string) => {
     if (!checkOwnerPermission()) return;
     if (!newSubNameInput.trim()) return;
@@ -1413,6 +1502,33 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     setIsAddingSubToId(null);
   };
 
+  const handleAddChildCategory = (groupId: string, subId: string) => {
+    if (!checkOwnerPermission()) return;
+    const name = newChildNameInput.trim();
+    if (!name) return;
+    const newChild: SubCategory = {
+      id: `child_${Date.now()}`,
+      name,
+      english: 'Custom Folder',
+      description: '用户自定义三级文件夹',
+    };
+    setCategories(previous => previous.map(group => (
+      group.id === groupId
+        ? {
+            ...group,
+            subCategories: group.subCategories.map(subcategory => (
+              subcategory.id === subId
+                ? { ...subcategory, childCategories: [...(subcategory.childCategories || []), newChild] }
+                : subcategory
+            )),
+          }
+        : group
+    )));
+    setNewChildNameInput('');
+    setIsAddingChildToId(null);
+    setExpandedSubCategories(previous => ({ ...previous, [subId]: true }));
+  };
+
   const handleAddGroup = () => {
     if (!checkOwnerPermission()) return;
     if (!newGroupNameInput.trim()) return;
@@ -1427,41 +1543,111 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     setIsAddingGroup(false);
   };
 
+  const deleteFolderWithContents = async (input: {
+    kind: 'category' | 'subcategory' | 'childcategory';
+    groupId: string;
+    subId?: string;
+    childId?: string;
+    displayName: string;
+    confirmationPassword?: string;
+  }) => {
+    try {
+      const response = await fetch('/api/sfx/library/folder', {
+        method: 'DELETE',
+        headers: getSfxLibraryAdminHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          kind: input.kind,
+          groupId: input.groupId,
+          subId: input.subId,
+          childId: input.childId,
+          baseRevision: serverRevisionRef.current,
+          confirmationPassword: input.confirmationPassword,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (response.status === 401) {
+        setSfxLibraryAdminToken('');
+        setIsAuthorized(false);
+        throw new Error('管理权限已过期，请重新验证后再删除。');
+      }
+      if (response.status === 409) {
+        await loadServerData();
+        throw new Error(payload.error || '音效库已被其他管理员更新，请确认最新内容后重试。');
+      }
+      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+
+      const nextCategories = Array.isArray(payload.categories) ? payload.categories : [];
+      const nextSounds = Array.isArray(payload.sounds) ? payload.sounds : [];
+      const categoriesJson = JSON.stringify(nextCategories);
+      const soundsJson = JSON.stringify(nextSounds);
+      serverRevisionRef.current = Number(payload.revision) || serverRevisionRef.current;
+      serverSnapshotRef.current = { categories: categoriesJson, sounds: soundsJson };
+      setCategories(nextCategories);
+      setSounds(nextSounds);
+      localStorage.setItem(SFX_LIBRARY_CATEGORIES_KEY, categoriesJson);
+      localStorage.setItem(SFX_LIBRARY_SOUNDS_KEY, soundsJson);
+      publishSfxLibraryIndex(nextCategories, nextSounds);
+      setSelectedCategory('全部');
+      setSelectedSoundId(nextSounds[0]?.id || '');
+      setIsPlaying(false);
+      showCustomAlert(
+        '删除完成',
+        `已删除“${input.displayName}”及其中 ${Number(payload.deletedSoundCount) || 0} 个音频文件。`,
+      );
+    } catch (error: any) {
+      showCustomAlert('删除失败', error?.message || '删除文件夹及音频文件失败，请稍后重试。');
+    }
+  };
+
   const handleDeleteCategory = (catId: string, catName: string) => {
     if (!checkOwnerPermission()) return;
     const affectedSoundsCount = sounds.filter(s => s.category === catName).length;
     showCustomConfirm(
       `确定要删除整个目录分类 "${catName}" 吗？`,
-      `只会删除这个目录，并将 ${affectedSoundsCount} 个关联音频移到“未分类”。不会删除任何音频文件。`,
-      () => {
-        setCategories(prev => prev.filter(c => c.id !== catId));
-        setSounds(prev => prev.map(s => s.category === catName ? { ...s, category: '未分类', subcategory: undefined } : s));
-        if (selectedCategory === catName) {
-          setSelectedCategory('全部');
-        }
-      }
+      `将永久删除这个目录以及其中 ${affectedSoundsCount} 个音频文件。此操作无法恢复，请确认已备份需要保留的文件。`,
+      (password) => {
+        void deleteFolderWithContents({
+          kind: 'category',
+          groupId: catId,
+          displayName: catName,
+          confirmationPassword: password,
+        });
+      },
+      { tone: 'danger', confirmLabel: '验证并永久删除', requiresPassword: true },
     );
   };
 
   const handleDeleteSubCategory = (groupId: string, subId: string, subName: string) => {
     if (!checkOwnerPermission()) return;
-    const affectedSoundsCount = sounds.filter(s => s.subcategory === subName).length;
+    const groupName = categories.find(group => group.id === groupId)?.name || '';
+    const affectedSoundsCount = sounds.filter(s => s.category === groupName && s.subcategory === subName).length;
     showCustomConfirm(
       `确定要删除子文件夹 "${subName}" 吗？`,
-      `只会删除这个子文件夹，并清空 ${affectedSoundsCount} 个音频的子文件夹归属。不会删除任何音频文件。`,
-      () => {
-        setCategories(prev => prev.map(group => {
-          if (group.id !== groupId) return group;
-          return {
-            ...group,
-            subCategories: group.subCategories.filter(sub => sub.id !== subId)
-          };
-        }));
-        setSounds(prev => prev.map(s => s.subcategory === subName ? { ...s, subcategory: undefined } : s));
-        if (selectedCategory === subName) {
-          setSelectedCategory('全部');
-        }
-      }
+      `将永久删除这个子文件夹以及其中 ${affectedSoundsCount} 个音频文件。此操作无法恢复，请确认已备份需要保留的文件。`,
+      () => { void deleteFolderWithContents({ kind: 'subcategory', groupId, subId, displayName: subName }); },
+      { tone: 'danger', confirmLabel: '永久删除' },
+    );
+  };
+
+  const handleDeleteChildCategory = (
+    groupId: string,
+    subId: string,
+    childId: string,
+    childName: string,
+  ) => {
+    if (!checkOwnerPermission()) return;
+    const group = categories.find(item => item.id === groupId);
+    const subcategory = group?.subCategories.find(item => item.id === subId);
+    const affectedSoundsCount = sounds.filter(sound => (
+      sound.category === group?.name
+      && sound.subcategory === subcategory?.name
+      && sound.childCategory === childName
+    )).length;
+    showCustomConfirm(
+      `确定要删除三级文件夹 "${childName}" 吗？`,
+      `将永久删除这个三级文件夹以及其中 ${affectedSoundsCount} 个音频文件。此操作无法恢复，请确认已备份需要保留的文件。`,
+      () => { void deleteFolderWithContents({ kind: 'childcategory', groupId, subId, childId, displayName: childName }); },
+      { tone: 'danger', confirmLabel: '永久删除' },
     );
   };
 
@@ -1500,12 +1686,226 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
         subCategories: group.subCategories.map(sub => sub.id === subId ? { ...sub, name: newName } : sub)
       };
     }));
-    setSounds(prev => prev.map(s => s.subcategory === oldName ? { ...s, subcategory: newName } : s));
+    const groupName = categories.find(group => group.id === groupId)?.name;
+    setSounds(prev => prev.map(s => (
+      s.category === groupName && s.subcategory === oldName ? { ...s, subcategory: newName } : s
+    )));
     if (selectedCategory === oldName) {
       setSelectedCategory(newName);
     }
     setEditingSubCategoryId(null);
   };
+
+  const startRenameChildCategory = (childId: string, name: string) => {
+    if (!checkOwnerPermission()) return;
+    setEditingChildCategoryId(childId);
+    setEditNameInput(name);
+  };
+
+  const confirmRenameChildCategory = (
+    groupId: string,
+    subId: string,
+    childId: string,
+    oldName: string,
+  ) => {
+    if (!checkOwnerPermission()) return;
+    const newName = editNameInput.trim();
+    if (!newName) return;
+    const group = categories.find(item => item.id === groupId);
+    const subcategory = group?.subCategories.find(item => item.id === subId);
+    setCategories(previous => previous.map(item => (
+      item.id === groupId
+        ? {
+            ...item,
+            subCategories: item.subCategories.map(sub => (
+              sub.id === subId
+                ? {
+                    ...sub,
+                    childCategories: (sub.childCategories || []).map(child => (
+                      child.id === childId ? { ...child, name: newName } : child
+                    )),
+                  }
+                : sub
+            )),
+          }
+        : item
+    )));
+    setSounds(previous => previous.map(sound => (
+      sound.category === group?.name
+      && sound.subcategory === subcategory?.name
+      && sound.childCategory === oldName
+        ? { ...sound, childCategory: newName }
+        : sound
+    )));
+    if (selectedCategory === oldName) setSelectedCategory(newName);
+    setEditingChildCategoryId(null);
+  };
+
+  const renderSubCategoryRows = (group: CategoryGroup, sectionIndex: number) => (
+    group.subCategories.map((subcategory, subIndex) => {
+      const children = subcategory.childCategories || [];
+      const isSubExpanded = Boolean(expandedSubCategories[subcategory.id]);
+      const isSubActive = selectedCategory === subcategory.name;
+      const subCount = sounds.filter(sound => (
+        sound.category === group.name && sound.subcategory === subcategory.name
+      )).length;
+
+      return (
+        <div key={subcategory.id} className="space-y-0.5">
+          <div
+            onContextMenu={(event) => openFolderContextMenu(event, {
+              kind: 'sub',
+              groupId: group.id,
+              groupName: group.name,
+              groupIndex: sectionIndex,
+              totalGroups: categories.length,
+              subId: subcategory.id,
+              subName: subcategory.name,
+              subIndex,
+              totalSubs: group.subCategories.length,
+            })}
+            className="group/sub flex items-center justify-between rounded py-0.5 transition-all hover:bg-slate-50"
+          >
+            {editingSubCategoryId === subcategory.id ? (
+              <div className="flex flex-1 items-center gap-1 pl-1">
+                <input
+                  type="text"
+                  value={editNameInput}
+                  onChange={(event) => setEditNameInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') confirmRenameSubCategory(group.id, subcategory.id, subcategory.name);
+                    if (event.key === 'Escape') setEditingSubCategoryId(null);
+                  }}
+                  className="w-24 rounded border border-emerald-300 bg-white px-1 py-0.5 text-[10px] outline-none focus:border-emerald-500"
+                  autoFocus
+                />
+                <button onClick={() => confirmRenameSubCategory(group.id, subcategory.id, subcategory.name)} className="shrink-0 rounded border border-emerald-100 bg-emerald-50 p-0.5 text-emerald-600">
+                  <Check className="h-2 w-2" />
+                </button>
+                <button onClick={() => setEditingSubCategoryId(null)} className="shrink-0 rounded border border-slate-150 bg-slate-50 p-0.5 text-slate-400">
+                  <X className="h-2.5 w-2.5" />
+                </button>
+              </div>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setExpandedSubCategories(previous => ({ ...previous, [subcategory.id]: !previous[subcategory.id] }));
+                  }}
+                  className={`ml-0.5 rounded p-0.5 text-slate-400 hover:bg-slate-100 ${children.length === 0 && !canManageDirectories ? 'invisible' : ''}`}
+                  title={isSubExpanded ? '收起三级文件夹' : '展开三级文件夹'}
+                >
+                  {isSubExpanded ? <ChevronDown className="h-2.5 w-2.5" /> : <ChevronRight className="h-2.5 w-2.5" />}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedCategory(subcategory.name);
+                    setSelectedTag(null);
+                  }}
+                  className={`flex flex-1 items-center justify-between rounded px-1 py-1 text-[10px] font-medium transition-all ${isSubActive ? 'bg-emerald-50/70 font-bold text-emerald-700' : 'text-slate-500 hover:text-slate-800'}`}
+                >
+                  <span className="shrink truncate text-left" title={subcategory.description}>📁 {subcategory.name}</span>
+                </button>
+              </>
+            )}
+            {editingSubCategoryId !== subcategory.id && (
+              <span className="ml-1 mr-1.5 shrink-0 font-mono text-[8px] text-slate-400">{subCount}</span>
+            )}
+          </div>
+
+          {isSubExpanded && (
+            <div className="ml-4 space-y-0.5 border-l border-slate-100 pl-2">
+              {isAddingChildToId === subcategory.id && (
+                <div className="flex items-center gap-1 rounded border border-slate-100 bg-slate-50 p-1">
+                  <input
+                    type="text"
+                    value={newChildNameInput}
+                    onChange={(event) => setNewChildNameInput(event.target.value)}
+                    placeholder="输入三级文件夹名"
+                    className="w-24 rounded border border-slate-200 px-1 py-0.5 text-[9.5px] outline-none focus:border-emerald-500"
+                    autoFocus
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') handleAddChildCategory(group.id, subcategory.id);
+                      if (event.key === 'Escape') setIsAddingChildToId(null);
+                    }}
+                  />
+                  <button onClick={() => handleAddChildCategory(group.id, subcategory.id)} className="rounded border border-emerald-100 bg-emerald-50 p-0.5 text-emerald-600"><Check className="h-2.5 w-2.5" /></button>
+                  <button onClick={() => setIsAddingChildToId(null)} className="rounded border border-slate-150 bg-slate-50 p-0.5 text-slate-400"><X className="h-2.5 w-2.5" /></button>
+                </div>
+              )}
+              {children.length === 0 && isAddingChildToId !== subcategory.id ? (
+                <div className="flex items-center gap-1 px-1 py-1 text-[9px] italic text-slate-400">
+                  <span>暂无三级文件夹</span>
+                  {canManageDirectories && <button type="button" onClick={() => startAddChildCategory(group.id, subcategory.id)} className="font-bold text-indigo-600 underline">添加</button>}
+                </div>
+              ) : children.map((child, childIndex) => {
+                const isChildActive = selectedCategory === child.name;
+                const childCount = sounds.filter(sound => (
+                  sound.category === group.name
+                  && sound.subcategory === subcategory.name
+                  && sound.childCategory === child.name
+                )).length;
+                return (
+                  <div
+                    key={child.id}
+                    onContextMenu={(event) => openFolderContextMenu(event, {
+                      kind: 'child',
+                      groupId: group.id,
+                      groupName: group.name,
+                      groupIndex: sectionIndex,
+                      totalGroups: categories.length,
+                      subId: subcategory.id,
+                      subName: subcategory.name,
+                      subIndex,
+                      totalSubs: group.subCategories.length,
+                      childId: child.id,
+                      childName: child.name,
+                      childIndex,
+                      totalChildren: children.length,
+                    })}
+                    className="flex items-center justify-between rounded py-0.5 hover:bg-slate-50"
+                  >
+                    {editingChildCategoryId === child.id ? (
+                      <div className="flex flex-1 items-center gap-1 pl-1">
+                        <input
+                          type="text"
+                          value={editNameInput}
+                          onChange={(event) => setEditNameInput(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') confirmRenameChildCategory(group.id, subcategory.id, child.id, child.name);
+                            if (event.key === 'Escape') setEditingChildCategoryId(null);
+                          }}
+                          className="w-20 rounded border border-emerald-300 bg-white px-1 py-0.5 text-[9.5px] outline-none"
+                          autoFocus
+                        />
+                        <button onClick={() => confirmRenameChildCategory(group.id, subcategory.id, child.id, child.name)} className="rounded bg-emerald-50 p-0.5 text-emerald-600"><Check className="h-2 w-2" /></button>
+                        <button onClick={() => setEditingChildCategoryId(null)} className="rounded bg-slate-50 p-0.5 text-slate-400"><X className="h-2 w-2" /></button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedCategory(child.name);
+                          setSelectedTag(null);
+                        }}
+                        className={`flex flex-1 items-center rounded px-1.5 py-1 text-left text-[9.5px] ${isChildActive ? 'bg-emerald-50/70 font-bold text-emerald-700' : 'text-slate-500 hover:text-slate-800'}`}
+                      >
+                        <span className="truncate" title={child.description}>📄 {child.name}</span>
+                      </button>
+                    )}
+                    {editingChildCategoryId !== child.id && <span className="mr-1.5 font-mono text-[8px] text-slate-400">{childCount}</span>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      );
+    })
+  );
 
   const [selectedSoundId, setSelectedSoundId] = useState<string>('sfx-1');
   const [isPropertiesPanelOpen, setIsPropertiesPanelOpen] = useState(true);
@@ -1559,6 +1959,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   const [namingStrategy, setNamingStrategy] = useState<'smart' | 'original' | 'standard'>('smart');
   const [batchMainCategory, setBatchMainCategory] = useState<string>('');
   const [batchSubCategory, setBatchSubCategory] = useState<string>('');
+  const [batchChildCategory, setBatchChildCategory] = useState<string>('');
 
   // Synchronize batch subcategories dynamically
   useEffect(() => {
@@ -1572,11 +1973,18 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
         if (!hasSub) {
           setBatchSubCategory(matchedGroup.subCategories[0].name);
         }
+        const matchedSubcategory = matchedGroup.subCategories.find(sub => sub.name === batchSubCategory)
+          || matchedGroup.subCategories[0];
+        const children = matchedSubcategory.childCategories || [];
+        if (!children.some(child => child.name === batchChildCategory)) {
+          setBatchChildCategory(children[0]?.name || '');
+        }
       } else {
         setBatchSubCategory('');
+        setBatchChildCategory('');
       }
     }
-  }, [batchMainCategory, categories, batchSubCategory]);
+  }, [batchChildCategory, batchMainCategory, categories, batchSubCategory]);
 
   const getImportTarget = (): ImportTarget | null => {
     const selectedGroup = categories.find(group => group.name === selectedCategory);
@@ -1584,6 +1992,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
       return {
         category: selectedGroup.name,
         subcategory: selectedGroup.subCategories[0]?.name || '',
+        childCategory: selectedGroup.subCategories[0]?.childCategories?.[0]?.name || '',
       };
     }
 
@@ -1594,7 +2003,21 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
       return {
         category: selectedSubGroup.name,
         subcategory: selectedCategory,
+        childCategory: selectedSubGroup.subCategories.find(sub => sub.name === selectedCategory)?.childCategories?.[0]?.name || '',
       };
+    }
+
+    for (const group of categories) {
+      for (const subcategory of group.subCategories) {
+        const child = (subcategory.childCategories || []).find(item => item.name === selectedCategory);
+        if (child) {
+          return {
+            category: group.name,
+            subcategory: subcategory.name,
+            childCategory: child.name,
+          };
+        }
+      }
     }
 
     const batchGroup = categories.find(group => group.name === batchMainCategory) || categories[0];
@@ -1606,16 +2029,20 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     return {
       category: batchGroup.name,
       subcategory: batchSubcategory,
+      childCategory: batchGroup.subCategories.find(sub => sub.name === batchSubcategory)
+        ?.childCategories?.find(child => child.name === batchChildCategory)?.name || '',
     };
   };
 
   const applyImportTarget = (target: ImportTarget) => {
     setBatchMainCategory(target.category);
     setBatchSubCategory(target.subcategory);
+    setBatchChildCategory(target.childCategory);
     setImportItems(prev => prev.map(item => ({
       ...item,
       category: target.category,
       subcategory: target.subcategory,
+      childCategory: target.childCategory,
     })));
   };
 
@@ -1624,14 +2051,22 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     applyImportTarget({
       category,
       subcategory: group?.subCategories[0]?.name || '',
+      childCategory: group?.subCategories[0]?.childCategories?.[0]?.name || '',
     });
   };
 
   const handleBatchSubCategoryChange = (subcategory: string) => {
+    const group = categories.find(item => item.name === batchMainCategory);
+    const sub = group?.subCategories.find(item => item.name === subcategory);
     applyImportTarget({
       category: batchMainCategory,
       subcategory,
+      childCategory: sub?.childCategories?.[0]?.name || '',
     });
+  };
+
+  const handleBatchChildCategoryChange = (childCategory: string) => {
+    applyImportTarget({ category: batchMainCategory, subcategory: batchSubCategory, childCategory });
   };
 
   const isRegularNaming = (filename: string): boolean => {
@@ -1788,11 +2223,12 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
         ...item,
         category: batchMainCategory,
         subcategory: batchSubCategory,
+        childCategory: batchChildCategory,
         fileName: finalFileName
       };
     }));
     
-    showCustomAlert("批量应用成功", `已将待入库的所有音效分类一键批量调整为: "${batchMainCategory} -> ${batchSubCategory || '无'}"。`);
+    showCustomAlert("批量应用成功", `已将待入库的所有音效分类一键批量调整为: "${batchMainCategory} -> ${batchSubCategory || '无'}${batchChildCategory ? ` -> ${batchChildCategory}` : ''}"。`);
   };
 
   // Refs
@@ -1958,6 +2394,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     if (sound.fileName.toLowerCase().includes(lowerQuery)) score += 8;
     if (sound.category.toLowerCase().includes(lowerQuery)) score += 5;
     if (sound.subcategory?.toLowerCase().includes(lowerQuery)) score += 5;
+    if (sound.childCategory?.toLowerCase().includes(lowerQuery)) score += 5;
     if (sound.path?.toLowerCase().includes(lowerQuery)) score += 7;
     if (sound.designer.toLowerCase().includes(lowerQuery)) score += 4;
 
@@ -2013,8 +2450,12 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
             (sound.subcategory && subNames.includes(sound.subcategory));
           if (!matchesGroup) return false;
         } else {
-          // It's a leaf subcategory, check direct match
-          if (sound.category !== selectedCategory && sound.subcategory !== selectedCategory) {
+          const isChildCategory = categories.some(group => group.subCategories.some(subcategory => (
+            (subcategory.childCategories || []).some(child => child.name === selectedCategory)
+          )));
+          if (isChildCategory) {
+            if (sound.childCategory !== selectedCategory) return false;
+          } else if (sound.category !== selectedCategory && sound.subcategory !== selectedCategory) {
             return false;
           }
         }
@@ -2459,6 +2900,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     if (importTarget) {
       setBatchMainCategory(importTarget.category);
       setBatchSubCategory(importTarget.subcategory);
+      setBatchChildCategory(importTarget.childCategory);
     }
 
     try {
@@ -2489,6 +2931,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
             ...(importTarget ? {
               category: importTarget.category,
               subcategory: importTarget.subcategory,
+              childCategory: importTarget.childCategory,
             } : {}),
             duration: parseFloat(duration.toFixed(2))
           };
@@ -2504,6 +2947,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
               ...analyzed,
               category: importTarget.category,
               subcategory: importTarget.subcategory,
+              childCategory: importTarget.childCategory,
             }
           : analyzed;
       });
@@ -2533,7 +2977,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     itemsToUpload
       .filter(item => item.status !== 'success' && item.status !== 'skipped')
       .forEach(item => {
-        const key = getAudioDirectoryFileKey(item.category, item.subcategory, item.fileName);
+        const key = getAudioDirectoryFileKey(item.category, item.subcategory, item.fileName, item.childCategory);
         if (!key) return;
         const group = pendingGroups.get(key) || [];
         group.push(item);
@@ -2542,7 +2986,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
 
     const existingFileNameKeys = new Set(
       sounds
-        .map(sound => getAudioDirectoryFileKey(sound.category, sound.subcategory, sound.fileName))
+        .map(sound => getAudioDirectoryFileKey(sound.category, sound.subcategory, sound.fileName, sound.childCategory))
         .filter(Boolean),
     );
     const duplicateKeys = new Set(
@@ -2571,11 +3015,11 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
         .forEach(item => {
           const originalName = item.fileName;
           let candidateName = originalName;
-          let candidateKey = getAudioDirectoryFileKey(item.category, item.subcategory, candidateName);
+          let candidateKey = getAudioDirectoryFileKey(item.category, item.subcategory, candidateName, item.childCategory);
           let suffix = 2;
           while (reservedKeys.has(candidateKey)) {
             candidateName = appendDuplicateFileNameSuffix(originalName, suffix);
-            candidateKey = getAudioDirectoryFileKey(item.category, item.subcategory, candidateName);
+            candidateKey = getAudioDirectoryFileKey(item.category, item.subcategory, candidateName, item.childCategory);
             suffix += 1;
           }
           if (candidateName !== originalName) {
@@ -2685,6 +3129,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
           fileName: originalFilenameOnServer || item.fileName.trim() || cleanFilenameOnServer || (item.originalFile ? item.originalFile.name : 'Unknown'),
           category: item.category,
           subcategory: item.subcategory,
+          childCategory: item.childCategory,
           tags: item.tags,
           duration: item.duration,
           format: (item.type === 'MP3' || item.type === 'OGG' || item.type === 'WAV') ? item.type as 'WAV' | 'MP3' | 'OGG' : 'WAV',
@@ -2720,13 +3165,13 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     // Add successful ones to library
     if (soundsToAdd.length > 0) {
       const newFileNameKeys = new Set(soundsToAdd.map(sound => (
-        getAudioDirectoryFileKey(sound.category, sound.subcategory, sound.fileName)
+        getAudioDirectoryFileKey(sound.category, sound.subcategory, sound.fileName, sound.childCategory)
       )));
 
       if (duplicateResolution === 'replace') {
         const replacedStorageKeys = sounds
           .filter(sound => newFileNameKeys.has(
-            getAudioDirectoryFileKey(sound.category, sound.subcategory, sound.fileName),
+            getAudioDirectoryFileKey(sound.category, sound.subcategory, sound.fileName, sound.childCategory),
           ))
           .map(sound => sound.storageKey)
           .filter((storageKey): storageKey is string => Boolean(storageKey));
@@ -2754,6 +3199,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                 existingSound.category,
                 existingSound.subcategory,
                 existingSound.fileName,
+                existingSound.childCategory,
               ),
             ))
           : prev;
@@ -2887,8 +3333,6 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                 </span>
               </>
             )}
-            <span className="text-slate-200">·</span>
-            <span className="hover:text-emerald-600 cursor-pointer transition-colors" onClick={() => showCustomAlert("引擎 & DAW 同步通道已开启", "⚙️ 音频引擎资产同步通道(Unity / Unreal Integration)与DAW工作流(Reaper Link)集成服务已被唤醒并建立桥接。")}>同步通道</span>
           </div>
         </div>
 
@@ -2896,7 +3340,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
         <div className="flex items-center gap-3">
 
           <button 
-            onClick={() => showCustomAlert("💡 操作使用指南", "1. 双轨制目录设计：左侧为“音效分类”、“全部音乐”与“公司游戏音效”树形目录树，支持无限层级拓展与手动删减/重命名，右侧支持一键AI智能标签匹配检索。\n\n2. 模糊意图智能搜索：输入“低频重击”等人类描述词时，Gemini 会自动声音情绪、物理特性并映射对齐 #低频、#撞击等对应资产标签。\n\n3. 键盘空格键热键：在浏览任何界面时，按下键盘“空格键 (Space)”可以一键控制当前选中音频文件的播放或暂停试听。\n\n4. 工作站拖动桥接：支持将右侧的资产卡片直接通过鼠标拖动投递到正在运行中的 Unity / Unreal 引擎及 Reaper DAW 轨道中自动同步。")}
+            onClick={() => showCustomAlert("💡 操作使用指南", "1. 双轨制目录设计：左侧为“音效分类”、“全部音乐”与“公司游戏音效”树形目录树，支持无限层级拓展与手动删减/重命名，右侧支持一键AI智能标签匹配检索。\n\n2. 模糊意图智能搜索：输入“低频重击”等人类描述词时，Gemini 会自动声音情绪、物理特性并映射对齐 #低频、#撞击等对应资产标签。\n\n3. 键盘空格键热键：在浏览任何界面时，按下键盘“空格键 (Space)”可以一键控制当前选中音频文件的播放或暂停试听。")}
             className="p-2 bg-slate-100 border border-slate-200 text-slate-500 hover:text-slate-800 rounded-xl hover:bg-slate-200/50 transition-all"
             title="操作指南"
           >
@@ -3183,76 +3627,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                                       )}
                                     </div>
                                   ) : (
-                                    group.subCategories.map((sub, subIdx) => {
-                                      const isSubActive = selectedCategory === sub.name;
-                                      const subCount = sounds.filter(s => s.category === sub.name || s.subcategory === sub.name).length;
-
-                                      return (
-                                        <div
-                                          key={sub.id}
-                                          onContextMenu={(event) => openFolderContextMenu(event, {
-                                            kind: 'sub',
-                                            groupId: group.id,
-                                            groupName: group.name,
-                                            groupIndex: sectionIdx,
-                                            totalGroups: categories.length,
-                                            subId: sub.id,
-                                            subName: sub.name,
-                                            subIndex: subIdx,
-                                            totalSubs: group.subCategories.length,
-                                          })}
-                                          className="group/sub flex items-center justify-between py-0.5 rounded transition-all hover:bg-slate-50"
-                                        >
-                                          {editingSubCategoryId === sub.id ? (
-                                            <div className="flex items-center gap-1 flex-1 pl-1">
-                                              <input
-                                                type="text"
-                                                value={editNameInput}
-                                                onChange={(e) => setEditNameInput(e.target.value)}
-                                                onKeyDown={(e) => {
-                                                  if (e.key === 'Enter') confirmRenameSubCategory(group.id, sub.id, sub.name);
-                                                  if (e.key === 'Escape') setEditingSubCategoryId(null);
-                                                }}
-                                                className="px-1 py-0.5 rounded border border-emerald-300 focus:border-emerald-500 bg-white text-[10px] w-24 outline-none"
-                                                autoFocus
-                                              />
-                                              <button 
-                                                onClick={() => confirmRenameSubCategory(group.id, sub.id, sub.name)}
-                                                className="p-0.5 text-emerald-600 bg-emerald-50 border border-emerald-100 rounded shrink-0"
-                                              >
-                                                <Check className="w-2 h-2" />
-                                              </button>
-                                              <button 
-                                                onClick={() => setEditingSubCategoryId(null)}
-                                                className="p-0.5 text-slate-400 bg-slate-50 border border-slate-150 rounded shrink-0"
-                                              >
-                                                <X className="w-2.5 h-2.5" />
-                                              </button>
-                                            </div>
-                                          ) : (
-                                            <button
-                                              onClick={() => {
-                                                setSelectedCategory(sub.name);
-                                                setSelectedTag(null);
-                                              }}
-                                              className={`flex-1 flex items-center justify-between py-1 px-1.5 rounded text-[10px] font-medium transition-all ${
-                                                isSubActive
-                                                  ? 'bg-emerald-50/70 text-emerald-700 font-bold'
-                                                  : 'text-slate-500 hover:text-slate-800'
-                                              }`}
-                                            >
-                                              <span className="truncate text-left shrink" title={sub.description}>📄 {sub.name}</span>
-                                            </button>
-                                          )}
-
-                                          {editingSubCategoryId !== sub.id && (
-                                            <span className="text-[8px] font-mono text-slate-400 ml-1 shrink-0 mr-1.5">
-                                              {subCount}
-                                            </span>
-                                          )}
-                                        </div>
-                                      );
-                                    })
+                                    renderSubCategoryRows(group, sectionIdx)
                                   )}
                                 </div>
                               )}
@@ -3454,76 +3829,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                                       )}
                                     </div>
                                   ) : (
-                                    group.subCategories.map((sub, subIdx) => {
-                                      const isSubActive = selectedCategory === sub.name;
-                                      const subCount = sounds.filter(s => s.category === sub.name || s.subcategory === sub.name).length;
-
-                                      return (
-                                        <div
-                                          key={sub.id}
-                                          onContextMenu={(event) => openFolderContextMenu(event, {
-                                            kind: 'sub',
-                                            groupId: group.id,
-                                            groupName: group.name,
-                                            groupIndex: sectionIdx,
-                                            totalGroups: categories.length,
-                                            subId: sub.id,
-                                            subName: sub.name,
-                                            subIndex: subIdx,
-                                            totalSubs: group.subCategories.length,
-                                          })}
-                                          className="group/sub flex items-center justify-between py-0.5 rounded transition-all hover:bg-slate-50"
-                                        >
-                                          {editingSubCategoryId === sub.id ? (
-                                            <div className="flex items-center gap-1 flex-1 pl-1">
-                                              <input
-                                                type="text"
-                                                value={editNameInput}
-                                                onChange={(e) => setEditNameInput(e.target.value)}
-                                                onKeyDown={(e) => {
-                                                  if (e.key === 'Enter') confirmRenameSubCategory(group.id, sub.id, sub.name);
-                                                  if (e.key === 'Escape') setEditingSubCategoryId(null);
-                                                }}
-                                                className="px-1 py-0.5 rounded border border-emerald-300 focus:border-emerald-500 bg-white text-[10px] w-24 outline-none"
-                                                autoFocus
-                                              />
-                                              <button 
-                                                onClick={() => confirmRenameSubCategory(group.id, sub.id, sub.name)}
-                                                className="p-0.5 text-emerald-600 bg-emerald-50 border border-emerald-100 rounded shrink-0"
-                                              >
-                                                <Check className="w-2 h-2" />
-                                              </button>
-                                              <button 
-                                                onClick={() => setEditingSubCategoryId(null)}
-                                                className="p-0.5 text-slate-400 bg-slate-50 border border-slate-150 rounded shrink-0"
-                                              >
-                                                <X className="w-2.5 h-2.5" />
-                                              </button>
-                                            </div>
-                                          ) : (
-                                            <button
-                                              onClick={() => {
-                                                setSelectedCategory(sub.name);
-                                                setSelectedTag(null);
-                                              }}
-                                              className={`flex-1 flex items-center justify-between py-1 px-1.5 rounded text-[10px] font-medium transition-all ${
-                                                isSubActive
-                                                  ? 'bg-emerald-50/70 text-emerald-700 font-bold'
-                                                  : 'text-slate-500 hover:text-slate-800'
-                                              }`}
-                                            >
-                                              <span className="truncate text-left shrink" title={sub.description}>📄 {sub.name}</span>
-                                            </button>
-                                          )}
-
-                                          {editingSubCategoryId !== sub.id && (
-                                            <span className="text-[8px] font-mono text-slate-400 ml-1 shrink-0 mr-1.5">
-                                              {subCount}
-                                            </span>
-                                          )}
-                                        </div>
-                                      );
-                                    })
+                                    renderSubCategoryRows(group, sectionIdx)
                                   )}
                                 </div>
                               )}
@@ -3662,76 +3968,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                                       )}
                                     </div>
                                   ) : (
-                                    group.subCategories.map((sub, subIdx) => {
-                                      const isSubActive = selectedCategory === sub.name;
-                                      const subCount = sounds.filter(s => s.category === sub.name || s.subcategory === sub.name).length;
-
-                                      return (
-                                        <div
-                                          key={sub.id}
-                                          onContextMenu={(event) => openFolderContextMenu(event, {
-                                            kind: 'sub',
-                                            groupId: group.id,
-                                            groupName: group.name,
-                                            groupIndex: sectionIdx,
-                                            totalGroups: categories.length,
-                                            subId: sub.id,
-                                            subName: sub.name,
-                                            subIndex: subIdx,
-                                            totalSubs: group.subCategories.length,
-                                          })}
-                                          className="group/sub flex items-center justify-between py-0.5 rounded transition-all hover:bg-slate-50"
-                                        >
-                                          {editingSubCategoryId === sub.id ? (
-                                            <div className="flex items-center gap-1 flex-1 pl-1">
-                                              <input
-                                                type="text"
-                                                value={editNameInput}
-                                                onChange={(e) => setEditNameInput(e.target.value)}
-                                                onKeyDown={(e) => {
-                                                  if (e.key === 'Enter') confirmRenameSubCategory(group.id, sub.id, sub.name);
-                                                  if (e.key === 'Escape') setEditingSubCategoryId(null);
-                                                }}
-                                                className="px-1 py-0.5 rounded border border-emerald-300 focus:border-emerald-500 bg-white text-[10px] w-24 outline-none"
-                                                autoFocus
-                                              />
-                                              <button 
-                                                onClick={() => confirmRenameSubCategory(group.id, sub.id, sub.name)}
-                                                className="p-0.5 text-emerald-600 bg-emerald-50 border border-emerald-100 rounded shrink-0"
-                                              >
-                                                <Check className="w-2 h-2" />
-                                              </button>
-                                              <button 
-                                                onClick={() => setEditingSubCategoryId(null)}
-                                                className="p-0.5 text-slate-400 bg-slate-50 border border-slate-150 rounded shrink-0"
-                                              >
-                                                <X className="w-2.5 h-2.5" />
-                                              </button>
-                                            </div>
-                                          ) : (
-                                            <button
-                                              onClick={() => {
-                                                setSelectedCategory(sub.name);
-                                                setSelectedTag(null);
-                                              }}
-                                              className={`flex-1 flex items-center justify-between py-1 px-1.5 rounded text-[10px] font-medium transition-all ${
-                                                isSubActive
-                                                  ? 'bg-emerald-50/70 text-emerald-700 font-bold'
-                                                  : 'text-slate-500 hover:text-slate-800'
-                                              }`}
-                                            >
-                                              <span className="truncate text-left shrink" title={sub.description}>📄 {sub.name}</span>
-                                            </button>
-                                          )}
-
-                                          {editingSubCategoryId !== sub.id && (
-                                            <span className="text-[8px] font-mono text-slate-400 ml-1 shrink-0 mr-1.5">
-                                              {subCount}
-                                            </span>
-                                          )}
-                                        </div>
-                                      );
-                                    })
+                                    renderSubCategoryRows(group, sectionIdx)
                                   )}
                                 </div>
                               )}
@@ -4235,7 +4472,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                 </div>
               </div>
 
-              {/* Unity/Reaper Drag Simulator Trigger & Export Actions */}
+              {/* Asset path and export actions */}
               <div className="flex items-center gap-2">
                 <button
                   onClick={copySoundPath}
@@ -4286,27 +4523,6 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
             </button>
           </div>
           
-          {/* Audio Drag Area mockup */}
-          <div className="p-4 border-b border-slate-200 bg-slate-50/60 text-center space-y-2 shrink-0">
-            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block">游戏开发 & 音频工作站联动</span>
-            
-            <div 
-              draggable
-              onDragStart={(e) => {
-                e.dataTransfer.setData("text/plain", selectedSound.path);
-                e.dataTransfer.effectAllowed = "copy";
-              }}
-              onClick={() => showCustomAlert("🖱️ 拖拽与导出联动", `已触发拖拽机制模拟：该资产 [${selectedSound.fileName}] 支持在桌面上直接拖拽投递到 Unity 资源层 (Assets) 或 Reaper DAW 时间线上。`)}
-              className="bg-white hover:bg-slate-50 border border-dashed border-slate-200 hover:border-emerald-500/60 rounded-xl p-3 text-center cursor-grab active:cursor-grabbing transition-all flex flex-col items-center justify-center gap-1.5"
-            >
-              <FileAudio className="w-7 h-7 text-emerald-600" />
-              <div>
-                <p className="text-[11px] font-black text-slate-800">{selectedSound.fileName}</p>
-                <p className="text-[9px] text-slate-400 mt-0.5">按住拖拽至 Unity / Unreal / Reaper</p>
-              </div>
-            </div>
-          </div>
-
           <div className="p-4 space-y-5">
             {/* Meta Properties */}
             <div className="space-y-3">
@@ -4389,15 +4605,6 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                   <span>特征可信度: 99.4%</span>
                   <span className="text-emerald-600 font-bold">已写入资产包</span>
                 </div>
-              </div>
-            </div>
-
-            {/* Integration info */}
-            <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 flex items-start gap-2 text-[10px] text-slate-500 leading-normal">
-              <Info className="w-3.5 h-3.5 text-indigo-500 shrink-0 mt-0.5" />
-              <div className="space-y-1">
-                <p className="font-bold text-slate-700">已桥接 Unreal 5.4 / Unity 2023</p>
-                <p className="text-slate-450">在音频工作站(DAW)点击拖入本库，工具将触发实时映射同步归档。</p>
               </div>
             </div>
 
@@ -4494,7 +4701,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                     
                     <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
                       {/* Batch Category selection */}
-                      <div className="md:col-span-5 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <div className="md:col-span-7 grid grid-cols-1 sm:grid-cols-3 gap-2">
                         <div className="space-y-1">
                           <label className="text-[10px] text-slate-500 font-bold block">批量入库目标主分类</label>
                           <select
@@ -4519,6 +4726,23 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                               const subCategories = group ? group.subCategories : [];
                               return subCategories.map(sub => (
                                 <option key={sub.id} value={sub.name}>📄 {sub.name}</option>
+                              ));
+                            })()}
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-[10px] text-slate-500 font-bold block">三级文件夹（可选）</label>
+                          <select
+                            value={batchChildCategory}
+                            onChange={(e) => handleBatchChildCategoryChange(e.target.value)}
+                            className="w-full bg-white border border-slate-200 hover:border-slate-300 focus:border-emerald-500 rounded-lg px-2 py-1.5 text-xs text-slate-750 outline-none transition-all font-medium"
+                          >
+                            <option value="">不使用三级文件夹</option>
+                            {(() => {
+                              const group = categories.find(g => g.name === batchMainCategory);
+                              const subcategory = group?.subCategories.find(sub => sub.name === batchSubCategory);
+                              return (subcategory?.childCategories || []).map(child => (
+                                <option key={child.id} value={child.name}>📄 {child.name}</option>
                               ));
                             })()}
                           </select>
@@ -4593,6 +4817,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                           <th className="p-3 w-[160px]">工程化文件名 (手动修改)</th>
                           <th className="p-3 w-[130px]">主分类 (可手改)</th>
                           <th className="p-3 w-[140px]">二级子分类 (可手改)</th>
+                          <th className="p-3 w-[140px]">三级文件夹 (可选)</th>
                           <th className="p-3">特征标签 (英文/逗号分隔)</th>
                           <th className="p-3 text-center w-[50px]">操作</th>
                         </tr>
@@ -4707,6 +4932,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                                   const group = categories.find(g => g.name === e.target.value);
                                   if (group && group.subCategories.length > 0) {
                                     updated[index].subcategory = group.subCategories[0].name;
+                                    updated[index].childCategory = group.subCategories[0].childCategories?.[0]?.name || '';
                                   }
                                   setImportItems(updated);
                                 }}
@@ -4726,6 +4952,9 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                                 onChange={(e) => {
                                   const updated = [...importItems];
                                   updated[index].subcategory = e.target.value;
+                                  const group = categories.find(g => g.name === updated[index].category);
+                                  updated[index].childCategory = group?.subCategories.find(sub => sub.name === e.target.value)
+                                    ?.childCategories?.[0]?.name || '';
                                   setImportItems(updated);
                                 }}
                                 disabled={isUploading || item.status === 'success'}
@@ -4736,6 +4965,29 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                                   const subCategories = group ? group.subCategories : [];
                                   return subCategories.map(sub => (
                                     <option key={sub.id} value={sub.name}>📄 {sub.name}</option>
+                                  ));
+                                })()}
+                              </select>
+                            </td>
+
+                            {/* Tags list */}
+                            <td className="p-2">
+                              <select
+                                value={item.childCategory || ''}
+                                onChange={(e) => {
+                                  const updated = [...importItems];
+                                  updated[index].childCategory = e.target.value;
+                                  setImportItems(updated);
+                                }}
+                                disabled={isUploading || item.status === 'success'}
+                                className="w-full bg-slate-50 border border-slate-200 hover:border-slate-300 focus:border-emerald-500 disabled:bg-slate-100 disabled:text-slate-400 rounded-lg px-1.5 py-1.5 text-xs text-slate-700 outline-none transition-all"
+                              >
+                                <option value="">不使用</option>
+                                {(() => {
+                                  const group = categories.find(g => g.name === item.category);
+                                  const subcategory = group?.subCategories.find(sub => sub.name === item.subcategory);
+                                  return (subcategory?.childCategories || []).map(child => (
+                                    <option key={child.id} value={child.name}>📄 {child.name}</option>
                                   ));
                                 })()}
                               </select>
@@ -4994,10 +5246,14 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
         >
           <div className="border-b border-slate-100 px-3 py-2">
             <p className="text-[10px] font-bold text-slate-400">
-              {folderContextMenu.kind === 'group' ? '母文件夹' : '子文件夹'}
+              {folderContextMenu.kind === 'group' ? '母文件夹' : folderContextMenu.kind === 'sub' ? '子文件夹' : '三级文件夹'}
             </p>
             <p className="mt-0.5 truncate text-xs font-black text-slate-800">
-              {folderContextMenu.kind === 'group' ? folderContextMenu.groupName : folderContextMenu.subName}
+              {folderContextMenu.kind === 'group'
+                ? folderContextMenu.groupName
+                : folderContextMenu.kind === 'sub'
+                  ? folderContextMenu.subName
+                  : folderContextMenu.childName}
             </p>
           </div>
 
@@ -5021,14 +5277,28 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                 </button>
               )}
 
+              {folderContextMenu.kind === 'sub' && folderContextMenu.subId && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => runFolderContextAction(() => startAddChildCategory(folderContextMenu.groupId, folderContextMenu.subId!))}
+                  className="mt-1 flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left font-bold text-slate-600 hover:bg-blue-50 hover:text-blue-700"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  新增三级文件夹
+                </button>
+              )}
+
               <button
                 type="button"
                 role="menuitem"
                 onClick={() => runFolderContextAction(() => {
                   if (folderContextMenu.kind === 'group') {
                     startRenameCategory(folderContextMenu.groupId, folderContextMenu.groupName);
-                  } else if (folderContextMenu.subId && folderContextMenu.subName) {
+                  } else if (folderContextMenu.kind === 'sub' && folderContextMenu.subId && folderContextMenu.subName) {
                     startRenameSubCategory(folderContextMenu.subId, folderContextMenu.subName);
+                  } else if (folderContextMenu.childId && folderContextMenu.childName) {
+                    startRenameChildCategory(folderContextMenu.childId, folderContextMenu.childName);
                   }
                 })}
                 className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left font-bold text-slate-600 hover:bg-emerald-50 hover:text-emerald-700"
@@ -5043,13 +5313,17 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                 onClick={() => runFolderContextAction(() => {
                   if (folderContextMenu.kind === 'group') {
                     moveCategory(folderContextMenu.groupId, 'up');
-                  } else if (folderContextMenu.subId) {
+                  } else if (folderContextMenu.kind === 'sub' && folderContextMenu.subId) {
                     moveSubCategory(folderContextMenu.groupId, folderContextMenu.subId, 'up');
+                  } else if (folderContextMenu.subId && folderContextMenu.childId) {
+                    moveChildCategory(folderContextMenu.groupId, folderContextMenu.subId, folderContextMenu.childId, 'up');
                   }
                 })}
                 disabled={folderContextMenu.kind === 'group'
                   ? folderContextMenu.groupIndex === 0
-                  : (folderContextMenu.subIndex ?? 0) === 0}
+                  : folderContextMenu.kind === 'sub'
+                    ? (folderContextMenu.subIndex ?? 0) === 0
+                    : (folderContextMenu.childIndex ?? 0) === 0}
                 className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left font-bold text-slate-600 hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:text-slate-300 disabled:hover:bg-white"
               >
                 <ArrowUp className="h-3.5 w-3.5" />
@@ -5062,13 +5336,17 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                 onClick={() => runFolderContextAction(() => {
                   if (folderContextMenu.kind === 'group') {
                     moveCategory(folderContextMenu.groupId, 'down');
-                  } else if (folderContextMenu.subId) {
+                  } else if (folderContextMenu.kind === 'sub' && folderContextMenu.subId) {
                     moveSubCategory(folderContextMenu.groupId, folderContextMenu.subId, 'down');
+                  } else if (folderContextMenu.subId && folderContextMenu.childId) {
+                    moveChildCategory(folderContextMenu.groupId, folderContextMenu.subId, folderContextMenu.childId, 'down');
                   }
                 })}
                 disabled={folderContextMenu.kind === 'group'
                   ? folderContextMenu.groupIndex >= folderContextMenu.totalGroups - 1
-                  : (folderContextMenu.subIndex ?? 0) >= (folderContextMenu.totalSubs ?? 1) - 1}
+                  : folderContextMenu.kind === 'sub'
+                    ? (folderContextMenu.subIndex ?? 0) >= (folderContextMenu.totalSubs ?? 1) - 1
+                    : (folderContextMenu.childIndex ?? 0) >= (folderContextMenu.totalChildren ?? 1) - 1}
                 className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left font-bold text-slate-600 hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:text-slate-300 disabled:hover:bg-white"
               >
                 <ArrowDown className="h-3.5 w-3.5" />
@@ -5084,9 +5362,11 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
             role="menuitem"
             onClick={() => runFolderContextAction(() => {
               if (folderContextMenu.kind === 'group') {
-                void downloadFolderAsZip(folderContextMenu.groupName, true);
-              } else if (folderContextMenu.subName) {
-                void downloadFolderAsZip(folderContextMenu.subName, false);
+                void downloadFolderAsZip(folderContextMenu.groupName, true, folderContextMenu.groupId);
+              } else if (folderContextMenu.kind === 'sub' && folderContextMenu.subName) {
+                void downloadFolderAsZip(folderContextMenu.subName, false, folderContextMenu.groupId, folderContextMenu.subId);
+              } else if (folderContextMenu.childName) {
+                void downloadFolderAsZip(folderContextMenu.childName, false, folderContextMenu.groupId, folderContextMenu.subId, folderContextMenu.childId);
               }
             })}
             className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left font-bold text-slate-600 hover:bg-indigo-50 hover:text-indigo-700"
@@ -5104,8 +5384,10 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                 onClick={() => runFolderContextAction(() => {
                   if (folderContextMenu.kind === 'group') {
                     handleDeleteCategory(folderContextMenu.groupId, folderContextMenu.groupName);
-                  } else if (folderContextMenu.subId && folderContextMenu.subName) {
+                  } else if (folderContextMenu.kind === 'sub' && folderContextMenu.subId && folderContextMenu.subName) {
                     handleDeleteSubCategory(folderContextMenu.groupId, folderContextMenu.subId, folderContextMenu.subName);
+                  } else if (folderContextMenu.subId && folderContextMenu.childId && folderContextMenu.childName) {
+                    handleDeleteChildCategory(folderContextMenu.groupId, folderContextMenu.subId, folderContextMenu.childId, folderContextMenu.childName);
                   }
                 })}
                 className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left font-bold text-rose-600 hover:bg-rose-50"
@@ -5124,34 +5406,54 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
           <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-150 animate-in fade-in zoom-in-95 duration-150 overflow-hidden">
             <div className="p-6">
               <div className="flex items-start gap-4">
-                <div className={`p-2.5 rounded-xl ${customDialog.isConfirm ? 'bg-amber-50 text-amber-600' : 'bg-indigo-50 text-indigo-600'} shrink-0`}>
-                  {customDialog.isConfirm ? <HelpCircle className="w-6 h-6" /> : <Info className="w-6 h-6" />}
+                <div className={`p-2.5 rounded-xl ${customDialog.isConfirm ? customDialog.confirmTone === 'danger' ? 'bg-rose-50 text-rose-600' : 'bg-amber-50 text-amber-600' : 'bg-indigo-50 text-indigo-600'} shrink-0`}>
+                  {customDialog.isConfirm ? customDialog.confirmTone === 'danger' ? <ShieldAlert className="w-6 h-6" /> : <HelpCircle className="w-6 h-6" /> : <Info className="w-6 h-6" />}
                 </div>
                 <div className="space-y-1.5 flex-1">
                   <h3 className="text-sm font-bold text-slate-900">{customDialog.title}</h3>
                   <p className="text-xs text-slate-500 whitespace-pre-wrap leading-relaxed">{customDialog.message}</p>
                 </div>
               </div>
+              {customDialog.isConfirm && customDialog.requiresPassword && (
+                <label className="mt-5 block space-y-2">
+                  <span className="text-xs font-bold text-slate-700">再次输入音效库管理密码</span>
+                  <input
+                    type="password"
+                    value={confirmPassword}
+                    onChange={(event) => setConfirmPassword(event.target.value)}
+                    placeholder="输入管理密码后才能删除母文件夹"
+                    autoComplete="current-password"
+                    autoFocus
+                    className="h-10 w-full rounded-xl border border-rose-200 bg-white px-3 text-sm text-slate-800 outline-none transition-colors focus:border-rose-500 focus:ring-2 focus:ring-rose-100"
+                  />
+                  <span className="block text-[10px] leading-relaxed text-rose-600">密码只用于本次服务器验证，不会保存在浏览器中。</span>
+                </label>
+              )}
             </div>
             <div className="px-6 py-4 bg-slate-50 border-t border-slate-100 flex items-center justify-end gap-2">
               {customDialog.isConfirm ? (
                 <>
                   <button
                     type="button"
-                    onClick={() => setCustomDialog(null)}
+                    onClick={() => {
+                      setConfirmPassword('');
+                      setCustomDialog(null);
+                    }}
                     className="px-4 py-2 rounded-xl text-xs font-bold text-slate-500 hover:text-slate-800 hover:bg-slate-100 transition-all"
                   >
                     取消
                   </button>
                   <button
                     type="button"
+                    disabled={Boolean(customDialog.requiresPassword && !confirmPassword.trim())}
                     onClick={() => {
-                      if (customDialog.onConfirm) customDialog.onConfirm();
+                      if (customDialog.onConfirm) customDialog.onConfirm(confirmPassword);
+                      setConfirmPassword('');
                       setCustomDialog(null);
                     }}
-                    className="px-5 py-2.5 bg-amber-600 hover:bg-amber-500 text-white rounded-xl text-xs font-bold transition-all shadow-md shadow-amber-600/10"
+                    className={`px-5 py-2.5 text-white rounded-xl text-xs font-bold transition-all shadow-md disabled:cursor-not-allowed disabled:opacity-40 ${customDialog.confirmTone === 'danger' ? 'bg-rose-600 hover:bg-rose-500 shadow-rose-600/10' : 'bg-amber-600 hover:bg-amber-500 shadow-amber-600/10'}`}
                   >
-                    确认
+                    {customDialog.confirmLabel || '确认'}
                   </button>
                 </>
               ) : (

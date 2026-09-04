@@ -1645,8 +1645,8 @@ export default function DubbingStudio({
           {/* Subtab Button 3: 声音克隆转换 */}
           <button
             type="button"
-            title="声音克隆转换"
-            aria-label="声音克隆转换"
+            title="声音克隆"
+            aria-label="声音克隆"
             onClick={() => {
               setActiveSubTab('translate');
               if (standaloneVoiceAudioRef.current) standaloneVoiceAudioRef.current.pause();
@@ -1661,7 +1661,7 @@ export default function DubbingStudio({
             }`}
           >
             <Languages className={`w-4 h-4 shrink-0 transition-colors ${activeSubTab === 'translate' ? 'text-emerald-600' : 'text-slate-400'}`} />
-            <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>声音克隆转换</span>
+            <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>声音克隆</span>
           </button>
 
           {/* Subtab Button 4: 声音转换 */}
@@ -1726,7 +1726,11 @@ export default function DubbingStudio({
         {visitedSubTabs.has('tts') && (
           <div hidden={activeSubTab !== 'tts'}>
             <div className="mb-4 border-b border-slate-200 pb-3">
-              <div className="inline-flex rounded-xl bg-slate-100 p-1">
+              <nav
+                className="mx-auto w-full max-w-4xl rounded-2xl border border-emerald-200 bg-emerald-50/60 p-2"
+                aria-label="文本配音输入模式"
+              >
+                <div className="grid grid-cols-2 gap-1 rounded-xl bg-white/80 p-1">
                 {[
                   { value: 'single', label: '单文本' },
                   { value: 'batch', label: '多文本' },
@@ -1736,19 +1740,20 @@ export default function DubbingStudio({
                     <button
                       key={option.value}
                       type="button"
-                      aria-pressed={isActive}
+                      aria-current={isActive ? 'page' : undefined}
                       onClick={() => setTtsInputMode(option.value as 'single' | 'batch')}
-                      className={`min-w-24 rounded-lg px-4 py-1.5 text-center text-xs font-black transition-all ${
+                      className={`flex h-10 min-w-0 items-center justify-center rounded-lg px-2 text-center text-[11px] font-black transition-colors ${
                         isActive
-                          ? 'bg-white text-emerald-700 shadow-sm shadow-slate-200'
-                          : 'text-slate-500 hover:bg-white/70 hover:text-emerald-700'
+                          ? 'bg-emerald-600 text-white shadow-sm'
+                          : 'text-slate-500 hover:bg-emerald-50 hover:text-emerald-700'
                       }`}
                     >
                       {option.label}
                     </button>
                   );
                 })}
-              </div>
+                </div>
+              </nav>
             </div>
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
               {/* Core parameters */}
@@ -2720,11 +2725,7 @@ export default function DubbingStudio({
                 initialFile={assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.file : undefined}
                 assistantRequestId={assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.id : undefined}
                 initialTargetLanguage={assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.language : undefined}
-                displayVoices={displayVoices}
                 setHistoryList={setHistoryList}
-                playingVoiceId={playingVoiceId}
-                handlePlayVoicePreview={handlePlayVoicePreview}
-                hideSelfHosted
                 onAudioPlay={() => {
                   if (standaloneVoiceAudioRef.current) {
                     standaloneVoiceAudioRef.current.pause();

@@ -86,14 +86,15 @@ function MemberUsageTable({
     <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
       <div className="flex flex-col gap-1 border-b border-slate-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <h3 className="text-xs font-bold text-slate-700">按成员汇总</h3>
-        <p className="text-[10px] text-slate-400">当前以设备区分；接入飞书后自动归入真实成员</p>
+        <p className="text-[10px] text-slate-400">当前以设备区分；接入飞书后自动归入真实成员。IP 仅表示连接来源，不等于个人身份。</p>
       </div>
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[1040px] text-left text-[11px]">
+        <table className="w-full min-w-[1160px] text-left text-[11px]">
           <thead className="bg-slate-50 text-slate-500">
             <tr>
               <th className="px-4 py-2.5 font-semibold">成员 / 设备</th>
               <th className="px-3 py-2.5 font-semibold">身份来源</th>
+              <th className="px-3 py-2.5 font-semibold">IP 地址</th>
               <th className="px-3 py-2.5 text-right font-semibold">调用</th>
               <th className="px-3 py-2.5 text-right font-semibold">ElevenLabs 积分</th>
               <th className="px-3 py-2.5 text-right font-semibold">Gemini Token</th>
@@ -128,6 +129,9 @@ function MemberUsageTable({
                         {sourceLabel}
                       </span>
                     </td>
+                    <td className="px-3 py-3 font-mono text-[10px] text-slate-500">
+                      {user.ipAddresses?.length ? user.ipAddresses.join(', ') : '未记录'}
+                    </td>
                     <td className="px-3 py-3 text-right font-mono">{formatInteger(user.requests)}</td>
                     <td className="px-3 py-3 text-right font-mono">{formatCredits(user.elevenLabsCredits)}</td>
                     <td className="px-3 py-3 text-right font-mono">{formatInteger(user.geminiTokens)}</td>
@@ -137,7 +141,7 @@ function MemberUsageTable({
                   </tr>
                   {isExpanded ? (
                     <tr className="bg-slate-50/80">
-                      <td colSpan={8} className="px-4 py-3 sm:px-8">
+                      <td colSpan={9} className="px-4 py-3 sm:px-8">
                         <div className="overflow-x-auto border-l-2 border-emerald-500 pl-3">
                           <table className="w-full min-w-[720px] text-[10px]">
                             <thead className="text-slate-400">
@@ -175,7 +179,7 @@ function MemberUsageTable({
               );
             })}
             {users.length === 0 ? (
-              <tr><td colSpan={8} className="px-4 py-10 text-center text-slate-400">当前周期还没有可归属的 AI 用量。</td></tr>
+              <tr><td colSpan={9} className="px-4 py-10 text-center text-slate-400">当前周期还没有可归属的 AI 用量。</td></tr>
             ) : null}
           </tbody>
         </table>

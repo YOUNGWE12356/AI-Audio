@@ -10,6 +10,7 @@ export type StoredAiUsageEvent = AiUsageEvent & {
   displayName: string;
   department: string;
   identitySource: UsageIdentitySource;
+  ipAddress: string;
 };
 
 export type UsageUserDetail = {
@@ -29,6 +30,7 @@ export type UsageUserSummary = {
   displayName: string;
   department: string;
   identitySource: UsageIdentitySource;
+  ipAddresses: string[];
   requests: number;
   elevenLabsCredits: number;
   geminiTokens: number;
@@ -51,6 +53,7 @@ export const summarizeUsageUsers = (events: StoredAiUsageEvent[]): UsageUserSumm
       displayName: event.displayName,
       department: event.department,
       identitySource: event.identitySource,
+      ipAddresses: [],
       requests: 0,
       elevenLabsCredits: 0,
       geminiTokens: 0,
@@ -64,6 +67,9 @@ export const summarizeUsageUsers = (events: StoredAiUsageEvent[]): UsageUserSumm
     member.geminiTokens += event.provider === 'gemini' ? event.totalTokens : 0;
     member.gptTokens += event.provider === 'gpt' ? event.totalTokens : 0;
     member.totalTokens += event.totalTokens;
+    if (event.ipAddress && !member.ipAddresses.includes(event.ipAddress)) {
+      member.ipAddresses.push(event.ipAddress);
+    }
     if (Date.parse(event.timestamp) > Date.parse(member.lastUsedAt)) member.lastUsedAt = event.timestamp;
 
     const detailKey = `${event.provider}\u0000${event.feature}\u0000${event.model}`;

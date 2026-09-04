@@ -24,7 +24,25 @@ import torch
 if perth.PerthImplicitWatermarker is None:
     perth.PerthImplicitWatermarker = perth.DummyWatermarker
 
+import chatterbox.mtl_tts as _mtl_tts
 from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+from chatterbox.models.s3tokenizer import SPEECH_VOCAB_SIZE
+
+
+# Some Chatterbox releases can emit an out-of-range speech token during
+# multilingual generation.  The English pipeline filters it before S3Gen, but
+# the multilingual pipeline does not, which leaves CUDA in a poisoned state
+# with a device-side assert.  Keep the fix local to this worker so both single
+# and batch jobs use the same safe path without requiring a package reinstall.
+_drop_invalid_tokens = _mtl_tts.drop_invalid_tokens
+
+
+def _safe_drop_invalid_tokens(tokens):
+    tokens = _drop_invalid_tokens(tokens)
+    return tokens[(tokens >= 0) & (tokens < SPEECH_VOCAB_SIZE)]
+
+
+_mtl_tts.drop_invalid_tokens = _safe_drop_invalid_tokens
 
 
 def speaker_similarity(

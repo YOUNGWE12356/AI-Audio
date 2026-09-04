@@ -64,6 +64,7 @@ export type UsageUser = {
   displayName: string;
   department: string;
   identitySource: UsageIdentitySource;
+  ipAddresses: string[];
   requests: number;
   elevenLabsCredits: number;
   geminiTokens: number;

@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { isIP } from 'node:net';
 import { exec, execFile } from 'child_process';
 import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
@@ -69,6 +70,12 @@ import {
   wrapElevenLabsPcmAsWav,
 } from './src/services/elevenLabsService';
 import { normalizeElevenLabsQualityMode } from './src/utils/elevenLabsQuality';
+import {
+  DUBBING_GROUP_MAX_GAP_SECONDS,
+  DUBBING_GROUP_MAX_SPAN_SECONDS,
+  DUBBING_GROUP_MAX_TEXT_LENGTH,
+  groupContinuousDubbingClips,
+} from './src/utils/dubbingClipGrouping';
 
 async function startServer() {
   const app = express();
@@ -76,6 +83,42 @@ async function startServer() {
   const FFMPEG_BINARY = process.env.FFMPEG_PATH || ffmpegStatic || 'ffmpeg';
 
   app.disable('x-powered-by');
+
+  const dataDir = path.join(process.cwd(), 'data');
+  const accessBlacklistPath = path.join(dataDir, 'access-blacklist.json');
+  const normalizeIpAddress = (value: unknown) => {
+    if (typeof value !== 'string') return '';
+    const normalized = value.trim().replace(/^\[|\]$/g, '').toLowerCase();
+    return normalized.startsWith('::ffff:') ? normalized.slice(7) : normalized;
+  };
+  const readAccessBlacklist = () => {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(accessBlacklistPath, 'utf8'));
+      if (!Array.isArray(parsed)) return [] as string[];
+      return Array.from(new Set(parsed
+        .map(normalizeIpAddress)
+        .filter(value => value && isIP(value) > 0)));
+    } catch {
+      return [] as string[];
+    }
+  };
+  let accessBlacklist = new Set(readAccessBlacklist());
+  const persistAccessBlacklist = () => {
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(accessBlacklistPath, JSON.stringify(Array.from(accessBlacklist).sort(), null, 2), 'utf8');
+  };
+  const getRequestIpAddress = (req: express.Request) => normalizeIpAddress(req.socket.remoteAddress || '');
+  const isRequestBlocked = (req: express.Request) => accessBlacklist.has(getRequestIpAddress(req));
+
+  // Enforce the device blacklist before parsing requests or serving the SPA.
+  app.use((req, res, next) => {
+    if (!isRequestBlocked(req)) return next();
+    res.setHeader('Cache-Control', 'no-store');
+    if (req.path.startsWith('/api/')) {
+      return res.status(403).json({ error: '该设备 IP 已被加入黑名单，暂时无法使用本工具。' });
+    }
+    return res.status(403).type('html').send('<!doctype html><meta charset="utf-8"><title>访问受限</title><h1>访问受限</h1><p>该设备 IP 已被管理员加入黑名单。</p>');
+  });
 
   const asyncRoute = (
     handler: (req: express.Request, res: express.Response) => Promise<unknown>
@@ -91,6 +134,7 @@ async function startServer() {
     displayName: string;
     department: string;
     identitySource: UsageIdentitySource;
+    ipAddress: string;
   };
   type UsageRequestContext = UsageActor & { feature: string; endpoint: string };
   const usageRequestContext = new AsyncLocalStorage<UsageRequestContext>();
@@ -100,6 +144,7 @@ async function startServer() {
       : ''
   );
   const resolveUsageActor = (req: express.Request, res: express.Response): UsageActor => {
+    const ipAddress = getRequestIpAddress(req);
     // A future Feishu auth middleware should set this server-verified value before this middleware.
     // Client-provided headers are never treated as authenticated Feishu identity.
     const feishuUser = res.locals.feishuUser as {
@@ -114,6 +159,7 @@ async function startServer() {
         displayName: normalizeIdentityText(feishuUser?.displayName, 80) || '飞书用户',
         department: normalizeIdentityText(feishuUser?.department, 80),
         identitySource: 'feishu',
+        ipAddress,
       };
     }
 
@@ -128,6 +174,7 @@ async function startServer() {
         displayName: `设备 ${suffix || '未命名'}`,
         department: '',
         identitySource: 'device',
+        ipAddress,
       };
     }
 
@@ -136,6 +183,7 @@ async function startServer() {
       displayName: '历史未识别用户',
       department: '',
       identitySource: 'unknown',
+      ipAddress,
     };
   };
   const resolveUsageFeature = (req: express.Request) => {
@@ -176,7 +224,6 @@ async function startServer() {
   });
 
   // Directories paths
-  const dataDir = path.join(process.cwd(), 'data');
   const uploadsDir = path.join(process.cwd(), 'uploads');
   // Keep the private sound library outside the application upload directory so
   // application cleanup or deployment cannot remove company audio assets.
@@ -362,6 +409,7 @@ async function startServer() {
       displayName: context?.displayName || '历史未识别用户',
       department: context?.department || '',
       identitySource: context?.identitySource || 'unknown',
+      ipAddress: context?.ipAddress || '',
     };
     fs.appendFileSync(aiUsageLedgerPath, `${JSON.stringify(storedEvent)}\n`, 'utf8');
   });
@@ -392,6 +440,7 @@ async function startServer() {
                 identitySource: ['feishu', 'device'].includes(String(event.identitySource))
                   ? event.identitySource as UsageIdentitySource
                   : 'unknown',
+                ipAddress: normalizeIpAddress(event.ipAddress),
               } satisfies StoredAiUsageEvent]
             : [];
         } catch {
@@ -603,6 +652,24 @@ async function startServer() {
     return res.status(401).json({ error: '需要有效的管理权限。' });
   };
 
+  app.get('/api/access/blacklist', requireSfxLibraryAdmin, (_req, res) => {
+    return res.json({ ips: Array.from(accessBlacklist).sort() });
+  });
+
+  app.put('/api/access/blacklist', requireSfxLibraryAdmin, (req, res) => {
+    const rawIps = req.body?.ips;
+    if (!Array.isArray(rawIps) || rawIps.length > 500) {
+      return res.status(400).json({ error: '黑名单格式无效，最多支持 500 个 IP。' });
+    }
+    const normalizedIps = rawIps.map(normalizeIpAddress);
+    if (normalizedIps.some(ip => !ip || isIP(ip) === 0)) {
+      return res.status(400).json({ error: '黑名单中包含无效 IP 地址。' });
+    }
+    accessBlacklist = new Set(normalizedIps);
+    persistAccessBlacklist();
+    return res.json({ success: true, ips: Array.from(accessBlacklist).sort() });
+  });
+
   const notifySfxLibraryChanged = (type: string) => {
     sfxLibraryRevision = Math.max(Date.now(), sfxLibraryRevision + 1);
     const event = `event: library-change\ndata: ${JSON.stringify({ type, revision: sfxLibraryRevision })}\n\n`;
@@ -686,10 +753,14 @@ async function startServer() {
     const touched = { categories: false, sounds: false };
     const hadLostMetadata = categories.some((group: any) => (
       isLostLibraryText(group?.name)
-      || (Array.isArray(group?.subCategories) && group.subCategories.some((sub: any) => isLostLibraryText(sub?.name)))
+      || (Array.isArray(group?.subCategories) && group.subCategories.some((sub: any) => (
+        isLostLibraryText(sub?.name)
+        || (Array.isArray(sub?.childCategories) && sub.childCategories.some((child: any) => isLostLibraryText(child?.name)))
+      )))
     )) || sounds.some((sound: any) => (
       isLostLibraryText(sound?.category)
       || isLostLibraryText(sound?.subcategory)
+      || isLostLibraryText(sound?.childCategory)
     ));
 
     categories.forEach((group: any, groupIndex: number) => {
@@ -714,6 +785,20 @@ async function startServer() {
           sub.description = sub.name || '历史导入素材';
           touched.categories = true;
         }
+        if (sub?.childCategories !== undefined && !Array.isArray(sub.childCategories)) {
+          sub.childCategories = [];
+          touched.categories = true;
+        }
+        (sub.childCategories || []).forEach((child: any, childIndex: number) => {
+          if (isLostLibraryText(child?.name)) {
+            child.name = `历史三级目录 ${childIndex + 1}`;
+            touched.categories = true;
+          }
+          if (isLostLibraryText(child?.description)) {
+            child.description = child.name || '历史导入素材';
+            touched.categories = true;
+          }
+        });
       });
     });
 
@@ -728,6 +813,10 @@ async function startServer() {
 
     sounds.forEach((sound: any) => {
       if (!sound || typeof sound !== 'object') return;
+      if (isLostLibraryText(sound.childCategory)) {
+        sound.childCategory = '';
+        touched.sounds = true;
+      }
       const placement = (isLostLibraryText(sound.category) || isLostLibraryText(sound.subcategory))
         ? inferLegacyPlacement(sound)
         : { category: String(sound.category || ''), subcategory: String(sound.subcategory || '') };
@@ -1015,9 +1104,14 @@ async function startServer() {
       }
       const hasCorruptedDirectoryText = categories.some((group: any) => (
         isLostLibraryText(group?.name)
-        || (Array.isArray(group?.subCategories) && group.subCategories.some((sub: any) => isLostLibraryText(sub?.name)))
+        || (Array.isArray(group?.subCategories) && group.subCategories.some((sub: any) => (
+          isLostLibraryText(sub?.name)
+          || (Array.isArray(sub?.childCategories) && sub.childCategories.some((child: any) => isLostLibraryText(child?.name)))
+        )))
       )) || sounds.some((sound: any) => (
-        isLostLibraryText(sound?.category) || isLostLibraryText(sound?.subcategory)
+        isLostLibraryText(sound?.category)
+        || isLostLibraryText(sound?.subcategory)
+        || isLostLibraryText(sound?.childCategory)
       ));
       const hasCorruptedSoundName = sounds.some((sound: any) => (
         hasLostFileNameText(sound?.name) || hasLostFileNameText(sound?.fileName)
@@ -1042,6 +1136,146 @@ async function startServer() {
       return res.status(500).json({ error: err.message });
     }
   });
+
+  app.delete('/api/sfx/library/folder', requireSfxLibraryAdmin, asyncRoute(async (req, res) => {
+    const kind = req.body?.kind === 'category' || req.body?.kind === 'subcategory' || req.body?.kind === 'childcategory'
+      ? req.body.kind as 'category' | 'subcategory' | 'childcategory'
+      : null;
+    const groupId = typeof req.body?.groupId === 'string' ? req.body.groupId : '';
+    const subId = typeof req.body?.subId === 'string' ? req.body.subId : '';
+    const childId = typeof req.body?.childId === 'string' ? req.body.childId : '';
+    const baseRevision = Number(req.body?.baseRevision);
+    if (!kind || !groupId || (kind !== 'category' && !subId) || (kind === 'childcategory' && !childId)) {
+      return res.status(400).json({ error: '删除文件夹参数无效。' });
+    }
+    if (kind === 'category') {
+      if (!sfxLibraryAdminPassword) {
+        return res.status(503).json({ error: '服务器尚未配置音效库管理密码，无法删除母文件夹。' });
+      }
+      const confirmationPassword = typeof req.body?.confirmationPassword === 'string'
+        ? req.body.confirmationPassword
+        : '';
+      if (!secretsMatch(confirmationPassword, sfxLibraryAdminPassword)) {
+        return res.status(403).json({ error: '管理密码错误，母文件夹未删除。' });
+      }
+    }
+
+    if (Number.isFinite(baseRevision) && baseRevision !== sfxLibraryRevision) {
+      const current = loadAndRepairLibraryMetadata();
+      return res.status(409).json({
+        error: '音效库已被其他管理员更新，请刷新后重试。',
+        revision: sfxLibraryRevision,
+        categories: current.categories,
+        sounds: current.sounds,
+      });
+    }
+
+    const current = loadAndRepairLibraryMetadata();
+    const group = current.categories.find((item: any) => item?.id === groupId);
+    if (!group) return res.status(404).json({ error: '要删除的文件夹不存在或已被删除。' });
+    const subcategory = kind !== 'category'
+      ? group.subCategories?.find((item: any) => item?.id === subId)
+      : null;
+    if (kind !== 'category' && !subcategory) {
+      return res.status(404).json({ error: '要删除的子文件夹不存在或已被删除。' });
+    }
+    const childCategory = kind === 'childcategory'
+      ? subcategory.childCategories?.find((item: any) => item?.id === childId)
+      : null;
+    if (kind === 'childcategory' && !childCategory) {
+      return res.status(404).json({ error: '要删除的三级文件夹不存在或已被删除。' });
+    }
+
+    const deletedSounds = current.sounds.filter((sound: any) => (
+      sound?.category === group.name
+      && (
+        kind === 'category'
+        || (
+          sound?.subcategory === subcategory.name
+          && (kind === 'subcategory' || sound?.childCategory === childCategory.name)
+        )
+      )
+    ));
+    const retainedSounds = current.sounds.filter((sound: any) => !deletedSounds.includes(sound));
+    const nextCategories = kind === 'category'
+      ? current.categories.filter((item: any) => item?.id !== groupId)
+      : current.categories.map((item: any) => (
+          item?.id === groupId
+            ? {
+                ...item,
+                subCategories: kind === 'subcategory'
+                  ? item.subCategories.filter((sub: any) => sub?.id !== subId)
+                  : item.subCategories.map((sub: any) => (
+                      sub?.id === subId
+                        ? { ...sub, childCategories: (sub.childCategories || []).filter((child: any) => child?.id !== childId) }
+                        : sub
+                    )),
+              }
+            : item
+        ));
+
+    const retainedStorageKeys = new Set(
+      retainedSounds
+        .map((sound: any) => typeof sound?.storageKey === 'string' ? sound.storageKey : '')
+        .filter(Boolean),
+    );
+    const storageKeys = Array.from(new Set(
+      deletedSounds
+        .map((sound: any) => typeof sound?.storageKey === 'string' ? sound.storageKey : '')
+        .filter((storageKey: string) => storageKey && !retainedStorageKeys.has(storageKey)),
+    ));
+    const trashDirectory = resolveLibraryPath(path.posix.join('.trash', randomUUID()));
+    if (!trashDirectory) return res.status(500).json({ error: '无法创建安全的删除暂存目录。' });
+    await fs.promises.mkdir(trashDirectory, { recursive: true });
+
+    const movedFiles: Array<{ source: string; trash: string }> = [];
+    try {
+      for (const [index, storageKey] of storageKeys.entries()) {
+        const source = resolveLibraryPath(storageKey);
+        if (!source || !fs.existsSync(source)) continue;
+        const trash = path.join(trashDirectory, `${index}-${path.basename(source)}`);
+        await fs.promises.rename(source, trash);
+        movedFiles.push({ source, trash });
+      }
+
+      const previousCategoriesJson = fs.existsSync(categoriesFile)
+        ? fs.readFileSync(categoriesFile, 'utf-8')
+        : JSON.stringify(current.categories, null, 2);
+      const previousSoundsJson = fs.existsSync(soundsFile)
+        ? fs.readFileSync(soundsFile, 'utf-8')
+        : JSON.stringify(current.sounds, null, 2);
+      try {
+        fs.writeFileSync(categoriesFile, JSON.stringify(nextCategories, null, 2), 'utf-8');
+        fs.writeFileSync(soundsFile, JSON.stringify(retainedSounds, null, 2), 'utf-8');
+      } catch (writeError) {
+        fs.writeFileSync(categoriesFile, previousCategoriesJson, 'utf-8');
+        fs.writeFileSync(soundsFile, previousSoundsJson, 'utf-8');
+        throw writeError;
+      }
+
+      const revision = notifySfxLibraryChanged('folder-deleted');
+      await fs.promises.rm(trashDirectory, { recursive: true, force: true }).catch((cleanupError) => {
+        console.warn(`Failed to purge deleted library files from ${trashDirectory}:`, cleanupError);
+      });
+      return res.json({
+        success: true,
+        revision,
+        categories: nextCategories,
+        sounds: retainedSounds,
+        deletedSoundCount: deletedSounds.length,
+        deletedFileCount: movedFiles.length,
+      });
+    } catch (error: any) {
+      for (const moved of movedFiles.reverse()) {
+        if (!fs.existsSync(moved.trash)) continue;
+        await fs.promises.rename(moved.trash, moved.source).catch((restoreError) => {
+          console.error(`Failed to restore library file ${moved.source}:`, restoreError);
+        });
+      }
+      await fs.promises.rm(trashDirectory, { recursive: true, force: true }).catch(() => undefined);
+      return res.status(500).json({ error: error?.message || '删除文件夹及音频文件失败。' });
+    }
+  }));
 
   // Private company-library media endpoints. The browser streams these files
   // directly from the server with HTTP Range support instead of proxying audio
@@ -3553,6 +3787,17 @@ ${JSON.stringify(normalizedVoices)}
     return env;
   };
 
+  const isUsableLocalAudio = (filePath: string) => {
+    try {
+      const stat = fs.statSync(filePath);
+      // A PCM WAV header is 44 bytes; reject truncated/empty outputs before
+      // returning a URL that the browser cannot play.
+      return stat.isFile() && stat.size > 44;
+    } catch {
+      return false;
+    }
+  };
+
   const runLocalVoiceCloneProcess = (pythonPath: string, args: string[], timeout: number) => new Promise<string>((resolve, reject) => {
     execFile(
       pythonPath,
@@ -3570,9 +3815,14 @@ ${JSON.stringify(normalizedVoices)}
           return;
         }
         const detail = String(stderr || stdout || error.message).trim().split(/\r?\n/).slice(-3).join(' ');
-        const message = /out of memory|CUDA.*memory/i.test(detail)
+        const fullDetail = `${error.message} ${detail}`;
+        const message = /device-side assert|CUDA.*kernel|CUDA.*assert/i.test(fullDetail)
+          ? '本地声音克隆的 CUDA 推理异常，通常由模型生成了无效 token 引起。请重试；如果持续失败，请让管理员重启声音服务并检查 NVIDIA 驱动。'
+          : /out of memory|CUDA.*memory/i.test(detail)
           ? '本地显存不足，请缩短目标台词或关闭其他占用显卡的程序后重试。'
-          : /ENOENT|not found|cannot find/i.test(`${error.message} ${detail}`)
+          : /timed?out|ETIMEDOUT|killed/i.test(fullDetail)
+            ? '本地声音克隆处理超时，请缩短素材或台词后重试。'
+            : /ENOENT|not found|cannot find/i.test(fullDetail)
             ? '本地声音克隆运行环境不完整，请检查 Python 和模型工具路径。'
             : `本地声音克隆失败：${detail || error.message}`;
         reject(Object.assign(new Error(message), { status: 503, cause: error }));
@@ -4024,7 +4274,7 @@ ${JSON.stringify(normalizedVoices)}
         speaker_similarity?: number;
         jobs?: Array<{ speaker_similarity?: number }>;
       };
-      if (!fs.existsSync(outputPath)) {
+      if (!isUsableLocalAudio(outputPath)) {
         throw Object.assign(new Error('本地模型没有生成可用的音频文件。'), { status: 502 });
       }
       keepOutput = true;
@@ -4504,7 +4754,7 @@ ${JSON.stringify(normalizedVoices)}
           Number(left.segment.start) - Number(right.segment.start)
           || left.segmentIndex - right.segmentIndex
         ));
-        if (clips.some(clip => !fs.existsSync(clip.path))) {
+        if (clips.some(clip => !isUsableLocalAudio(clip.path))) {
           throw Object.assign(new Error(`本地模型没有完整生成版本 ${versionId} 的全部台词。`), { status: 502 });
         }
         const generatedEventClips = (generatedEventClipsByVersion.get(versionId) || []).map(clip => ({
@@ -4512,7 +4762,7 @@ ${JSON.stringify(normalizedVoices)}
           duration: generatedDurations.get(`${versionId}-event-${clip.eventIndex}`)
             || Math.max(0.2, Number(clip.event.end) - Number(clip.event.start)),
         }));
-        if (generatedEventClips.some(clip => !fs.existsSync(clip.path))) {
+        if (generatedEventClips.some(clip => !isUsableLocalAudio(clip.path))) {
           throw Object.assign(new Error(`本地模型没有完整生成版本 ${versionId} 的语气事件。`), { status: 502 });
         }
         const versionEventClips = [...eventClips, ...generatedEventClips];
@@ -4613,6 +4863,9 @@ ${JSON.stringify(normalizedVoices)}
           '-filter_complex', filterParts.join(';'),
           '-map', '[out]', '-ar', '24000', '-ac', '1', '-c:a', 'pcm_s16le', outputPath,
         ], 180_000);
+        if (!isUsableLocalAudio(outputPath)) {
+          throw Object.assign(new Error(`版本 ${versionId} 没有生成可播放的音频文件。`), { status: 502 });
+        }
         const generatedDuration = await getMediaDurationSeconds(outputPath).catch(() => outputDuration);
         const performance = ['natural', 'expressive', 'stable'].includes(String(versions[versionIndex].performance))
           ? versions[versionIndex].performance
@@ -5447,27 +5700,25 @@ ${JSON.stringify(normalizedVoices)}
 请提供以下轨道的元素（你可以根据视频画面的时间长度和事件，智能规划最合适的开始时间 startTime 和时长 duration，单位为秒）：
 ${bgmEnabled ? '1. 背景音乐轨 (bgm): 通常是一段大气合适的 background music，覆盖视频主要时间。' : ''}
 ${sfxEnabled ? '2. 音效轨 (sfx): 根据视频中的关键动势、场景变化或特效出现，生成对应的短音效。' : ''}
-${dubbingEnabled ? '3. 配音轨 (dubbing): 逐帧识别视频中的字幕变化、说话人和嘴部活动，为每一条字幕生成一个且仅一个独立配音片段。' : ''}
+${dubbingEnabled ? '3. 配音轨 (dubbing): 逐帧识别视频中的字幕变化、说话人和嘴部活动，并将密集连续对白整理为较长的自然配音片段。' : ''}
 
 ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这里只规划台词与时间，不要为单个片段推荐或返回 voiceId。
 配音时间轴必须遵守以下规则：
-- 字幕文字发生变化时，上一句立即结束，下一句必须新建独立 dubbing clip；绝对不要把两条不同字幕合并成一句。
+- 先逐条识别字幕，再把同一说话人的连续字幕按时间顺序合并成一个 dubbing clip；短停顿保留为自然标点或换行，不要让合成声音逐句重新起音。
+- 相邻字幕间隔不超过 ${DUBBING_GROUP_MAX_GAP_SECONDS} 秒时应优先合并；间隔超过 ${DUBBING_GROUP_MAX_GAP_SECONDS} 秒、明确更换说话人、合并区间超过 ${DUBBING_GROUP_MAX_SPAN_SECONDS} 秒或合并文字超过 ${DUBBING_GROUP_MAX_TEXT_LENGTH} 字符时才新建片段。
 - 同一条字幕在连续画面中保持不变时只生成一个 clip，不要因逐帧重复看到而重复创建。
-- 每条字幕使用稳定且唯一的 subtitleId，例如 "subtitle-001"、"subtitle-002"。
-- text 必须逐字对应画面中的当前字幕；speaker 表示当前说话人或画面角色，无法确定时写 "unknown"。
-- subtitleStartTime/subtitleEndTime 是该字幕实际出现和消失的时间，是绝对不可越过的硬边界。
-- 配音片段必须严格按画面字幕块切分：屏幕字幕文字一旦变化，上一句立即结束并新建下一句；同一句字幕只要画面文字未变化，就保持为一个片段。
+- 每个合并后的片段使用稳定且唯一的 subtitleId，例如 "subtitle-group-001"；speaker 表示这一组的说话人或画面角色，无法确定时写 "unknown"。
+- text 必须逐字保留组内每一条字幕，按出现顺序连接，不得总结、改写或漏字；使用自然标点或换行表现组内短暂停顿。
+- subtitleStartTime 必须等于组内第一条字幕的实际出现时间；subtitleEndTime 必须等于组内最后一条字幕的实际消失时间，两者构成合并片段的硬边界。
 - startTime 必须等于 subtitleStartTime，duration 必须等于 subtitleEndTime - subtitleStartTime；口型时间只作为 lipStartTime/lipEndTime 元数据，不得用来缩短配音片段。
-- lipStartTime/lipEndTime 是该字幕区间内说话人口型开始和结束活动的时间，必须限制在字幕边界内。
-- 当 lipSyncConfidence 较高且口型与字幕的交集有效时，dubbing 的 startTime=max(subtitleStartTime, lipStartTime)，结束时间=min(subtitleEndTime, lipEndTime)，duration 等于二者之差。
-- 当置信度低、没有可见人脸、属于画外音或口型交集无效时，startTime=subtitleStartTime，duration=subtitleEndTime-subtitleStartTime。
+- lipStartTime/lipEndTime 是整组对白区间内说话人口型开始和结束活动的时间，必须限制在合并片段的字幕边界内。
 - lipSyncConfidence 为 0 到 1；timingSource 只能说明依据，例如 "subtitle+lip"、"subtitle"、"speech+subtitle" 或 "visual-estimate"。
-- 保留视频中每一条可辨识字幕，不限制为少数重点片段。字幕持续多久，整句话后续就会按该区间统一调整语速。
+- 保留视频中每一条可辨识字幕，不限制为少数重点片段。合并后整组台词会按组内第一句到最后一句的区间统一调整语速并对齐视频。
 
 CRITICAL SUBTITLE OCR PASS:
 - First scan the entire video chronologically for on-screen subtitles, captions, speech bubbles, lyrics, and dialogue text.
-- Every distinct visible subtitle/caption text MUST become one dubbing clip, even if it is very short, appears only once, or is not visually important.
-- Do not summarize subtitles. Do not skip "minor" captions. Do not merge adjacent captions when the visible text is different.
+- Every distinct visible subtitle/caption text MUST be preserved in chronological order, even if it is very short, appears only once, or is not visually important.
+- Do not summarize or skip "minor" captions. Merge dense adjacent captions from the same speaker into one continuous dubbing clip using the grouping limits above.
 - If one subtitle is split across two visual lines, combine both lines into the same text field in natural reading order.
 - If multiple subtitle areas are visible at the same time, return separate clips only when they represent different spoken lines; otherwise combine the lines for the same speaker.
 - Use best-effort OCR for partially occluded or stylized text, but keep the original language and punctuation as close as possible.
@@ -5897,9 +6148,11 @@ CRITICAL SUBTITLE OCR PASS:
         }
         compactDubbingClips.push(clip);
       }
+      const dubbingSourceCueCount = compactDubbingClips.length;
+      const groupedDubbingClips = groupContinuousDubbingClips(compactDubbingClips);
       normalizedClips = [
         ...normalizedClips.filter((clip: any) => clip.trackId !== 'dubbing'),
-        ...compactDubbingClips,
+        ...groupedDubbingClips,
       ].sort((left: any, right: any) => left.startTime - right.startTime);
 
       const usedSubtitleIds = new Set<string>();
@@ -5955,6 +6208,7 @@ CRITICAL SUBTITLE OCR PASS:
         analysisSource,
         analysisPartial,
         dubbingCueCount,
+        dubbingSourceCueCount,
         dubbingStatus: dubbingEnabled
           ? dubbingAnalysisUnavailable ? 'unavailable' : dubbingCueCount > 0 ? 'detected' : 'none-detected'
           : 'disabled',

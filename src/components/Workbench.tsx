@@ -25,41 +25,6 @@ interface WorkbenchProps {
 }
 
 export default function Workbench({ setCurrentTab, historyList, assistantPanel }: WorkbenchProps) {
-  const studios = [
-    {
-      id: 'audio-director' as const,
-      name: 'AI 音频设计',
-      desc: '解析文字、图片、音频与视频参考，规划影片或游戏的音效、配乐和配音制作方案',
-      icon: Sparkles,
-      color: 'from-emerald-500/20 to-teal-500/20 text-emerald-400 border-emerald-500/15',
-      badge: '核心模块',
-    },
-    {
-      id: 'music-studio' as const,
-      name: 'AI 音乐',
-      desc: '根据风格、情绪、速度、乐器和歌词生成纯音乐或带人声的双版本音乐',
-      icon: Music,
-      color: 'from-indigo-500/20 to-purple-500/20 text-indigo-400 border-indigo-500/15',
-      badge: 'AI 作曲',
-    },
-    {
-      id: 'sfx-studio' as const,
-      name: 'AI 音效',
-      desc: '输入声音对象、动作、材质和空间，生成可对比、试听和下载的双版本音效',
-      icon: Waves,
-      color: 'from-blue-500/20 to-cyan-500/20 text-blue-400 border-blue-500/15',
-      badge: 'Foley 音效',
-    },
-    {
-      id: 'dubbing-studio' as const,
-      name: 'AI 配音',
-      desc: '覆盖文本配音、语音转语音、声音克隆、声音转换和语音转文本完整流程',
-      icon: Mic,
-      color: 'from-pink-500/20 to-rose-500/20 text-pink-400 border-pink-500/15',
-      badge: 'TTS 角色配音',
-    }
-  ];
-
   const featureGuide = [
     {
       id: 'video-soundtrack' as const,
@@ -68,7 +33,11 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
       icon: Film,
       accent: 'bg-amber-50 text-amber-700 border-amber-100',
       intro: '在同一条视频时间线上组织原声、配音、音效和音乐，完成从素材分析到最终混音。',
-      usage: '导入视频，识别字幕与对白片段；在轨道中补充配音、环境声、动作音效和 BGM，检查时间与音量后导出。',
+      usage: [
+        '导入视频或音频，等待系统识别字幕、对白和时间码；先检查识别结果是否准确。',
+        '在时间线上添加配音、环境声、动作音效和 BGM，拖动片段调整起止位置，并分别控制各轨道音量。',
+        '从头到尾试听混音，确认对白清楚、音效不抢声后，导出最终视频或音频文件。',
+      ],
       functions: ['字幕/对白识别', '多轨时间线', '混音与导出'],
     },
     {
@@ -78,7 +47,11 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
       icon: Sparkles,
       accent: 'bg-emerald-50 text-emerald-700 border-emerald-100',
       intro: '把文字、图片、音频或视频参考拆成可执行的声音方向、素材清单与时间排程。',
-      usage: '上传参考素材并补充项目目标，生成整体声音方案；确认后把音乐、音效或配音提示发送到对应模块继续制作。',
+      usage: [
+        '输入项目类型、画面内容和声音目标，也可以上传截图、音频或视频作为参考。',
+        '查看 AI 拆分出的音乐、音效、配音清单和出现时刻；补充遗漏内容或修改不符合项目的建议。',
+        '确认方案后，将音乐、音效或配音任务发送到对应工具继续生成，并保留需求表作为制作依据。',
+      ],
       functions: ['多模态解析', '声音方案规划', '跨模块发送'],
     },
     {
@@ -88,7 +61,11 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
       icon: Music,
       accent: 'bg-indigo-50 text-indigo-700 border-indigo-100',
       intro: '生成纯音乐或带歌词人声的音乐版本，可用于短片、宣传片、游戏循环与氛围铺底。',
-      usage: '描述曲风、情绪、速度、乐器和时长；需要人声时输入歌词。生成后在音波上点击定位，对比版本并下载。',
+      usage: [
+        '填写曲风、情绪、速度、乐器、用途和目标时长；需要人声时，再输入完整歌词或段落结构。',
+        '选择纯音乐或带歌词人声模式后开始生成，等待两个版本完成并比较旋律、编曲和人声表现。',
+        '点击波形定位试听重点段落，确认版本和名称后下载音频，或将结果继续放入工作站剪辑。',
+      ],
       functions: ['纯音乐/带词', '双版本试听', '音波定位播放'],
     },
     {
@@ -98,7 +75,11 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
       icon: Waves,
       accent: 'bg-blue-50 text-blue-700 border-blue-100',
       intro: '生成动作、机械、自然、科幻、界面、转场和环境氛围等独立声音素材。',
-      usage: '按“对象 + 动作 + 材质 + 空间 + 强度”描述声音，选择自动或指定时长；试听两个版本后下载或归档。',
+      usage: [
+        '用“对象 + 动作 + 材质 + 空间 + 强度”描述声音，例如“金属门在狭窄走廊中快速关闭”。',
+        '选择自动时长或输入指定时长，必要时补充近景/远景、速度和情绪等限制条件后生成两个版本。',
+        '对比试听两个版本，确认起音、尾音和质感符合画面后下载；常用素材可直接归档到音效库。',
+      ],
       functions: ['自动/指定时长', '双版本生成', '历史归档'],
     },
     {
@@ -108,7 +89,11 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
       icon: Mic,
       accent: 'bg-pink-50 text-pink-700 border-pink-100',
       intro: '集中处理单条与批量 TTS、语音转语音、跨语言声音克隆，以及带时间码的语音转文本。',
-      usage: '先选择左侧任务类型，再导入语音或输入台词；设置语言、声线和表达方式，生成后通过音波试听并下载。',
+      usage: [
+        '先在左侧选择文本转语音、语音转语音、声音克隆或语音转文本等任务类型。',
+        '按页面提示输入台词或上传参考语音，再设置语言、声线、语速、情绪和表达方式等参数。',
+        '生成后逐句试听并检查发音、停顿和时长；确认无误后下载，或把音频送入工作站继续处理。',
+      ],
       functions: ['单条/批量 TTS', '语音转语音', '克隆与转写'],
     },
     {
@@ -118,7 +103,11 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
       icon: RefreshCw,
       accent: 'bg-violet-50 text-violet-700 border-violet-100',
       intro: '支持直接表达式翻译、Seed-VC 音色迁移、多人角色分轨，以及对白与笑声/呼吸等事件混合。',
-      usage: '进入 AI 配音后选择“声音转换”，再选择方案一至四；上传素材，分析台词与角色，确认目标文本后生成 A/B 版本。',
+      usage: [
+        '进入 AI 配音的“声音转换”，选择单人转换、多人角色转换或克隆转换等方案。',
+        '上传原始对白或视频，等待系统识别台词、角色和声音事件；检查文本、分段和目标语言是否正确。',
+        '确认参数后生成 A/B 版本，逐段对比音色、口型节奏和时长；满意的版本可下载或直接加入工作站。',
+      ],
       functions: ['跨语言音色迁移', '多人角色分轨', '声音事件保留'],
     },
     {
@@ -128,7 +117,11 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
       icon: SlidersHorizontal,
       accent: 'bg-cyan-50 text-cyan-700 border-cyan-100',
       intro: '提供多轨工作站、音频分析、批量格式/压缩/响度处理和 AI 人声分离。',
-      usage: '根据任务选择左侧工具：在工作站剪辑混音，在分析页检查音频指标，或批量转成 WAV/MP3 并统一响度。',
+      usage: [
+        '根据任务选择音频工作站、音频分析、格式转换、响度处理或人声分离等工具。',
+        '上传一个或多个音频，按页面提示设置剪辑范围、输出格式、采样率、目标响度或分离选项。',
+        '检查波形、响度和导出规格，确认处理结果后下载；需要继续编辑时，可直接放入工作站轨道。',
+      ],
       functions: ['多轨编辑', '分析与转码', '人声分离'],
     },
     {
@@ -138,7 +131,11 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
       icon: ClipboardList,
       accent: 'bg-teal-50 text-teal-700 border-teal-100',
       intro: '从描述、截图、音频或视频中整理标准化音效、配乐和配音制作需求。',
-      usage: '选择表格模板，输入需求或上传参考素材；生成后逐行校对、继续追加，再导出 CSV 交给 Excel、WPS 或团队协作。',
+      usage: [
+        '先选择项目模板，再输入简短需求，或上传截图、音频、视频等参考文件；系统会按模板整理字段。',
+        '检查生成表格中的类型、描述、数量、优先级、命名和 ID；发现遗漏时可补充说明并再次优化。',
+        '逐行确认后继续追加任务，最后导出 CSV，交给 Excel、WPS 或团队协作，并保留项目模板便于复用。',
+      ],
       functions: ['多模态识别', '模板化需求表', '追加与 CSV 导出'],
     },
     {
@@ -148,20 +145,26 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
       icon: Database,
       accent: 'bg-slate-50 text-slate-700 border-slate-200',
       intro: '集中管理生成或导入的声音资产，用统一名称、分类和关键词支持长期复用。',
-      usage: '上传或归档常用声音，补充分类与关键词；按名称和标签检索，试听确认后下载或用于后续项目。',
+      usage: [
+        '上传音效或音乐文件，填写规范名称、项目、类别、标签和备注；已有生成结果也可以直接归档。',
+        '通过名称、类别或关键词筛选资产，打开详情试听并确认版本、时长和格式是否适合当前项目。',
+        '将确认后的文件下载到本地，或拖入音频工作站继续剪辑；常用声音可保留统一标签方便复用。',
+      ],
       functions: ['上传与归档', '搜索/分类管理', '试听与下载'],
     },
   ];
 
-  const workflowSteps = [
-    ['1', '选择任务', '从生成、转换、剪辑或资产管理中选择入口'],
-    ['2', '准备输入', '输入需求文字，或导入图片、音频与视频素材'],
-    ['3', '生成与调整', '检查识别结果和参数，对比 A/B 版本并修改'],
-    ['4', '试听与交付', '点击音波定位检查，下载音频或导出需求表'],
-  ];
+  const recentHistory = historyList.slice(0, 20);
+  const historyTabByType: Record<HistoryItem['type'], TabType> = {
+    sfx: 'sfx-studio',
+    music: 'music-studio',
+    voice: 'dubbing-studio',
+    director: 'audio-director',
+    'video-soundtrack': 'video-soundtrack',
+  };
 
   return (
-    <div id="workbench-view" className="flex-1 p-8 space-y-6 max-w-6xl mx-auto w-full">
+    <div id="workbench-view" className="flex-1 px-8 pt-6 pb-8 space-y-6 max-w-6xl mx-auto w-full">
       {/* Welcome Banner */}
       <div id="workbench-hero" className="relative overflow-hidden p-6 md:p-7">
         <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(ellipse_at_center,rgba(16,185,129,0.14)_0%,rgba(20,184,166,0.07)_42%,transparent_82%)]" />
@@ -176,67 +179,8 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
 
       {assistantPanel}
 
-      {/* Main Studio Modules Grid */}
-      <div className="-mt-2 space-y-4">
-        <h3 className="text-base font-bold text-slate-800">创意工作空间</h3>
-        <div id="studios-grid" className="grid grid-cols-1 md:grid-cols-2 gap-5">
-          {studios.map((studio) => {
-            const Icon = studio.icon;
-            return (
-              <div 
-                key={studio.id}
-                id={`studio-card-${studio.id}`}
-                onClick={() => setCurrentTab(studio.id)}
-                className="group cursor-pointer bg-white hover:bg-emerald-50/20 border border-slate-200 hover:border-emerald-200 rounded-2xl p-6 transition-all duration-300 flex flex-col justify-between h-52 relative overflow-hidden shadow-sm"
-              >
-                <div className="absolute top-0 right-0 w-24 h-24 bg-emerald-500/2 opacity-0 group-hover:opacity-100 transition-opacity rounded-bl-full pointer-events-none" />
-                
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div className={`p-2.5 rounded-xl bg-gradient-to-br ${studio.color} border flex items-center justify-center shadow-inner`}>
-                      <Icon className="w-5 h-5" />
-                    </div>
-                    <span className="text-[10px] font-bold text-slate-600 px-2.5 py-0.5 bg-slate-50 rounded-full border border-slate-200">
-                      {studio.badge}
-                    </span>
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-bold text-slate-800 group-hover:text-emerald-700 transition-colors">{studio.name}</h4>
-                    <p className="text-xs text-slate-500 leading-relaxed mt-1.5">{studio.desc}</p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-1.5 text-xs font-bold text-slate-500 group-hover:text-emerald-700 transition-colors mt-4">
-                  <span>立刻进入</span>
-                  <ArrowRight className="w-3.5 h-3.5 transition-transform group-hover:translate-x-1" />
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
       {/* Product Guide */}
       <div id="tool-guide" className="space-y-4 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-        <div className="flex flex-col gap-2 border-b border-slate-100 pb-4 md:flex-row md:items-end md:justify-between">
-          <div>
-            <p className="text-[10px] font-black uppercase tracking-[0.2em] text-emerald-600">AI Audio Guide</p>
-            <h3 className="mt-1 text-lg font-black text-slate-800">功能说明与使用方法</h3>
-          </div>
-          <p className="max-w-xl text-xs leading-relaxed text-slate-500">
-            从需求规划、声音生成和音色转换，到时间线剪辑与资产交付；先按任务选择入口，再按照卡片中的步骤操作。
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 border-b border-slate-100 pb-4 sm:grid-cols-2 xl:grid-cols-4">
-          {workflowSteps.map(([number, title, description], index) => (
-            <div key={number} className={`flex gap-3 px-3 py-2 ${index > 0 ? 'sm:border-l sm:border-slate-100' : ''}`}>
-              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-[10px] font-black text-emerald-700">{number}</span>
-              <div><p className="text-[11px] font-black text-slate-800">{title}</p><p className="mt-0.5 text-[10px] leading-relaxed text-slate-500">{description}</p></div>
-            </div>
-          ))}
-        </div>
-
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
           {featureGuide.map((item) => {
             const Icon = item.icon;
@@ -264,7 +208,16 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
 
                   <div className="rounded-xl border border-slate-200 bg-white/70 p-3">
                     <div className="text-[10px] font-black text-slate-700">怎么用</div>
-                    <p className="mt-1 text-[11px] leading-relaxed text-slate-500">{item.usage}</p>
+                    <ol className="mt-2 space-y-1.5">
+                      {item.usage.map((step, index) => (
+                        <li key={step} className="flex gap-2 text-[11px] leading-relaxed text-slate-500">
+                          <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-[9px] font-black text-emerald-700">
+                            {index + 1}
+                          </span>
+                          <span>{step}</span>
+                        </li>
+                      ))}
+                    </ol>
                   </div>
 
                   <div>
@@ -291,6 +244,54 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
           })}
         </div>
       </div>
+
+      <section id="recent-work-history" className="space-y-4 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-black text-slate-800">最近工作记录</h3>
+            <p className="mt-1 text-[11px] text-slate-500">输入内容、参考文件和生成结果会在此设备长期保留；不支持文件存储的浏览器至少保留完整记录。</p>
+          </div>
+          <span className="shrink-0 text-[10px] font-bold text-slate-400">最近 {recentHistory.length} 条</span>
+        </div>
+        {recentHistory.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-slate-200 px-4 py-8 text-center text-[11px] text-slate-400">暂无工作记录</div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {recentHistory.map(item => (
+              <div key={item.id} className="flex items-start gap-3 py-3 first:pt-0 last:pb-0">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <button
+                      type="button"
+                      onClick={() => setCurrentTab(historyTabByType[item.type])}
+                      className="truncate text-left text-xs font-bold text-slate-700 hover:text-emerald-700"
+                    >
+                      {item.title}
+                    </button>
+                    <span className="text-[10px] font-mono text-slate-400">{item.timestamp}</span>
+                  </div>
+                  <p className="mt-1 line-clamp-2 text-[10px] leading-relaxed text-slate-500">{item.inputText || item.prompt}</p>
+                  {item.attachments && item.attachments.length > 0 && (
+                    <p className="mt-1 truncate text-[10px] text-slate-400" title={item.attachments.map(file => file.name).join('、')}>
+                      参考文件：{item.attachments.map(file => file.name).join('、')}
+                    </p>
+                  )}
+                </div>
+                {item.url && item.url !== '#' && (
+                  <a
+                    href={item.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="shrink-0 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-500 hover:border-emerald-200 hover:text-emerald-700"
+                  >
+                    打开文件
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
     </div>
   );
 }

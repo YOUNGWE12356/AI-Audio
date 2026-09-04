@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AlertCircle, CheckCircle2, FileAudio, Loader2, Play, RefreshCw, UploadCloud, Volume2 } from 'lucide-react';
+import { AlertCircle, CheckCircle2, FileAudio, Info, Loader2, Play, RefreshCw, UploadCloud, Volume2 } from 'lucide-react';
 import { convertWithSeedVc, getSeedVcStatus, type SeedVcConvertOptions, type SeedVcConvertResult, type SeedVcModel, type SeedVcStatus } from '../services/seedVoiceConversionService';
 import { transcribeSpeech, generateVoice } from '../services/elevenLabsService';
 import { translateTextToLanguage } from '../services/geminiService';
@@ -119,10 +119,10 @@ const conversionPlans: Array<{
   description: string;
   tone: string;
 }> = [
-  { id: 'plan1', label: '方案一 · Seed-VC', title: '单人转换', description: '自动提取台词、翻译并生成目标语言驱动音频，再由 Seed-VC 迁移原始音色与表达。', tone: 'border-emerald-200 bg-emerald-50/60 text-emerald-800' },
-  { id: 'plan2', label: '方案二', title: '多人角色分轨转换', description: '先识别说话人，再为每个角色单独建立音色和台词轨道，避免多人对话串音。', tone: 'border-violet-200 bg-violet-50/60 text-violet-800' },
-  { id: 'plan3', label: '方案三', title: '语音与声音事件混合', description: '在台词转换之外保留笑声、呼吸、语气词和环境声等非语言事件。', tone: 'border-amber-200 bg-amber-50/60 text-amber-800' },
-  { id: 'plan4', label: '克隆转换方案', title: '克隆转换', description: '用于声音克隆转换的独立方案入口。', tone: 'border-sky-200 bg-sky-50/60 text-sky-800' },
+  { id: 'plan1', label: '单人转换', title: '', description: '普通单人对白最稳定，适合作为默认选择。', tone: 'border-emerald-200 bg-emerald-50/60 text-emerald-800' },
+  { id: 'plan2', label: '多人角色分轨转换', title: '', description: '多人对话效果最好，可减少角色串音和音色混淆。', tone: 'border-violet-200 bg-violet-50/60 text-violet-800' },
+  { id: 'plan3', label: '语音与声音事件混合', title: '', description: '素材里笑声、呼吸、叹气等较多时最自然。', tone: 'border-amber-200 bg-amber-50/60 text-amber-800' },
+  { id: 'plan4', label: '克隆转换方案', title: '', description: '最侧重还原指定人物的音色，相似度通常最高，但需要干净的单人参考音频。', tone: 'border-sky-200 bg-sky-50/60 text-sky-800' },
 ];
 
 const targetLanguages = [
@@ -348,30 +348,36 @@ export default function VoiceConversion({
 
   return (
     <div id="voice-conversion-minimal" className="mx-auto max-w-6xl space-y-5 pb-8" aria-label="声音转换工作台">
-      <div className="flex flex-col gap-3 border-b border-slate-200 pb-5 md:flex-row md:items-end md:justify-between">
-        <div>
-          <div className="flex items-center gap-2"><RefreshCw className="h-5 w-5 text-emerald-600" /><h1 className="text-xl font-black tracking-tight text-slate-900">声音转换</h1></div>
-          <p className="mt-2 max-w-2xl text-xs leading-relaxed text-slate-500">{activePlanConfig.description}</p>
+      <nav className="mx-auto w-full max-w-4xl rounded-2xl border border-emerald-200 bg-emerald-50/60 p-2" aria-label="声音转换方案">
+        <div className="grid grid-cols-2 gap-1 rounded-xl bg-white/80 p-1 sm:grid-cols-4">
+          {conversionPlans.map((plan) => {
+            const isActive = activePlan === plan.id;
+            return (
+              <button
+                key={plan.id}
+                type="button"
+                aria-current={isActive ? 'page' : undefined}
+                onClick={() => setActivePlan(plan.id)}
+                className={`flex h-10 min-w-0 items-center justify-center rounded-lg px-2 text-center text-[11px] font-black transition-colors ${isActive ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-500 hover:bg-emerald-50 hover:text-emerald-700'}`}
+              >
+                <span className="truncate">{plan.label}</span>
+              </button>
+            );
+          })}
         </div>
-      </div>
-
-      <nav className="mx-auto grid w-full max-w-4xl grid-cols-2 gap-1 rounded-xl border border-slate-200 bg-slate-100/80 p-1 sm:grid-cols-4" aria-label="声音转换方案">
-        {conversionPlans.map((plan) => {
-          const isActive = activePlan === plan.id;
-          return (
-            <button
-              key={plan.id}
-              type="button"
-              aria-current={isActive ? 'page' : undefined}
-              onClick={() => setActivePlan(plan.id)}
-              className={`rounded-lg px-2 py-2 text-left transition-colors ${isActive ? 'bg-white text-slate-900 shadow-sm ring-1 ring-slate-200' : 'text-slate-500 hover:bg-white/70 hover:text-slate-800'}`}
-            >
-              <span className="block text-xs font-black">{plan.label}</span>
-              <span className="mt-0.5 block truncate text-[10px] font-medium opacity-70">{plan.title}</span>
-            </button>
-          );
-        })}
       </nav>
+
+      <div
+        role="note"
+        aria-live="polite"
+        className="mx-auto flex w-full max-w-4xl items-start gap-2.5 rounded-xl border border-emerald-100 bg-white px-4 py-3 shadow-sm"
+      >
+        <Info className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" aria-hidden="true" />
+        <p className="min-w-0 text-[11px] leading-5 text-slate-600">
+          <span className="font-black text-slate-800">{activePlanConfig.label}：</span>
+          {activePlanConfig.description}
+        </p>
+      </div>
 
       <div className={activePlan === 'plan1' ? '' : 'hidden'}>
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-12 lg:items-start">
@@ -436,11 +442,8 @@ export default function VoiceConversion({
           initialFile={initialFile}
           assistantRequestId={assistantRequestId}
           initialTargetLanguage={initialTargetLanguage}
-          displayVoices={displayVoices}
           setHistoryList={setHistoryList}
           onAudioPlay={onAudioPlay}
-          playingVoiceId={playingVoiceId}
-          handlePlayVoicePreview={handlePlayVoicePreview}
         />
       </div>
     </div>

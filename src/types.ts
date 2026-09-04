@@ -30,6 +30,13 @@ export interface HistoryItem {
   timestamp: string;
   details?: string;
   speed?: number;
+  inputText?: string;
+  attachments?: Array<{
+    name: string;
+    type?: string;
+    size?: number;
+    file?: File;
+  }>;
 }
 
 export interface TimelineClip {
@@ -60,6 +67,13 @@ export interface TimelineClip {
   subtitleId?: string; // Stable source subtitle/caption cue identifier
   subtitleStartTime?: number; // Source subtitle cue start time in seconds
   subtitleEndTime?: number; // Source subtitle cue end time in seconds
+  subtitleCues?: Array<{ // Original cue timing retained when dense dialogue is grouped
+    id: string;
+    text: string;
+    startTime: number;
+    endTime: number;
+    speaker?: string;
+  }>;
   lipStartTime?: number; // Detected visible mouth movement start in seconds
   lipEndTime?: number; // Detected visible mouth movement end in seconds
   lipSyncConfidence?: number; // 0 to 1 confidence for subtitle/lip timing
