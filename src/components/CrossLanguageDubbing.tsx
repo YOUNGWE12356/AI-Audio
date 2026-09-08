@@ -38,6 +38,13 @@ import {
 } from '../services/localVoiceCloneService';
 import { convertWithSeedVc, type SeedVcConvertOptions, type SeedVcConvertResult } from '../services/seedVoiceConversionService';
 import { downloadAudioHelper } from '../utils/downloadHelper';
+import {
+  COSYVOICE_LANGUAGE_OPTIONS,
+  DUBBING_SOURCE_LANGUAGE_OPTIONS,
+  DUBBING_TARGET_LANGUAGE_OPTIONS,
+  getAudioLanguage,
+  LOCAL_CLONE_LANGUAGE_OPTIONS,
+} from '../services/languageRegistry';
 
 interface CrossLanguageDubbingProps {
   initialFile?: File;
@@ -52,7 +59,7 @@ type TranslateDubbingOptionId = 'A' | 'B';
 type DubbingMode = 'dubbing_v2' | 'self_hosted';
 type LocalDialogueMode = 'single' | 'multi';
 
-const DUBBING_V2_AVAILABLE = false;
+const DUBBING_V2_AVAILABLE = import.meta.env.VITE_ENABLE_DUBBING_V2 === 'true';
 type LocalCloneInputMode = 'text' | 'speech_to_speech';
 
 interface MultiSpeakerSegment {
@@ -353,81 +360,11 @@ const buildMultiSpeakerProfiles = (segments: MultiSpeakerSegment[], duration?: n
   });
 };
 
-const sourceLanguageOptions = [
-  { value: 'auto', label: '自动识别' },
-  { value: 'zh', label: '中文' },
-  { value: 'en', label: '英文' },
-  { value: 'ja', label: '日文' },
-  { value: 'ko', label: '韩文' },
-  { value: 'fr', label: '法文' },
-  { value: 'de', label: '德文' },
-  { value: 'es', label: '西班牙文' },
-];
+const sourceLanguageOptions = DUBBING_SOURCE_LANGUAGE_OPTIONS;
 
-const targetLanguageOptions = [
-  { value: 'English', label: '英文' },
-  { value: 'Chinese Mandarin', label: '中文' },
-  { value: 'Japanese', label: '日文' },
-  { value: 'Korean', label: '韩文' },
-  { value: 'French', label: '法文' },
-  { value: 'German', label: '德文' },
-  { value: 'Spanish', label: '西班牙文' },
-  { value: 'Portuguese', label: '葡萄牙文' },
-  { value: 'Italian', label: '意大利文' },
-  { value: 'Russian', label: '俄文' },
-  { value: 'Hindi', label: '印地文' },
-  { value: 'Indonesian', label: '印尼文' },
-  { value: 'Vietnamese', label: '越南文' },
-  { value: 'Thai', label: '泰文' },
-  { value: 'Arabic', label: '阿拉伯文' },
-  { value: 'Turkish', label: '土耳其文' },
-  { value: 'Dutch', label: '荷兰文' },
-  { value: 'Polish', label: '波兰文' },
-  { value: 'Swedish', label: '瑞典文' },
-  { value: 'Danish', label: '丹麦文' },
-  { value: 'Finnish', label: '芬兰文' },
-  { value: 'Norwegian', label: '挪威文' },
-  { value: 'Greek', label: '希腊文' },
-  { value: 'Czech', label: '捷克文' },
-  { value: 'Romanian', label: '罗马尼亚文' },
-  { value: 'Hungarian', label: '匈牙利文' },
-  { value: 'Ukrainian', label: '乌克兰文' },
-  { value: 'Hebrew', label: '希伯来文' },
-  { value: 'Malay', label: '马来文' },
-  { value: 'Filipino', label: '菲律宾文' },
-  { value: 'Bengali', label: '孟加拉文' },
-  { value: 'Urdu', label: '乌尔都文' },
-  { value: 'Tamil', label: '泰米尔文' },
-];
-
-const localTargetLanguageOptions: ReadonlyArray<{ value: string; label: string }> = [
-  { value: 'zh', label: '中文' },
-  { value: 'en', label: '英文' },
-  { value: 'ja', label: '日文' },
-  { value: 'ko', label: '韩文' },
-  { value: 'fr', label: '法文' },
-  { value: 'de', label: '德文' },
-  { value: 'es', label: '西班牙文' },
-  { value: 'pt', label: '葡萄牙文' },
-  { value: 'it', label: '意大利文' },
-  { value: 'ru', label: '俄文' },
-  { value: 'ar', label: '阿拉伯文' },
-  { value: 'hi', label: '印地文' },
-  { value: 'tr', label: '土耳其文' },
-  { value: 'nl', label: '荷兰文' },
-  { value: 'pl', label: '波兰文' },
-  { value: 'sv', label: '瑞典文' },
-  { value: 'da', label: '丹麦文' },
-  { value: 'fi', label: '芬兰文' },
-  { value: 'no', label: '挪威文' },
-  { value: 'el', label: '希腊文' },
-  { value: 'he', label: '希伯来文' },
-  { value: 'ms', label: '马来文' },
-  { value: 'sw', label: '斯瓦希里文' },
-] as const;
-
-const cosyVoiceLanguageCodes = new Set(['zh', 'en', 'ja', 'ko', 'de', 'es', 'fr', 'it', 'ru']);
-const cosyVoiceTargetLanguageOptions = localTargetLanguageOptions.filter(option => cosyVoiceLanguageCodes.has(option.value));
+const targetLanguageOptions = DUBBING_TARGET_LANGUAGE_OPTIONS;
+const localTargetLanguageOptions = LOCAL_CLONE_LANGUAGE_OPTIONS;
+const cosyVoiceTargetLanguageOptions = COSYVOICE_LANGUAGE_OPTIONS;
 const localVoiceEngineOptions: Array<{
   value: LocalVoiceCloneEngine;
   label: string;
@@ -1036,7 +973,7 @@ export default function CrossLanguageDubbing({
   const handleLocalVoiceEngineChange = (engine: LocalVoiceCloneEngine) => {
     setLocalVoiceEngine(engine);
     setError(null);
-    if (engine === 'cosyvoice3' && !cosyVoiceLanguageCodes.has(localTargetLanguage)) {
+    if (engine === 'cosyvoice3' && !COSYVOICE_LANGUAGE_OPTIONS.some(option => option.value === localTargetLanguage)) {
       handleLocalTargetLanguageChange('en');
       setTargetTextExtractionMessage('CosyVoice 3 不支持原目标语种，已切换为英文，请重新提取台词。');
     }
@@ -1111,22 +1048,11 @@ export default function CrossLanguageDubbing({
 
   useEffect(() => {
     if (initialFile && assistantRequestId) handleFileChange(initialFile);
-    const requestedLanguage = {
-      zh: 'Chinese Mandarin',
-      en: 'English',
-      ja: 'Japanese',
-      ko: 'Korean',
-      ar: 'Arabic',
-    }[initialTargetLanguage || ''];
-    if (requestedLanguage) setTargetLanguage(requestedLanguage);
-    const requestedLocalLanguage = {
-      zh: 'zh',
-      en: 'en',
-      ja: 'ja',
-      ko: 'ko',
-      ar: 'ar',
-    }[initialTargetLanguage || ''];
-    if (requestedLocalLanguage) setLocalTargetLanguage(requestedLocalLanguage);
+    const requestedLanguage = getAudioLanguage(initialTargetLanguage || '');
+    if (requestedLanguage) {
+      setTargetLanguage(requestedLanguage.elevenLabsName);
+      if (requestedLanguage.localChatterbox) setLocalTargetLanguage(requestedLanguage.code);
+    }
   }, [assistantRequestId, initialTargetLanguage]);
 
   const toggleSourcePlay = () => {
@@ -1585,7 +1511,7 @@ export default function CrossLanguageDubbing({
 
   return (
     <div className="space-y-5">
-      {!cloneModeOnly && (
+      {(!cloneModeOnly || DUBBING_V2_AVAILABLE) && (
         <nav
           className="mx-auto w-full max-w-4xl rounded-2xl border border-emerald-200 bg-emerald-50/60 p-2"
           aria-label="声音克隆方案"
@@ -1593,7 +1519,7 @@ export default function CrossLanguageDubbing({
           <div className="grid grid-cols-2 gap-1 rounded-xl bg-white/80 p-1">
             {([
               { value: 'self_hosted' as const, label: '声音克隆', disabled: false },
-              { value: 'dubbing_v2' as const, label: 'Dubbing v2 · 暂停使用', disabled: !DUBBING_V2_AVAILABLE },
+              { value: 'dubbing_v2' as const, label: DUBBING_V2_AVAILABLE ? '扩展语种 · Dubbing v2' : 'Dubbing v2 · 暂停使用', disabled: !DUBBING_V2_AVAILABLE },
             ]).map(option => {
               const isActive = dubbingMode === option.value;
               return (

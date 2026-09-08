@@ -1220,6 +1220,7 @@ const JINN_NAMING_GUIDE = `
       - 类别前缀按现有项目语义使用 Item、Loot、Weapon、Monster。不要擅自增加 Sfx、Audio、Sound 等通用前缀。
       - 参考命名必须作为风格锚点：Item_Pinata_DonkeyBray、Loot_Pinata_Use、Loot_Pinata_Success、Loot_WoodenPlank_Pickup、Loot_WoodenPlank_Attack、Loot_WoodenPlank_Hit、Loot_WoodenPlank_HitWall、Loot_Crowbar_Pickup、Weapon_Saif_Combo_1、Weapon_Saif_Combo_2、Weapon_Saif_ChargeMax、Weapon_Saif_AttackMax、Weapon_Saif_Hit、Weapon_Saif_HitWall、Weapon_Saif_UmmDuwais_ExecuteMonster、Monster_Spider_Idle、Monster_Spider_Walk、Monster_Spider_Webbing、Monster_Spider_Lock、Monster_Spider_Chase、Monster_Spider_BeAttacked、Monster_Spider_Attack、Monster_Spider_EnterAmbush、Monster_Spider_Ambush、Monster_Spider_StopAmbush、Monster_Spider_Dizziness、Monster_Spider_Died。
       - 动作词保持参考表中的写法与时态，例如 Pickup、Use、Success、Attack、Hit、HitWall、Idle、Walk、Webbing、Lock、Chase、BeAttacked、EnterAmbush、Ambush、StopAmbush、Dizziness、Died、Combo_1、ChargeMax、AttackMax、ExecuteMonster。不要改成同义词，也不要加入华丽形容词。
+      - 命名末段必须描述“实际要制作和听到的声音行为”，不能只照搬触发条件。Hit 仅用于交付物本身是碰撞、击中或受击冲击声的情况；如果音效是在受击、惊吓或碰撞时触发的怪物叫声，必须按叫声类型命名，例如老鼠吱叫使用 Monster_Mouse_Squeak，咆哮使用 Roar，嘶叫使用 Hiss，笑声使用 Laugh，低语使用 Whisper。禁止把“老鼠受到惊吓时发出的吱叫”命名为 Monster_Mouse_Hit。
       - event_name 必须逐字复制 filename，二者使用完全相同的工程命名；禁止自行添加 Event_、SFX_、Play_ 或 event:/ 前缀。多个资源文件可以在 filename 末尾保留编号（如 _1、_2、_3 或参考文件中的 _1234），event_name 也必须保留相同编号。单个资源不要凭空补编号。
       - 若参考素材明确提供专有资源前缀，必须保留差异。例如 ID 事件名 Monster_Spider_Idle 对应的资源工程名可以是 Monster_NewSpider_Idle；没有明确前缀时不要自行添加 New。
       - 物件、战斗、怪物动作等世界声音默认填写 3D。怪物相关条目 distance_3d 默认 35，道具和武器相关条目默认 20，无法明确归类时也默认 20；只有明确是 UI 等屏幕声时才使用 2D 和“-”。playback_logic 必须明确填写 Loop 或 Once：Idle、Walk、Chase、Ambush、Dizziness 等持续状态通常为 Loop，其余瞬时动作通常为 Once。
@@ -1358,7 +1359,7 @@ export async function generateSfxRequirements(
   referenceFile: { data: string; mimeType: string } | null,
   templateType: 'game_sfx_general' | 'game_sfx_middleware' | 'voiceover_general' | 'voiceover_multilang',
   projectName: string | null = null,
-): Promise<{ items: any[] }> {
+): Promise<{ items: any[]; sourceItemCount?: number }> {
   const normalizedProjectName = projectName?.trim().toLowerCase() || '';
   const isJinnProject = normalizedProjectName === 'jinn';
   const isAvatarProject = normalizedProjectName === 'avatar';
@@ -1373,7 +1374,7 @@ export async function generateSfxRequirements(
   }
 
   if (isBrowser) {
-    return postJson<{ items: any[] }>('/api/ai/gemini/sfx-requirements', {
+    return postJson<{ items: any[]; sourceItemCount?: number }>('/api/ai/gemini/sfx-requirements', {
       inputText,
       screenshot: referenceFile,
       templateType,
@@ -1537,6 +1538,15 @@ export async function generateSfxRequirements(
     };
   }
 
+  // Ask Gemini to expose the number of rows it actually read from a table or
+  // checklist reference. The UI uses this only to remove hallucinated rows;
+  // ordinary visual references return 0 and remain unconstrained.
+  schema.required = Array.from(new Set([...(schema.required || []), 'sourceItemCount']));
+  schema.properties.sourceItemCount = {
+    type: Type.INTEGER,
+    description: '仅当上传参考文件是需求表、表格或清单截图且能数清数据行时，填写不含表头的实际数据行数；普通图片、音频、视频或纯文字需求填写 0。',
+  };
+
   const hasTextInput = inputText.trim().length > 0;
   const inputInterpretationInstruction = hasTextInput
     ? `
@@ -1579,7 +1589,8 @@ export async function generateSfxRequirements(
 
     请严格遵守以下规则进行处理：
     1. **多模态输入识别与需求数量控制**：
-       - **图片/截图/表格草稿**：如果上传文件是已有需求表、表格截图、手写/截图清单，请仔细 OCR 并识别其中实际包含的音效、BGM 或配音条目数量；重构和优化时 items 数组必须与原输入条目数量 1:1 对应，不要额外增加行。
+       - **图片/截图/表格草稿**：如果上传文件是已有需求表、表格截图、手写/截图清单，请先逐行 OCR，排除表头、合计行和空白行，数出实际数据行，并将该数字写入 \`sourceItemCount\`；重构和优化时 \`items\` 数组必须与原输入条目数量 1:1 对应，\`items.length\` 必须等于 \`sourceItemCount\`，绝不能为了补充专业建议而额外增加行。
+       - 如果截图中的数据行无法可靠数清，\`sourceItemCount\` 填 0，不要猜测；此时仅按能确认的条目输出，不要添加截图中没有的需求。
        - **普通图片/视觉参考图**：如果上传文件不是表格，而是画面、角色、场景、UI 或概念图，请根据画面内容生成适合当前模板的音乐/音效/配音需求，不要求 1:1。
        - **音频文件**：音频通常作为 BGM/音乐参考处理。请聆听并分析风格、情绪、速度、节奏密度、配器、音色、段落结构、循环/无缝衔接需求和适用场景；优先生成 BGM 或音乐方向需求。如果用户文字另有说明，再结合文字修正。
        - **视频文件**：视频默认只分析画面、镜头节奏、角色动作、UI变化、场景氛围和画面中的可见字幕；请忽略视频内嵌音频，因为它大概率与画面无关。不要根据视频原声推断音乐或音效。
@@ -1655,7 +1666,14 @@ export async function generateSfxRequirements(
   }
 
   try {
-    return JSON.parse(response.text);
+    const parsed = JSON.parse(response.text) as { items?: any[]; sourceItemCount?: unknown };
+    const sourceItemCount = Number.parseInt(String(parsed.sourceItemCount ?? 0), 10);
+    return {
+      items: Array.isArray(parsed.items) ? parsed.items : [],
+      sourceItemCount: Number.isFinite(sourceItemCount) && sourceItemCount > 0
+        ? Math.min(sourceItemCount, 100)
+        : 0,
+    };
   } catch (e) {
     console.error("JSON 解析失败:", {
       length: response.text.length,
@@ -2164,7 +2182,7 @@ export async function createEnglishMusicPromptForElevenLabs(
 export async function translateTextToLanguage(
   text: string,
   targetLanguage: string,
-  options?: { preserveTone?: boolean; preserveInterjections?: boolean; maxDurationSeconds?: number }
+  options?: { preserveTone?: boolean; preserveInterjections?: boolean; maxDurationSeconds?: number; strictDuration?: boolean }
 ): Promise<string> {
   const normalizedText = text.trim();
   if (!normalizedText) return '';
@@ -2178,6 +2196,7 @@ export async function translateTextToLanguage(
       preserveTone: options?.preserveTone !== false,
       preserveInterjections: options?.preserveInterjections !== false,
       maxDurationSeconds: options?.maxDurationSeconds,
+      strictDuration: options?.strictDuration === true,
     });
     return result.text;
   }
@@ -2185,7 +2204,9 @@ export async function translateTextToLanguage(
   try {
     const { ai, ThinkingLevel } = await getAI();
     const durationInstruction = typeof options?.maxDurationSeconds === 'number' && Number.isFinite(options.maxDurationSeconds)
-      ? `Aim to speak naturally within about ${Math.max(0.5, options.maxDurationSeconds).toFixed(1)} seconds. Use concise spoken phrasing and do not add detail that is absent from the source. Do not omit essential meaning, repetitions, fillers, interjections, hesitations, or conversational emphasis; preserve all of them when they carry meaning.`
+      ? options.strictDuration
+        ? `The spoken translation MUST fit within ${Math.max(0.5, options.maxDurationSeconds).toFixed(1)} seconds at a normal, unhurried speaking pace. This is a hard dubbing limit. Use the shortest natural wording, never expand the source, and preserve the essential meaning and emotional intention. Keep only repetitions, fillers, and interjections that are essential to the performance.`
+        : `Aim to speak naturally within about ${Math.max(0.5, options.maxDurationSeconds).toFixed(1)} seconds. Use concise spoken phrasing and do not add detail that is absent from the source. Do not omit essential meaning, repetitions, fillers, interjections, hesitations, or conversational emphasis; preserve all of them when they carry meaning.`
       : '';
     const interjectionInstruction = options?.preserveInterjections !== false
       ? 'Preserve every filler, interjection, hesitation, vocalization, and repeated syllable. Keep the same type and repetition count (for example, 哦哦哦 must not become 啊啊啊). Translate a vocalization only to its direct target-language equivalent; never invent, normalize, or replace it with a different sound.'

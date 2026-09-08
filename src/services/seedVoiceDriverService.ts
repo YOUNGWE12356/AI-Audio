@@ -165,6 +165,97 @@ async function decodeAudioBlobs(blobs: Blob[]): Promise<AudioBuffer[]> {
   }
 }
 
+export const MAX_NATURAL_DRIVER_RATE = 1.3;
+
+export interface SeedVoiceDriverClipTiming {
+  index: number;
+  start: number;
+  end: number;
+  availableDuration: number;
+  contentStart: number;
+  contentDuration: number;
+  requiredPlaybackRate: number;
+}
+
+const findActiveAudioWindow = (buffer: AudioBuffer) => {
+  const blockSize = Math.max(1, Math.floor(buffer.sampleRate * 0.005));
+  let peak = 0;
+  for (let channelIndex = 0; channelIndex < buffer.numberOfChannels; channelIndex += 1) {
+    const channel = buffer.getChannelData(channelIndex);
+    for (let index = 0; index < channel.length; index += 8) {
+      peak = Math.max(peak, Math.abs(channel[index]));
+    }
+  }
+  if (peak < 0.001) return { start: 0, duration: buffer.duration };
+
+  const threshold = Math.max(0.002, peak * 0.025);
+  let firstFrame = 0;
+  let lastFrame = buffer.length;
+  let foundStart = false;
+  for (let blockStart = 0; blockStart < buffer.length; blockStart += blockSize) {
+    const blockEnd = Math.min(buffer.length, blockStart + blockSize);
+    let blockPeak = 0;
+    for (let channelIndex = 0; channelIndex < buffer.numberOfChannels; channelIndex += 1) {
+      const channel = buffer.getChannelData(channelIndex);
+      for (let index = blockStart; index < blockEnd; index += 1) {
+        blockPeak = Math.max(blockPeak, Math.abs(channel[index]));
+      }
+    }
+    if (blockPeak >= threshold) {
+      if (!foundStart) firstFrame = blockStart;
+      lastFrame = blockEnd;
+      foundStart = true;
+    }
+  }
+  if (!foundStart) return { start: 0, duration: buffer.duration };
+
+  const paddingFrames = Math.floor(buffer.sampleRate * 0.035);
+  firstFrame = Math.max(0, firstFrame - paddingFrames);
+  lastFrame = Math.min(buffer.length, lastFrame + paddingFrames);
+  return {
+    start: firstFrame / buffer.sampleRate,
+    duration: Math.max(0.05, (lastFrame - firstFrame) / buffer.sampleRate),
+  };
+};
+
+const buildDriverClipTimings = (
+  segments: SeedVoiceTimedSegment[],
+  buffers: AudioBuffer[],
+  renderDuration: number,
+): SeedVoiceDriverClipTiming[] => buffers.map((buffer, index) => {
+  const segment = segments[index];
+  const start = Math.min(renderDuration, Math.max(0, segment.start));
+  const nextStart = segments[index + 1]?.start;
+  const nextBoundary = Number.isFinite(nextStart) ? Math.max(start + 0.08, Number(nextStart) - 0.04) : renderDuration;
+  // A translated line may safely use the original pause after the source line,
+  // but it must always stop before the next cue begins.
+  const end = Math.min(renderDuration, nextBoundary);
+  const availableDuration = Math.max(0.08, end - start);
+  const active = findActiveAudioWindow(buffer);
+  return {
+    index,
+    start,
+    end,
+    availableDuration,
+    contentStart: active.start,
+    contentDuration: active.duration,
+    requiredPlaybackRate: active.duration / availableDuration,
+  };
+});
+
+export async function analyzeSeedVoiceDriver(
+  segments: SeedVoiceTimedSegment[],
+  audioBlobs: Blob[],
+  totalDuration: number,
+) {
+  if (segments.length === 0 || segments.length !== audioBlobs.length) {
+    throw new Error('台词时间线与生成音频数量不一致。');
+  }
+  const buffers = await decodeAudioBlobs(audioBlobs);
+  const renderDuration = Math.max(totalDuration, segments.at(-1)?.end || 0, 0.5);
+  return buildDriverClipTimings(segments, buffers, renderDuration);
+}
+
 export async function renderSeedVoiceDriver(
   segments: SeedVoiceTimedSegment[],
   audioBlobs: Blob[],
@@ -179,21 +270,14 @@ export async function renderSeedVoiceDriver(
   if (!OfflineContextClass) throw new Error('当前浏览器不支持离线音频时间线渲染。');
   const renderDuration = Math.max(totalDuration, segments.at(-1)?.end || 0, 0.5);
   const context = new OfflineContextClass(1, Math.ceil(renderDuration * sampleRate), sampleRate);
+  const clipTimings = buildDriverClipTimings(segments, buffers, renderDuration);
   let paceAdjustedCount = 0;
   let maxPlaybackRate = 1;
 
   buffers.forEach((buffer, index) => {
-    const segment = segments[index];
-    const nextStart = segments[index + 1]?.start ?? renderDuration;
-    const availableDuration = Math.max(segment.end - segment.start, nextStart - segment.start - 0.05, 0.3);
-    const requiredRate = buffer.duration / availableDuration;
-    // Translated speech is often longer than the source language. Use the
-    // following silence first, then fit the complete generated clip back into
-    // its slot. This avoids aborting the whole conversion because of one long
-    // translated line. The upper bound is a last-resort guard for pathological
-    // sub-second slots; normal lines remain at or below a modest compression.
-    const playbackRate = requiredRate > 1 ? Math.min(1.6, requiredRate) : 1;
-    const renderedSegmentDuration = buffer.duration / playbackRate;
+    const timing = clipTimings[index];
+    const playbackRate = timing.requiredPlaybackRate > 1 ? timing.requiredPlaybackRate : 1;
+    const renderedSegmentDuration = timing.contentDuration / playbackRate;
     if (playbackRate > 1.005) paceAdjustedCount += 1;
     maxPlaybackRate = Math.max(maxPlaybackRate, playbackRate);
 
@@ -203,13 +287,14 @@ export async function renderSeedVoiceDriver(
     source.playbackRate.value = playbackRate;
     source.connect(gain);
     gain.connect(context.destination);
-    const start = Math.max(0, segment.start);
+    const start = timing.start;
     const fadeDuration = Math.min(0.015, renderedSegmentDuration / 4);
     gain.gain.setValueAtTime(0, start);
     gain.gain.linearRampToValueAtTime(1, start + fadeDuration);
     gain.gain.setValueAtTime(1, Math.max(start + fadeDuration, start + renderedSegmentDuration - fadeDuration));
     gain.gain.linearRampToValueAtTime(0, start + renderedSegmentDuration);
-    source.start(start);
+    source.start(start, timing.contentStart, timing.contentDuration);
+    source.stop(Math.min(timing.end, start + renderedSegmentDuration));
   });
 
   const rendered = await context.startRendering();

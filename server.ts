@@ -70,6 +70,7 @@ import {
   wrapElevenLabsPcmAsWav,
 } from './src/services/elevenLabsService';
 import { normalizeElevenLabsQualityMode } from './src/utils/elevenLabsQuality';
+import { AUDIO_LANGUAGE_REGISTRY } from './src/services/languageRegistry';
 import {
   DUBBING_GROUP_MAX_GAP_SECONDS,
   DUBBING_GROUP_MAX_SPAN_SECONDS,
@@ -3340,6 +3341,7 @@ async function startServer() {
         maxDurationSeconds: typeof req.body?.maxDurationSeconds === 'number'
           ? parseNumber(req.body.maxDurationSeconds, 0, 0.5, 60)
           : undefined,
+        strictDuration: req.body?.strictDuration === true,
       },
     );
     return res.json({ text });
@@ -3676,42 +3678,16 @@ ${JSON.stringify(normalizedVoices)}
     ));
   }));
 
-  const localVoiceCloneLanguages: Record<string, string> = {
-    ar: 'Arabic',
-    da: 'Danish',
-    de: 'German',
-    el: 'Greek',
-    en: 'English',
-    es: 'Spanish',
-    fi: 'Finnish',
-    fr: 'French',
-    he: 'Hebrew',
-    hi: 'Hindi',
-    it: 'Italian',
-    ja: 'Japanese',
-    ko: 'Korean',
-    ms: 'Malay',
-    nl: 'Dutch',
-    no: 'Norwegian',
-    pl: 'Polish',
-    pt: 'Portuguese',
-    ru: 'Russian',
-    sv: 'Swedish',
-    sw: 'Swahili',
-    tr: 'Turkish',
-    zh: 'Chinese',
-  };
-  const cosyVoiceLanguages: Record<string, string> = {
-    de: 'German',
-    en: 'English',
-    es: 'Spanish',
-    fr: 'French',
-    it: 'Italian',
-    ja: 'Japanese',
-    ko: 'Korean',
-    ru: 'Russian',
-    zh: 'Chinese',
-  };
+  const localVoiceCloneLanguages: Record<string, string> = Object.fromEntries(
+    AUDIO_LANGUAGE_REGISTRY
+      .filter(language => language.localChatterbox)
+      .map(language => [language.code, language.elevenLabsName]),
+  );
+  const cosyVoiceLanguages: Record<string, string> = Object.fromEntries(
+    AUDIO_LANGUAGE_REGISTRY
+      .filter(language => language.localCosyVoice)
+      .map(language => [language.code, language.elevenLabsName]),
+  );
   type LocalVoiceCloneEngine = 'chatterbox' | 'cosyvoice3';
   const resolveLocalToolPath = (configuredPath: string | undefined, fallback: string) => (
     path.resolve(process.cwd(), configuredPath?.trim() || fallback)
@@ -5138,41 +5114,9 @@ ${JSON.stringify(normalizedVoices)}
     const targetLanguage = String(req.body?.targetLanguage || 'English').trim();
     const cloningStrength = Math.min(10, Math.max(0, Math.round(Number(req.body?.cloningStrength ?? 7))));
     const outputFormat = req.body?.outputFormat === 'mp4' ? 'mp4' : 'mp3';
-    const languageCodeByName: Record<string, string> = {
-      English: 'en',
-      'Chinese Mandarin': 'zh',
-      Japanese: 'ja',
-      Korean: 'ko',
-      French: 'fr',
-      German: 'de',
-      Spanish: 'es',
-      Portuguese: 'pt',
-      Italian: 'it',
-      Russian: 'ru',
-      Hindi: 'hi',
-      Indonesian: 'id',
-      Vietnamese: 'vi',
-      Thai: 'th',
-      Arabic: 'ar',
-      Turkish: 'tr',
-      Dutch: 'nl',
-      Polish: 'pl',
-      Swedish: 'sv',
-      Danish: 'da',
-      Finnish: 'fi',
-      Norwegian: 'no',
-      Greek: 'el',
-      Czech: 'cs',
-      Romanian: 'ro',
-      Hungarian: 'hu',
-      Ukrainian: 'uk',
-      Hebrew: 'he',
-      Malay: 'ms',
-      Filipino: 'fil',
-      Bengali: 'bn',
-      Urdu: 'ur',
-      Tamil: 'ta',
-    };
+    const languageCodeByName: Record<string, string> = Object.fromEntries(
+      AUDIO_LANGUAGE_REGISTRY.map(language => [language.elevenLabsName, language.elevenLabsCode]),
+    );
     const sourceCode = sourceLanguage === 'auto' ? undefined : (languageCodeByName[sourceLanguage] || sourceLanguage);
     const targetCode = languageCodeByName[targetLanguage] || targetLanguage;
     const apiBase = 'https://api.elevenlabs.io/v1/dubbing';

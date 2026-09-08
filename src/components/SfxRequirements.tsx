@@ -430,8 +430,32 @@ const normalizeJinnEngineeringName = (value: unknown) => {
   return capitalizeEngineeringNameSegments(normalized);
 };
 
+const inferJinnVocalAction = (item: any): string | null => {
+  const description = String(item?.description || '').toLowerCase();
+  const remarks = String(item?.remarks || '').toLowerCase();
+  const vocalText = `${description} ${remarks}`;
+  if (!vocalText.trim()) return null;
+
+  const hasVocalDescription = /(叫|鸣|吼|啸|嚎|嘶|笑|低语|耳语|squeak|squeal|cry|call|roar|growl|hiss|howl|scream|shriek|laugh|whisper|vocal)/i.test(vocalText);
+  if (!hasVocalDescription) return null;
+
+  const context = `${String(item?.filename || '')} ${String(item?.scene || '')} ${vocalText}`.toLowerCase();
+  if (/(老鼠|鼠叫|mouse|rat)/i.test(context) && /(吱|尖细|squeak|squeal)/i.test(vocalText)) return 'Squeak';
+  if (/(低语|耳语|whisper)/i.test(vocalText)) return 'Whisper';
+  if (/(笑|laugh)/i.test(vocalText)) return 'Laugh';
+  if (/(嘶嘶|吐信|hiss)/i.test(vocalText)) return 'Hiss';
+  if (/(咆哮|怒吼|roar|growl)/i.test(vocalText)) return 'Roar';
+  if (/(尖叫|惊叫|scream|shriek)/i.test(vocalText)) return 'Scream';
+  if (/(嚎叫|长啸|howl)/i.test(vocalText)) return 'Howl';
+  return 'Cry';
+};
+
 const normalizeJinnRequirementItems = (items: any[]) => items.map((item) => {
-  const filename = normalizeJinnEngineeringName(item?.filename);
+  const normalizedFilename = normalizeJinnEngineeringName(item?.filename);
+  const vocalAction = inferJinnVocalAction(item);
+  const filename = vocalAction
+    ? normalizedFilename.replace(/_(?:Hit|Frightened|BeFrightened|Scared|Startled|Surprised|Reaction|React|BeAttacked)(?=_(?:\d+)$|$)/i, `_${vocalAction}`)
+    : normalizedFilename;
   const eventName = normalizeJinnEngineeringName(item?.event_name);
   return {
     ...item,
@@ -1025,8 +1049,18 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
             : selectedProject === 'sunny_island'
               ? normalizeSunnyIslandRequirementItems(normalizedItems)
             : normalizedItems;
+        const sourceItemCount = Number(response.sourceItemCount);
+        const isTableReference = Boolean(
+          requestReferenceFile
+          && requestReferenceFile.type.startsWith('image/')
+          && Number.isInteger(sourceItemCount)
+          && sourceItemCount > 0,
+        );
+        const countLockedItems = isTableReference && sourceItemCount < projectAwareItems.length
+          ? projectAwareItems.slice(0, sourceItemCount)
+          : projectAwareItems;
         const mergedItems = mergeGeneralRowsWithDetectedVoRows(
-          projectAwareItems,
+          countLockedItems,
           detectedVoRows,
         );
         const generatedItems = selectedProject === 'jinn'
@@ -1041,10 +1075,10 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
             ...prevRows,
             ...normalizeGeneratedRows(generatedItems, prevRows.length + 1, requestTemplateType),
           ], true);
-          setSuccessMessage(`已继续添加 ${generatedItems.length} 条新需求到当前表格末尾${detectedVoRows.length ? `，其中包含 ${detectedVoRows.length} 条视频字幕配音需求` : ''}。`);
+          setSuccessMessage(`已继续添加 ${generatedItems.length} 条新需求到当前表格末尾${isTableReference && sourceItemCount < response.items.length ? `（已按参考表 ${sourceItemCount} 行校正）` : ''}${detectedVoRows.length ? `，其中包含 ${detectedVoRows.length} 条视频字幕配音需求` : ''}。`);
         } else {
           setRowsForTemplate(requestTemplateType, normalizeGeneratedRows(generatedItems, 1, requestTemplateType), true);
-          setSuccessMessage(`已生成 ${generatedItems.length} 条需求，并替换为当前这版需求表${detectedVoRows.length ? `，其中包含 ${detectedVoRows.length} 条视频字幕配音需求` : ''}。`);
+          setSuccessMessage(`已生成 ${generatedItems.length} 条需求，并替换为当前这版需求表${isTableReference && sourceItemCount < response.items.length ? `（已按参考表 ${sourceItemCount} 行校正）` : ''}${detectedVoRows.length ? `，其中包含 ${detectedVoRows.length} 条视频字幕配音需求` : ''}。`);
         }
         setSuccess(true);
       } else {

@@ -23,19 +23,13 @@ import {
 import { buildSeedVoiceTimeline, readMediaDuration, type SeedVoiceAudioEvent } from '../services/seedVoiceDriverService';
 import { translateTextToLanguage } from '../services/geminiService';
 import GeneratedAudioPlayer from './GeneratedAudioPlayer';
+import { LOCAL_CLONE_LANGUAGE_TUPLES } from '../services/languageRegistry';
 
 type AdvancedVoiceConversionMode = 'speakers' | 'events';
 
 const EVENT_LABELS: Record<string, string> = {
   laughter: '笑声', breath: '呼吸', quick_breath: '急促呼吸', cough: '咳嗽', sigh: '叹气', noise: '非语言声', mn: '语气词',
 };
-
-const LANGUAGES = [
-  ['zh', '中文'], ['en', '英文'], ['ja', '日文'], ['ko', '韩文'], ['fr', '法文'], ['de', '德文'], ['es', '西班牙文'],
-  ['pt', '葡萄牙文'], ['it', '意大利文'], ['ru', '俄文'], ['ar', '阿拉伯文'], ['hi', '印地文'], ['tr', '土耳其文'],
-  ['nl', '荷兰文'], ['pl', '波兰文'], ['sv', '瑞典文'], ['da', '丹麦文'], ['fi', '芬兰文'], ['no', '挪威文'],
-  ['el', '希腊文'], ['he', '希伯来文'], ['ms', '马来文'], ['sw', '斯瓦希里文'],
-];
 
 type PanelProfile = LocalMultiSpeakerProfile & { name: string };
 
@@ -147,8 +141,8 @@ export default function AdvancedVoiceConversionPanel({ mode }: { mode: AdvancedV
   const engineStatus = status?.engines?.[engine];
   const languageOptions = useMemo(() => {
     const supported = engineStatus?.supportedLanguages;
-    if (!supported) return LANGUAGES;
-    return LANGUAGES.filter(([code]) => Object.prototype.hasOwnProperty.call(supported, code));
+    if (!supported) return LOCAL_CLONE_LANGUAGE_TUPLES;
+    return LOCAL_CLONE_LANGUAGE_TUPLES.filter(([code]) => Object.prototype.hasOwnProperty.call(supported, code));
   }, [engineStatus]);
   const canAnalyze = Boolean(sourceFile && !working);
   const canGenerate = Boolean(sourceFile && segments.length > 0 && profiles.length > 0 && segments.every(segment => segment.sourceText.trim()) && !working && engineStatus?.available);
@@ -208,7 +202,7 @@ export default function AdvancedVoiceConversionPanel({ mode }: { mode: AdvancedV
           if (segment.targetText.trim()) return segment;
           const translated = await translateTextToLanguage(
             segment.sourceText,
-            LANGUAGES.find(item => item[0] === language)?.[1] || language,
+            LOCAL_CLONE_LANGUAGE_TUPLES.find(item => item[0] === language)?.[1] || language,
             { preserveTone: true, preserveInterjections: true, maxDurationSeconds: Math.max(0.5, segment.end - segment.start) },
           );
           return { ...segment, targetText: translated.trim() };
