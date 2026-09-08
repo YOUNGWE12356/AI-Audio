@@ -59,7 +59,7 @@ type TranslateDubbingOptionId = 'A' | 'B';
 type DubbingMode = 'dubbing_v2' | 'self_hosted';
 type LocalDialogueMode = 'single' | 'multi';
 
-const DUBBING_V2_AVAILABLE = import.meta.env.VITE_ENABLE_DUBBING_V2 === 'true';
+const DUBBING_V2_AVAILABLE = false;
 type LocalCloneInputMode = 'text' | 'speech_to_speech';
 
 interface MultiSpeakerSegment {
@@ -1511,7 +1511,7 @@ export default function CrossLanguageDubbing({
 
   return (
     <div className="space-y-5">
-      {(!cloneModeOnly || DUBBING_V2_AVAILABLE) && (
+      {DUBBING_V2_AVAILABLE && (
         <nav
           className="mx-auto w-full max-w-4xl rounded-2xl border border-emerald-200 bg-emerald-50/60 p-2"
           aria-label="声音克隆方案"

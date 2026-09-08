@@ -448,7 +448,15 @@ export default function App() {
       }
     });
 
-    if (!hasGeminiKey) return;
+    // Full-video preupload is only useful for professional video paths.
+    // Quick/game analysis intentionally uses local keyframes, so uploading the
+    // original video there would add latency without improving the result.
+    if (!hasGeminiKey || !(target.video || target.avatar)) {
+      preuploadAbortControllersRef.current.forEach(controller => controller.abort('not-professional'));
+      preuploadAbortControllersRef.current.clear();
+      preuploadPromisesRef.current.clear();
+      return;
+    }
 
     const updatePreuploadState = (fileId: string, patch: NonNullable<FileItem['preupload']>) => {
       setFiles(prev => prev.map(item => {
@@ -511,7 +519,7 @@ export default function App() {
 
       preuploadPromisesRef.current.set(item.id, preuploadPromise);
     });
-  }, [files, hasGeminiKey]);
+  }, [files, hasGeminiKey, target.video, target.avatar]);
 
   useEffect(() => {
     return () => {
@@ -924,8 +932,12 @@ export default function App() {
           type: standaloneMusicType,
         };
       };
-      const optionA = await createMusicOption('A');
-      const optionB = await createMusicOption('B');
+      // The two takes are independent requests; run them concurrently so the
+      // user waits for one generation window instead of two back-to-back calls.
+      const [optionA, optionB] = await Promise.all([
+        createMusicOption('A'),
+        createMusicOption('B'),
+      ]);
       setPendingMusicOptions({ optionA, optionB });
       setStandaloneMusicAudioUrl(optionA.url);
       
@@ -1075,23 +1087,6 @@ export default function App() {
           );
         }
       } else {
-        const preuploadId = canUseSingleVideoPreupload
-          ? await waitForReadyPreupload(videoFiles[0])
-          : null;
-        if (preuploadId) {
-          setAnalysisStage('视频已预上传，正在直接分析完整画面并生成音频方案...');
-          res = await analyzeAudioDesignPreuploadedVideo(
-            preuploadId,
-            requirements,
-            target,
-            isInstrumental,
-            {
-              signal: controller.signal,
-              analysisMode: 'fallback',
-              scope,
-            },
-          );
-        } else {
         // Fast mode reduces videos to compact keyframes and resizes images.
         let fileData: Awaited<ReturnType<typeof prepareFilesForGemini>> | null = null;
         try {
@@ -1130,7 +1125,6 @@ export default function App() {
             isInstrumental,
             { signal: controller.signal, scope },
           );
-        }
         }
       }
       

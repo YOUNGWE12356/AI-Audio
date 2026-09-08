@@ -1818,17 +1818,8 @@ export default function DubbingStudio({
               </div>
 
               <div className="rounded-xl border border-emerald-100 bg-emerald-50/60 p-3">
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <Sparkles className="h-3.5 w-3.5 text-emerald-600" />
-                      <span className="text-[11px] font-black text-emerald-900">ElevenLabs V3 自动增强</span>
-                    </div>
-                    <p className="mt-1 text-[10px] leading-relaxed text-emerald-800/75">
-                      逐句分析台词，在情绪变化处添加多个 V3 语气标签；不改正文，不满意可恢复原文。
-                    </p>
-                  </div>
-                  <div className="flex shrink-0 flex-wrap gap-2">
+                <div className="flex justify-end">
+                  <div className="flex flex-wrap justify-end gap-2">
                     <button
                       type="button"
                       onClick={handleV3EnhancePrompt}
@@ -2123,7 +2114,6 @@ export default function DubbingStudio({
                   <Volume2 className="w-3.5 h-3.5 text-emerald-600" />
                   <span>声线设定方式（精品人声库）</span>
                 </span>
-                <span className="text-[10px] text-slate-450 font-semibold bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded">ElevenLabs 引擎支持</span>
               </label>
 
               {/* PREMIUM VOICE SELECTION WIDGET */}

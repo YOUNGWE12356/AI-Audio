@@ -722,7 +722,7 @@ export default function AudioDirector({
                     className="h-3.5 w-3.5 accent-emerald-600"
                   />
                   <Music className="h-3.5 w-3.5 shrink-0" />
-                  <span>分析音乐</span>
+                  <span>音乐</span>
                 </label>
                 <label className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-semibold transition-all ${
                   analysisScope.sfx
@@ -736,7 +736,7 @@ export default function AudioDirector({
                     className="h-3.5 w-3.5 accent-emerald-600"
                   />
                   <Volume2 className="h-3.5 w-3.5 shrink-0" />
-                  <span>分析音效</span>
+                  <span>音效</span>
                 </label>
               </div>
             </div>

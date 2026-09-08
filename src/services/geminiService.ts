@@ -746,7 +746,7 @@ export async function analyzeAudioDesignVideoFile(
       mimeType: uploadedFile.mimeType,
       label: `完整视频：${displayName}`,
       videoMetadata: {
-        fps: 4,
+        fps: target.avatar ? 2 : 1,
       },
     }], requirements, target, isInstrumental, { scope });
   } catch (error) {
@@ -928,12 +928,14 @@ export async function analyzeAudioDesign(
     parts.push({ text: `${labels ? `[${labels}]\n` : ''}${prompt}` });
   }
 
-  const { ai, Type } = await getAI();
+  const { ai, Type, ThinkingLevel } = await getAI();
   const response = await generateGeminiContent(ai, {
     model: GEMINI_PRIMARY_MODEL,
     contents: [{ parts }],
     config: {
       responseMimeType: "application/json",
+      maxOutputTokens: analysisScope.music && analysisScope.sfx ? 16_384 : 10_240,
+      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
       responseSchema: {
         type: Type.OBJECT,
         required: [
@@ -1382,7 +1384,7 @@ export async function generateSfxRequirements(
     });
   }
 
-  const { ai, Type } = await getAI();
+  const { ai, Type, ThinkingLevel } = await getAI();
   let schema: any;
   let templateDescription = "";
 
@@ -1656,7 +1658,8 @@ export async function generateSfxRequirements(
     contents: [{ parts }],
     config: {
       responseMimeType: "application/json",
-      maxOutputTokens: 24_576,
+      maxOutputTokens: 12_288,
+      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
       responseSchema: schema
     }
   });

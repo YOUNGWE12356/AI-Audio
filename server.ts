@@ -3210,7 +3210,7 @@ async function startServer() {
       mimeType: cachedVideo.mimeType,
       label: `完整视频：${cachedVideo.displayName}`,
       videoMetadata: {
-        fps: 4,
+        fps: target.avatar ? 2 : 1,
       },
     }], String(requirements), target, Boolean(isInstrumental), { scope });
     return res.json(result);

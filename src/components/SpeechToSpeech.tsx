@@ -631,7 +631,6 @@ export default function SpeechToSpeech({
                 <Volume2 className="w-3.5 h-3.5 text-emerald-600" />
                 <span>选择变声目标声线 (精品人声库)</span>
               </span>
-              <span className="text-[10px] text-slate-450 font-semibold bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded">ElevenLabs 变声引擎</span>
             </label>
 
             <div className="space-y-3 relative">
