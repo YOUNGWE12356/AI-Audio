@@ -35,6 +35,8 @@ const DEFAULT_OPTIONS: SeedVcConvertOptions = {
   repetitionPenalty: 1.1,
 };
 
+const VOICE_CONVERSION_AI_TIMEOUT_MS = 240_000;
+
 const formatTime = (value: number) => {
   if (!Number.isFinite(value) || value <= 0) return '0:00';
   const whole = Math.floor(value);
@@ -268,12 +270,16 @@ export default function VoiceConversion({
             preserveTone: true,
             maxDurationSeconds: Math.max(0.5, segment.end - segment.start),
             strictDuration: true,
+            timeoutMs: VOICE_CONVERSION_AI_TIMEOUT_MS,
           })).trim(),
         }));
         setTimedSegments(translated);
         setTargetText(translated.map(segment => segment.targetText).join('\n\n'));
       } else {
-        setTargetText(await translateTextToLanguage(sourceText, languageLabel, { preserveTone: true }));
+        setTargetText(await translateTextToLanguage(sourceText, languageLabel, {
+          preserveTone: true,
+          timeoutMs: VOICE_CONVERSION_AI_TIMEOUT_MS,
+        }));
       }
     }
     catch (reason) { setError(reason instanceof Error ? reason.message : '台词翻译失败'); }
@@ -317,6 +323,7 @@ export default function VoiceConversion({
               preserveInterjections: attempt === 0,
               maxDurationSeconds: Math.max(0.5, clipTiming.availableDuration * durationFactors[attempt]),
               strictDuration: true,
+              timeoutMs: VOICE_CONVERSION_AI_TIMEOUT_MS,
             })).trim();
             return [index, conciseText, await generateSegmentVoice(conciseText)];
           }).then(items => items.map(([index, text, blob]) => [index, { text, blob }] as const)));

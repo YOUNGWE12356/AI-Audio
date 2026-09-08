@@ -60,7 +60,26 @@ type DubbingMode = 'dubbing_v2' | 'self_hosted';
 type LocalDialogueMode = 'single' | 'multi';
 
 const DUBBING_V2_AVAILABLE = false;
+const VOICE_CONVERSION_AI_TIMEOUT_MS = 240_000;
 type LocalCloneInputMode = 'text' | 'speech_to_speech';
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  task: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await task(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 interface MultiSpeakerSegment {
   id: string;
@@ -731,6 +750,7 @@ export default function CrossLanguageDubbing({
   const translateExtractedTargetText = async (sourceText: string, language: string, requestId: number) => {
     const translatedText = await translateTextToLanguage(sourceText, localTargetLanguageLabel(language), {
       preserveTone: true,
+      timeoutMs: VOICE_CONVERSION_AI_TIMEOUT_MS,
     });
     if (targetTextRequestRef.current !== requestId) return;
     setLocalTargetText(translatedText.trim().slice(0, 800));
@@ -743,14 +763,15 @@ export default function CrossLanguageDubbing({
     requestId: number,
     eventCount: number,
   ) => {
-    const translatedSegments = await Promise.all(segments.map(async segment => ({
+    const translatedSegments = await mapWithConcurrency(segments, 3, async segment => ({
       ...segment,
       speakerId: 'speaker_0',
       targetText: (await translateTextToLanguage(segment.sourceText, localTargetLanguageLabel(language), {
         preserveTone: true,
         maxDurationSeconds: Math.max(0.5, segment.end - segment.start),
+        timeoutMs: VOICE_CONVERSION_AI_TIMEOUT_MS,
       })).trim().slice(0, 800),
-    })));
+    }));
     if (targetTextRequestRef.current !== requestId) return;
     setMultiSpeakerSegments(translatedSegments);
     setLocalTargetText(translatedSegments.map(segment => segment.targetText).join('\n\n').slice(0, 800));
@@ -783,13 +804,14 @@ export default function CrossLanguageDubbing({
       setMultiSpeakerProfiles(profiles);
       setTargetTextExtractionMessage(`已识别 ${profiles.length} 位说话人、${segments.length} 段台词和 ${events.length} 个语气事件，正在翻译…`);
 
-      const translatedSegments = await Promise.all(segments.map(async segment => ({
+      const translatedSegments = await mapWithConcurrency(segments, 3, async segment => ({
         ...segment,
         targetText: (await translateTextToLanguage(segment.sourceText, localTargetLanguageLabel(localTargetLanguage), {
           preserveTone: true,
           maxDurationSeconds: Math.max(0.5, segment.end - segment.start),
+          timeoutMs: VOICE_CONVERSION_AI_TIMEOUT_MS,
         })).trim().slice(0, 800),
-      })));
+      }));
       if (targetTextRequestRef.current !== requestId) return;
       setMultiSpeakerSegments(translatedSegments);
       setLocalTargetText(translatedSegments.map(segment => segment.targetText).join(' ').slice(0, 800));

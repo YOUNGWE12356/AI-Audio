@@ -27,11 +27,31 @@ import { LOCAL_CLONE_LANGUAGE_TUPLES } from '../services/languageRegistry';
 
 type AdvancedVoiceConversionMode = 'speakers' | 'events';
 
+const VOICE_CONVERSION_AI_TIMEOUT_MS = 240_000;
+
 const EVENT_LABELS: Record<string, string> = {
   laughter: '笑声', breath: '呼吸', quick_breath: '急促呼吸', cough: '咳嗽', sigh: '叹气', noise: '非语言声', mn: '语气词',
 };
 
 type PanelProfile = LocalMultiSpeakerProfile & { name: string };
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  task: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await task(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 function UploadBox({ file, onChange }: { file: File | null; onChange: (file: File | null) => void }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -172,14 +192,23 @@ export default function AdvancedVoiceConversionPanel({ mode }: { mode: AdvancedV
       setSegments(detectedSegments);
       setEvents(detectedEvents); setProfiles(nextProfiles); setSelectedEventIds(new Set(detectedEvents.map(event => event.id)));
       setProgress('正在自动翻译识别到的台词…');
-      const translatedResults = await Promise.allSettled(detectedSegments.map(async segment => {
-        const translated = await translateTextToLanguage(
-          segment.sourceText,
-          languageOptions.find(item => item[0] === language)?.[1] || language,
-          { preserveTone: true, preserveInterjections: true, maxDurationSeconds: Math.max(0.5, segment.end - segment.start) },
-        );
-        return translated.trim();
-      }));
+      const translatedResults = await mapWithConcurrency<LocalMultiSpeakerSegment, PromiseSettledResult<string>>(detectedSegments, 3, async segment => {
+        try {
+          const translated = await translateTextToLanguage(
+            segment.sourceText,
+            languageOptions.find(item => item[0] === language)?.[1] || language,
+            {
+              preserveTone: true,
+              preserveInterjections: true,
+              maxDurationSeconds: Math.max(0.5, segment.end - segment.start),
+              timeoutMs: VOICE_CONVERSION_AI_TIMEOUT_MS,
+            },
+          );
+          return { status: 'fulfilled', value: translated.trim() } as PromiseFulfilledResult<string>;
+        } catch (reason) {
+          return { status: 'rejected', reason } as PromiseRejectedResult;
+        }
+      });
       const translatedSegments = detectedSegments.map((segment, index) => {
         const translation = translatedResults[index];
         return translation?.status === 'fulfilled' ? { ...segment, targetText: translation.value } : segment;
@@ -198,15 +227,20 @@ export default function AdvancedVoiceConversionPanel({ mode }: { mode: AdvancedV
       let preparedSegments = segments;
       if (segments.some(segment => !segment.targetText.trim())) {
         setProgress('正在自动补全目标语言台词…');
-        const translatedSegments = await Promise.all(segments.map(async segment => {
+        const translatedSegments = await mapWithConcurrency<LocalMultiSpeakerSegment, LocalMultiSpeakerSegment>(segments, 3, async segment => {
           if (segment.targetText.trim()) return segment;
           const translated = await translateTextToLanguage(
             segment.sourceText,
             LOCAL_CLONE_LANGUAGE_TUPLES.find(item => item[0] === language)?.[1] || language,
-            { preserveTone: true, preserveInterjections: true, maxDurationSeconds: Math.max(0.5, segment.end - segment.start) },
+            {
+              preserveTone: true,
+              preserveInterjections: true,
+              maxDurationSeconds: Math.max(0.5, segment.end - segment.start),
+              timeoutMs: VOICE_CONVERSION_AI_TIMEOUT_MS,
+            },
           );
           return { ...segment, targetText: translated.trim() };
-        }));
+        });
         if (translatedSegments.some(segment => !segment.targetText.trim())) {
           throw new Error('有台词未能生成目标语言文本，请检查翻译结果后重试。');
         }

@@ -46,7 +46,6 @@ import {
   isGeminiUnsupportedLocationError,
 } from './src/services/geminiRetry';
 import {
-  recordElevenLabsResponseUsage,
   setAiUsageRecorder,
 } from './src/services/usageTracking';
 import type { AiUsageEvent } from './src/services/usageTracking';
@@ -63,11 +62,11 @@ import {
   fetchAvailableVoices,
   generateMusic,
   generateSoundEffect,
+  getElevenLabsApiKeys,
   generateSpeechToSpeech,
   generateVoice,
   isolateAudio,
   transcribeSpeech,
-  wrapElevenLabsPcmAsWav,
 } from './src/services/elevenLabsService';
 import { normalizeElevenLabsQualityMode } from './src/utils/elevenLabsQuality';
 import { AUDIO_LANGUAGE_REGISTRY } from './src/services/languageRegistry';
@@ -1361,7 +1360,7 @@ async function startServer() {
       services: {
         gemini: Boolean(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY),
         gptText: isGptTextConfigured(),
-        elevenLabs: Boolean(process.env.ELEVENLABS_API_KEY || process.env.VITE_ELEVENLABS_API_KEY),
+        elevenLabs: getElevenLabsApiKeys().length > 0,
         ffmpeg: Boolean(FFMPEG_BINARY),
         demucsConfigured: Boolean(process.env.DEMUCS_COMMAND || process.env.DEMUCS_PYTHON),
       },
@@ -1507,7 +1506,7 @@ async function startServer() {
       providers: {
         elevenLabs: summarizeLocalProvider(
           'elevenlabs',
-          Boolean(process.env.ELEVENLABS_API_KEY || process.env.VITE_ELEVENLABS_API_KEY),
+          getElevenLabsApiKeys().length > 0,
         ),
         gemini: summarizeLocalProvider(
           'gemini',
@@ -1809,42 +1808,44 @@ async function startServer() {
     voiceName?: string,
   ) => {
     const ownerId = String(publicOwnerId || '').trim();
-    if (!ownerId || sharedVoiceAvailabilityCache.has(voiceId)) return;
+    if (!ownerId) return;
 
-    const apiKey = process.env.ELEVENLABS_API_KEY || process.env.VITE_ELEVENLABS_API_KEY || '';
-    if (!apiKey) return;
+    await Promise.all(getElevenLabsApiKeys().map(async (apiKey, index) => {
+      const cacheKey = `${index}:${voiceId}`;
+      if (sharedVoiceAvailabilityCache.has(cacheKey)) return;
 
-    const response = await fetch(
-      `https://api.elevenlabs.io/v1/voices/add/${encodeURIComponent(ownerId)}/${encodeURIComponent(voiceId)}`,
-      {
-        method: 'POST',
-        headers: {
-          'xi-api-key': apiKey,
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
+      const response = await fetch(
+        `https://api.elevenlabs.io/v1/voices/add/${encodeURIComponent(ownerId)}/${encodeURIComponent(voiceId)}`,
+        {
+          method: 'POST',
+          headers: {
+            'xi-api-key': apiKey,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify({
+            new_name: String(voiceName || `Voice Library ${voiceId}`).slice(0, 80),
+          }),
         },
-        body: JSON.stringify({
-          new_name: String(voiceName || `Voice Library ${voiceId}`).slice(0, 80),
-        }),
-      },
-    );
+      );
 
-    if (response.ok) {
-      sharedVoiceAvailabilityCache.add(voiceId);
-      return;
-    }
+      if (response.ok) {
+        sharedVoiceAvailabilityCache.add(cacheKey);
+        return;
+      }
 
-    const body = await response.json().catch(() => ({}));
-    const message = String(body?.detail?.message || body?.message || response.statusText || '');
-    if (
-      response.status === 409 ||
-      /already|exists|added|Multiple voice additions\/deletions/i.test(message)
-    ) {
-      sharedVoiceAvailabilityCache.add(voiceId);
-      return;
-    }
+      const body = await response.json().catch(() => ({}));
+      const message = String(body?.detail?.message || body?.message || response.statusText || '');
+      if (
+        response.status === 409 ||
+        /already|exists|added|Multiple voice additions\/deletions/i.test(message)
+      ) {
+        sharedVoiceAvailabilityCache.add(cacheKey);
+        return;
+      }
 
-    throw new Error(`ElevenLabs 声音库同步失败：${message || response.status}`);
+      console.warn(`ElevenLabs shared voice sync skipped for configured key #${index + 1}:`, message || response.status);
+    }));
   };
 
   const parseNumber = (value: unknown, fallback: number, min: number, max: number) => {
@@ -6200,8 +6201,7 @@ CRITICAL SUBTITLE OCR PASS:
       const qualityMode = normalizeElevenLabsQualityMode(req.body?.qualityMode);
       const isProQuality = qualityMode === 'pro';
       
-      const apiKey = process.env.ELEVENLABS_API_KEY || process.env.VITE_ELEVENLABS_API_KEY;
-      if (!apiKey) {
+      if (getElevenLabsApiKeys().length === 0) {
         return res.status(400).json({ error: 'ElevenLabs API Key is not configured on the server. Please configure it in Settings.' });
       }
       
@@ -6238,31 +6238,20 @@ CRITICAL SUBTITLE OCR PASS:
             );
           }
           console.log(`ElevenLabs server TTS: text="${generationText}" voiceId=${targetVoice}`);
-          const apiResponse = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${targetVoice}`, {
-            method: "POST",
-            headers: {
-              "xi-api-key": apiKey,
-              "Content-Type": "application/json",
+          const voiceBlob = await generateVoice(
+            generationText,
+            targetVoice,
+            isProQuality ? 0.45 : 0.5,
+            isProQuality ? 0.82 : 0.75,
+            isProQuality ? 0.14 : 0.05,
+            {
+              qualityMode,
+              voiceSource: String(req.body?.voiceSource || '').trim() === 'voice_library' ? 'voice_library' : undefined,
+              publicOwnerId: String(req.body?.publicOwnerId || '').trim(),
+              voiceName: String(req.body?.voiceName || '').trim(),
             },
-            body: JSON.stringify({
-              text: generationText,
-              model_id: "eleven_v3",
-              voice_settings: {
-                stability: isProQuality ? 0.45 : 0.5,
-                similarity_boost: isProQuality ? 0.82 : 0.75,
-                style: isProQuality ? 0.14 : 0.05,
-                use_speaker_boost: true,
-              },
-            }),
-          });
-
-          if (!apiResponse.ok) {
-            const errJson = await apiResponse.json().catch(() => ({}));
-            throw new Error(`ElevenLabs TTS Error: ${errJson.detail?.message || apiResponse.statusText}`);
-          }
-
-          recordElevenLabsResponseUsage(apiResponse, 'eleven_v3');
-          return Buffer.from(await apiResponse.arrayBuffer());
+          );
+          return Buffer.from(await voiceBlob.arrayBuffer());
         });
         fs.writeFileSync(filePath, buffer);
 
@@ -6290,30 +6279,11 @@ CRITICAL SUBTITLE OCR PASS:
           : `Sound effect, realistic texture: ${prompt}`;
         console.log(`ElevenLabs server SFX Gen: prompt="${sfxPrompt}" duration=${duration}`);
         
-        const apiResponse = await fetch(
-          `https://api.elevenlabs.io/v1/sound-generation?output_format=${ELEVENLABS_SOUND_OUTPUT_FORMAT}`,
-          {
-            method: "POST",
-            headers: {
-              "xi-api-key": apiKey,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              model_id: ELEVENLABS_SOUND_MODEL,
-              text: sfxPrompt,
-              duration_seconds: Math.min(30, Math.max(0.5, duration || 4)),
-              prompt_influence: isProQuality ? 0.45 : 0.3,
-            }),
-          },
+        const wavBlob = await generateSoundEffect(
+          sfxPrompt,
+          Math.min(30, Math.max(0.5, duration || 4)),
+          { qualityMode },
         );
-        
-        if (!apiResponse.ok) {
-          const errJson = await apiResponse.json().catch(() => ({}));
-          throw new Error(`ElevenLabs SFX Gen Error: ${errJson.detail?.message || apiResponse.statusText}`);
-        }
-
-        recordElevenLabsResponseUsage(apiResponse, ELEVENLABS_SOUND_MODEL);
-        const wavBlob = wrapElevenLabsPcmAsWav(await apiResponse.arrayBuffer());
         const buffer = Buffer.from(await wavBlob.arrayBuffer());
         fs.writeFileSync(filePath, buffer);
       }
@@ -6400,7 +6370,7 @@ CRITICAL SUBTITLE OCR PASS:
           console.warn('Demucs is unavailable or failed; falling back to cloud/filter separation:', demucsResult.errors.slice(-3));
         }
 
-        const hasElevenLabsKey = Boolean(process.env.ELEVENLABS_API_KEY || process.env.VITE_ELEVENLABS_API_KEY);
+        const hasElevenLabsKey = getElevenLabsApiKeys().length > 0;
         if (hasElevenLabsKey) {
           let isolatedTempPath = '';
           try {

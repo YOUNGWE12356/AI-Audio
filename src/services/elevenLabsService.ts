@@ -132,7 +132,7 @@ async function requestBlob(path: string, init: RequestInit): Promise<Blob> {
     if (path.includes('/music') && ELEVENLABS_PROMPT_POLICY_ERROR.test(message)) {
       throw new Error(MUSIC_PROMPT_POLICY_MESSAGE);
     }
-    throw new Error(message);
+    throw new Error(formatElevenLabsErrorMessage(message));
   }
   return response.blob();
 }
@@ -141,13 +141,107 @@ async function requestJson<T>(path: string, init: RequestInit): Promise<T> {
   const response = await fetch(path, init);
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(body.error || `AI 服务请求失败 (${response.status})`);
+    throw new Error(formatElevenLabsErrorMessage(String(body.error || `AI 服务请求失败 (${response.status})`)));
   }
   return body as T;
 }
 
-const getApiKey = () => {
-  return process.env.ELEVENLABS_API_KEY || process.env.VITE_ELEVENLABS_API_KEY || "";
+export const getElevenLabsApiKeys = () => {
+  const rawValues = [
+    process.env.ELEVENLABS_API_KEY,
+    process.env.ELEVENLABS_FALLBACK_API_KEY,
+    process.env.ELEVENLABS_API_KEYS,
+    process.env.VITE_ELEVENLABS_API_KEY,
+  ];
+  const seen = new Set<string>();
+  return rawValues
+    .flatMap(value => String(value || '').split(/[\s,;]+/))
+    .map(value => value.trim())
+    .filter(value => {
+      if (!value || seen.has(value)) return false;
+      seen.add(value);
+      return true;
+    });
+};
+
+const ELEVENLABS_QUOTA_ERROR = /exceeds your quota|credits? remaining|credits? (?:are|is) required|insufficient credits|not enough credits|quota exceeded/i;
+
+const isElevenLabsQuotaErrorMessage = (message: string) => ELEVENLABS_QUOTA_ERROR.test(message);
+const isElevenLabsVoiceNotFoundMessage = (message: string) => /not found|voice_id|voice id|voice does not exist/i.test(message);
+
+const formatElevenLabsErrorMessage = (message: string) => {
+  const text = message.trim() || '未知错误';
+  if (!isElevenLabsQuotaErrorMessage(text)) return text;
+  const remainingMatch = text.match(/you have\s+([\d,.]+)\s+credits?\s+remaining/i);
+  const requiredMatch = text.match(/while\s+([\d,.]+)\s+credits?\s+(?:are|is)\s+required/i);
+  const detail = remainingMatch && requiredMatch
+    ? `当前 key 剩余 ${remainingMatch[1]} credits，本次需要 ${requiredMatch[1]} credits。`
+    : '当前 ElevenLabs key 的 credits 不足。';
+  return `ElevenLabs 额度不足：${detail}系统已尝试可用备用 API；请充值或在 .env 配置 ELEVENLABS_FALLBACK_API_KEY / ELEVENLABS_API_KEYS。`;
+};
+
+export const getElevenLabsErrorMessage = async (response: Response, fallback = response.statusText) => {
+  const errorData = await response.json().catch(() => ({ detail: { message: fallback } }));
+  const detail = errorData.detail;
+  return String(
+    typeof detail === 'string'
+      ? detail
+      : detail?.message || errorData.message || fallback,
+  );
+};
+
+export const withElevenLabsApiKey = async <T,>(
+  operationLabel: string,
+  task: (apiKey: string, keyIndex: number) => Promise<T>,
+) => {
+  const apiKeys = getElevenLabsApiKeys();
+  if (apiKeys.length === 0) {
+    throw new Error("ElevenLabs API Key is not configured. Please add it in the Secrets panel.");
+  }
+
+  let lastError: unknown = null;
+  for (let index = 0; index < apiKeys.length; index += 1) {
+    try {
+      if (index > 0) {
+        console.warn(`${operationLabel}: retrying with ElevenLabs fallback API key #${index + 1}.`);
+      }
+      return await task(apiKeys[index], index);
+    } catch (error: any) {
+      lastError = error;
+      const message = String(error?.message || error || '');
+      if ((isElevenLabsQuotaErrorMessage(message) || isElevenLabsVoiceNotFoundMessage(message)) && index < apiKeys.length - 1) {
+        console.warn(`${operationLabel}: ElevenLabs key #${index + 1} cannot complete this request; trying next key.`);
+        continue;
+      }
+      throw new Error(formatElevenLabsErrorMessage(message));
+    }
+  }
+
+  throw new Error(formatElevenLabsErrorMessage(String((lastError as any)?.message || lastError || 'ElevenLabs 请求失败。')));
+};
+
+const ensureSharedVoiceAvailableForKey = async (
+  apiKey: string,
+  voiceId?: string,
+  ownerId?: string,
+  voiceName?: string,
+) => {
+  if (!voiceId || !ownerId) return;
+  const response = await fetch(
+    `https://api.elevenlabs.io/v1/voices/add/${encodeURIComponent(ownerId)}/${encodeURIComponent(voiceId)}`,
+    {
+      method: 'POST',
+      headers: {
+        'xi-api-key': apiKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ new_name: voiceName || undefined }),
+    },
+  );
+  if (response.ok || response.status === 409) return;
+  const message = await getElevenLabsErrorMessage(response);
+  if (/already exists|already added|voice already/i.test(message)) return;
+  throw new Error(message);
 };
 
 export async function generateSoundEffect(text: string, duration?: number, options?: ElevenLabsGenerationOptions): Promise<Blob> {
@@ -165,11 +259,6 @@ export async function generateSoundEffect(text: string, duration?: number, optio
         qualityMode,
       }),
     });
-  }
-
-  const apiKey = getApiKey();
-  if (!apiKey) {
-    throw new Error("ElevenLabs API Key is not configured. Please add it in the Secrets panel.");
   }
 
   // Build a richer English prompt instead of stripping Chinese to nothing.
@@ -204,25 +293,26 @@ export async function generateSoundEffect(text: string, duration?: number, optio
     prompt_influence: isProQuality ? 0.45 : 0.3,
   };
 
-  const response = await fetch(
-    `https://api.elevenlabs.io/v1/sound-generation?output_format=${ELEVENLABS_SOUND_OUTPUT_FORMAT}`,
-    {
-    method: "POST",
-    headers: {
-      "xi-api-key": apiKey,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(requestBody),
-    },
-  );
+  return withElevenLabsApiKey('ElevenLabs sound effect generation', async (apiKey) => {
+    const response = await fetch(
+      `https://api.elevenlabs.io/v1/sound-generation?output_format=${ELEVENLABS_SOUND_OUTPUT_FORMAT}`,
+      {
+      method: "POST",
+      headers: {
+        "xi-api-key": apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(requestBody),
+      },
+    );
 
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ detail: { message: "Unknown error" } }));
-    throw new Error(`ElevenLabs API error: ${errorData.detail?.message || response.statusText}`);
-  }
+    if (!response.ok) {
+      throw new Error(await getElevenLabsErrorMessage(response));
+    }
 
-  recordElevenLabsResponseUsage(response, ELEVENLABS_SOUND_MODEL);
-  return wrapElevenLabsPcmAsWav(await response.arrayBuffer());
+    recordElevenLabsResponseUsage(response, ELEVENLABS_SOUND_MODEL);
+    return wrapElevenLabsPcmAsWav(await response.arrayBuffer());
+  });
 }
 
 export async function generateMusic(
@@ -239,11 +329,6 @@ export async function generateMusic(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text, duration, isInstrumental, lyrics, qualityMode }),
     });
-  }
-
-  const apiKey = getApiKey();
-  if (!apiKey) {
-    throw new Error("ElevenLabs API Key is not configured. Please add it in the Secrets panel.");
   }
 
   // Clean all Chinese and non-English characters from the style prompt to keep the music model prompt focused.
@@ -282,37 +367,35 @@ export async function generateMusic(
     limitedMusicPrompt,
   );
 
-  const response = await fetch(
-    `https://api.elevenlabs.io/v1/music?output_format=${ELEVENLABS_MUSIC_OUTPUT_FORMAT}`,
-    {
-    method: "POST",
-    headers: {
-      "xi-api-key": apiKey,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      prompt: limitedMusicPrompt,
-      music_length_ms: musicLengthMs,
-      model_id: ELEVENLABS_MUSIC_MODEL,
-      force_instrumental: isInstrumental,
-    }),
-    },
-  );
+  return withElevenLabsApiKey('ElevenLabs music generation', async (apiKey) => {
+    const response = await fetch(
+      `https://api.elevenlabs.io/v1/music?output_format=${ELEVENLABS_MUSIC_OUTPUT_FORMAT}`,
+      {
+      method: "POST",
+      headers: {
+        "xi-api-key": apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        prompt: limitedMusicPrompt,
+        music_length_ms: musicLengthMs,
+        model_id: ELEVENLABS_MUSIC_MODEL,
+        force_instrumental: isInstrumental,
+      }),
+      },
+    );
 
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ detail: { message: "Unknown error" } }));
-    const detail = errorData.detail;
-    const message = typeof detail === 'string'
-      ? detail
-      : detail?.message || errorData.message || response.statusText;
-    if (ELEVENLABS_PROMPT_POLICY_ERROR.test(message)) {
-      throw new Error(MUSIC_PROMPT_POLICY_MESSAGE);
+    if (!response.ok) {
+      const message = await getElevenLabsErrorMessage(response);
+      if (ELEVENLABS_PROMPT_POLICY_ERROR.test(message)) {
+        throw new Error(MUSIC_PROMPT_POLICY_MESSAGE);
+      }
+      throw new Error(message);
     }
-    throw new Error(`ElevenLabs Music API error: ${message}`);
-  }
 
-  recordElevenLabsResponseUsage(response, ELEVENLABS_MUSIC_MODEL);
-  return await response.blob();
+    recordElevenLabsResponseUsage(response, ELEVENLABS_MUSIC_MODEL);
+    return await response.blob();
+  });
 }
 
 export async function generateVoice(
@@ -345,100 +428,106 @@ export async function generateVoice(
     });
   }
 
-  const apiKey = getApiKey();
-  if (!apiKey) {
-    throw new Error("ElevenLabs API Key is not configured. Please add it in the Secrets panel.");
-  }
-
   console.log(`Generating TTS Voice with ID ${voiceId} for text:`, text.substring(0, 30));
 
   // Prefer Eleven v3 for the most expressive voice quality, then fall back to stable multilingual models.
   const modelsToTry = ["eleven_v3", "eleven_multilingual_v2", "eleven_flash_v2_5"];
   let lastError: any = null;
-  let successfulBlob: Blob | null = null;
 
-  for (const modelId of modelsToTry) {
-    try {
-      console.log(`Attempting voice generation using model: ${modelId}`);
-      const textForModel = modelId === "eleven_v3" ? text : fallbackText;
-      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
-        method: "POST",
-        headers: {
-          "xi-api-key": apiKey,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          text: textForModel,
-          model_id: modelId,
-          ...(typeof options?.seed === 'number' ? { seed: options.seed } : {}),
-          voice_settings: {
-            stability: stability,
-            similarity_boost: similarity,
-            style: style,
-            use_speaker_boost: true,
-          },
-        }),
-      });
-
-      if (response.ok) {
-        recordElevenLabsResponseUsage(response, modelId);
-        successfulBlob = await response.blob();
-        break;
-      } else {
-        const errorData = await response.json().catch(() => ({ detail: { message: "Unknown error" } }));
-        const errorMessage = errorData.detail?.message || response.statusText || "";
-        console.warn(`Model ${modelId} failed:`, errorMessage);
-        
-        // If it's a voice not found error (404), don't waste time trying next model, just go to fallback voice directly
-        if (response.status === 404 || errorMessage.toLowerCase().includes("not found") || errorMessage.toLowerCase().includes("voice_id")) {
-          lastError = new Error(`ElevenLabs API error: ${errorMessage}`);
-          break;
-        }
-        
-        lastError = new Error(`ElevenLabs API error: ${errorMessage}`);
+  try {
+    return await withElevenLabsApiKey('ElevenLabs TTS generation', async (apiKey) => {
+      if (options?.voiceSource === 'voice_library') {
+        await ensureSharedVoiceAvailableForKey(apiKey, voiceId, options.publicOwnerId, options.voiceName);
       }
-    } catch (err: any) {
-      console.warn(`Exception with model ${modelId}:`, err);
-      lastError = err;
-    }
-  }
 
-  if (successfulBlob) {
-    return successfulBlob;
+      for (const modelId of modelsToTry) {
+        try {
+          console.log(`Attempting voice generation using model: ${modelId}`);
+          const textForModel = modelId === "eleven_v3" ? text : fallbackText;
+          const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+            method: "POST",
+            headers: {
+              "xi-api-key": apiKey,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              text: textForModel,
+              model_id: modelId,
+              ...(typeof options?.seed === 'number' ? { seed: options.seed } : {}),
+              voice_settings: {
+                stability: stability,
+                similarity_boost: similarity,
+                style: style,
+                use_speaker_boost: true,
+              },
+            }),
+          });
+
+          if (response.ok) {
+            recordElevenLabsResponseUsage(response, modelId);
+            return await response.blob();
+          }
+
+          const errorMessage = await getElevenLabsErrorMessage(response);
+          console.warn(`Model ${modelId} failed:`, errorMessage);
+          lastError = new Error(errorMessage);
+
+          if (isElevenLabsQuotaErrorMessage(errorMessage)) {
+            throw lastError;
+          }
+
+          // If it's a voice not found error (404), don't waste time trying next model on the same key.
+          if (response.status === 404 || errorMessage.toLowerCase().includes("not found") || errorMessage.toLowerCase().includes("voice_id")) {
+            break;
+          }
+        } catch (err: any) {
+          console.warn(`Exception with model ${modelId}:`, err);
+          lastError = err;
+          if (isElevenLabsQuotaErrorMessage(String(err?.message || err || ''))) {
+            throw err;
+          }
+        }
+      }
+
+      throw lastError || new Error("Failed to generate voiceover with the selected configuration.");
+    });
+  } catch (error: any) {
+    lastError = error;
   }
 
   // Fallback if voice ID was not found: try with a configured guaranteed default voice and stable v2 model
   const isVoiceNotFoundError = lastError && (lastError.message.toLowerCase().includes("not found") || lastError.message.toLowerCase().includes("voice_id"));
   const guaranteedFallbackVoiceId: string = '';
-  if ((isVoiceNotFoundError || !successfulBlob) && guaranteedFallbackVoiceId && voiceId !== guaranteedFallbackVoiceId) {
+  if (isVoiceNotFoundError && guaranteedFallbackVoiceId && voiceId !== guaranteedFallbackVoiceId) {
     console.warn(`Voice ID '${voiceId}' or model failed. Retrying with guaranteed default voice (${guaranteedFallbackVoiceId}) and eleven_multilingual_v2...`);
     
     try {
-      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${guaranteedFallbackVoiceId}`, {
-        method: "POST",
-        headers: {
-          "xi-api-key": apiKey,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          text: fallbackText,
-          model_id: "eleven_multilingual_v2",
-          voice_settings: {
-            stability: stability,
-            similarity_boost: similarity,
-            style: style,
-            use_speaker_boost: true,
+      return await withElevenLabsApiKey('ElevenLabs TTS fallback voice generation', async (apiKey) => {
+        const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${guaranteedFallbackVoiceId}`, {
+          method: "POST",
+          headers: {
+            "xi-api-key": apiKey,
+            "Content-Type": "application/json",
           },
-        }),
-      });
+          body: JSON.stringify({
+            text: fallbackText,
+            model_id: "eleven_multilingual_v2",
+            voice_settings: {
+              stability: stability,
+              similarity_boost: similarity,
+              style: style,
+              use_speaker_boost: true,
+            },
+          }),
+        });
 
-      if (response.ok) {
-        recordElevenLabsResponseUsage(response, 'eleven_multilingual_v2');
-        return await response.blob();
-      }
-      
-      const retryErrorData = await response.json().catch(() => ({ detail: { message: "Unknown error" } }));
-      throw new Error(`ElevenLabs API error (fallback): ${retryErrorData.detail?.message || response.statusText}`);
+        if (response.ok) {
+          recordElevenLabsResponseUsage(response, 'eleven_multilingual_v2');
+          return await response.blob();
+        }
+
+        throw new Error(await getElevenLabsErrorMessage(response));
+      });
     } catch (fallbackErr: any) {
       throw new Error(`ElevenLabs API fallback failed: ${fallbackErr.message || fallbackErr}`);
     }
@@ -573,51 +662,56 @@ export async function fetchAvailableVoices(): Promise<ElevenLabsVoice[]> {
     return data.voices || [];
   }
 
-  const apiKey = getApiKey();
-  if (!apiKey) {
+  const apiKeys = getElevenLabsApiKeys();
+  if (apiKeys.length === 0) {
     return [];
   }
-  try {
-    const [libraryVoices, myVoicesResponse] = await Promise.all([
-      fetchSharedVoiceLibrary(apiKey),
-      fetch("https://api.elevenlabs.io/v2/voices?page_size=100&voice_type=non-default&include_total_count=false", {
+
+  const voiceGroups = await Promise.all(apiKeys.map(async (apiKey, index) => {
+    try {
+      const [libraryVoices, myVoicesResponse] = await Promise.all([
+        fetchSharedVoiceLibrary(apiKey),
+        fetch("https://api.elevenlabs.io/v2/voices?page_size=100&voice_type=non-default&include_total_count=false", {
+          method: "GET",
+          headers: {
+            "xi-api-key": apiKey,
+            Accept: 'application/json',
+          }
+        }),
+      ]);
+
+      let myVoices: ElevenLabsVoice[] = [];
+      if (myVoicesResponse.ok) {
+        const data = await myVoicesResponse.json();
+        myVoices = Array.isArray(data.voices) ? data.voices.map(normalizeMyVoice) : [];
+      } else {
+        console.warn(`Failed to fetch ElevenLabs account voices for configured key #${index + 1}:`, myVoicesResponse.statusText);
+      }
+
+      if (libraryVoices.length > 0 || myVoices.length > 0) {
+        return [...libraryVoices, ...myVoices];
+      }
+
+      const response = await fetch("https://api.elevenlabs.io/v1/voices", {
         method: "GET",
         headers: {
           "xi-api-key": apiKey,
           Accept: 'application/json',
         }
-      }),
-    ]);
-
-    let myVoices: ElevenLabsVoice[] = [];
-    if (myVoicesResponse.ok) {
-      const data = await myVoicesResponse.json();
-      myVoices = Array.isArray(data.voices) ? data.voices.map(normalizeMyVoice) : [];
-    } else {
-      console.warn("Failed to fetch ElevenLabs account voices:", myVoicesResponse.statusText);
-    }
-
-    if (libraryVoices.length > 0 || myVoices.length > 0) {
-      return dedupeVoicesById([...libraryVoices, ...myVoices]);
-    }
-
-    const response = await fetch("https://api.elevenlabs.io/v1/voices", {
-      method: "GET",
-      headers: {
-        "xi-api-key": apiKey,
-        Accept: 'application/json',
+      });
+      if (!response.ok) {
+        console.warn(`Failed to fetch ElevenLabs voices for configured key #${index + 1}:`, response.statusText);
+        return [];
       }
-    });
-    if (!response.ok) {
-      console.warn("Failed to fetch ElevenLabs voices:", response.statusText);
+      const data = await response.json();
+      return Array.isArray(data.voices) ? data.voices.map(normalizeMyVoice) : [];
+    } catch (err) {
+      console.error(`Error fetching ElevenLabs voices for configured key #${index + 1}:`, err);
       return [];
     }
-    const data = await response.json();
-    return Array.isArray(data.voices) ? data.voices.map(normalizeMyVoice) : [];
-  } catch (err) {
-    console.error("Error fetching ElevenLabs voices:", err);
-    return [];
-  }
+  }));
+
+  return dedupeVoicesById(voiceGroups.flat());
 }
 
 export async function generateSpeechToSpeech(
@@ -644,11 +738,6 @@ export async function generateSpeechToSpeech(
     });
   }
 
-  const apiKey = getApiKey();
-  if (!apiKey) {
-    throw new Error("ElevenLabs API Key is not configured. Please add it in the Secrets panel.");
-  }
-
   console.log(`Generating Speech to Speech with voice ID ${voiceId}`);
 
   const formData = new FormData();
@@ -664,21 +753,26 @@ export async function generateSpeechToSpeech(
     })
   );
 
-  const response = await fetch(`https://api.elevenlabs.io/v1/speech-to-speech/${voiceId}`, {
-    method: "POST",
-    headers: {
-      "xi-api-key": apiKey,
-    },
-    body: formData,
+  return withElevenLabsApiKey('ElevenLabs speech-to-speech generation', async (apiKey) => {
+    if (options?.voiceSource === 'voice_library') {
+      await ensureSharedVoiceAvailableForKey(apiKey, voiceId, options.publicOwnerId, options.voiceName);
+    }
+
+    const response = await fetch(`https://api.elevenlabs.io/v1/speech-to-speech/${voiceId}`, {
+      method: "POST",
+      headers: {
+        "xi-api-key": apiKey,
+      },
+      body: formData,
+    });
+
+    if (!response.ok) {
+      throw new Error(await getElevenLabsErrorMessage(response));
+    }
+
+    recordElevenLabsResponseUsage(response, 'eleven_multilingual_sts_v2');
+    return await response.blob();
   });
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ detail: { message: "Unknown error" } }));
-    throw new Error(`ElevenLabs API error: ${errorData.detail?.message || response.statusText}`);
-  }
-
-  recordElevenLabsResponseUsage(response, 'eleven_multilingual_sts_v2');
-  return await response.blob();
 }
 
 export async function translateDubbingAudio(
@@ -745,31 +839,27 @@ export async function isolateAudio(audioFile: File | Blob): Promise<Blob> {
     });
   }
 
-  const apiKey = getApiKey();
-  if (!apiKey) {
-    throw new Error("ElevenLabs API Key is not configured. Please add it in the Secrets panel.");
-  }
-
   console.log(`Isolating audio / vocals...`);
 
   const formData = new FormData();
   formData.append("audio", audioFile);
 
-  const response = await fetch("https://api.elevenlabs.io/v1/audio-isolation", {
-    method: "POST",
-    headers: {
-      "xi-api-key": apiKey,
-    },
-    body: formData,
+  return withElevenLabsApiKey('ElevenLabs audio isolation', async (apiKey) => {
+    const response = await fetch("https://api.elevenlabs.io/v1/audio-isolation", {
+      method: "POST",
+      headers: {
+        "xi-api-key": apiKey,
+      },
+      body: formData,
+    });
+
+    if (!response.ok) {
+      throw new Error(await getElevenLabsErrorMessage(response));
+    }
+
+    recordElevenLabsResponseUsage(response, 'audio-isolation');
+    return await response.blob();
   });
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ detail: { message: "Unknown error" } }));
-    throw new Error(`ElevenLabs API error (Audio Isolation): ${errorData.detail?.message || response.statusText}`);
-  }
-
-  recordElevenLabsResponseUsage(response, 'audio-isolation');
-  return await response.blob();
 }
 
 /**
@@ -827,14 +917,9 @@ export async function transcribeSpeech(
     });
     if (!response.ok) {
       const errorBody = await response.json().catch(() => ({}));
-      throw new Error(errorBody.error || `转录服务请求失败 (${response.status})`);
+      throw new Error(formatElevenLabsErrorMessage(String(errorBody.error || `转录服务请求失败 (${response.status})`)));
     }
     return response.json();
-  }
-
-  const apiKey = getApiKey();
-  if (!apiKey) {
-    throw new Error("ElevenLabs API Key is not configured. Please add it in the Secrets panel.");
   }
 
   console.log("Transcribing speech to text...");
@@ -851,19 +936,20 @@ export async function transcribeSpeech(
     formData.append("num_speakers", String(Math.round(options.numSpeakers)));
   }
 
-  const response = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
-    method: "POST",
-    headers: {
-      "xi-api-key": apiKey,
-    },
-    body: formData,
+  return withElevenLabsApiKey('ElevenLabs speech-to-text transcription', async (apiKey) => {
+    const response = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
+      method: "POST",
+      headers: {
+        "xi-api-key": apiKey,
+      },
+      body: formData,
+    });
+
+    if (!response.ok) {
+      throw new Error(await getElevenLabsErrorMessage(response));
+    }
+
+    recordElevenLabsResponseUsage(response, 'scribe_v2');
+    return await response.json();
   });
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ detail: { message: "Unknown error" } }));
-    throw new Error(`ElevenLabs STT API error: ${errorData.detail?.message || response.statusText}`);
-  }
-
-  recordElevenLabsResponseUsage(response, 'scribe_v2');
-  return await response.json();
 }

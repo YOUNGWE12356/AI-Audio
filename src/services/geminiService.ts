@@ -45,13 +45,14 @@ async function postJson<T>(
 ): Promise<T> {
   const controller = new AbortController();
   let timedOut = false;
+  const timeoutMs = options.timeoutMs ?? 90_000;
   const handleParentAbort = () => controller.abort(options.signal?.reason);
   if (options.signal?.aborted) handleParentAbort();
   options.signal?.addEventListener('abort', handleParentAbort, { once: true });
   const timeoutId = setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, options.timeoutMs ?? 90_000);
+  }, timeoutMs);
 
   try {
     const response = await fetch(path, {
@@ -72,7 +73,8 @@ async function postJson<T>(
     return response.json();
   } catch (error) {
     if (controller.signal.aborted) {
-      throw new Error(timedOut ? 'AI 分析超过 90 秒，请减少素材后重试。' : '已取消本次分析。');
+      const timeoutSeconds = Math.max(1, Math.round(timeoutMs / 1000));
+      throw new Error(timedOut ? `AI 分析超过 ${timeoutSeconds} 秒，请减少素材后重试。` : '已取消本次分析。');
     }
     throw error;
   } finally {
@@ -2185,7 +2187,13 @@ export async function createEnglishMusicPromptForElevenLabs(
 export async function translateTextToLanguage(
   text: string,
   targetLanguage: string,
-  options?: { preserveTone?: boolean; preserveInterjections?: boolean; maxDurationSeconds?: number; strictDuration?: boolean }
+  options?: {
+    preserveTone?: boolean;
+    preserveInterjections?: boolean;
+    maxDurationSeconds?: number;
+    strictDuration?: boolean;
+    timeoutMs?: number;
+  }
 ): Promise<string> {
   const normalizedText = text.trim();
   if (!normalizedText) return '';
@@ -2200,7 +2208,7 @@ export async function translateTextToLanguage(
       preserveInterjections: options?.preserveInterjections !== false,
       maxDurationSeconds: options?.maxDurationSeconds,
       strictDuration: options?.strictDuration === true,
-    });
+    }, { timeoutMs: options?.timeoutMs });
     return result.text;
   }
 
