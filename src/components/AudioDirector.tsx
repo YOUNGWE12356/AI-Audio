@@ -608,6 +608,17 @@ export default function AudioDirector({
                 </div>
               </div>
             )}
+
+            {/* Custom Text Requirements */}
+            <div className="space-y-2">
+              <label className="text-[11px] font-bold text-slate-700">输入您的文字设计需求（选填）</label>
+              <textarea
+                value={requirements}
+                onChange={(e) => setRequirements(e.target.value)}
+                placeholder="例如：生成充满赛博朋克科幻感的背景音乐，并重点标记战斗中光剑碰撞及脚步声的声音出现时刻..."
+                className="w-full h-24 bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500 transition-all resize-none placeholder-slate-400"
+              />
+            </div>
           </div>
 
           {/* Core Configuration & Extra Prompts */}
@@ -769,17 +780,6 @@ export default function AudioDirector({
                 </button>
               </div>
             </div>}
-
-            {/* Custom Text Requirements */}
-            <div className="space-y-2">
-              <label className="text-[11px] font-bold text-slate-700">输入您的文字设计需求（选填）</label>
-              <textarea
-                value={requirements}
-                onChange={(e) => setRequirements(e.target.value)}
-                placeholder="例如：生成充满赛博朋克科幻感的背景音乐，并重点标记战斗中光剑碰撞及脚步声的声音出现时刻..."
-                className="w-full h-24 bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500 transition-all resize-none placeholder-slate-400"
-              />
-            </div>
 
             {/* Submit Action */}
             <button

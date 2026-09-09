@@ -37,7 +37,7 @@ import CrossLanguageDubbing from './CrossLanguageDubbing';
 import VoiceConversion from './VoiceConversion';
 import { downloadAudioHelper } from '../utils/downloadHelper';
 import GeneratedAudioPlayer, { sanitizeAudioFileName } from './GeneratedAudioPlayer';
-import { enhanceVoicePromptForElevenV3 } from '../services/geminiService';
+import { enhanceVoicePromptForElevenV3, extractBatchVoiceTextFromImage } from '../services/geminiService';
 import { getElevenLabsQualityMode } from '../utils/elevenLabsQuality';
 import type { AssistantVoiceRequest } from './GlobalAssistant';
 
@@ -122,8 +122,12 @@ const VOICE_SEARCH_SYNONYMS: Array<{ triggers: string[]; terms: string[] }> = [
 
 const QUICK_VOICE_SEARCHES = ['温柔女声', '低沉男声', '年轻旁白', '专业解说', '开心活泼', '成熟稳重'];
 const DEFAULT_SMART_VOICE_SEARCH_TERMS = ['voice', 'narration', 'natural', 'expressive', 'character'];
-const BATCH_VOICE_ACCEPTED_FILE_TYPES = '.txt,.md,.csv,.tsv,.json,.html,.htm,.docx,.xlsx,.xls,.pdf,image/*';
-const BATCH_VOICE_READABLE_FILE_HINT = '支持拖拽 Word .docx、Excel .xlsx、CSV/TSV、TXT/MD/JSON/HTML；旧版 .xls 建议另存为 .xlsx 或 CSV。';
+const BATCH_VOICE_ACCEPTED_FILE_TYPES = '.txt,.md,.csv,.tsv,.json,.html,.htm,.docx,.xlsx,.xls,image/png,image/jpeg,image/webp';
+const BATCH_VOICE_MAX_FILE_SIZE_BYTES = 8 * 1024 * 1024;
+const BATCH_VOICE_MAX_TOTAL_FILE_SIZE_BYTES = 20 * 1024 * 1024;
+const BATCH_VOICE_MAX_TEXT_CHARS = 120_000;
+const BATCH_VOICE_MAX_ITEMS = 200;
+const BATCH_VOICE_MAX_XLSX_ROWS = 600;
 const DUBBING_SUBNAV_MIN_WIDTH = 64;
 const DUBBING_SUBNAV_COMPACT_WIDTH = 168;
 const DUBBING_SUBNAV_DEFAULT_WIDTH = 184;
@@ -407,7 +411,7 @@ const parseBatchVoiceLine = (line: string, index: number): BatchVoiceRequirement
 };
 
 const parseBatchVoiceRequirementsFromText = (rawText: string) => {
-  const normalized = rawText
+  const normalized = rawText.slice(0, BATCH_VOICE_MAX_TEXT_CHARS)
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
     .replace(/<br\s*\/?>/gi, '\n')
@@ -421,6 +425,7 @@ const parseBatchVoiceRequirementsFromText = (rawText: string) => {
     .filter(line => line && !/^(文件名|命名|名称|name|filename)[\t,，]/i.test(line));
 
   const parsed = lines
+    .slice(0, BATCH_VOICE_MAX_ITEMS)
     .map((line, index) => parseBatchVoiceLine(line, index))
     .filter(Boolean) as BatchVoiceRequirement[];
 
@@ -456,11 +461,20 @@ const readXlsxVoiceRequirementText = async (file: File) => {
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
   const rows: string[] = [];
+  let reachedRowLimit = false;
   for (const sheetPath of sheetFiles) {
+    if (rows.length >= BATCH_VOICE_MAX_XLSX_ROWS) {
+      reachedRowLimit = true;
+      break;
+    }
     const sheetXml = await zip.file(sheetPath)?.async('string');
     if (!sheetXml) continue;
     const sheetDoc = parser.parseFromString(sheetXml, 'application/xml');
-    Array.from(sheetDoc.getElementsByTagName('row')).forEach(row => {
+    for (const row of Array.from(sheetDoc.getElementsByTagName('row'))) {
+      if (rows.length >= BATCH_VOICE_MAX_XLSX_ROWS) {
+        reachedRowLimit = true;
+        break;
+      }
       const cells: string[] = [];
       Array.from(row.getElementsByTagName('c')).forEach(cell => {
         const ref = cell.getAttribute('r') || '';
@@ -476,16 +490,26 @@ const readXlsxVoiceRequirementText = async (file: File) => {
       if (usefulCells.length > 0) {
         rows.push(cells.join('\t').replace(/\t+$/g, ''));
       }
-    });
+    }
   }
 
   if (rows.length === 0) {
     throw new Error('没有在 xlsx 表格中读取到可用文字。');
   }
-  return rows.join('\n');
+  return `${rows.join('\n')}${reachedRowLimit ? '\n（已达到批量导入上限，后续行请拆成另一个文件继续导入）' : ''}`;
 };
 
+const readFileAsDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(String(reader.result || ''));
+  reader.onerror = () => reject(new Error('读取截图失败，请重试。'));
+  reader.readAsDataURL(file);
+});
+
 const readBatchVoiceFileText = async (file: File) => {
+  if (file.size > BATCH_VOICE_MAX_FILE_SIZE_BYTES) {
+    throw new Error(`${file.name} 文件过大（${(file.size / 1024 / 1024).toFixed(1)}MB），请拆分或另存为精简版 CSV/TXT 后再导入。`);
+  }
   const lowerName = file.name.toLowerCase();
   if (lowerName.endsWith('.docx')) {
     const { default: JSZip } = await import('jszip');
@@ -497,7 +521,7 @@ const readBatchVoiceFileText = async (file: File) => {
     const xmlDoc = new DOMParser().parseFromString(documentXml, 'application/xml');
     return Array.from(xmlDoc.getElementsByTagName('w:p')).map(paragraph => (
       Array.from(paragraph.getElementsByTagName('w:t')).map(node => node.textContent || '').join('')
-    )).filter(Boolean).join('\n');
+    )).filter(Boolean).join('\n').slice(0, BATCH_VOICE_MAX_TEXT_CHARS);
   }
 
   if (lowerName.endsWith('.xlsx')) {
@@ -508,15 +532,52 @@ const readBatchVoiceFileText = async (file: File) => {
     throw new Error('暂不支持旧版 .xls 二进制表格，请先另存为 .xlsx 或 CSV 后再拖拽上传。');
   }
 
+  if (file.type.startsWith('image/')) {
+    if (!/^image\/(png|jpe?g|webp)$/i.test(file.type)) {
+      throw new Error('截图识别目前支持 PNG、JPG/JPEG、WebP 格式。');
+    }
+    const data = await readFileAsDataUrl(file);
+    return extractBatchVoiceTextFromImage({
+      data,
+      mimeType: file.type,
+      fileName: file.name,
+    });
+  }
+
   if (/(\.txt|\.md|\.csv|\.tsv|\.json|\.html?)$/i.test(lowerName) || file.type.startsWith('text/')) {
-    return file.text();
+    return (await file.text()).slice(0, BATCH_VOICE_MAX_TEXT_CHARS);
   }
 
-  if (file.type.startsWith('image/') || lowerName.endsWith('.pdf')) {
-    throw new Error('这个文件需要 OCR/视觉解析。当前先支持 txt、md、csv、tsv、json、html、docx、xlsx；图片或 PDF 可以先把 OCR 文字粘贴到下方文本框。');
+  if (lowerName.endsWith('.pdf')) {
+    throw new Error('PDF 暂时不走批量配音 OCR，请先截图或复制文字粘贴到文本框。');
   }
 
-  return file.text();
+  return (await file.text()).slice(0, BATCH_VOICE_MAX_TEXT_CHARS);
+};
+
+const getBatchVoiceClipboardImageFiles = (clipboardData: DataTransfer | null) => {
+  if (!clipboardData) return [];
+  const files = Array.from(clipboardData.files || []).filter(file => file.type.startsWith('image/'));
+  const itemFiles = Array.from(clipboardData.items || [])
+    .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+    .map(item => item.getAsFile())
+    .filter(Boolean) as File[];
+  const seen = new Set<string>();
+  const allFiles = [...files, ...itemFiles].filter(file => {
+    const key = `${file.name || 'clipboard-image'}:${file.type}:${file.size}:${file.lastModified || 0}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return allFiles.map((file, index) => {
+    if (file.name && file.name !== 'image.png') return file;
+    const extension = file.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png';
+    return new File(
+      [file],
+      `pasted-batch-voice-screenshot-${Date.now()}-${index + 1}.${extension}`,
+      { type: file.type || 'image/png' },
+    );
+  });
 };
 
 const buildBatchVoiceGenerationText = (item: BatchVoiceRequirement) => {
@@ -1277,9 +1338,12 @@ export default function DubbingStudio({
 
   const handleParseBatchVoiceText = (text = batchVoiceRawText) => {
     const items = parseBatchVoiceRequirementsFromText(text);
+    const isTruncated = text.length > BATCH_VOICE_MAX_TEXT_CHARS || text.split(/\r\n|\r|\n/).length > BATCH_VOICE_MAX_ITEMS;
     setBatchVoiceItems(items);
     setBatchVoiceError(items.length > 0 ? null : '没有识别到有效台词。可以按“文件名：台词”一行一条来整理后再分析。');
-    setBatchVoiceStatus(items.length > 0 ? `已分析出 ${items.length} 条配音需求，请先检查预览。` : '');
+    setBatchVoiceStatus(items.length > 0
+      ? `已分析出 ${items.length} 条配音需求，请先检查预览。${isTruncated ? '为避免页面卡顿，已按当前导入上限截取前面内容。' : ''}`
+      : '');
   };
 
   const handleEnhanceBatchVoiceTags = async () => {
@@ -1330,10 +1394,21 @@ export default function DubbingStudio({
   const handleBatchVoiceFiles = async (files: File[]) => {
     const pickedFiles = files.filter(Boolean);
     if (pickedFiles.length === 0) return;
-    setBatchVoiceFileName(pickedFiles.length === 1 ? pickedFiles[0].name : `${pickedFiles.length} 个文件`);
+    const containsImage = pickedFiles.some(file => file.type.startsWith('image/'));
     setBatchVoiceError(null);
-    setBatchVoiceStatus(pickedFiles.length === 1 ? '正在读取文档内容...' : `正在读取 ${pickedFiles.length} 个文档/表格...`);
+    setBatchVoiceStatus(containsImage
+      ? `正在用 GPT 5.6 识别${pickedFiles.length === 1 ? '截图内容' : `${pickedFiles.length} 个文件中的截图内容`}...`
+      : pickedFiles.length === 1 ? '正在读取文档内容...' : `正在读取 ${pickedFiles.length} 个文档/表格...`);
     try {
+      const totalSize = pickedFiles.reduce((sum, file) => sum + file.size, 0);
+      if (totalSize > BATCH_VOICE_MAX_TOTAL_FILE_SIZE_BYTES) {
+        throw new Error(`本次选择的文件共 ${(totalSize / 1024 / 1024).toFixed(1)}MB，超过批量导入保护上限。请分批导入，或另存为精简版 CSV/TXT。`);
+      }
+      const oversizedFile = pickedFiles.find(file => file.size > BATCH_VOICE_MAX_FILE_SIZE_BYTES);
+      if (oversizedFile) {
+        throw new Error(`${oversizedFile.name} 文件过大（${(oversizedFile.size / 1024 / 1024).toFixed(1)}MB），请拆分或另存为精简版 CSV/TXT 后再导入。`);
+      }
+      setBatchVoiceFileName(pickedFiles.length === 1 ? pickedFiles[0].name : `${pickedFiles.length} 个文件`);
       const results = await Promise.allSettled(pickedFiles.map(async (file) => ({
         file,
         text: await readBatchVoiceFileText(file),
@@ -1352,10 +1427,12 @@ export default function DubbingStudio({
 
       const text = readableTexts.join('\n\n');
       const items = parseBatchVoiceRequirementsFromText(text);
-      setBatchVoiceRawText(text);
+      const safeText = text.slice(0, BATCH_VOICE_MAX_TEXT_CHARS);
+      const isTruncated = text.length > BATCH_VOICE_MAX_TEXT_CHARS || items.length >= BATCH_VOICE_MAX_ITEMS;
+      setBatchVoiceRawText(safeText);
       setBatchVoiceItems(items);
       setBatchVoiceStatus(items.length > 0
-        ? `已从 ${pickedFiles.length === 1 ? pickedFiles[0].name : `${pickedFiles.length} 个文件`} 分析出 ${items.length} 条配音需求，请先检查预览。`
+        ? `已从 ${pickedFiles.length === 1 ? pickedFiles[0].name : `${pickedFiles.length} 个文件`} 分析出 ${items.length} 条配音需求，请先检查预览。${isTruncated ? '为避免浏览器崩溃，本次只导入前 200 条/前 120000 字。' : ''}`
         : `已读取 ${pickedFiles.length === 1 ? pickedFiles[0].name : `${pickedFiles.length} 个文件`}，但没有识别到有效台词。可以手动粘贴/整理文本后再分析。`);
       if (items.length === 0) {
         setBatchVoiceError('没有识别到有效台词。推荐一行一条，例如“角色_001：你好，欢迎回来。”');
@@ -1374,6 +1451,34 @@ export default function DubbingStudio({
     setBatchVoiceDragActive(false);
     handleBatchVoiceFiles(Array.from(event.dataTransfer.files));
   };
+
+  const handleBatchVoicePaste = (event: React.ClipboardEvent<HTMLDivElement> | ClipboardEvent) => {
+    const imageFiles = getBatchVoiceClipboardImageFiles(event.clipboardData);
+    if (imageFiles.length === 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void handleBatchVoiceFiles(imageFiles);
+  };
+
+  useEffect(() => {
+    if (ttsInputMode !== 'batch') return;
+    const handleWindowPaste = (event: ClipboardEvent) => {
+      const activeElement = document.activeElement;
+      const isTextInput = activeElement instanceof HTMLTextAreaElement
+        || activeElement instanceof HTMLInputElement
+        || activeElement?.getAttribute('contenteditable') === 'true';
+      const imageFiles = getBatchVoiceClipboardImageFiles(event.clipboardData);
+      if (imageFiles.length === 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (isTextInput && activeElement instanceof HTMLElement) {
+        activeElement.blur();
+      }
+      void handleBatchVoiceFiles(imageFiles);
+    };
+    window.addEventListener('paste', handleWindowPaste);
+    return () => window.removeEventListener('paste', handleWindowPaste);
+  }, [ttsInputMode]);
 
   const addBatchVoiceItem = () => {
     setBatchVoiceItems(prev => [
@@ -1733,7 +1838,7 @@ export default function DubbingStudio({
                 <div className="grid grid-cols-2 gap-1 rounded-xl bg-white/80 p-1">
                 {[
                   { value: 'single', label: '单文本' },
-                  { value: 'batch', label: '多文本' },
+                  { value: 'batch', label: '多文本（多条配音一次生成）' },
                 ].map(option => {
                   const isActive = ttsInputMode === option.value;
                   return (
@@ -1817,7 +1922,7 @@ export default function DubbingStudio({
                 />
               </div>
 
-              <div className="rounded-xl border border-emerald-100 bg-emerald-50/60 p-3">
+              <div className="p-0">
                 <div className="flex justify-end">
                   <div className="flex flex-wrap justify-end gap-2">
                     <button
@@ -1876,6 +1981,7 @@ export default function DubbingStudio({
 
             {ttsInputMode === 'batch' && (
             <div
+              onPaste={handleBatchVoicePaste}
               onDragEnter={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
@@ -1906,13 +2012,10 @@ export default function DubbingStudio({
                     <UploadCloud className="h-4 w-4 text-emerald-600" />
                     <h3 className="text-xs font-black uppercase tracking-wider text-slate-800">批量配音需求导入</h3>
                   </div>
-                  <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
-                    上传台本/需求表、拖拽文档或直接粘贴内容，先生成可编辑预览，再逐条合成；试听确认后再打包下载 ZIP。
-                  </p>
                 </div>
                 <label className="inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-[10px] font-bold text-emerald-700 shadow-sm transition-colors hover:bg-emerald-50">
                   <UploadCloud className="h-3.5 w-3.5" />
-                  <span>上传文档/表格/图片</span>
+                  <span>上传配音需求文档、图片</span>
                   <input
                     type="file"
                     accept={BATCH_VOICE_ACCEPTED_FILE_TYPES}
@@ -1924,14 +2027,6 @@ export default function DubbingStudio({
                     }}
                   />
                 </label>
-              </div>
-
-              <div className={`rounded-xl border border-dashed px-3 py-2 text-[10px] leading-relaxed transition-colors ${
-                batchVoiceDragActive
-                  ? 'border-emerald-400 bg-emerald-100 text-emerald-800'
-                  : 'border-emerald-200 bg-white/70 text-slate-500'
-              }`}>
-                {batchVoiceDragActive ? '松开即可导入文档/表格并生成可编辑预览。' : BATCH_VOICE_READABLE_FILE_HINT}
               </div>
 
               {batchVoiceFileName && (

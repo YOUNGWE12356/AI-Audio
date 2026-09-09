@@ -128,7 +128,7 @@ const conversionPlans: Array<{
   description: string;
   tone: string;
 }> = [
-  { id: 'plan1', label: '单人转换', title: '', description: '普通单人对白最稳定，适合作为默认选择。', tone: 'border-emerald-200 bg-emerald-50/60 text-emerald-800' },
+  { id: 'plan1', label: '单人转换', title: '', description: '普通单人对白最稳定，适合作为默认选择。支持多语种。', tone: 'border-emerald-200 bg-emerald-50/60 text-emerald-800' },
   { id: 'plan2', label: '多人角色分轨转换', title: '', description: '多人对话效果最好，可减少角色串音和音色混淆。', tone: 'border-violet-200 bg-violet-50/60 text-violet-800' },
   { id: 'plan3', label: '语音与声音事件混合', title: '', description: '素材里笑声、呼吸、叹气等较多时最自然。', tone: 'border-amber-200 bg-amber-50/60 text-amber-800' },
   { id: 'plan4', label: '克隆转换方案', title: '', description: '最侧重还原指定人物的音色，相似度通常最高，但需要干净的单人参考音频。', tone: 'border-sky-200 bg-sky-50/60 text-sky-800' },

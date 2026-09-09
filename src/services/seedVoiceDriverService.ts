@@ -32,6 +32,39 @@ const normalizeAudioEvent = (value: string): SeedVoiceAudioEventType => {
   return 'noise';
 };
 
+const joinSeedVoiceText = (left: string, right: string) => {
+  const previous = left.trim();
+  const next = right.trim();
+  if (!previous) return next;
+  if (!next) return previous;
+  const needsSpace = /[A-Za-z0-9]$/.test(previous) && /^[A-Za-z0-9]/.test(next);
+  return `${previous}${needsSpace ? ' ' : ''}${next}`;
+};
+
+const mergeAdjacentSeedVoiceTailSegments = (segments: SeedVoiceTimedSegment[]) => {
+  const merged: SeedVoiceTimedSegment[] = [];
+  segments.forEach(segment => {
+    const previous = merged.at(-1);
+    const gap = previous ? segment.start - previous.end : Infinity;
+    const segmentDuration = segment.end - segment.start;
+    const combinedDuration = previous ? segment.end - previous.start : Infinity;
+    const canMerge = Boolean(
+      previous
+      && gap >= -0.02
+      && gap <= 0.2
+      && segmentDuration <= 2
+      && combinedDuration <= 20,
+    );
+    if (canMerge && previous) {
+      previous.end = Math.max(previous.end, segment.end);
+      previous.sourceText = joinSeedVoiceText(previous.sourceText, segment.sourceText);
+      return;
+    }
+    merged.push({ ...segment });
+  });
+  return merged;
+};
+
 export function buildSeedVoiceTimeline(transcription: SpeechTranscriptionResult) {
   const words = (transcription.words || []).flatMap((word, index) => {
     const text = String(word.text ?? word.word ?? '');
@@ -70,7 +103,7 @@ export function buildSeedVoiceTimeline(transcription: SpeechTranscriptionResult)
         targetText: '',
       } satisfies SeedVoiceTimedSegment];
     });
-    return { segments, events: [] as SeedVoiceAudioEvent[] };
+    return { segments: mergeAdjacentSeedVoiceTailSegments(segments), events: [] as SeedVoiceAudioEvent[] };
   }
 
   const segments: SeedVoiceTimedSegment[] = [];
@@ -114,7 +147,7 @@ export function buildSeedVoiceTimeline(transcription: SpeechTranscriptionResult)
     const currentDuration = current.length > 0 ? word.end - current[0].start : 0;
     const shouldBreak = Boolean(previous) && (
       gap > 1.2
-      || currentDuration > 10
+      || currentDuration > 20
       || (currentDuration > 5 && gap > 0.16 && SENTENCE_END_PATTERN.test(previous!.text.trim()))
     );
     if (shouldBreak) flush();
@@ -134,7 +167,7 @@ export function buildSeedVoiceTimeline(transcription: SpeechTranscriptionResult)
   });
 
   return {
-    segments: segments.map((segment, index) => ({ ...segment, id: `segment-${index + 1}` })),
+    segments: mergeAdjacentSeedVoiceTailSegments(segments).map((segment, index) => ({ ...segment, id: `segment-${index + 1}` })),
     events: mergedEvents.map((event, index) => ({ ...event, id: `event-${index + 1}` })),
   };
 }

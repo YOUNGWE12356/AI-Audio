@@ -2255,6 +2255,66 @@ ${normalizedText}`;
   }
 }
 
+export async function extractBatchVoiceTextFromImage(
+  image: { data: string; mimeType: string; fileName?: string },
+): Promise<string> {
+  const mimeType = String(image.mimeType || '').toLowerCase();
+  if (!mimeType.startsWith('image/')) {
+    throw new Error('请上传 PNG、JPG 或 WebP 截图。');
+  }
+
+  if (isBrowser) {
+    const result = await postJson<{ text: string }>('/api/ai/gemini/batch-voice-image-ocr', {
+      image,
+    }, { timeoutMs: 120_000 });
+    return result.text;
+  }
+
+  try {
+    const { ai, ThinkingLevel } = await getAI();
+    const prompt = `你是配音台本整理助手。请对这张截图做 OCR，只提取适合“批量文本转语音”的台词内容。
+
+要求：
+1. 按截图中从上到下、从左到右的阅读顺序整理。
+2. 如果截图是表格，请优先识别“文件名/命名/名称/角色/编号”和“台词/文案/内容/对白”这类列。
+3. 如果能识别到文件名或角色名，请输出为“文件名：台词”；否则每行只输出一条台词。
+4. 保留可见编号、角色名、语气标注、标点和原语言；不要翻译。
+5. 忽略按钮、菜单、页眉页脚、水印、聊天软件界面控件、无关说明文字。
+6. 最多输出 200 条；不要编造截图里没有的台词。
+7. 只返回纯文本，不要 markdown、不要解释。`;
+
+    const response = await generateGeminiContent(ai, {
+      model: GEMINI_PRIMARY_MODEL,
+      contents: [{
+        parts: [
+          { text: prompt },
+          {
+            inlineData: {
+              data: image.data.split(',')[1] || image.data,
+              mimeType,
+            },
+          },
+        ],
+      }],
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      },
+    });
+
+    const text = response.text?.trim() || '';
+    if (!text) throw new Error('没有从截图中识别到可用台词，请换更清晰的截图或手动粘贴文字。');
+    return text
+      .replace(/^```(?:text)?\s*/i, '')
+      .replace(/```$/i, '')
+      .trim();
+  } catch (err) {
+    console.error('Batch voice image OCR failed:', err);
+    throw err instanceof Error
+      ? err
+      : new Error('截图识别失败，请换更清晰的图片或手动粘贴文字。');
+  }
+}
+
 export async function matchBestVoice(
   description: string,
   gender: 'male' | 'female',

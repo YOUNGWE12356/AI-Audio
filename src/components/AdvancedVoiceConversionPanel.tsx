@@ -77,6 +77,46 @@ function speakerIdOf(value: { speaker_id?: string; speakerId?: string } | undefi
   return String(value?.speaker_id || value?.speakerId || fallback).trim() || fallback;
 }
 
+function joinSpeakerText(left: string, right: string) {
+  const previous = left.trim();
+  const next = right.trim();
+  if (!previous) return next;
+  if (!next) return previous;
+  const needsSpace = /[A-Za-z0-9]$/.test(previous) && /^[A-Za-z0-9]/.test(next);
+  return `${previous}${needsSpace ? ' ' : ''}${next}`;
+}
+
+/**
+ * Transcription providers may split one continuous utterance at an arbitrary
+ * sentence boundary, even when the same speaker continues without a pause.
+ * Merge only tiny, adjacent tail fragments so meaningful pauses, timing and
+ * audio-event boundaries remain untouched.
+ */
+function mergeAdjacentSpeakerTailSegments(segments: LocalMultiSpeakerSegment[]) {
+  const merged: LocalMultiSpeakerSegment[] = [];
+  segments.forEach(segment => {
+    const previous = merged.at(-1);
+    const gap = previous ? segment.start - previous.end : Infinity;
+    const segmentDuration = segment.end - segment.start;
+    const combinedDuration = previous ? segment.end - previous.start : Infinity;
+    const canMerge = Boolean(
+      previous
+      && previous.speakerId === segment.speakerId
+      && gap >= -0.02
+      && gap <= 0.2
+      && segmentDuration <= 2
+      && combinedDuration <= 20,
+    );
+    if (canMerge && previous) {
+      previous.end = Math.max(previous.end, segment.end);
+      previous.sourceText = joinSpeakerText(previous.sourceText, segment.sourceText);
+      return;
+    }
+    merged.push({ ...segment });
+  });
+  return merged;
+}
+
 function buildSpeakerSegments(result: SpeechTranscriptionResult): LocalMultiSpeakerSegment[] {
   const words = (result.words || []).filter(word => word.type !== 'audio_event' && word.type !== 'spacing' && String(word.text || word.word || '').trim());
   const hasWordSpeakerLabels = words.some(word => Boolean(String(word.speaker_id || word.speakerId || '').trim()));
@@ -89,8 +129,8 @@ function buildSpeakerSegments(result: SpeechTranscriptionResult): LocalMultiSpea
     targetText: '',
   })).filter(segment => segment.sourceText && Number.isFinite(segment.start) && Number.isFinite(segment.end) && segment.end > segment.start);
   const hasSegmentSpeakerLabels = raw.some(segment => segment.speakerId !== 'speaker_1');
-  if (raw.length > 0 && !hasWordSpeakerLabels) return raw;
-  if (raw.length > 0 && hasSegmentSpeakerLabels && words.length === 0) return raw;
+  if (raw.length > 0 && !hasWordSpeakerLabels) return mergeAdjacentSpeakerTailSegments(raw);
+  if (raw.length > 0 && hasSegmentSpeakerLabels && words.length === 0) return mergeAdjacentSpeakerTailSegments(raw);
 
   const grouped: LocalMultiSpeakerSegment[] = [];
   words.forEach((word, index) => {
@@ -106,7 +146,7 @@ function buildSpeakerSegments(result: SpeechTranscriptionResult): LocalMultiSpea
     }
     grouped.push({ id: `segment-${index + 1}`, speakerId, start, end, sourceText: String(word.text || word.word || '').trim(), targetText: '' });
   });
-  return grouped.length > 0 ? grouped : raw;
+  return grouped.length > 0 ? mergeAdjacentSpeakerTailSegments(grouped) : mergeAdjacentSpeakerTailSegments(raw);
 }
 
 function buildEvents(result: SpeechTranscriptionResult, segments: LocalMultiSpeakerSegment[]): LocalMultiSpeakerAudioEvent[] {

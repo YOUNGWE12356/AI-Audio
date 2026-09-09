@@ -170,6 +170,40 @@ const normalizeSpeakerId = (value: unknown) => {
   return normalized || 'speaker_0';
 };
 
+const joinMultiSpeakerText = (left: string, right: string) => {
+  const previous = left.trim();
+  const next = right.trim();
+  if (!previous) return next;
+  if (!next) return previous;
+  const needsSpace = /[A-Za-z0-9]$/.test(previous) && /^[A-Za-z0-9]/.test(next);
+  return `${previous}${needsSpace ? ' ' : ''}${next}`;
+};
+
+const mergeAdjacentMultiSpeakerTailSegments = (segments: MultiSpeakerSegment[]) => {
+  const merged: MultiSpeakerSegment[] = [];
+  segments.forEach(segment => {
+    const previous = merged.at(-1);
+    const gap = previous ? segment.start - previous.end : Infinity;
+    const segmentDuration = segment.end - segment.start;
+    const combinedDuration = previous ? segment.end - previous.start : Infinity;
+    const canMerge = Boolean(
+      previous
+      && previous.speakerId === segment.speakerId
+      && gap >= -0.02
+      && gap <= 0.2
+      && segmentDuration <= 2
+      && combinedDuration <= 20,
+    );
+    if (canMerge && previous) {
+      previous.end = Math.max(previous.end, segment.end);
+      previous.sourceText = joinMultiSpeakerText(previous.sourceText, segment.sourceText);
+      return;
+    }
+    merged.push({ ...segment });
+  });
+  return merged;
+};
+
 const buildMultiSpeakerDialogue = (transcription: Awaited<ReturnType<typeof transcribeSpeech>>) => {
   const rawTimedWords = (transcription.words || []).flatMap((word, index) => {
     const text = String(word.text ?? word.word ?? '');
@@ -222,7 +256,7 @@ const buildMultiSpeakerDialogue = (transcription: Awaited<ReturnType<typeof tran
         targetText: '',
       } satisfies MultiSpeakerSegment];
     });
-    return { segments, events: [] as MultiSpeakerAudioEvent[] };
+    return { segments: mergeAdjacentMultiSpeakerTailSegments(segments), events: [] as MultiSpeakerAudioEvent[] };
   }
 
   const rawSegments: MultiSpeakerSegment[] = [];
@@ -296,21 +330,19 @@ const buildMultiSpeakerDialogue = (transcription: Awaited<ReturnType<typeof tran
   const mergedSegments: MultiSpeakerSegment[] = [];
   rawSegments.forEach(segment => {
     const previous = mergedSegments.at(-1);
-    const previousDuration = previous ? previous.end - previous.start : 0;
     const segmentDuration = segment.end - segment.start;
-      const hasInterveningAudioEvent = Boolean(previous) && mergedEvents.some(event => (
+    const hasInterveningAudioEvent = Boolean(previous) && mergedEvents.some(event => (
       event.start >= previous!.end - 0.02
       && event.end <= segment.start + 0.02
     ));
     const canMerge = Boolean(previous)
       && previous!.speakerId === segment.speakerId
-      && segment.start - previous!.end <= 1.4
-      && segment.end - previous!.start <= 16
+      && segment.start - previous!.end >= -0.02
+      && segment.start - previous!.end <= 0.2
+      && segmentDuration <= 2
+      && segment.end - previous!.start <= 20
       && !hasInterveningAudioEvent;
-    const shouldMerge = canMerge && (
-      previousDuration < 1.4
-      || segmentDuration < 1.4
-    );
+    const shouldMerge = canMerge;
     if (!shouldMerge || !previous) {
       mergedSegments.push({ ...segment });
       return;

@@ -2061,14 +2061,14 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                 onDragLeave={handleFactoryDrag}
                 onDrop={handleFactoryDrop}
                 onClick={openFactoryFilePicker}
-                className={`border-2 border-dashed rounded-2xl p-8 flex flex-col items-center justify-center cursor-pointer transition-all ${
+                className={`border-2 border-dashed rounded-2xl px-5 py-3 flex flex-col items-center justify-center cursor-pointer transition-all ${
                   factoryDragActive
                     ? 'border-emerald-500 bg-emerald-50/50 scale-[0.99]'
                     : factoryFile
                     ? 'border-slate-250 bg-slate-50/20 hover:bg-slate-50/60'
                     : 'border-slate-200 hover:border-emerald-400 hover:bg-slate-50'
                 }`}
-                style={{ minHeight: '180px' }}
+                style={{ minHeight: '118px' }}
               >
                 <input
                   ref={factoryInputRef}
@@ -2095,8 +2095,8 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                 />
 
                 {factoryFile ? (
-                  <div className="text-center space-y-3">
-                    <div className="w-12 h-12 rounded-2xl bg-emerald-50 border border-emerald-100 flex items-center justify-center mx-auto text-emerald-600 shadow-sm animate-pulse">
+                  <div className="text-center space-y-1.5">
+                    <div className="w-9 h-9 rounded-xl bg-emerald-50 border border-emerald-100 flex items-center justify-center mx-auto text-emerald-600 shadow-sm animate-pulse">
                       {factoryFile.type.startsWith('video/') ? (
                         <FileVideo className="w-6 h-6" />
                       ) : (
@@ -2138,13 +2138,13 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                     </div>
                   </div>
                 ) : (
-                  <div className="text-center space-y-3">
-                    <div className="w-12 h-12 rounded-2xl bg-slate-50 border border-slate-100 flex items-center justify-center mx-auto text-slate-400">
+                  <div className="text-center space-y-1.5">
+                    <div className="w-9 h-9 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-center mx-auto text-slate-400">
                       <Upload className="w-6 h-6" />
                     </div>
                     <div>
                       <p className="text-xs font-bold text-slate-700">点击上传、批量多选，或将媒体文件/文件夹拖拽到此处</p>
-                      <p className="text-[10px] text-slate-400 mt-1 max-w-xs mx-auto leading-relaxed">
+                      <p className="text-[10px] text-slate-400 mt-0.5 max-w-xs mx-auto leading-snug">
                         支持多文件和文件夹批量转换，可转换为高保真 WAV 或高压缩 MP3 格式。
                       </p>
                     </div>

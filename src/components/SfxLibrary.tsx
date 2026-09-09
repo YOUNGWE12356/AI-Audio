@@ -152,6 +152,10 @@ type ImportTarget = {
   childCategory: string;
 };
 
+type SearchScope = '全部' | '音效库' | '音乐' | '公司音效';
+
+const SEARCH_SCOPE_OPTIONS: SearchScope[] = ['全部', '音效库', '音乐', '公司音效'];
+
 const isUploadedAudioAsset = (sound: SoundEffect) => {
   if (sound.storageKey) return true;
   const url = (sound.url || '').toLowerCase();
@@ -165,6 +169,26 @@ const inferAudioAssetKind = (sound: SoundEffect): 'music' | 'sfx' => {
   return text.includes('music') || text.includes('bgm') || text.includes('配乐') || text.includes('音乐') || text.includes('闊充箰')
     ? 'music'
     : 'sfx';
+};
+
+const getSearchScopeForSound = (sound: SoundEffect): Exclude<SearchScope, '全部'> => {
+  const directoryText = `${sound.category || ''} ${sound.subcategory || ''} ${sound.childCategory || ''} ${sound.path || ''}`.toLowerCase();
+  if (directoryText.includes('公司游戏音效') || directoryText.includes('company') || directoryText.includes('company_sfx')) {
+    return '公司音效';
+  }
+  if (
+    sound.category === '全部音乐'
+    || sound.category === '音乐'
+    || sound.subcategory === '全部音乐'
+    || sound.subcategory === '音乐'
+    || sound.childCategory === '全部音乐'
+    || sound.childCategory === '音乐'
+    || directoryText.includes('assets/music')
+    || directoryText.includes('music_all')
+  ) {
+    return '音乐';
+  }
+  return '音效库';
 };
 
 export const LOCAL_DEFAULT_CATEGORIES: CategoryGroup[] = [
@@ -647,6 +671,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   const [expandedSubCategories, setExpandedSubCategories] = useState<Record<string, boolean>>({});
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [searchScope, setSearchScope] = useState<SearchScope>('全部');
   const [searchHistory, setSearchHistory] = useState<string[]>(['金属撞击', '科幻激光', 'Q版点击']);
   const [showFilters, setShowFilters] = useState<boolean>(true);
 
@@ -2462,19 +2487,24 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
       }
     }
 
-    // 2. Right tag cloud filter
+    // 2. Search scope filter
+    if (searchScope !== '全部' && getSearchScopeForSound(sound) !== searchScope) {
+      return false;
+    }
+
+    // 3. Right tag cloud filter
     if (selectedTag && !sound.tags.includes(selectedTag)) {
       return false;
     }
 
-    // 3. AI Semantic Search Match Score Check
+    // 4. AI Semantic Search Match Score Check
     if (searchQuery.trim().length > 0) {
       if (getMatchScore(sound, searchQuery) === 0) {
         return false;
       }
     }
 
-    // 4. Secondary Multi-dimensional Filters
+    // 5. Secondary Multi-dimensional Filters
     // Duration
     if (filterDuration === '< 1秒' && sound.duration >= 1) return false;
     if (filterDuration === '1-3秒' && (sound.duration < 1 || sound.duration > 3)) return false;
@@ -3274,6 +3304,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
 
   // Reset all filters
   const resetFilters = () => {
+    setSearchScope('全部');
     setFilterDuration('全部');
     setFilterChannel('全部');
     setFilterFormat('全部');
@@ -4117,6 +4148,33 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
               </div>
             </form>
 
+            {/* Search Scope */}
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-slate-400 text-[10px] font-bold">搜索范围:</span>
+              <div className="flex flex-wrap gap-1.5">
+                {SEARCH_SCOPE_OPTIONS.map(scope => {
+                  const isActive = searchScope === scope;
+                  return (
+                    <button
+                      key={scope}
+                      type="button"
+                      onClick={() => {
+                        setSearchScope(scope);
+                        setSelectedCategory('全部');
+                      }}
+                      className={`rounded-lg border px-2.5 py-1 text-[10px] font-bold transition-all ${
+                        isActive
+                          ? 'border-emerald-500 bg-emerald-50 text-emerald-700 shadow-sm'
+                          : 'border-slate-200 bg-slate-50 text-slate-500 hover:border-emerald-200 hover:text-emerald-700'
+                      }`}
+                    >
+                      {scope}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             {/* Suggestions & Search History */}
             <div className="flex flex-wrap items-center gap-2 text-xs">
               <span className="text-slate-400 text-[10px] font-bold">高频热词:</span>
@@ -4142,7 +4200,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                 <SlidersHorizontal className="w-3.5 h-3.5 text-emerald-600" />
                 <span>高级多维资产筛选</span>
               </button>
-              {(filterDuration !== '全部' || filterChannel !== '全部' || filterFormat !== '全部' || filterDesigner !== '全部' || filterSampleRate !== '全部' || selectedTag) && (
+              {(searchScope !== '全部' || filterDuration !== '全部' || filterChannel !== '全部' || filterFormat !== '全部' || filterDesigner !== '全部' || filterSampleRate !== '全部' || selectedTag) && (
                 <button
                   onClick={resetFilters}
                   className="text-[10px] font-mono text-emerald-600 hover:text-emerald-700 flex items-center gap-1"

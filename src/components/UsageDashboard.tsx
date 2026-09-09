@@ -35,7 +35,7 @@ function ProviderSummary({ provider, usage }: { provider: typeof PROVIDERS[numbe
   const Icon = provider.icon;
   const primaryValue = provider.key === 'elevenLabs' ? formatCredits(usage.credits) : formatInteger(usage.totalTokens);
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-4">
+    <div className="flex h-full min-h-[138px] flex-col rounded-lg border border-slate-200 bg-white p-4">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <div className={`flex h-8 w-8 items-center justify-center rounded-lg ${provider.iconClass}`}>
@@ -64,7 +64,9 @@ function ProviderSummary({ provider, usage }: { provider: typeof PROVIDERS[numbe
         <p className="mt-3 border-t border-slate-100 pt-3 text-[10px] text-amber-700">
           {usage.unmeteredRequests} 次调用未返回积分计费信息，已记录调用次数，暂未计入积分。
         </p>
-      ) : null}
+      ) : (
+        <div className="mt-auto h-[45px] border-t border-transparent pt-3" aria-hidden="true" />
+      )}
     </div>
   );
 }
@@ -274,7 +276,7 @@ export default function UsageDashboard() {
         <>
           <div className="mt-4 grid gap-3 lg:grid-cols-3">
             {PROVIDERS.map(provider => (
-              <div key={provider.key}>
+              <div key={provider.key} className="h-full">
                 <ProviderSummary provider={provider} usage={summary.providers[provider.key]} />
               </div>
             ))}

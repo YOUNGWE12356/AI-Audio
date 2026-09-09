@@ -612,6 +612,8 @@ const normalizeSourceAudioDuration = (
   getClipSourceOffset(clip) + clip.duration * getEffectiveClipSpeed(clip),
 );
 
+const isDraftTimelineClip = (clip: Pick<TimelineClip, 'audioUrl'>) => !clip.audioUrl;
+
 const normalizeClipFade = (value: unknown, clipDuration = 0) => {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return 0;
   return Math.min(5, Math.max(0, Math.min(value, Math.max(0, clipDuration / 2))));
@@ -2790,6 +2792,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
         let nextFadeOut = normalizeClipFade(clip.fadeOut, clip.duration);
         let nextSourceOffset = getClipSourceOffset(clip);
         const clipSpeedForTrim = getEffectiveClipSpeed(clip);
+        const draftClipCanResizeFreely = isDraftTimelineClip(clip);
         const sourceDurationForTrim = normalizePositiveNumber(
           initialClipState.sourceAudioDuration,
           initialClipState.sourceOffset + initialClipState.duration * clipSpeedForTrim,
@@ -2802,7 +2805,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
         } else if (interactionType === 'resize-right') {
           newDuration = initialClipState.duration + deltaTime;
           const maxDurationByTimeline = safeDuration - clip.startTime;
-          const maxDurationBySource = timeStretchEnabled
+          const maxDurationBySource = timeStretchEnabled || draftClipCanResizeFreely
             ? maxDurationByTimeline
             : Math.max(minClipDuration, (sourceDurationForTrim - initialClipState.sourceOffset) / clipSpeedForTrim);
           newDuration = clampNumber(
@@ -2814,7 +2817,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
           nextFadeIn = normalizeClipFade(nextFadeIn, newDuration);
           nextFadeOut = normalizeClipFade(nextFadeOut, newDuration);
         } else if (interactionType === 'resize-left') {
-          if (timeStretchEnabled) {
+          if (timeStretchEnabled || draftClipCanResizeFreely) {
             newStartTime = initialClipState.startTime + deltaTime;
             newDuration = initialClipState.duration - deltaTime;
 
@@ -2825,6 +2828,10 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
             if (newDuration < minClipDuration) {
               newDuration = minClipDuration;
               newStartTime = initialClipState.startTime + initialClipState.duration - minClipDuration;
+            }
+
+            if (draftClipCanResizeFreely) {
+              nextSourceOffset = initialClipState.sourceOffset;
             }
           } else {
             const maxRevealEarlier = initialClipState.sourceOffset / clipSpeedForTrim;
@@ -2860,7 +2867,9 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
           startTime: newStartTime,
           duration: newDuration,
           sourceOffset: nextSourceOffset > 0 ? nextSourceOffset : undefined,
-          sourceAudioDuration: movedClip.sourceAudioDuration || sourceDurationForTrim,
+          sourceAudioDuration: draftClipCanResizeFreely
+            ? movedClip.sourceAudioDuration
+            : movedClip.sourceAudioDuration || sourceDurationForTrim,
           fadeIn: nextFadeIn,
           fadeOut: nextFadeOut,
           ...((isDubbingClip || timeStretchEnabled) ? {
@@ -10592,7 +10601,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                                     {/* Bottom corner stretch handles */}
                                     {!clipIsOriginalAudio && (
                                       <div 
-                                        className={`absolute bottom-0 left-0 z-20 h-1/2 w-3 cursor-ew-resize rounded-bl-md rounded-tr-sm opacity-0 transition-opacity hover:bg-white/30 group-hover/clip:opacity-100 ${timelineToolMode !== 'select' ? 'pointer-events-none' : ''}`}
+                                        className={`absolute bottom-0 left-0 z-30 h-2/3 w-5 cursor-ew-resize rounded-bl-md rounded-tr-sm opacity-0 transition-opacity hover:bg-white/30 group-hover/clip:opacity-100 ${timelineToolMode !== 'select' ? 'pointer-events-none' : ''} ${isSelected ? 'opacity-70' : ''}`}
                                         onMouseDown={(e) => startDragOrResize(e, clip.id, 'resize-left')}
                                         title={timeStretchEnabled ? '时间拉伸：拖动改变声音快慢' : '拖动调整片段起点；往左拉可显示音频前面的声音'}
                                       />
@@ -10615,7 +10624,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                                     {/* Right stretch handle */}
                                     {!clipIsOriginalAudio && (
                                       <div 
-                                        className={`absolute bottom-0 right-0 z-20 h-1/2 w-3 cursor-ew-resize rounded-br-md rounded-tl-sm opacity-0 transition-opacity hover:bg-white/30 group-hover/clip:opacity-100 ${timelineToolMode !== 'select' ? 'pointer-events-none' : ''}`}
+                                        className={`absolute bottom-0 right-0 z-30 h-2/3 w-5 cursor-ew-resize rounded-br-md rounded-tl-sm opacity-0 transition-opacity hover:bg-white/30 group-hover/clip:opacity-100 ${timelineToolMode !== 'select' ? 'pointer-events-none' : ''} ${isSelected ? 'opacity-70' : ''}`}
                                         onMouseDown={(e) => startDragOrResize(e, clip.id, 'resize-right')}
                                         title={timeStretchEnabled ? '时间拉伸：拖动改变声音快慢' : '拖动调整片段终点；往右拉可显示音频后面的声音'}
                                       />

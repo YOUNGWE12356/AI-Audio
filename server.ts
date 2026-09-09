@@ -22,6 +22,7 @@ import {
   generateLyricsFromMusicStyle,
   createEnglishMusicPromptForElevenLabs,
   enhanceVoicePromptForElevenV3,
+  extractBatchVoiceTextFromImage,
   matchBestVoice,
   optimizeImportMetadata,
   regenerateLyrics,
@@ -3306,6 +3307,24 @@ async function startServer() {
     const normalizedProjectName = typeof projectName === 'string' ? projectName.trim().slice(0, 80) : null;
     const result = await generateSfxRequirements(String(inputText), screenshot, templateType, normalizedProjectName || null);
     return res.json(result);
+  }));
+
+  app.post('/api/ai/gemini/batch-voice-image-ocr', asyncRoute(async (req, res) => {
+    const image = req.body?.image;
+    const mimeType = String(image?.mimeType || '').toLowerCase();
+    const data = String(image?.data || '');
+    if (!mimeType.startsWith('image/') || !data) {
+      return res.status(400).json({ error: '请上传 PNG、JPG 或 WebP 截图。' });
+    }
+    if (data.length > 12 * 1024 * 1024) {
+      return res.status(400).json({ error: '截图文件过大，请裁剪后再上传。' });
+    }
+    const text = await extractBatchVoiceTextFromImage({
+      data,
+      mimeType,
+      fileName: typeof image?.fileName === 'string' ? image.fileName : undefined,
+    });
+    return res.json({ text });
   }));
 
   app.post('/api/ai/gemini/optimize-metadata', asyncRoute(async (req, res) => {
