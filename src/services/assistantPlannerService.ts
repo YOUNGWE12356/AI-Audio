@@ -76,8 +76,8 @@ const ASSISTANT_PLAN_SCHEMA: Record<string, unknown> = {
         },
       ],
     },
-    audioTask: nullableEnum(['analyze', 'convert', 'rename', 'workstation', 'isolate']),
-    audioTool: nullableEnum(['workstation', 'analysis', 'factory', 'renamer', 'isolation']),
+    audioTask: nullableEnum(['analyze', 'convert', 'rename', 'workstation', 'isolate', 'midi', 'music-separation']),
+    audioTool: nullableEnum(['workstation', 'analysis', 'factory', 'renamer', 'isolation', 'midi', 'music-separation']),
   },
   required: [
     'title',
@@ -130,8 +130,10 @@ const ASSISTANT_PLANNER_INSTRUCTIONS = `你是 AI Audio 专业音频工作台的
    - workstation：多轨 DAW、剪切/分割/移动/复制、淡入淡出、音量、声像、静音/独奏、升降调、移调、变速、音频拉伸、BPM、拍号、节拍器、混音、Master 和 stems 导出。
    - analysis：BPM、调性、和弦、乐器、响度/LUFS、动态范围、底噪、SNR 等分析。
    - factory：MP3/WAV/FLAC/OGG/AAC/M4A 格式转换、压缩、采样率、比特率、响度/音量标准化、从视频提取音频。单纯转换格式不需要先分析音频。
+   - midi：音频转 MIDI、转成 MIDI、导出 MIDI、提取 MIDI、扒谱、扒带、从旋律/钢琴/鼓/吉他/Bass/弦乐/多乐器素材生成 MIDI。
+   - music-separation：拆分分轨、高质量音乐分轨、歌曲分轨、音乐分轨、乐器分轨、stem separation；把完整歌曲或混音拆成人声、鼓、贝斯、其它乐器等独立音源分轨。
    - renamer：批量重命名、前后缀、编号、查找替换。
-   - isolation：人声/伴奏分离、去噪、移除背景音乐。
+   - isolation：只用于人声提取/人声消除/伴奏移除/去噪/移除背景音乐；如果用户说拆歌曲里的乐器、鼓、贝斯、多个 stems，应使用 music-separation，不要使用 isolation。
 7. 音效需求表 (sfx-requirements/requirements)：整理游戏音效、FMOD/Wwise、配音或多语种配音需求清单。
 8. 音效库 (sfx-library/library)：搜索、试听、收藏、下载已有公司音频资产。目录和名称来自实时资产目录。
 9. 设置与工作台 (settings/workbench/general)：只用于明确的导航请求。

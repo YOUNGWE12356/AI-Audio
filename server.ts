@@ -14,6 +14,7 @@ import { DEFAULT_CATEGORIES, INITIAL_SOUNDS } from './src/data/sfxData';
 import type { SoundEffect } from './src/data/sfxData';
 import { buildSfxLibraryIndex, findSfxLibraryMatches } from './src/services/sfxLibraryIndex';
 import { planAssistantTask } from './src/services/assistantPlannerService';
+import { createMusicSeparationRouter } from './src/services/musicSeparationServer';
 import multer from 'multer';
 import {
   analyzeAudioDesign,
@@ -200,6 +201,7 @@ async function startServer() {
     if (endpoint.includes('/translate-dubbing')) return '翻译配音';
     if (endpoint.includes('/translate-language') || endpoint.endsWith('/translate')) return '文本翻译';
     if (endpoint.includes('/speech-to-speech')) return '音频工具 · 语音转换';
+    if (endpoint.includes('/music-separation')) return '音频工具 · 高质量音乐分轨';
     if (endpoint.includes('/audio-isolation') || endpoint.includes('/separate-original-audio')) return '音频工具 · 人声分离';
     if (endpoint.includes('/speech-to-text')) return '音频工具 · 语音转文字';
     if (endpoint.includes('/sound-effect')) return 'AI 音效';
@@ -1042,6 +1044,7 @@ async function startServer() {
 
   // Serve uploaded files statically
   app.use('/uploads', express.static(uploadsDir));
+  app.get('/favicon.ico', (_req, res) => res.status(204).end());
 
   app.post('/api/sfx/admin/login', (req, res) => {
     if (!sfxLibraryAdminPassword) {
@@ -1734,6 +1737,12 @@ async function startServer() {
     limits: { fileSize: MAX_UPLOAD_BYTES },
   });
 
+  app.use('/api/audio/music-separation', createMusicSeparationRouter({
+    uploadsDir,
+    ffmpegBinary: FFMPEG_BINARY,
+    maxUploadBytes: MAX_UPLOAD_BYTES,
+  }));
+
   const sendAudioBlob = async (res: express.Response, blob: Blob) => {
     res.setHeader('Content-Type', blob.type || 'audio/mpeg');
     return res.send(Buffer.from(await blob.arrayBuffer()));
@@ -1787,6 +1796,378 @@ async function startServer() {
       return undefined;
     } finally {
       await Promise.all([safeUnlink(inputPath), safeUnlink(outputPath)]);
+    }
+  }));
+
+  type AudioToMidiMode = 'basic-pitch' | 'piano' | 'drums' | 'guitar' | 'bass' | 'strings' | 'multitrack';
+  type AudioToMidiEngineStatus = {
+    id: AudioToMidiMode;
+    label: string;
+    available: boolean;
+    engine: string;
+    status: 'ready' | 'missing' | 'planned';
+    detail: string;
+    env?: string[];
+  };
+  const AUDIO_TO_MIDI_MODES = new Set<AudioToMidiMode>([
+    'basic-pitch',
+    'piano',
+    'drums',
+    'guitar',
+    'bass',
+    'strings',
+    'multitrack',
+  ]);
+  const resolvePythonBinary = (specificEnvName: string) => (
+    String(process.env[specificEnvName] || process.env.PYTHON_PATH || process.env.PYTHON || 'python').trim()
+  );
+  const execFileCapture = (
+    command: string,
+    args: string[],
+    timeout = 30_000,
+  ) => new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    execFile(command, args, {
+      timeout,
+      windowsHide: true,
+      maxBuffer: 8 * 1024 * 1024,
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: process.env.PYTHONIOENCODING || 'utf-8',
+        PYTHONUTF8: process.env.PYTHONUTF8 || '1',
+      },
+    }, (error, stdout, stderr) => {
+      if (error) {
+        reject(Object.assign(error, { stdout, stderr }));
+        return;
+      }
+      resolve({ stdout: String(stdout || ''), stderr: String(stderr || '') });
+    });
+  });
+  const pythonModuleAvailable = async (pythonBinary: string, moduleName: string, timeout = 2_500) => {
+    try {
+      await execFileCapture(pythonBinary, ['-c', `import ${moduleName}`], timeout);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const splitCommandTemplate = (template: string) => {
+    const parts: string[] = [];
+    const pattern = /"([^"]*)"|'([^']*)'|(\S+)/g;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(template)) !== null) {
+      parts.push(match[1] ?? match[2] ?? match[3] ?? '');
+    }
+    return parts.filter(Boolean);
+  };
+  const renderCommandTemplate = (
+    template: string,
+    replacements: Record<string, string>,
+  ) => splitCommandTemplate(template).map((part) => (
+    part.replace(/\{input\}|\{output\}|\{outputDir\}/g, token => replacements[token.slice(1, -1)] || token)
+  ));
+  const runCommandTemplate = async (
+    template: string,
+    replacements: Record<string, string>,
+    timeout = 15 * 60_000,
+  ) => {
+    const [command, ...args] = renderCommandTemplate(template, replacements);
+    if (!command) throw Object.assign(new Error('MIDI 模型命令为空，请检查环境变量配置。'), { status: 503 });
+    return execFileCapture(command, args, timeout);
+  };
+  const findFilesByExtension = async (root: string, extension: string): Promise<string[]> => {
+    const entries = await fs.promises.readdir(root, { withFileTypes: true }).catch(() => []);
+    const results: string[] = [];
+    for (const entry of entries) {
+      const entryPath = path.join(root, entry.name);
+      if (entry.isDirectory()) {
+        results.push(...await findFilesByExtension(entryPath, extension));
+      } else if (entry.isFile() && entry.name.toLowerCase().endsWith(extension)) {
+        results.push(entryPath);
+      }
+    }
+    return results;
+  };
+  let audioToMidiStatusCache: { expiresAt: number; engines: AudioToMidiEngineStatus[] } | null = null;
+  let audioToMidiStatusPromise: Promise<AudioToMidiEngineStatus[]> | null = null;
+  const readAudioToMidiStatusUncached = async (): Promise<AudioToMidiEngineStatus[]> => {
+    const basicPitchPython = resolvePythonBinary('BASIC_PITCH_PYTHON');
+    const pianoPython = resolvePythonBinary('PIANO_TRANSCRIPTION_PYTHON');
+    const autoDiscoverPythonModels = process.env.AUDIO_TO_MIDI_AUTO_DISCOVER === '1';
+    const shouldProbeBasicPitch = autoDiscoverPythonModels;
+    const shouldProbePiano = autoDiscoverPythonModels;
+    const [basicPitchModule, pianoInferenceModule, pianoModule] = await Promise.all([
+      process.env.BASIC_PITCH_COMMAND || !shouldProbeBasicPitch ? Promise.resolve(Boolean(process.env.BASIC_PITCH_COMMAND)) : pythonModuleAvailable(basicPitchPython, 'basic_pitch', 2_000),
+      process.env.PIANO_TRANSCRIPTION_COMMAND || !shouldProbePiano ? Promise.resolve(Boolean(process.env.PIANO_TRANSCRIPTION_COMMAND)) : pythonModuleAvailable(pianoPython, 'piano_transcription_inference', 2_000),
+      process.env.PIANO_TRANSCRIPTION_COMMAND || !shouldProbePiano ? Promise.resolve(false) : pythonModuleAvailable(pianoPython, 'piano_transcription', 2_000),
+    ]);
+    const pianoAvailable = Boolean(process.env.PIANO_TRANSCRIPTION_COMMAND || pianoInferenceModule || pianoModule);
+    return [
+      {
+        id: 'basic-pitch',
+        label: '通用转 MIDI',
+        available: Boolean(process.env.BASIC_PITCH_COMMAND || basicPitchModule),
+        engine: process.env.BASIC_PITCH_COMMAND ? 'Basic Pitch 自定义命令' : 'Spotify Basic Pitch',
+        status: (process.env.BASIC_PITCH_COMMAND || basicPitchModule) ? 'ready' : 'missing',
+        detail: '适合人声哼唱、单乐器旋律、简单和声和快速 MIDI Demo。',
+        env: ['BASIC_PITCH_PYTHON', 'BASIC_PITCH_COMMAND'],
+      },
+      {
+        id: 'piano',
+        label: '钢琴专用',
+        available: pianoAvailable,
+        engine: process.env.PIANO_TRANSCRIPTION_COMMAND
+          ? 'ByteDance Piano Transcription'
+          : pianoInferenceModule
+            ? 'piano_transcription_inference'
+            : 'piano_transcription',
+        status: pianoAvailable ? 'ready' : 'missing',
+        detail: '适合钢琴独奏、钢琴和弦、左右手与踏板信息，优先接入本机 piano trans。',
+        env: ['PIANO_TRANSCRIPTION_PYTHON', 'PIANO_TRANSCRIPTION_COMMAND'],
+      },
+      {
+        id: 'drums',
+        label: '鼓专用',
+        available: Boolean(process.env.DRUM_TRANSCRIPTION_COMMAND),
+        engine: process.env.DRUM_TRANSCRIPTION_COMMAND ? 'ADTOF PyTorch' : 'ADTOF PyTorch 待配置',
+        status: process.env.DRUM_TRANSCRIPTION_COMMAND ? 'ready' : 'missing',
+        detail: '适合 Kick / Snare / Hi-hat / Cymbal 等鼓组节奏识别。',
+        env: ['DRUM_TRANSCRIPTION_COMMAND'],
+      },
+      {
+        id: 'guitar',
+        label: '吉他专用',
+        available: Boolean(process.env.GUITAR_TRANSCRIPTION_COMMAND),
+        engine: process.env.GUITAR_TRANSCRIPTION_COMMAND ? 'Basic Pitch · Guitar Profile' : 'Guitar Profile 待配置',
+        status: process.env.GUITAR_TRANSCRIPTION_COMMAND ? 'ready' : 'missing',
+        detail: '针对吉他常用音域、短音符与弯音优化的复音转录配置。',
+        env: ['GUITAR_TRANSCRIPTION_COMMAND'],
+      },
+      {
+        id: 'bass',
+        label: 'Bass 专用',
+        available: Boolean(process.env.BASS_TRANSCRIPTION_COMMAND),
+        engine: process.env.BASS_TRANSCRIPTION_COMMAND ? 'Basic Pitch · Bass Profile' : 'Bass Profile 待配置',
+        status: process.env.BASS_TRANSCRIPTION_COMMAND ? 'ready' : 'missing',
+        detail: '限制在 Bass 常用低频音域，减少泛音被误识别为高音音符。',
+        env: ['BASS_TRANSCRIPTION_COMMAND'],
+      },
+      {
+        id: 'strings',
+        label: '弦乐专用',
+        available: Boolean(process.env.STRINGS_TRANSCRIPTION_COMMAND),
+        engine: process.env.STRINGS_TRANSCRIPTION_COMMAND ? 'Basic Pitch · Strings Profile' : 'Strings Profile 待配置',
+        status: process.env.STRINGS_TRANSCRIPTION_COMMAND ? 'ready' : 'missing',
+        detail: '针对持续音、连奏和较宽弦乐音域优化的复音转录配置。',
+        env: ['STRINGS_TRANSCRIPTION_COMMAND'],
+      },
+      {
+        id: 'multitrack',
+        label: '多乐器实验',
+        available: Boolean(process.env.MUSCRIPTOR_COMMAND || process.env.MT3_COMMAND),
+        engine: process.env.MUSCRIPTOR_COMMAND ? 'MuScriptor' : process.env.MT3_COMMAND ? 'YourMT3 · 8 Stem' : 'YourMT3 待配置',
+        status: (process.env.MUSCRIPTOR_COMMAND || process.env.MT3_COMMAND) ? 'ready' : 'missing',
+        detail: '从混音中识别多种乐器并输出多轨 MIDI，复杂编配仍建议人工检查。',
+        env: ['MUSCRIPTOR_COMMAND', 'MT3_COMMAND'],
+      },
+    ];
+  };
+  const readAudioToMidiStatus = async (): Promise<AudioToMidiEngineStatus[]> => {
+    const now = Date.now();
+    if (audioToMidiStatusCache && audioToMidiStatusCache.expiresAt > now) {
+      return audioToMidiStatusCache.engines;
+    }
+    if (!audioToMidiStatusPromise) {
+      audioToMidiStatusPromise = readAudioToMidiStatusUncached()
+        .then((engines) => {
+          audioToMidiStatusCache = { engines, expiresAt: Date.now() + 60_000 };
+          return engines;
+        })
+        .finally(() => {
+          audioToMidiStatusPromise = null;
+        });
+    }
+    return audioToMidiStatusPromise;
+  };
+  const normalizeAudioToMidiMode = (value: unknown): AudioToMidiMode => {
+    const mode = String(value || 'basic-pitch').trim() as AudioToMidiMode;
+    return AUDIO_TO_MIDI_MODES.has(mode) ? mode : 'basic-pitch';
+  };
+  const makeAudioToMidiOutputName = (sourceName: string, mode: AudioToMidiMode) => {
+    const baseName = path.basename(sourceName, path.extname(sourceName))
+      .replace(/[^a-zA-Z0-9_\u4e00-\u9fa5-]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 80) || 'audio';
+    return `${baseName}_${mode.replace(/-/g, '_')}_${Date.now()}.mid`;
+  };
+  const runAudioToMidi = async (
+    mode: AudioToMidiMode,
+    inputWavPath: string,
+    outputMidiPath: string,
+    outputDir: string,
+  ) => {
+    const replacements = { input: inputWavPath, output: outputMidiPath, outputDir };
+    const finalizeBasicPitchOutput = async (engine: string) => {
+      const midiFiles = await findFilesByExtension(outputDir, '.mid');
+      const generated = midiFiles[0];
+      if (!generated) throw Object.assign(new Error(`${engine} 已运行，但没有找到生成的 MIDI 文件。`), { status: 502 });
+      if (path.resolve(generated) !== path.resolve(outputMidiPath)) {
+        await fs.promises.copyFile(generated, outputMidiPath);
+      }
+      return engine;
+    };
+    const runBasicPitchProfile = async (command: string | undefined, engine: string) => {
+      if (!command) throw Object.assign(new Error(`${engine} 未配置。`), { status: 503 });
+      await runCommandTemplate(command, replacements);
+      return finalizeBasicPitchOutput(engine);
+    };
+
+    if (mode === 'basic-pitch') {
+      if (process.env.BASIC_PITCH_COMMAND) {
+        await runCommandTemplate(process.env.BASIC_PITCH_COMMAND, replacements);
+      } else {
+        await execFileCapture(
+          resolvePythonBinary('BASIC_PITCH_PYTHON'),
+          ['-m', 'basic_pitch.predict', '--model-serialization', 'onnx', '--save-midi', outputDir, inputWavPath],
+          15 * 60_000,
+        );
+      }
+      return finalizeBasicPitchOutput('Spotify Basic Pitch');
+    }
+
+    if (mode === 'piano') {
+      if (process.env.PIANO_TRANSCRIPTION_COMMAND) {
+        await runCommandTemplate(process.env.PIANO_TRANSCRIPTION_COMMAND, replacements);
+        return 'ByteDance Piano Transcription';
+      }
+      const python = resolvePythonBinary('PIANO_TRANSCRIPTION_PYTHON');
+      const hasInference = await pythonModuleAvailable(python, 'piano_transcription_inference');
+      if (hasInference) {
+        await execFileCapture(
+          python,
+          ['-m', 'piano_transcription_inference', '--audio_path', inputWavPath, '--output_midi_path', outputMidiPath],
+          15 * 60_000,
+        );
+        return 'piano_transcription_inference';
+      }
+      throw Object.assign(new Error('钢琴专用模型未配置。请安装 piano_transcription_inference，或配置 PIANO_TRANSCRIPTION_COMMAND。'), { status: 503 });
+    }
+
+    if (mode === 'drums') {
+      if (!process.env.DRUM_TRANSCRIPTION_COMMAND) {
+        throw Object.assign(new Error('鼓专用模型未配置。请配置 DRUM_TRANSCRIPTION_COMMAND。'), { status: 503 });
+      }
+      await runCommandTemplate(process.env.DRUM_TRANSCRIPTION_COMMAND, replacements);
+      return 'ADTOF PyTorch';
+    }
+
+    if (mode === 'guitar') {
+      return runBasicPitchProfile(process.env.GUITAR_TRANSCRIPTION_COMMAND, 'Basic Pitch · Guitar Profile');
+    }
+
+    if (mode === 'bass') {
+      return runBasicPitchProfile(process.env.BASS_TRANSCRIPTION_COMMAND, 'Basic Pitch · Bass Profile');
+    }
+
+    if (mode === 'strings') {
+      return runBasicPitchProfile(process.env.STRINGS_TRANSCRIPTION_COMMAND, 'Basic Pitch · Strings Profile');
+    }
+
+    if (mode === 'multitrack') {
+      const command = process.env.MUSCRIPTOR_COMMAND || process.env.MT3_COMMAND;
+      if (!command) {
+        throw Object.assign(new Error('多乐器实验模型未配置。请配置 MUSCRIPTOR_COMMAND 或 MT3_COMMAND。'), { status: 503 });
+      }
+      await runCommandTemplate(command, replacements, 30 * 60_000);
+      return process.env.MUSCRIPTOR_COMMAND ? 'MuScriptor' : 'YourMT3 · 8 Stem';
+    }
+
+    throw Object.assign(new Error('该乐器专用模型仍在评估中，当前请先使用通用转 MIDI。'), { status: 503 });
+  };
+
+  app.get('/api/audio-to-midi/status', asyncRoute(async (_req, res) => {
+    res.json({ engines: await readAudioToMidiStatus() });
+  }));
+
+  app.post('/api/audio-to-midi/convert', upload.single('media'), asyncRoute(async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ error: '请上传需要转 MIDI 的音频或视频文件。' });
+    }
+
+    const mode = normalizeAudioToMidiMode(req.body?.mode);
+    const status = await readAudioToMidiStatus();
+    const engineStatus = status.find(engine => engine.id === mode);
+    if (!engineStatus?.available) {
+      await safeUnlink(req.file.path);
+      return res.status(503).json({
+        error: engineStatus
+          ? `${engineStatus.label} 当前不可用：${engineStatus.detail}${engineStatus.env?.length ? ` 请配置 ${engineStatus.env.join(' 或 ')}。` : ''}`
+          : '当前 MIDI 转换模型不可用。',
+      });
+    }
+
+    const jobId = randomUUID();
+    const temporaryDirectory = await fs.promises.mkdtemp(path.join(uploadsDir, `.audio-to-midi-${jobId}-`));
+    const sourcePath = path.resolve(req.file.path);
+    const inputWavPath = path.resolve(temporaryDirectory, 'input.wav');
+    const outputFileName = makeAudioToMidiOutputName(req.file.originalname || req.file.filename, mode);
+    const outputMidiPath = path.resolve(uploadsDir, outputFileName);
+    if (![temporaryDirectory, inputWavPath].every(filePath => isPathInside(uploadsDir, filePath)) || !isPathInside(uploadsDir, outputMidiPath)) {
+      await Promise.all([safeUnlink(req.file.path), safeRemoveDirectory(temporaryDirectory)]);
+      throw Object.assign(new Error('MIDI 临时路径无效。'), { status: 500 });
+    }
+
+    try {
+      await runFfmpegFile([
+        '-y',
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-i', sourcePath,
+        '-vn',
+        '-sn',
+        '-map', '0:a:0',
+        '-ac', mode === 'piano' ? '1' : '2',
+        '-ar', '44100',
+        '-c:a', 'pcm_s16le',
+        inputWavPath,
+      ], 180_000);
+
+      const engine = await runAudioToMidi(mode, inputWavPath, outputMidiPath, temporaryDirectory);
+      if (!fs.existsSync(outputMidiPath)) {
+        throw Object.assign(new Error('MIDI 模型已运行，但没有生成输出文件。'), { status: 502 });
+      }
+
+      return res.json({
+        midiUrl: `/uploads/${outputFileName}`,
+        midiFileName: outputFileName,
+        mode,
+        engine,
+        sourceName: req.file.originalname || req.file.filename,
+        sourceSize: req.file.size,
+        notes: [
+          mode === 'basic-pitch'
+            ? '通用模型适合清晰旋律、哼唱和单乐器，复杂混音需要人工检查。'
+            : mode === 'piano'
+              ? '钢琴专用模型更适合钢琴和弦、左右手与踏板信息。'
+              : mode === 'drums'
+                ? '鼓专用模型会按鼓组触发点输出 MIDI，建议检查鼓件映射。'
+                : mode === 'guitar'
+                  ? '吉他配置保留常用音域与弯音，失真较重的素材建议先降噪。'
+                  : mode === 'bass'
+                    ? 'Bass 配置限制低频音域，减少泛音造成的高八度误识别。'
+                    : mode === 'strings'
+                      ? '弦乐配置针对持续音和连奏，复杂合奏建议使用多乐器模式。'
+                      : 'YourMT3 会输出带乐器信息的多轨 MIDI，复杂编配仍建议人工校对。',
+        ],
+      });
+    } catch (error: any) {
+      await safeUnlink(outputMidiPath);
+      const stderr = String(error?.stderr || '').trim().split(/\r?\n/).slice(-2).join(' ');
+      return res.status(Number(error?.status) || 500).json({
+        error: stderr || error?.message || '音频转 MIDI 失败，请检查模型环境。',
+      });
+    } finally {
+      await Promise.all([safeUnlink(req.file.path), safeRemoveDirectory(temporaryDirectory)]);
     }
   }));
 
@@ -7035,6 +7416,7 @@ CRITICAL SUBTITLE OCR PASS:
     const vite = await createViteServer({
       server: { 
         middlewareMode: true,
+        hmr: process.env.DISABLE_HMR !== 'true',
         watch: {
           ignored: ['**/uploads/**', '**/data/**']
         }

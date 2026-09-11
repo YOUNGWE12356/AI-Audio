@@ -24,7 +24,8 @@ import {
   Music,
   Sparkles,
   BarChart3,
-  FileText
+  FileText,
+  Layers
 } from 'lucide-react';
 import { 
   resampleAudioBuffer, 
@@ -33,9 +34,11 @@ import {
 } from '../services/audioEncoderService';
 import { isolateAudio } from '../services/elevenLabsService';
 import AudioWorkstation from './AudioWorkstation';
+import AudioToMidiPanel from './AudioToMidiPanel';
 import type { AssistantAudioRequest } from './GlobalAssistant';
 
 const AudioAnalyzer = React.lazy(() => import('./AudioAnalyzer'));
+const MusicStemSeparation = React.lazy(() => import('./MusicStemSeparation'));
 
 interface FactoryConversionResult {
   id: string;
@@ -257,7 +260,7 @@ interface AudioToolsProps {
 }
 
 export default function AudioTools({ assistantAudioRequest = null, onAssistantTaskRunningChange }: AudioToolsProps) {
-  const [activeSubTab, setActiveSubTab] = useState<'workstation' | 'analysis' | 'factory' | 'renamer' | 'isolation'>('workstation');
+  const [activeSubTab, setActiveSubTab] = useState<'workstation' | 'analysis' | 'factory' | 'midi' | 'renamer' | 'isolation' | 'music-separation'>('workstation');
   const [subNavWidth, setSubNavWidth] = useState(() => {
     if (typeof window === 'undefined') return AUDIO_TOOLS_SUBNAV_DEFAULT_WIDTH;
     const hasInitializedWidth = window.localStorage.getItem(AUDIO_TOOLS_SUBNAV_WIDTH_READY_KEY) === '1';
@@ -461,7 +464,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
   const [factoryProgress, setFactoryProgress] = useState<number>(0);
   const [factoryError, setFactoryError] = useState<string | null>(null);
   const [factoryResults, setFactoryResults] = useState<FactoryConversionResult[]>([]);
-  const [pendingWorkstationImport, setPendingWorkstationImport] = useState<{ id: string; file: File } | null>(null);
+  const [pendingWorkstationImport, setPendingWorkstationImport] = useState<{ id: string; files: File[]; separateTracks?: boolean } | null>(null);
   const [assistantAnalysisFiles, setAssistantAnalysisFiles] = useState<File[]>([]);
   const assistantFactorySubmitRef = useRef<string | null>(null);
   const assistantFactoryRunningRequestRef = useRef<string | null>(null);
@@ -475,6 +478,14 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
     }
     if (assistantAudioRequest.task === 'workstation' || assistantAudioRequest.audioTool === 'workstation') {
       setActiveSubTab('workstation');
+      return;
+    }
+    if (assistantAudioRequest.task === 'midi' || assistantAudioRequest.audioTool === 'midi') {
+      setActiveSubTab('midi');
+      return;
+    }
+    if (assistantAudioRequest.task === 'music-separation' || assistantAudioRequest.audioTool === 'music-separation') {
+      setActiveSubTab('music-separation');
       return;
     }
     if (assistantAudioRequest.task === 'isolate' || assistantAudioRequest.audioTool === 'isolation') {
@@ -565,7 +576,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
     const outputFile = new File([factoryBlob], outputName, { type: mimeType, lastModified: Date.now() });
 
     downloadFile(factoryBlob, primaryFactoryResult.sourceName, factoryFormat);
-    setPendingWorkstationImport({ id: `factory-workstation-${Date.now()}`, file: outputFile });
+    setPendingWorkstationImport({ id: `factory-workstation-${Date.now()}`, files: [outputFile] });
     setActiveSubTab('workstation');
     setFactoryStatus(`已下载并放入工作站：${outputName}`);
   };
@@ -1448,11 +1459,11 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
       {/* Sub-navigation Sidebar */}
       <div
         className={`relative w-full md:w-[var(--audio-tools-subnav-width)] bg-white border-b md:border-b-0 md:border-r border-slate-200 flex flex-col shrink-0 select-none ${
-          isSubNavCompact ? 'p-2 md:p-3' : 'p-4 md:p-5'
+          isSubNavCompact ? 'p-2 md:p-3' : 'p-2 md:p-5'
         }`}
         style={{ '--audio-tools-subnav-width': `${subNavWidth}px` } as React.CSSProperties}
       >
-        <div className="space-y-1.5">
+        <div className="flex gap-1.5 overflow-x-auto pb-1 md:block md:space-y-1.5 md:overflow-visible md:pb-0 [&>button]:w-auto [&>button]:shrink-0 md:[&>button]:w-full">
           {/* Subtab Button 0: 音频工作站 */}
           <button
             onClick={() => setActiveSubTab('workstation')}
@@ -1501,6 +1512,22 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
             <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>格式/压缩/音量</span>
           </button>
 
+          {/* Subtab Button: 音频转 MIDI */}
+          <button
+            onClick={() => setActiveSubTab('midi')}
+            title="音频转 MIDI"
+            className={`w-full flex items-center overflow-hidden whitespace-nowrap rounded-xl text-xs font-semibold transition-all duration-200 ${
+              isSubNavCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
+            } ${
+              activeSubTab === 'midi'
+                ? 'bg-emerald-50 text-emerald-700 shadow-sm border border-emerald-100'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+            }`}
+          >
+            <Sliders className={`w-4 h-4 shrink-0 transition-colors ${activeSubTab === 'midi' ? 'text-emerald-600' : 'text-slate-400'}`} />
+            <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>音频转 MIDI</span>
+          </button>
+
           {/* Subtab Button: 批量命名 */}
           <button
             onClick={() => setActiveSubTab('renamer')}
@@ -1515,6 +1542,22 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
           >
             <FileText className={`w-4 h-4 shrink-0 transition-colors ${activeSubTab === 'renamer' ? 'text-emerald-600' : 'text-slate-400'}`} />
             <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>批量命名</span>
+          </button>
+
+          {/* Subtab Button: 拆分分轨 */}
+          <button
+            onClick={() => setActiveSubTab('music-separation')}
+            title="拆分分轨"
+            className={`w-full flex items-center overflow-hidden whitespace-nowrap rounded-xl text-xs font-semibold transition-all duration-200 ${
+              isSubNavCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
+            } ${
+              activeSubTab === 'music-separation'
+                ? 'bg-emerald-50 text-emerald-700 shadow-sm border border-emerald-100'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+            }`}
+          >
+            <Layers className={`w-4 h-4 shrink-0 transition-colors ${activeSubTab === 'music-separation' ? 'text-emerald-600' : 'text-slate-400'}`} />
+            <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>拆分分轨</span>
           </button>
 
           {/* Subtab Button 2: 人声分离 */}
@@ -1575,6 +1618,38 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
           }
         >
           <AudioAnalyzer initialFiles={assistantAnalysisFiles} />
+        </React.Suspense>
+      )}
+
+      {/* ==========================================================
+          SUB-TAB: AUDIO TO MIDI
+          ========================================================== */}
+      {activeSubTab === 'midi' && (
+        <AudioToMidiPanel />
+      )}
+
+      {/* ==========================================================
+          SUB-TAB: HIGH-QUALITY MUSIC STEM SEPARATION
+          ========================================================== */}
+      {activeSubTab === 'music-separation' && (
+        <React.Suspense
+          fallback={
+            <div className="flex min-h-[360px] items-center justify-center rounded-xl border border-slate-200 bg-white text-sm font-semibold text-slate-500 shadow-sm">
+              <Loader2 className="mr-2 h-4 w-4 animate-spin text-emerald-600" />
+              正在加载高质量音乐分轨…
+            </div>
+          }
+        >
+          <MusicStemSeparation
+            onSendToWorkstation={(files) => {
+              setPendingWorkstationImport({
+                id: `music-stems-workstation-${Date.now()}`,
+                files,
+                separateTracks: true,
+              });
+              setActiveSubTab('workstation');
+            }}
+          />
         </React.Suspense>
       )}
 

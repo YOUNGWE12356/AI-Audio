@@ -19,6 +19,7 @@ API 密钥、系统命令和长期文件存储不得进入浏览器端。浏览�
 - Node.js 20 或更高版本
 - npm 11
 - FFmpeg（视频混音和音轨导出需要，并且必须加入系统 `PATH`）
+- 可选：NVIDIA GPU 与 CUDA 版 PyTorch（本地高质量音乐分轨需要）
 
 ### 安装与启动
 
@@ -32,6 +33,16 @@ API 密钥、系统命令和长期文件存储不得进入浏览器端。浏览�
 - `GEMINI_API_KEY`：Gemini 多模态分析、翻译和内容规划
 - `ELEVENLABS_API_KEY`：音效、音乐、配音和语音工具
 - `PORT`：可选，本地服务端口，默认 `3000`
+
+### 本地高质量音乐分轨
+
+Windows 环境执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/music-separation/setup-music-separation.ps1
+```
+
+安装脚本使用独立虚拟环境，不会改变 Seed-VC 或 Demucs 的依赖。完成后重启服务，在“音频工具”中打开“高质量音乐分轨”。
 
 `.env` 已被 Git 忽略，真实密钥不得写入 `.env.example`、前端代码或提交记录。
 

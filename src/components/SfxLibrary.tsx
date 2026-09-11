@@ -25,6 +25,7 @@ import {
   SlidersHorizontal, 
   User, 
   Heart, 
+  Star,
   FileAudio,
   ChevronRight,
   ChevronDown,
@@ -155,6 +156,47 @@ type ImportTarget = {
 type SearchScope = '全部' | '音效库' | '音乐' | '公司音效';
 
 const SEARCH_SCOPE_OPTIONS: SearchScope[] = ['全部', '音效库', '音乐', '公司音效'];
+const SFX_LIBRARY_RATINGS_KEY = 'ai-audio-sfx-library-ratings-v1';
+const SFX_LIBRARY_FAVORITES_KEY = 'ai-audio-sfx-library-favorites-v1';
+const RATING_VALUES = [1, 2, 3, 4, 5] as const;
+
+type SoundRatings = Record<string, number>;
+type SoundFavoriteOverrides = Record<string, boolean>;
+
+const readStoredSoundRatings = (): SoundRatings => {
+  if (typeof window === 'undefined') return {};
+  try {
+    const saved = localStorage.getItem(SFX_LIBRARY_RATINGS_KEY);
+    if (!saved) return {};
+    const parsed = JSON.parse(saved);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, number] => (
+        typeof entry[1] === 'number'
+        && Number.isInteger(entry[1])
+        && entry[1] >= 1
+        && entry[1] <= 5
+      )),
+    );
+  } catch {
+    return {};
+  }
+};
+
+const readStoredSoundFavorites = (): SoundFavoriteOverrides => {
+  if (typeof window === 'undefined') return {};
+  try {
+    const saved = localStorage.getItem(SFX_LIBRARY_FAVORITES_KEY);
+    if (!saved) return {};
+    const parsed = JSON.parse(saved);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, boolean] => entry[1] === true),
+    );
+  } catch {
+    return {};
+  }
+};
 
 const isUploadedAudioAsset = (sound: SoundEffect) => {
   if (sound.storageKey) return true;
@@ -623,6 +665,106 @@ export const LOCAL_INITIAL_SOUNDS: SoundEffect[] = [
   }
 ];
 
+interface SoundRatingControlProps {
+  soundId: string;
+  soundName: string;
+  rating: number;
+  onRate: (soundId: string, rating: number) => void;
+}
+
+const SoundRatingControl = React.memo(function SoundRatingControl({
+  soundId,
+  soundName,
+  rating,
+  onRate,
+}: SoundRatingControlProps) {
+  const [hoveredRating, setHoveredRating] = useState(0);
+  const [isExpanded, setIsExpanded] = useState(false);
+  const visibleRating = hoveredRating || rating;
+
+  const getPointerRating = (event: React.MouseEvent<HTMLDivElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    if (bounds.width <= 0) return rating || 1;
+    return Math.max(1, Math.min(5, Math.ceil(((event.clientX - bounds.left) / bounds.width) * 5)));
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    let nextRating: number | null = null;
+    if (event.key === 'ArrowRight' || event.key === 'ArrowUp') nextRating = Math.min(5, rating + 1);
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') nextRating = Math.max(0, rating - 1);
+    if (event.key === 'Home') nextRating = 0;
+    if (event.key === 'End') nextRating = 5;
+    if (/^[1-5]$/.test(event.key)) nextRating = Number(event.key);
+    if (nextRating === null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onRate(soundId, nextRating);
+  };
+
+  return (
+    <div className="relative h-7 w-8 shrink-0">
+      <div
+        role="slider"
+        aria-label={`${soundName}评分`}
+        aria-valuemin={0}
+        aria-valuemax={5}
+        aria-valuenow={rating}
+        aria-valuetext={rating ? `${rating} 星` : '未评分'}
+        tabIndex={0}
+        title={rating ? `当前 ${rating} 星；点击同一星级可清除` : '悬停后点击星星设置评分'}
+        className={`absolute right-0 top-0 flex h-7 cursor-pointer select-none items-center rounded-md transition-[width,background-color,box-shadow] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 ${
+          isExpanded
+            ? 'z-20 w-[84px] justify-end gap-0.5 border border-slate-200 bg-white px-1 shadow-md'
+            : 'w-8 justify-center gap-0.5 overflow-hidden'
+        }`}
+        onClick={event => {
+          event.stopPropagation();
+          if (!isExpanded) {
+            setIsExpanded(true);
+            return;
+          }
+          const nextRating = getPointerRating(event);
+          onRate(soundId, rating === nextRating ? 0 : nextRating);
+        }}
+        onMouseEnter={() => setIsExpanded(true)}
+        onMouseMove={event => {
+          if (isExpanded) setHoveredRating(getPointerRating(event));
+        }}
+        onMouseLeave={() => {
+          setIsExpanded(false);
+          setHoveredRating(0);
+        }}
+        onFocus={() => setIsExpanded(true)}
+        onBlur={() => {
+          setIsExpanded(false);
+          setHoveredRating(0);
+        }}
+        onKeyDown={handleKeyDown}
+      >
+        {isExpanded ? (
+          RATING_VALUES.map(value => (
+            <Star
+              key={value}
+              aria-hidden="true"
+              className={`h-3.5 w-3.5 shrink-0 transition-colors ${
+                value <= visibleRating ? 'fill-amber-400 text-amber-400' : 'text-slate-300'
+              }`}
+            />
+          ))
+        ) : (
+          <>
+            <Star
+              aria-hidden="true"
+              className={`h-3.5 w-3.5 shrink-0 ${rating ? 'fill-amber-400 text-amber-400' : 'text-slate-300'}`}
+            />
+            {rating > 0 ? <span className="text-[9px] font-bold text-amber-600">{rating}</span> : null}
+          </>
+        )}
+      </div>
+    </div>
+  );
+});
+
 interface SfxLibraryProps {
   assistantSearchQuery?: string;
   assistantCategory?: string;
@@ -876,6 +1018,41 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     }
     return INITIAL_SOUNDS;
   });
+  const [soundRatings, setSoundRatings] = useState<SoundRatings>(readStoredSoundRatings);
+  const [soundFavoriteOverrides, setSoundFavoriteOverrides] = useState<SoundFavoriteOverrides>(readStoredSoundFavorites);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SFX_LIBRARY_RATINGS_KEY, JSON.stringify(soundRatings));
+    } catch {
+      // Rating remains available for the current session when browser storage is unavailable.
+    }
+  }, [soundRatings]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SFX_LIBRARY_FAVORITES_KEY, JSON.stringify(soundFavoriteOverrides));
+    } catch {
+      // Favorites remain available for the current session when browser storage is unavailable.
+    }
+  }, [soundFavoriteOverrides]);
+
+  const isSoundFavorite = useCallback((sound: SoundEffect) => (
+    soundFavoriteOverrides[sound.id] === true
+  ), [soundFavoriteOverrides]);
+
+  const handleRateSound = useCallback((soundId: string, rating: number) => {
+    setSoundRatings(current => {
+      if (rating === 0) {
+        if (!(soundId in current)) return current;
+        const next = { ...current };
+        delete next[soundId];
+        return next;
+      }
+      if (current[soundId] === rating) return current;
+      return { ...current, [soundId]: rating };
+    });
+  }, []);
 
   const isLoadedFromServer = useRef(false);
   const serverRevisionRef = useRef(0);
@@ -2462,7 +2639,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     // 1. Left side category tree filter
     if (selectedCategory !== '全部') {
       if (selectedCategory === '我的收藏') {
-        if (!sound.isFavorite) return false;
+        if (!isSoundFavorite(sound)) return false;
       } else {
         // Try to match selectedCategory with a top-level CategoryGroup name
         const matchedGroup = categories.find(g => g.name === selectedCategory);
@@ -2525,10 +2702,16 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     return true;
   });
 
-  // Sort filtered results so that higher semantic match score comes first
-  if (searchQuery.trim().length > 0) {
-    filteredSounds.sort((a, b) => getMatchScore(b, searchQuery) - getMatchScore(a, searchQuery));
-  }
+  // Personal ratings take priority within every filtered result set. Search
+  // relevance remains the tie-breaker for sounds with the same rating.
+  const normalizedSearchQuery = searchQuery.trim();
+  filteredSounds.sort((a, b) => {
+    const ratingDifference = (soundRatings[b.id] || 0) - (soundRatings[a.id] || 0);
+    if (ratingDifference !== 0) return ratingDifference;
+    return normalizedSearchQuery
+      ? getMatchScore(b, normalizedSearchQuery) - getMatchScore(a, normalizedSearchQuery)
+      : 0;
+  });
 
   // --- Tag Cloud Extraction (Extract all tags from sound database dynamically) ---
   const allTags = Array.from(new Set(sounds.flatMap(s => s.tags)));
@@ -2545,10 +2728,16 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     setSearchQuery(q);
   };
 
-  const toggleFavorite = (id: string, e: React.MouseEvent) => {
+  const toggleFavorite = (sound: SoundEffect, e: React.MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation();
-    if (!checkOwnerPermission()) return;
-    setSounds(prev => prev.map(s => s.id === id ? { ...s, isFavorite: !s.isFavorite } : s));
+    setSoundFavoriteOverrides(current => {
+      if (current[sound.id]) {
+        const next = { ...current };
+        delete next[sound.id];
+        return next;
+      }
+      return { ...current, [sound.id]: true };
+    });
   };
 
   const copySoundPath = () => {
@@ -4066,7 +4255,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                     <Heart className="w-3.5 h-3.5 text-red-500" />
                     <span>我的收藏</span>
                   </div>
-                  <span className="text-[10px] font-mono text-slate-450 bg-slate-100 px-1.5 py-0.2 rounded">{sounds.filter(s => s.isFavorite).length}</span>
+                  <span className="text-[10px] font-mono text-slate-450 bg-slate-100 px-1.5 py-0.2 rounded">{sounds.filter(isSoundFavorite).length}</span>
                 </button>
               </nav>
             </div>
@@ -4326,6 +4515,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                   const isSelected = selectedSoundId === sound.id;
                   const itemProgress = playbackProgress[sound.id] || 0;
                   const isItemPlaying = isPlaying && selectedSoundId === sound.id;
+                  const isFavorite = isSoundFavorite(sound);
 
                   return (
                     <div
@@ -4334,7 +4524,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                         setSelectedSoundId(sound.id);
                         setIsPropertiesPanelOpen(true);
                       }}
-                      className={`group p-3 rounded-xl border transition-all cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                      className={`group grid grid-cols-1 gap-3 rounded-xl border p-3 transition-all cursor-pointer sm:grid-cols-[minmax(200px,55%)_56px_auto] sm:items-center sm:justify-start md:grid-cols-[minmax(180px,40%)_minmax(104px,128px)_56px_auto] ${
                         isSelected 
                           ? 'bg-emerald-50/60 border-emerald-300 shadow-sm' 
                           : 'bg-white border-slate-200 hover:border-slate-300'
@@ -4379,7 +4569,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                       </div>
 
                       {/* Middle Block: Simplified wave progress display */}
-                      <div className="hidden w-36 shrink-0 px-1.5 md:block">
+                      <div className="hidden min-w-0 w-full px-1.5 md:block">
                         <div className="h-6 flex items-center gap-0.5 bg-slate-100/70 rounded px-1.5 relative overflow-hidden">
                           {/* Simulated mini waveform heights */}
                           {[40, 60, 20, 80, 50, 70, 90, 40, 30, 60, 80, 20, 50, 60, 80, 30, 50, 40].map((h, i) => {
@@ -4401,29 +4591,33 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                         </div>
                       </div>
 
-                      {/* Right Block: Attributes & Actions */}
-                      <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0">
-                        <div className="text-right font-mono text-[10px] text-slate-400 hidden sm:block shrink-0 min-w-[50px]">
-                          <p className="font-bold text-slate-700">{sound.duration}s</p>
-                          <p className="text-[8px] text-slate-400">{sound.size}</p>
-                        </div>
+                      <div className="hidden min-w-[50px] shrink-0 text-left font-mono text-[10px] text-slate-400 sm:block">
+                        <p className="font-bold text-slate-700">{sound.duration}s</p>
+                        <p className="text-[8px] text-slate-400">{sound.size}</p>
+                      </div>
 
-                        <div className="flex items-center gap-1">
-                          {canModifyLibrary && (
-                            <button
-                              onClick={(e) => toggleFavorite(sound.id, e)}
-                              className={`p-1.5 rounded-lg border transition-colors ${
-                                sound.isFavorite
-                                  ? 'bg-red-50 border-red-100 text-red-500'
-                                  : 'bg-slate-50 border-slate-200 text-slate-400 hover:text-red-600 hover:bg-red-50'
-                              }`}
-                              title="加入收藏"
-                            >
-                              <Heart className={`w-3.5 h-3.5 ${sound.isFavorite ? 'fill-current' : ''}`} />
-                            </button>
-                          )}
-
-                        </div>
+                      {/* Right Block: Personal actions and rating */}
+                      <div className="flex shrink-0 items-center justify-end gap-2 justify-self-end">
+                        <button
+                          type="button"
+                          aria-label={`${isFavorite ? '取消收藏' : '收藏'}${sound.name}`}
+                          aria-pressed={isFavorite}
+                          onClick={(event) => toggleFavorite(sound, event)}
+                          className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors ${
+                            isFavorite
+                              ? 'bg-red-50 text-red-500'
+                              : 'text-slate-300 hover:bg-red-50 hover:text-red-500'
+                          }`}
+                          title={isFavorite ? '取消收藏' : '加入收藏'}
+                        >
+                          <Heart className={`h-3.5 w-3.5 ${isFavorite ? 'fill-current' : ''}`} />
+                        </button>
+                        <SoundRatingControl
+                          soundId={sound.id}
+                          soundName={sound.name}
+                          rating={soundRatings[sound.id] || 0}
+                          onRate={handleRateSound}
+                        />
                       </div>
                     </div>
                   );

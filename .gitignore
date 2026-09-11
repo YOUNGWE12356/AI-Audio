@@ -10,6 +10,7 @@ uploads/*
 *.log
 __pycache__/
 *.pyc
+.venvs/
 .env*
 !.env.example
 tools/python311/
@@ -28,3 +29,7 @@ tools/seed-vc/models/
 tools/seamless-expressive/repo/
 tools/seamless-expressive/.venv/
 tools/seamless-expressive/models/
+tools/music-separation/.venv/
+tools/music-separation/models/
+tools/audio-to-midi/models/
+tools/audio-to-midi/vendor/

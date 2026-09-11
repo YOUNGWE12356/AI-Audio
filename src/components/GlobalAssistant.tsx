@@ -26,8 +26,8 @@ import type { SfxLibraryIndex } from '../services/sfxLibraryIndex';
 export interface AssistantAudioRequest {
   id: string;
   file?: File;
-  task: 'analyze' | 'convert' | 'rename' | 'workstation' | 'isolate';
-  audioTool?: 'workstation' | 'analysis' | 'factory' | 'renamer' | 'isolation';
+  task: 'analyze' | 'convert' | 'rename' | 'workstation' | 'isolate' | 'midi' | 'music-separation';
+  audioTool?: 'workstation' | 'analysis' | 'factory' | 'renamer' | 'isolation' | 'midi' | 'music-separation';
   targetFormat?: 'mp3' | 'wav' | 'ogg' | 'flac' | 'aac' | 'm4a';
   targetSampleRate?: number;
   targetBitrate?: number;
@@ -252,7 +252,7 @@ const hasExplicitVoiceWorkflow = (prompt: string) => detectVoiceMode(prompt) !==
 const detectAudioTask = (prompt: string, file?: File) => {
   const normalized = normalize(prompt);
   if (file && AUDIO_EXTENSIONS.test(file.name)) return true;
-  return /音频|歌曲|音乐文件|wav|mp3|响度|风格分析|bpm|调性|格式转换|转换格式|转格式|提取音频|转成mp3|转换成mp3|音量|压缩|采样率|比特率|lufs/.test(normalized);
+  return /音频|歌曲|音乐文件|wav|mp3|midi|扒谱|扒带|响度|风格分析|bpm|调性|格式转换|转换格式|转格式|提取音频|转成mp3|转换成mp3|音量|压缩|采样率|比特率|lufs|分轨|stem|stems/.test(normalized);
 };
 
 const detectWorkstationTask = (prompt: string) => {
@@ -277,6 +277,15 @@ const detectIsolationTask = (prompt: string) => {
   const normalized = normalize(prompt);
   return /人声分离|提取人声|提取.*人声|分离人声|去掉人声|消除人声|提取伴奏|去除伴奏|去掉.*伴奏|删除.*伴奏|移除.*伴奏|分离.*伴奏|消除伴奏|去噪|降噪|消除噪音|消除背景音|去掉背景音乐|去除背景音乐|删除背景音乐|移除背景音乐/.test(normalized);
 };
+
+const detectMusicSeparationTask = (prompt: string) => {
+  const normalized = normalize(prompt);
+  return /歌曲分轨|音乐分轨|乐器分轨|多乐器分轨|高质量音乐分轨|拆分分轨|分离分轨|分轨拆分|(?:歌|歌曲|音乐|混音|bgm|一首歌).{0,12}分轨|分轨.{0,12}(?:拆|分离|提取|导出|出来)|拆(?:出|开)?.{0,12}(?:鼓|贝斯|bass|吉他|钢琴|人声|伴奏|乐器|stem|stems|音源|轨道)|(?:分离|提取).{0,12}(?:鼓|贝斯|bass|吉他|钢琴|乐器|stem|stems|音源|轨道)|(?:鼓|贝斯|bass|吉他|钢琴|人声|伴奏|乐器|stem|stems|音源).{0,12}(?:拆分|分离|分轨|提取|导出)|stemseparation|musicseparation|stems分离|stems拆分/.test(normalized);
+};
+
+const detectMidiTask = (prompt: string) => (
+  /音频转midi|转midi|转成midi|转为midi|转换成midi|导出midi|输出midi|保存为midi|midi提取|提取midi|生成midi|扒谱|扒带|钢琴转谱|音频转谱|旋律转谱|audio2midi|audiotomidi/.test(normalize(prompt))
+);
 
 const detectRenameTask = (prompt: string) => (
   /重命名|批量命名|批量重命名|改文件名|修改文件名|改名|(?:音频)?文件(?:名)?.*(?:前缀|后缀|编号|大小写|查找替换|正则替换|删除字符)|(?:前缀|后缀|自动编号).*文件名/.test(normalize(prompt))
@@ -316,6 +325,8 @@ const buildExplicitNavigationPlan = (prompt: string): AssistantPlan | null => {
   if (/^(?:音频工具|音频工作站|daw)$/.test(destination)) return { ...base, title: '打开音频工作站', tab: 'audio-tools', kind: 'audio', audioTask: 'workstation', audioTool: 'workstation' };
   if (/^(?:音频分析|测速测调|乐器和弦分析)$/.test(destination)) return { ...base, title: '打开音频分析', tab: 'audio-tools', kind: 'audio', audioTask: 'analyze', audioTool: 'analysis' };
   if (/^(?:格式(?:\/)?压缩(?:\/)?音量|格式转换|音频转换|音频压缩)$/.test(destination)) return { ...base, title: '打开格式/压缩/音量', tab: 'audio-tools', kind: 'audio', audioTask: 'convert', audioTool: 'factory' };
+  if (/^(?:音频转midi|转midi|转成midi|midi转换|扒谱|扒带|audio2midi|audiotomidi)$/.test(destination)) return { ...base, title: '打开音频转 MIDI', tab: 'audio-tools', kind: 'audio', audioTask: 'midi', audioTool: 'midi' };
+  if (/^(?:拆分分轨|歌曲分轨|音乐分轨|高质量音乐分轨|乐器分轨|分轨拆分|stemseparation|musicseparation)$/.test(destination)) return { ...base, title: '打开拆分分轨', tab: 'audio-tools', kind: 'audio', audioTask: 'music-separation', audioTool: 'music-separation' };
   if (/^(?:批量命名|批量重命名)$/.test(destination)) return { ...base, title: '打开批量命名', tab: 'audio-tools', kind: 'audio', audioTask: 'rename', audioTool: 'renamer' };
   if (/^(?:人声分离|人声提取)$/.test(destination)) return { ...base, title: '打开人声分离', tab: 'audio-tools', kind: 'audio', audioTask: 'isolate', audioTool: 'isolation' };
   const voiceMode = /语音转语音/.test(destination) ? 'sts'
@@ -614,6 +625,7 @@ const buildPlan = (
     || detectFactoryTask(prompt)
     || detectAnalysisTask(prompt)
     || soundIntent === 'analysis'
+    || detectMusicSeparationTask(prompt)
     || detectIsolationTask(prompt)
     || /音频分析|分析音频|转格式|转换格式|格式转换|提取音频|转成mp3|转换成mp3|输出mp3/.test(normalized);
   const explicitSfxGeneration = hasExplicitSfxGenerationIntent(prompt);
@@ -698,6 +710,23 @@ const buildPlan = (
         file ? '载入已提供的音频文件' : '导入多个音频或整个文件夹',
         '设置查找替换、前后缀、编号或命名模板',
         '预览改名结果后导出文件或 ZIP',
+      ],
+    };
+  }
+
+  if (detectMusicSeparationTask(prompt)) {
+    return {
+      title: '准备拆分分轨',
+      summary: file ? `已载入 ${file.name}，准备拆出歌曲里的独立音源分轨` : '将打开拆分分轨功能，请先上传歌曲或混音文件',
+      tab: 'audio-tools',
+      kind: 'audio',
+      audioTask: 'music-separation',
+      audioTool: 'music-separation',
+      steps: [
+        '打开音频工具 > 拆分分轨',
+        file ? '载入已提供的歌曲或混音文件' : '上传需要拆分的歌曲、BGM 或混音音频',
+        '拆分出人声、鼓、贝斯和其它乐器等独立分轨',
+        '试听分轨结果，必要时发送到音频工作站继续编辑',
       ],
     };
   }
@@ -910,6 +939,22 @@ const buildPlan = (
         '识别主体、动作、材质和空间感',
         '生成两版试听结果并保留重新生成和下载',
       ],
+    };
+  }
+
+  if (detectMidiTask(prompt)) {
+    return {
+      title: '打开音频转 MIDI',
+      summary: file ? `已识别 ${file.name}，准备进入音频转 MIDI` : '将打开音频工具里的音频转 MIDI 功能',
+      tab: 'audio-tools',
+      kind: 'audio',
+      steps: [
+        '打开音频工具 > 音频转 MIDI',
+        '按素材类型选择通用转 MIDI 或乐器专用转 MIDI',
+        '上传音频或视频文件，生成 MIDI 后试听并下载',
+      ],
+      audioTask: 'midi',
+      audioTool: 'midi',
     };
   }
 
@@ -1226,10 +1271,14 @@ export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceReq
 
       if (plan.navigationOnly) {
         if (plan.kind === 'audio') {
+          const planText = `${prompt} ${plan.title || ''} ${plan.summary || ''} ${(plan.steps || []).join(' ')}`;
+          const forcedAudioTool = detectMusicSeparationTask(planText) ? 'music-separation'
+            : detectMidiTask(planText) ? 'midi'
+              : undefined;
           onAudioRequest({
             id: requestId,
-            task: plan.audioTask || 'workstation',
-            audioTool: plan.audioTool || 'workstation',
+            task: forcedAudioTool || plan.audioTask || 'workstation',
+            audioTool: forcedAudioTool || plan.audioTool || 'workstation',
           });
         } else if (plan.kind === 'voice') {
           const mode = plan.voiceMode || 'tts';
@@ -1256,11 +1305,15 @@ export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceReq
       if (plan.kind === 'audio') {
         const hasAudioTargets = plan.audioTargets && Object.values(plan.audioTargets).some((value) => value !== undefined);
         const wantsConvert = plan.audioTask === 'convert' || hasAudioTargets || /转成mp3|转换成mp3|输出mp3|格式转换|转换格式|转格式|提取音频|mp3/i.test(prompt);
+        const planText = `${prompt} ${plan.title || ''} ${plan.summary || ''} ${(plan.steps || []).join(' ')}`;
+        const forcedAudioTool = detectMusicSeparationTask(planText) ? 'music-separation'
+          : detectMidiTask(planText) ? 'midi'
+            : undefined;
         onAudioRequest({
           id: requestId,
           file,
-          task: plan.audioTask || (wantsConvert ? 'convert' : 'analyze'),
-          audioTool: plan.audioTool,
+          task: forcedAudioTool || plan.audioTask || (wantsConvert ? 'convert' : 'analyze'),
+          audioTool: forcedAudioTool || plan.audioTool,
           ...(plan.requestedAudioFormat ? { targetFormat: plan.requestedAudioFormat } : {}),
           ...plan.audioTargets,
         });

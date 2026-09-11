@@ -143,9 +143,6 @@ export default function SfxStudio({
                   }`}
                 />
               </div>
-              <span className="text-[9px] text-slate-400 block">
-                自动时长会让 ElevenLabs 根据描述决定长度；指定秒数支持 1s - 20s，音效通常建议控制在 2s - 8s。
-              </span>
             </div>
 
             {standaloneError && (
@@ -168,7 +165,7 @@ export default function SfxStudio({
               ) : (
                 <>
                   <Sparkles className="w-4 h-4" />
-                  <span>生成高保真独立音效</span>
+                  <span>生成音效DEMO</span>
                 </>
               )}
             </button>

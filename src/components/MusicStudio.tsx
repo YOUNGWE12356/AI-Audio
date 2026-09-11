@@ -602,7 +602,7 @@ export default function MusicStudio({
               ) : (
                 <>
                   <Sparkles className="w-4 h-4" />
-                  <span>生成两首背景音乐 Demo</span>
+                  <span>生成音乐DEMO</span>
                 </>
               )}
             </button>

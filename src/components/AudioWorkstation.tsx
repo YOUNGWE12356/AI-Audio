@@ -137,7 +137,7 @@ const TOOL_CURSOR_BY_MODE: Record<ToolMode, string> = {
 };
 
 interface AudioWorkstationProps {
-  pendingImport?: { id: string; file: File } | null;
+  pendingImport?: { id: string; files: File[]; separateTracks?: boolean } | null;
   onPendingImportConsumed?: (id: string) => void;
 }
 
@@ -217,7 +217,14 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
   const activeSnapStep = rulerMode === 'bars' ? beatDurationSeconds : snapStep;
   
   // Audio sources keeping track of what's playing in real time
-  const activeSourcesRef = useRef<{ source: AudioBufferSourceNode; gainNode: GainNode }[]>([]);
+  const activeSourcesRef = useRef<{
+    source: AudioBufferSourceNode;
+    trackId: string;
+    clipId: string;
+    trackGainNode: GainNode;
+    trackPanNode: StereoPannerNode;
+    clipMuteGainNode: GainNode;
+  }[]>([]);
   const activeMetronomeSourcesRef = useRef<OscillatorNode[]>([]);
   const playbackStartTimeRef = useRef<number>(0);
   const playbackStartPlayheadRef = useRef<number>(0);
@@ -834,6 +841,28 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
     }
   };
 
+  const applyLiveMixControls = (nextTracks: AudioTrack[]) => {
+    if (!isPlayingRef.current || !audioCtxRef.current) return;
+    const ctx = audioCtxRef.current;
+    const hasSolo = nextTracks.some(track => track.solo && !track.muted);
+
+    activeSourcesRef.current.forEach(item => {
+      const track = nextTracks.find(candidate => candidate.id === item.trackId);
+      const clip = track?.clips.find(candidate => candidate.id === item.clipId);
+      const shouldHearTrack = Boolean(track && !track.muted && (!hasSolo || track.solo));
+      const trackGain = shouldHearTrack && track ? trackVolumeDbToGain(track.volume) : 0;
+      const clipGain = clip && !clip.muted ? 1 : 0;
+      const pan = track ? track.pan / 100 : 0;
+
+      item.trackGainNode.gain.cancelScheduledValues(ctx.currentTime);
+      item.trackGainNode.gain.setTargetAtTime(trackGain, ctx.currentTime, 0.01);
+      item.trackPanNode.pan.cancelScheduledValues(ctx.currentTime);
+      item.trackPanNode.pan.setTargetAtTime(pan, ctx.currentTime, 0.01);
+      item.clipMuteGainNode.gain.cancelScheduledValues(ctx.currentTime);
+      item.clipMuteGainNode.gain.setTargetAtTime(clipGain, ctx.currentTime, 0.005);
+    });
+  };
+
   // Play audio project
   const handlePlay = () => {
     if (isPlaying) {
@@ -876,12 +905,15 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
           const playbackRate = clampPlaybackRate(clip.playbackRate ?? 1);
           source.playbackRate.setValueAtTime(playbackRate, ctx.currentTime);
 
-          // Clip level gain node for fades
+          // Clip level gain node for fades + live mute gate.
           const clipGain = ctx.createGain();
+          const clipMuteGain = ctx.createGain();
           applyFadeEnvelope(clipGain, clip, currentTime, ctx);
+          clipMuteGain.gain.value = clip.muted ? 0 : 1;
 
           source.connect(clipGain);
-          clipGain.connect(trackGain);
+          clipGain.connect(clipMuteGain);
+          clipMuteGain.connect(trackGain);
 
           // Calculate timing variables in seconds
           const delay = Math.max(0, clip.startTime - currentTime);
@@ -894,7 +926,14 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
 
           try {
             source.start(ctx.currentTime + delay, offset, duration);
-            activeSourcesRef.current.push({ source, gainNode: trackGain });
+            activeSourcesRef.current.push({
+              source,
+              trackId: track.id,
+              clipId: clip.id,
+              trackGainNode: trackGain,
+              trackPanNode: trackPan,
+              clipMuteGainNode: clipMuteGain,
+            });
           } catch (err) {
             console.error('Error starting source:', err);
           }
@@ -1008,13 +1047,7 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
     if (selectedClip?.trackId === trackId) {
       setSelectedClip(null);
     }
-    // Re-trigger audio playing to exclude deleted track
-    if (isPlaying) {
-      setTimeout(() => {
-        handlePause();
-        handlePlay();
-      }, 30);
-    }
+    applyLiveMixControls(updated);
   };
 
   // Update track properties
@@ -1027,10 +1060,8 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
     });
     setTracks(updated);
 
-    // Apply channel-strip changes immediately during playback.
-    if (['volume', 'pan', 'muted', 'solo'].includes(String(prop)) && isPlaying) {
-      handlePause();
-      setTimeout(() => handlePlay(), 30);
+    if (['volume', 'pan', 'muted', 'solo'].includes(String(prop))) {
+      applyLiveMixControls(updated);
     }
   };
 
@@ -1123,12 +1154,6 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
 
         setTracks(updatedTracks);
         setSelectedClip({ trackId: track.id, clipId: clip2Id });
-
-        // Update live playing if active
-        if (isPlaying) {
-          handlePause();
-          setTimeout(() => handlePlay(), 100);
-        }
       } catch (err) {
         console.error("Failed to split clip:", err);
       }
@@ -1155,12 +1180,7 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
     });
     setTracks(updated);
     setSelectedClip(null);
-
-    // Stop and play to apply instantly
-    if (isPlaying) {
-      handlePause();
-      setTimeout(() => handlePlay(), 50);
-    }
+    applyLiveMixControls(updated);
   };
 
   const updateSelectedClip = (updater: (clip: AudioClip) => AudioClip) => {
@@ -1174,10 +1194,7 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
           }
     ));
     setTracks(updated);
-    if (isPlaying) {
-      handlePause();
-      setTimeout(() => handlePlay(), 50);
-    }
+    applyLiveMixControls(updated);
   };
 
   const handleClipPlaybackRateChange = (value: number) => {
@@ -1194,6 +1211,11 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
         fadeOut: clampFade(clip.fadeOut || 0, nextDuration),
       };
     });
+    if (isPlayingRef.current && audioCtxRef.current) {
+      activeSourcesRef.current
+        .filter(item => item.trackId === selectedClip.trackId && item.clipId === selectedClip.clipId)
+        .forEach(item => item.source.playbackRate.setTargetAtTime(nextRate, audioCtxRef.current!.currentTime, 0.01));
+    }
   };
 
   const handleDuplicateClip = () => {
@@ -1252,11 +1274,6 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
         : track
     )));
     setSelectedClip({ trackId: targetTrackId, clipId: pastedClip.id });
-
-    if (isPlaying) {
-      handlePause();
-      setTimeout(() => handlePlay(), 50);
-    }
 
     return true;
   };
@@ -1496,7 +1513,6 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
     const jobId = transposeJobIdRef.current + 1;
     transposeJobIdRef.current = jobId;
     setIsPitchShifting(true);
-    if (isPlaying) handlePause();
 
     try {
       await new Promise(resolve => requestAnimationFrame(resolve));
@@ -1538,7 +1554,7 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
 
   const importAudioFiles = async (
     files: File[],
-    placement?: { trackId?: string; startTime?: number },
+    placement?: { trackId?: string; startTime?: number; separateTracks?: boolean },
   ) => {
     const audioFiles = files.filter(file => (
       file.type.startsWith('audio/') || /\.(aac|aif|aiff|flac|m4a|mp3|ogg|opus|wav|webm)$/i.test(file.name)
@@ -1572,31 +1588,64 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
       setExportFormat('wav');
       setExportSampleRate(WORKSTATION_SAMPLE_RATE);
       setExportBitDepth(WORKSTATION_BIT_DEPTH);
-      const updatedTracks = [...tracks];
-      const targetTrack = updatedTracks.find(track => track.id === placement?.trackId) || updatedTracks[0];
-      let nextStartTime = snapTime(placement?.startTime ?? currentTime);
-
-      newClips.forEach((item, index) => {
-        const targetTrackIndex = Math.max(0, updatedTracks.findIndex(track => track.id === targetTrack.id));
-        const trackColor = CLIP_COLORS[targetTrackIndex % CLIP_COLORS.length].bg;
-        const newClip: AudioClip = {
+      const updatedTracks = tracks.map(track => ({ ...track, clips: [...track.clips] }));
+      const baseStartTime = snapTime(placement?.startTime ?? currentTime);
+      const createClip = (
+        item: { file: File; buffer: AudioBuffer },
+        index: number,
+        trackIndex: number,
+        startTime: number,
+      ): AudioClip => ({
           id: `clip-${Date.now()}-${index}`,
           name: item.file.name.replace(/\.[^/.]+$/, ""), // remove extension
-          startTime: parseFloat(nextStartTime.toFixed(3)),
+          startTime: parseFloat(startTime.toFixed(3)),
           duration: item.buffer.duration,
           buffer: item.buffer,
           sourceBuffer: item.buffer,
-          color: trackColor,
+          color: CLIP_COLORS[trackIndex % CLIP_COLORS.length].bg,
           fadeIn: 0,
           fadeOut: 0,
           gain: 100,
           muted: false,
           transposeSemitones: 0,
-          playbackRate: 1
-        };
-        targetTrack.clips.push(newClip);
-        nextStartTime += item.buffer.duration;
-      });
+          playbackRate: 1,
+        });
+
+      if (placement?.separateTracks) {
+        const emptyTrackIndexes = updatedTracks
+          .map((track, index) => track.clips.length === 0 ? index : -1)
+          .filter(index => index >= 0);
+        newClips.forEach((item, index) => {
+          let trackIndex = emptyTrackIndexes[index];
+          if (trackIndex === undefined) {
+            trackIndex = updatedTracks.length;
+            updatedTracks.push({
+              id: `track-${Date.now()}-${index}`,
+              name: `音频轨 ${trackIndex + 1}`,
+              volume: DEFAULT_TRACK_VOLUME_DB,
+              pan: 0,
+              muted: false,
+              solo: false,
+              clips: [],
+            });
+          }
+          const stemName = item.file.name
+            .replace(/\.[^/.]+$/, '')
+            .replace(/^\d+[_\s-]*/, '')
+            .trim();
+          const targetTrack = updatedTracks[trackIndex];
+          if (targetTrack.clips.length === 0 && stemName) targetTrack.name = stemName;
+          targetTrack.clips.push(createClip(item, index, trackIndex, baseStartTime));
+        });
+      } else {
+        const targetTrack = updatedTracks.find(track => track.id === placement?.trackId) || updatedTracks[0];
+        const targetTrackIndex = Math.max(0, updatedTracks.findIndex(track => track.id === targetTrack.id));
+        let nextStartTime = baseStartTime;
+        newClips.forEach((item, index) => {
+          targetTrack.clips.push(createClip(item, index, targetTrackIndex, nextStartTime));
+          nextStartTime += item.buffer.duration;
+        });
+      }
 
       setTracks(updatedTracks);
     }
@@ -1699,7 +1748,10 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
   useEffect(() => {
     if (!pendingImport || consumedPendingImportRef.current === pendingImport.id) return;
     consumedPendingImportRef.current = pendingImport.id;
-    void importAudioFiles([pendingImport.file]).finally(() => {
+    void importAudioFiles(pendingImport.files, {
+      startTime: pendingImport.separateTracks ? 0 : undefined,
+      separateTracks: pendingImport.separateTracks,
+    }).finally(() => {
       onPendingImportConsumed?.(pendingImport.id);
     });
   }, [pendingImport, onPendingImportConsumed]);
@@ -1817,21 +1869,19 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
     }
 
     if (toolMode === 'erase') {
-      setTracks(tracks.map(track => (
+      const updated = tracks.map(track => (
         track.id === trackId
           ? { ...track, clips: track.clips.filter(clip => clip.id !== clipId) }
           : track
-      )));
+      ));
+      setTracks(updated);
       setSelectedClip(null);
-      if (isPlaying) {
-        handlePause();
-        setTimeout(() => handlePlay(), 50);
-      }
+      applyLiveMixControls(updated);
       return;
     }
 
     if (toolMode === 'mute') {
-      setTracks(tracks.map(track => (
+      const updated = tracks.map(track => (
         track.id === trackId
           ? {
               ...track,
@@ -1840,11 +1890,9 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
               ))
             }
           : track
-      )));
-      if (isPlaying) {
-        handlePause();
-        setTimeout(() => handlePlay(), 50);
-      }
+      ));
+      setTracks(updated);
+      applyLiveMixControls(updated);
       return;
     }
 
@@ -1937,10 +1985,6 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
     };
 
     const handleMouseUp = () => {
-      if (fadeDrag && isPlaying) {
-        handlePause();
-        setTimeout(() => handlePlay(), 50);
-      }
       endHistoryTransaction();
       setFadeDrag(null);
     };
@@ -2010,10 +2054,6 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
     };
 
     const handleMouseUp = () => {
-      if (resizeDrag && isPlaying) {
-        handlePause();
-        setTimeout(() => handlePlay(), 50);
-      }
       endHistoryTransaction();
       setResizeDrag(null);
     };
@@ -2086,12 +2126,6 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
 
           setTracks(finalTracks);
           setSelectedClip({ trackId: dragOverInfo.trackId, clipId: draggingClip.clipId });
-
-          // Restart playing to apply changes instantly
-          if (isPlaying) {
-            handlePause();
-            setTimeout(() => handlePlay(), 100);
-          }
         }
       }
       setDraggingClip(null);
