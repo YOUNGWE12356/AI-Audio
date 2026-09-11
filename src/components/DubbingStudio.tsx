@@ -1838,7 +1838,7 @@ export default function DubbingStudio({
                 <div className="grid grid-cols-2 gap-1 rounded-xl bg-white/80 p-1">
                 {[
                   { value: 'single', label: '单文本' },
-                  { value: 'batch', label: '多文本（多条配音一次生成）' },
+                  { value: 'batch', label: '多文本（多条文本一次生成）' },
                 ].map(option => {
                   const isActive = ttsInputMode === option.value;
                   return (

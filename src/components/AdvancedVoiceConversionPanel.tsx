@@ -53,7 +53,7 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-function UploadBox({ file, onChange }: { file: File | null; onChange: (file: File | null) => void }) {
+function UploadBox({ file, onChange, hint }: { file: File | null; onChange: (file: File | null) => void; hint: string }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   return (
     <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4">
@@ -69,6 +69,7 @@ function UploadBox({ file, onChange }: { file: File | null; onChange: (file: Fil
           <UploadCloud className="h-4 w-4" /> 选择或拖入原始视频 / 音频
         </button>
       )}
+      <p className="mt-2 text-[10px] leading-relaxed text-slate-400">{hint}</p>
     </div>
   );
 }
@@ -329,7 +330,7 @@ export default function AdvancedVoiceConversionPanel({ mode }: { mode: AdvancedV
         </div>
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex items-center justify-between gap-3"><div><p className="text-xs font-black text-slate-800">1. 选择目标语种并上传素材</p><p className="mt-1 text-[10px] text-slate-500">先选择要输出的语言，再上传包含完整对白的原始视频或音频。</p></div><FileAudio className="h-5 w-5 text-violet-600" /></div>
-          <div className="mt-4"><UploadBox file={sourceFile} onChange={resetSource} /></div>
+          <div className="mt-4"><UploadBox file={sourceFile} onChange={resetSource} hint={isSpeakerMode ? '单个文件不超过 100 MB；暂无单独时长限制，建议使用清晰、连续的多人对白素材。' : '单个文件不超过 100 MB；暂无单独时长限制，建议保留笑声、呼吸、叹气等声音事件。'} /></div>
           <div className="mt-3 flex flex-wrap items-center gap-2 sm:flex-nowrap"><label className="inline-flex w-full items-center gap-2 sm:w-auto"><span className="shrink-0 text-[10px] font-black text-slate-600">目标语种</span><select value={language} onChange={event => setLanguage(event.target.value)} title={`当前引擎支持 ${languageOptions.length} 种语言`} className="w-24 min-w-0 rounded-lg border border-slate-200 bg-white px-2 py-2 text-[11px] font-bold text-slate-700">{languageOptions.map(item => <option key={item[0]} value={item[0]}>{item[1]}</option>)}</select></label>{isSpeakerMode ? <label className="inline-flex w-full items-center gap-2 sm:w-auto"><span className="shrink-0 text-[10px] font-black text-slate-600">说话人数</span><select value={speakerCount} onChange={event => setSpeakerCount(event.target.value === 'auto' ? 'auto' : Number(event.target.value))} className="w-32 min-w-0 rounded-lg border border-slate-200 bg-white px-2 py-2 text-[11px] font-bold text-slate-700"><option value="auto">自动识别说话人</option>{[2, 3, 4, 5, 6, 7, 8].map(value => <option key={value} value={value}>{value} 位说话人</option>)}</select></label> : null}<button type="button" disabled={!canAnalyze} onClick={() => void analyze()} className="inline-flex w-full items-center justify-center gap-1.5 whitespace-nowrap rounded-lg bg-slate-900 px-2 py-2 text-[10px] font-black text-white disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto">{working === 'analyze' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}第 2 步：分析台词</button></div>
           {sourceUrl ? <audio controls preload="metadata" src={sourceUrl} className="mt-3 h-8 w-full" /> : null}
         </div>

@@ -449,7 +449,7 @@ export default function VoiceConversion({
         <div className="space-y-5 lg:col-span-12">
           <div className="rounded-2xl border border-emerald-200 bg-emerald-50/50 p-5 shadow-sm">
             <div className="flex items-start justify-between gap-3"><div><p className="text-xs font-black text-emerald-900">第一步：上传素材并选择目标语种</p><p className="mt-1 text-[10px] leading-relaxed text-emerald-800/80">上传后系统会自动提取原始台词、时间码和声音事件，无需再单独点击提取按钮。</p></div><FileAudio className="h-5 w-5 text-emerald-600" /></div>
-            <UploadCard title="原始素材（视频 / 音频）" hint="包含原始人物声音和完整对白的素材。上传后会提取逐句时间码、停顿和笑声，并默认用它作为参考音。" file={originalFile} accept="audio/*,video/*" onFile={updateOriginalFile} />
+            <UploadCard title="原始素材（视频 / 音频）" hint="包含原始人物声音和完整对白的素材。上传后会提取逐句时间码、停顿和笑声，并默认用它作为参考音。单个文件不超过 100 MB；暂无单独时长限制，建议使用较短、清晰的素材。" file={originalFile} accept="audio/*,video/*" onFile={updateOriginalFile} />
             <div className="mt-3 flex flex-wrap items-center gap-2">{textLoading === 'transcribe' ? <span className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-100 px-3 py-2 text-[10px] font-black text-emerald-800"><Loader2 className="h-3.5 w-3.5 animate-spin" />正在自动提取台词…</span> : null}{originalUrl && <audio controls src={originalUrl} className="h-8 min-w-[180px] flex-1" />}</div>
             {timedSegments.length > 0 ? <p className="mt-3 text-[10px] font-bold text-emerald-800">已建立 {timedSegments.length} 段台词时间槽 · {audioEvents.length} 个笑声/呼吸事件 · 原时长 {formatTime(originalDuration)}</p> : null}
           </div>
@@ -478,8 +478,8 @@ export default function VoiceConversion({
             {driverProgress ? <p className="mt-2 text-[10px] font-bold text-emerald-700">{driverProgress}</p> : null}
           </div>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <UploadCard title="待转换语音（时间线驱动）" hint="自动生成与原素材等长的目标语音；未说话的位置保持空白，不做整段拉伸。" file={sourceFile} accept="audio/*,video/*" onFile={setSourceFile} />
-            <UploadCard title="原始参考音（自动使用，可替换）" hint="默认使用上面的原始素材。若有更干净的同一人物语音片段，可在这里替换以提升音色稳定性。" file={referenceFile} accept="audio/*,video/*" onFile={setReferenceFile} />
+            <UploadCard title="待转换语音（时间线驱动）" hint="自动生成与原素材等长的目标语音；未说话的位置保持空白，不做整段拉伸。单个文件不超过 100 MB；暂无单独时长限制。" file={sourceFile} accept="audio/*,video/*" onFile={setSourceFile} />
+            <UploadCard title="原始参考音（自动使用，可替换）" hint="默认使用上面的原始素材。若有更干净的同一人物语音片段，可在这里替换以提升音色稳定性。单个文件不超过 100 MB；建议 10–20 秒单人干净声音，系统最多使用 20 秒。" file={referenceFile} accept="audio/*,video/*" onFile={setReferenceFile} />
           </div>
           {(sourceUrl || referenceUrl) && <div className="grid grid-cols-1 gap-3 md:grid-cols-2">{sourceUrl && <audio controls src={sourceUrl} className="h-9 w-full" />}{referenceUrl && <audio controls src={referenceUrl} className="h-9 w-full" />}</div>}
           {driverPaceSummary ? <div className="rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2 text-[10px] text-emerald-800">驱动音频已严格对齐 {formatTime(originalDuration)}；{driverPaceSummary.condensed > 0 ? `自动精简 ${driverPaceSummary.condensed} 段译文；` : ''}{driverPaceSummary.adjusted > 0 ? `${driverPaceSummary.adjusted} 段做轻微语速校准，最大 ${driverPaceSummary.maxRate.toFixed(2)}x` : '所有台词保持自然语速'}。</div> : null}

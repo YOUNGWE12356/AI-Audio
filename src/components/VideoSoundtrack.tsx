@@ -2793,6 +2793,10 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
         let nextSourceOffset = getClipSourceOffset(clip);
         const clipSpeedForTrim = getEffectiveClipSpeed(clip);
         const draftClipCanResizeFreely = isDraftTimelineClip(clip);
+        // The time-stretch tool is only meaningful for clips that do not have
+        // rendered audio yet. Once audio exists, edge dragging must trim the
+        // source range while keeping its playback speed unchanged.
+        const resizeChangesSpeed = timeStretchEnabled && draftClipCanResizeFreely;
         const sourceDurationForTrim = normalizePositiveNumber(
           initialClipState.sourceAudioDuration,
           initialClipState.sourceOffset + initialClipState.duration * clipSpeedForTrim,
@@ -2805,7 +2809,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
         } else if (interactionType === 'resize-right') {
           newDuration = initialClipState.duration + deltaTime;
           const maxDurationByTimeline = safeDuration - clip.startTime;
-          const maxDurationBySource = timeStretchEnabled || draftClipCanResizeFreely
+          const maxDurationBySource = resizeChangesSpeed || draftClipCanResizeFreely
             ? maxDurationByTimeline
             : Math.max(minClipDuration, (sourceDurationForTrim - initialClipState.sourceOffset) / clipSpeedForTrim);
           newDuration = clampNumber(
@@ -2817,7 +2821,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
           nextFadeIn = normalizeClipFade(nextFadeIn, newDuration);
           nextFadeOut = normalizeClipFade(nextFadeOut, newDuration);
         } else if (interactionType === 'resize-left') {
-          if (timeStretchEnabled || draftClipCanResizeFreely) {
+          if (resizeChangesSpeed || draftClipCanResizeFreely) {
             newStartTime = initialClipState.startTime + deltaTime;
             newDuration = initialClipState.duration - deltaTime;
 
@@ -2872,15 +2876,15 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
             : movedClip.sourceAudioDuration || sourceDurationForTrim,
           fadeIn: nextFadeIn,
           fadeOut: nextFadeOut,
-          ...((isDubbingClip || timeStretchEnabled) ? {
-            autoSpeed: timeStretchEnabled
+          ...((isDubbingClip || resizeChangesSpeed) ? {
+            autoSpeed: resizeChangesSpeed
               ? calculateDubbingAutoSpeed(movedClip.sourceAudioDuration || initialClipState.duration, newDuration)
               : normalizeAutoSpeed(movedClip.autoSpeed),
             timingDirty: isDubbingClip ? true : movedClip.timingDirty,
           } : {}),
         };
         const cachedAudio = audioInstancesRef.current[clip.id];
-        if (cachedAudio && (isDubbingClip || timeStretchEnabled)) {
+        if (cachedAudio && (isDubbingClip && draftClipCanResizeFreely || resizeChangesSpeed)) {
           cachedAudio.playbackRate = getEffectiveClipSpeed(updatedClip);
         }
         if (cachedAudio && nextTrackId !== clip.trackId) {
@@ -6981,6 +6985,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
       ? tracksRef.current.find(track => track.id === targetClip.trackId)
       : undefined;
     const isDubbingClip = targetTrack?.type === 'dubbing';
+    const hasRenderedAudio = Boolean(targetClip?.audioUrl);
     const timingFields: Array<keyof TimelineClip> = [
       'text',
       'targetLanguage',
@@ -7043,7 +7048,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
             Math.max(minimumDuration, requestedDuration),
           );
         }
-        if (isDubbingClip && (field === 'duration' || field === 'startTime')) {
+        if (isDubbingClip && !hasRenderedAudio && (field === 'duration' || field === 'startTime')) {
           updated.autoSpeed = calculateDubbingAutoSpeed(
             c.sourceAudioDuration,
             updated.duration,
@@ -10603,7 +10608,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                                       <div 
                                         className={`absolute bottom-0 left-0 z-30 h-2/3 w-5 cursor-ew-resize rounded-bl-md rounded-tr-sm opacity-0 transition-opacity hover:bg-white/30 group-hover/clip:opacity-100 ${timelineToolMode !== 'select' ? 'pointer-events-none' : ''} ${isSelected ? 'opacity-70' : ''}`}
                                         onMouseDown={(e) => startDragOrResize(e, clip.id, 'resize-left')}
-                                        title={timeStretchEnabled ? '时间拉伸：拖动改变声音快慢' : '拖动调整片段起点；往左拉可显示音频前面的声音'}
+                                        title={clip.audioUrl ? '已生成音频：拖动裁剪播放范围，不改变速度' : timeStretchEnabled ? '时间拉伸：拖动改变声音快慢' : '拖动调整片段起点；往左拉可显示音频前面的声音'}
                                       />
                                     )}
 
@@ -10626,7 +10631,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                                       <div 
                                         className={`absolute bottom-0 right-0 z-30 h-2/3 w-5 cursor-ew-resize rounded-br-md rounded-tl-sm opacity-0 transition-opacity hover:bg-white/30 group-hover/clip:opacity-100 ${timelineToolMode !== 'select' ? 'pointer-events-none' : ''} ${isSelected ? 'opacity-70' : ''}`}
                                         onMouseDown={(e) => startDragOrResize(e, clip.id, 'resize-right')}
-                                        title={timeStretchEnabled ? '时间拉伸：拖动改变声音快慢' : '拖动调整片段终点；往右拉可显示音频后面的声音'}
+                                        title={clip.audioUrl ? '已生成音频：拖动裁剪播放范围，不改变速度' : timeStretchEnabled ? '时间拉伸：拖动改变声音快慢' : '拖动调整片段终点；往右拉可显示音频后面的声音'}
                                       />
                                     )}
                                   </div>

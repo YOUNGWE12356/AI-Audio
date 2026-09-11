@@ -1701,11 +1701,11 @@ export default function CrossLanguageDubbing({
             <p className="mt-1 text-[10px] text-slate-400">
               {dubbingMode === 'self_hosted'
                 ? localInputMode === 'speech_to_speech'
-                  ? '这段声音会作为目标克隆音色；建议使用 10–20 秒、单人且干净的片段。'
+                  ? '这段声音会作为目标克隆音色；建议使用 10–20 秒、单人且干净的片段，系统最多使用 20 秒。单个文件不超过 100 MB。'
                   : localDialogueMode === 'multi'
-                    ? '上传完整对话；系统会识别说话人，并为每位角色选择独立参考片段。'
-                  : '建议使用 10–20 秒、单人、干净且情绪明确的片段。音频只在本机处理。'
-                : '支持拖拽上传；视频可输出带新配音的 MP4，也可只导出音频。'}
+                    ? '上传完整对话；系统会识别说话人，并为每位角色选择独立参考片段。单个文件不超过 100 MB；暂无单独时长限制。'
+                  : '建议使用 10–20 秒、单人、干净且情绪明确的片段。音频只在本机处理。单个文件不超过 100 MB，系统最多使用参考声音 20 秒。'
+                : '支持拖拽上传；视频可输出带新配音的 MP4，也可只导出音频。单个文件不超过 100 MB；暂无单独时长限制。'}
             </p>
           </label>
 
@@ -1714,7 +1714,7 @@ export default function CrossLanguageDubbing({
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <p className="text-xs font-bold text-slate-700">上传待转换语音</p>
-                  <p className="mt-1 text-[10px] leading-relaxed text-slate-400">直接把这段语音转换成上面的克隆参考音色，保留原有内容、节奏和情绪。</p>
+                  <p className="mt-1 text-[10px] leading-relaxed text-slate-400">直接把这段语音转换成上面的克隆参考音色，保留原有内容、节奏和情绪。单个文件不超过 100 MB；暂无单独时长限制。</p>
                 </div>
                 <label className="inline-flex h-9 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-sky-200 bg-white px-3 text-[10px] font-bold text-sky-700 transition-colors hover:border-sky-400 hover:bg-sky-50">
                   <input
