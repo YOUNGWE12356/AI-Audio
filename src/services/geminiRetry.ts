@@ -1,7 +1,7 @@
 import type { GoogleGenAI } from '@google/genai';
 import { recordAiUsage, toUsageNumber } from './usageTracking';
 
-export const GEMINI_PRIMARY_MODEL = 'gemini-3.8-flash';
+export const GEMINI_PRIMARY_MODEL = 'gemini-3.6-flash';
 export const GEMINI_FALLBACK_MODEL = 'gemini-3.5-flash-lite';
 
 type GenerateContentRequest = Parameters<GoogleGenAI['models']['generateContent']>[0];

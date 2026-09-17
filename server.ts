@@ -48,6 +48,7 @@ import {
   isGeminiUnsupportedLocationError,
 } from './src/services/geminiRetry';
 import {
+  recordAiUsage,
   setAiUsageRecorder,
 } from './src/services/usageTracking';
 import type { AiUsageEvent } from './src/services/usageTracking';
@@ -59,8 +60,15 @@ import {
 import {
   ELEVENLABS_MUSIC_MODEL,
   ELEVENLABS_MUSIC_OUTPUT_FORMAT,
+  ELEVENLABS_MUSIC_CREDITS_PER_MINUTE,
   ELEVENLABS_SOUND_MODEL,
   ELEVENLABS_SOUND_OUTPUT_FORMAT,
+  ELEVENLABS_SOUND_EFFECT_CREDITS_PER_GENERATION,
+  ELEVENLABS_SPEECH_TO_TEXT_CREDITS_PER_MINUTE,
+  ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE,
+  estimateAudioDurationSecondsFromBlob,
+  estimateTextGenerationCredits,
+  estimateTimedCredits,
   fetchAvailableVoices,
   generateMusic,
   generateSoundEffect,
@@ -247,7 +255,18 @@ async function startServer() {
   const geminiTempDir = path.join(dataDir, '.gemini-upload');
   const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
   const MAX_INLINE_MEDIA_BYTES = 24 * 1024 * 1024;
+  const AUDIO_DESIGN_VIDEO_OPTIMIZE_THRESHOLD_BYTES = 50 * 1024 * 1024;
   const MAX_CHUNK_COUNT = 100;
+  const UPLOADS_RETENTION_DAYS = Math.max(
+    1,
+    Number.parseInt(process.env.UPLOADS_RETENTION_DAYS || '7', 10) || 7,
+  );
+  const UPLOADS_CLEANUP_INTERVAL_MS = Math.max(
+    60 * 60 * 1000,
+    Number.parseInt(process.env.UPLOADS_CLEANUP_INTERVAL_MS || String(24 * 60 * 60 * 1000), 10)
+      || 24 * 60 * 60 * 1000,
+  );
+  const UPLOADS_CLEANUP_ENABLED = String(process.env.UPLOADS_CLEANUP_ENABLED || 'true').toLowerCase() !== 'false';
   const normalizeUnitVolume = (value: unknown) => (
     typeof value === 'number' && Number.isFinite(value)
       ? Math.min(4, Math.max(0, value))
@@ -452,6 +471,295 @@ async function startServer() {
       });
   };
 
+  type ElevenLabsQuotaAllocation = {
+    periodKey: string;
+    userId: string;
+    displayName: string;
+    identitySource: UsageIdentitySource;
+    bonusCredits: number;
+    updatedAt: string;
+  };
+  type ElevenLabsAccountQuotaAllocation = {
+    periodKey: string;
+    totalCredits: number;
+    updatedAt: string;
+  };
+  type ElevenLabsQuotaStore = {
+    version: 1;
+    allocations: ElevenLabsQuotaAllocation[];
+    accountAllocations: ElevenLabsAccountQuotaAllocation[];
+  };
+  type ElevenLabsQuotaStatus = {
+    enabled: boolean;
+    periodKey: string;
+    periodStart: string;
+    periodEnd: string;
+    timeZone: 'Asia/Shanghai';
+    baseCredits: number;
+    bonusCredits: number;
+    limitCredits: number;
+    usedCredits: number;
+    pendingCredits: number;
+    remainingCredits: number;
+    blocked: boolean;
+  };
+  type ElevenLabsAccountQuotaStatus = {
+    periodKey: string;
+    periodStart: string;
+    periodEnd: string;
+    timeZone: 'Asia/Shanghai';
+    defaultTotalCredits: number;
+    totalCredits: number;
+    usedCredits: number;
+    remainingCredits: number;
+    adjusted: boolean;
+  };
+
+  const elevenLabsQuotaPath = path.join(dataDir, 'elevenlabs-quotas.json');
+  const ELEVENLABS_QUOTA_ENABLED = String(process.env.ELEVENLABS_QUOTA_ENABLED || 'true').toLowerCase() !== 'false';
+  const ELEVENLABS_MONTHLY_CREDITS = Math.max(
+    1_000,
+    Number.parseInt(process.env.ELEVENLABS_MONTHLY_CREDITS || '20000', 10) || 20_000,
+  );
+  const ELEVENLABS_QUOTA_TIME_ZONE = 'Asia/Shanghai' as const;
+  const MAX_ELEVENLABS_BONUS_CREDITS = 1_000_000;
+  const ELEVENLABS_ACCOUNT_CYCLE_CREDITS = Math.max(
+    1_000,
+    Number.parseInt(process.env.ELEVENLABS_ACCOUNT_CYCLE_CREDITS || '600000', 10) || 600_000,
+  );
+  const MAX_ELEVENLABS_ACCOUNT_CYCLE_CREDITS = 100_000_000;
+  const activeElevenLabsQuotaReservations = new Map<string, number>();
+
+  const readElevenLabsQuotaStore = (): ElevenLabsQuotaStore => {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(elevenLabsQuotaPath, 'utf8')) as Partial<ElevenLabsQuotaStore>;
+      const allocations = Array.isArray(parsed.allocations)
+        ? parsed.allocations.flatMap((entry) => {
+            const allocation = entry as Partial<ElevenLabsQuotaAllocation>;
+            const periodKey = normalizeIdentityText(allocation.periodKey, 7);
+            const userId = normalizeIdentityText(allocation.userId, 160);
+            const bonusCredits = Math.round(Number(allocation.bonusCredits));
+            if (!/^\d{4}-\d{2}$/.test(periodKey) || !userId || !Number.isFinite(bonusCredits)) return [];
+            return [{
+              periodKey,
+              userId,
+              displayName: normalizeIdentityText(allocation.displayName, 80) || userId,
+              identitySource: ['feishu', 'device'].includes(String(allocation.identitySource))
+                ? allocation.identitySource as UsageIdentitySource
+                : 'unknown',
+              bonusCredits: Math.min(
+                MAX_ELEVENLABS_BONUS_CREDITS,
+                Math.max(-ELEVENLABS_MONTHLY_CREDITS, bonusCredits),
+              ),
+              updatedAt: typeof allocation.updatedAt === 'string' && Number.isFinite(Date.parse(allocation.updatedAt))
+                ? allocation.updatedAt
+                : new Date(0).toISOString(),
+            } satisfies ElevenLabsQuotaAllocation];
+          })
+        : [];
+      const accountAllocations = Array.isArray(parsed.accountAllocations)
+        ? parsed.accountAllocations.flatMap((entry) => {
+            const allocation = entry as Partial<ElevenLabsAccountQuotaAllocation>;
+            const periodKey = normalizeIdentityText(allocation.periodKey, 10);
+            const totalCredits = Math.round(Number(allocation.totalCredits));
+            if (!/^\d{4}-\d{2}-11$/.test(periodKey) || !Number.isFinite(totalCredits)) return [];
+            return [{
+              periodKey,
+              totalCredits: Math.min(
+                MAX_ELEVENLABS_ACCOUNT_CYCLE_CREDITS,
+                Math.max(0, totalCredits),
+              ),
+              updatedAt: typeof allocation.updatedAt === 'string' && Number.isFinite(Date.parse(allocation.updatedAt))
+                ? allocation.updatedAt
+                : new Date(0).toISOString(),
+            } satisfies ElevenLabsAccountQuotaAllocation];
+          })
+        : [];
+      return { version: 1, allocations, accountAllocations };
+    } catch {
+      return { version: 1, allocations: [], accountAllocations: [] };
+    }
+  };
+  let elevenLabsQuotaStore = readElevenLabsQuotaStore();
+
+  const persistElevenLabsQuotaStore = () => {
+    const serialized = `${JSON.stringify(elevenLabsQuotaStore, null, 2)}\n`;
+    const temporaryPath = `${elevenLabsQuotaPath}.tmp`;
+    fs.writeFileSync(temporaryPath, serialized, 'utf8');
+    try {
+      fs.renameSync(temporaryPath, elevenLabsQuotaPath);
+    } catch {
+      fs.writeFileSync(elevenLabsQuotaPath, serialized, 'utf8');
+      try { fs.unlinkSync(temporaryPath); } catch {}
+    }
+  };
+
+  const getElevenLabsQuotaPeriod = (now = new Date()) => {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: ELEVENLABS_QUOTA_TIME_ZONE,
+      year: 'numeric',
+      month: '2-digit',
+    }).formatToParts(now);
+    const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+    const year = Number(values.year);
+    const month = Number(values.month);
+    const chinaOffsetMs = 8 * 60 * 60 * 1000;
+    const startTime = Date.UTC(year, month - 1, 1) - chinaOffsetMs;
+    const endTime = Date.UTC(year, month, 1) - chinaOffsetMs;
+    return {
+      key: `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}`,
+      startTime,
+      endTime,
+      start: new Date(startTime).toISOString(),
+      end: new Date(endTime).toISOString(),
+    };
+  };
+
+  const getElevenLabsBillingCyclePeriod = (now = new Date()) => {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: ELEVENLABS_QUOTA_TIME_ZONE,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(now);
+    const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+    const year = Number(values.year);
+    const month = Number(values.month);
+    const day = Number(values.day);
+    const chinaOffsetMs = 8 * 60 * 60 * 1000;
+    const cycleMonthIndex = day >= 11 ? month - 1 : month - 2;
+    const startTime = Date.UTC(year, cycleMonthIndex, 11) - chinaOffsetMs;
+    const endTime = Date.UTC(year, cycleMonthIndex + 1, 11) - chinaOffsetMs;
+    return {
+      key: new Date(startTime + chinaOffsetMs).toISOString().slice(0, 10),
+      startTime,
+      endTime,
+      start: new Date(startTime).toISOString(),
+      end: new Date(endTime).toISOString(),
+    };
+  };
+
+  const getCurrentElevenLabsQuotaAllocation = (userId: string, periodKey: string) => (
+    elevenLabsQuotaStore.allocations.find(entry => entry.periodKey === periodKey && entry.userId === userId)
+  );
+
+  const getElevenLabsQuotaUsage = (userId: string, startTime: number, endTime: number) => (
+    readAiUsageEvents().reduce((total, event) => {
+      if (event.provider !== 'elevenlabs' || event.userId !== userId) return total;
+      const timestamp = Date.parse(event.timestamp);
+      return timestamp >= startTime && timestamp < endTime ? total + event.credits : total;
+    }, 0)
+  );
+
+  const buildElevenLabsQuotaStatus = (
+    userId: string,
+    period = getElevenLabsQuotaPeriod(),
+    usedCredits = getElevenLabsQuotaUsage(userId, period.startTime, period.endTime),
+  ): ElevenLabsQuotaStatus => {
+    const allocation = getCurrentElevenLabsQuotaAllocation(userId, period.key);
+    const bonusCredits = allocation?.bonusCredits || 0;
+    const limitCredits = ELEVENLABS_MONTHLY_CREDITS + bonusCredits;
+    const pendingCredits = activeElevenLabsQuotaReservations.get(userId) || 0;
+    const remainingCredits = Math.max(0, limitCredits - usedCredits - pendingCredits);
+    return {
+      enabled: ELEVENLABS_QUOTA_ENABLED,
+      periodKey: period.key,
+      periodStart: period.start,
+      periodEnd: period.end,
+      timeZone: ELEVENLABS_QUOTA_TIME_ZONE,
+      baseCredits: ELEVENLABS_MONTHLY_CREDITS,
+      bonusCredits,
+      limitCredits,
+      usedCredits,
+      pendingCredits,
+      remainingCredits,
+      blocked: ELEVENLABS_QUOTA_ENABLED && remainingCredits <= 0,
+    };
+  };
+
+  const buildElevenLabsAccountQuotaStatus = (
+    events: StoredAiUsageEvent[],
+    period = getElevenLabsBillingCyclePeriod(),
+  ): ElevenLabsAccountQuotaStatus => {
+    const allocation = elevenLabsQuotaStore.accountAllocations.find(entry => entry.periodKey === period.key);
+    const totalCredits = allocation?.totalCredits ?? ELEVENLABS_ACCOUNT_CYCLE_CREDITS;
+    const usedCredits = events.reduce((total, event) => {
+      if (event.provider !== 'elevenlabs') return total;
+      const timestamp = Date.parse(event.timestamp);
+      return timestamp >= period.startTime && timestamp < period.endTime ? total + event.credits : total;
+    }, 0);
+    return {
+      periodKey: period.key,
+      periodStart: period.start,
+      periodEnd: period.end,
+      timeZone: ELEVENLABS_QUOTA_TIME_ZONE,
+      defaultTotalCredits: ELEVENLABS_ACCOUNT_CYCLE_CREDITS,
+      totalCredits,
+      usedCredits,
+      remainingCredits: Math.max(0, totalCredits - usedCredits),
+      adjusted: Boolean(allocation),
+    };
+  };
+
+  const reserveElevenLabsQuota = (actor: UsageActor, requestedCredits: number) => {
+    const normalizedRequestedCredits = Math.max(1, Math.ceil(Number(requestedCredits) || 1));
+    const quota = buildElevenLabsQuotaStatus(actor.userId);
+    if (ELEVENLABS_QUOTA_ENABLED && normalizedRequestedCredits > quota.remainingCredits) {
+      return { quota, release: null };
+    }
+    if (!ELEVENLABS_QUOTA_ENABLED) return { quota, release: () => undefined };
+
+    activeElevenLabsQuotaReservations.set(
+      actor.userId,
+      (activeElevenLabsQuotaReservations.get(actor.userId) || 0) + normalizedRequestedCredits,
+    );
+    let released = false;
+    return {
+      quota,
+      release: () => {
+        if (released) return;
+        released = true;
+        const remainingReservation = Math.max(
+          0,
+          (activeElevenLabsQuotaReservations.get(actor.userId) || 0) - normalizedRequestedCredits,
+        );
+        if (remainingReservation > 0) activeElevenLabsQuotaReservations.set(actor.userId, remainingReservation);
+        else activeElevenLabsQuotaReservations.delete(actor.userId);
+      },
+    };
+  };
+
+  const estimateUploadedMediaDuration = (req: express.Request) => {
+    if (!req.file) return undefined;
+    if (req.file.mimetype.startsWith('video/')) return 60;
+    return estimateAudioDurationSecondsFromBlob(
+      new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype }),
+    );
+  };
+
+  const requireElevenLabsQuota = (
+    estimateCredits: (req: express.Request) => number,
+  ): express.RequestHandler => (req, res, next) => {
+    const actor = resolveUsageActor(req, res);
+    const reservation = reserveElevenLabsQuota(actor, estimateCredits(req));
+    if (!reservation.release) {
+      return res.status(429).json({
+        code: 'ELEVENLABS_USER_QUOTA_EXCEEDED',
+        error: `本月 ElevenLabs 个人积分不足。已用 ${Math.ceil(reservation.quota.usedCredits)} / ${reservation.quota.limitCredits}，请联系管理员追加额度。`,
+        quota: reservation.quota,
+      });
+    }
+    let completed = false;
+    const release = () => {
+      if (completed) return;
+      completed = true;
+      reservation.release?.();
+    };
+    res.once('finish', release);
+    res.once('close', release);
+    return next();
+  };
+
   const getDateKey = (timestamp: string, timeZone: string) => {
     const parts = new Intl.DateTimeFormat('en-CA', {
       timeZone,
@@ -573,6 +881,74 @@ async function startServer() {
       console.warn(`Failed to remove temporary directory ${directoryPath}:`, error);
     });
   };
+
+  const cleanupExpiredUploads = async () => {
+    if (!UPLOADS_CLEANUP_ENABLED) return;
+    const cutoffTime = Date.now() - UPLOADS_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    let removedFiles = 0;
+    let removedBytes = 0;
+
+    const visitDirectory = async (directoryPath: string, removeEmptyDirectory: boolean): Promise<void> => {
+      if (!isPathInside(path.dirname(directoryPath), directoryPath) && path.resolve(directoryPath) !== path.resolve(uploadsDir)) {
+        return;
+      }
+
+      let entries: fs.Dirent[];
+      try {
+        entries = await fs.promises.readdir(directoryPath, { withFileTypes: true });
+      } catch (error: any) {
+        if (error?.code !== 'ENOENT') console.warn(`Failed to scan upload directory ${directoryPath}:`, error);
+        return;
+      }
+
+      await Promise.all(entries.map(async (entry) => {
+        const entryPath = path.resolve(directoryPath, entry.name);
+        if (!isPathInside(uploadsDir, entryPath)) return;
+        if (entry.isDirectory()) {
+          await visitDirectory(entryPath, true);
+          return;
+        }
+        if (!entry.isFile()) return;
+        if (entry.name === '.gitkeep') return;
+
+        try {
+          const stat = await fs.promises.stat(entryPath);
+          const lastTouchedAt = Math.max(stat.mtimeMs, stat.birthtimeMs, stat.ctimeMs);
+          if (lastTouchedAt >= cutoffTime) return;
+          await fs.promises.unlink(entryPath);
+          removedFiles += 1;
+          removedBytes += stat.size;
+        } catch (error: any) {
+          if (error?.code !== 'ENOENT') console.warn(`Failed to remove expired upload ${entryPath}:`, error);
+        }
+      }));
+
+      if (!removeEmptyDirectory) return;
+      try {
+        await fs.promises.rmdir(directoryPath);
+      } catch {
+        // Directory is not empty, was already removed, or is still in use.
+      }
+    };
+
+    await visitDirectory(uploadsDir, false);
+    if (removedFiles > 0) {
+      console.log(`[uploads-cleanup] Removed ${removedFiles} expired file(s), ${(removedBytes / 1024 / 1024).toFixed(1)} MB; retention=${UPLOADS_RETENTION_DAYS}d.`);
+    }
+  };
+
+  if (UPLOADS_CLEANUP_ENABLED) {
+    setTimeout(() => {
+      void cleanupExpiredUploads().catch((error) => {
+        console.warn('[uploads-cleanup] Initial cleanup failed:', error);
+      });
+    }, 30_000);
+    setInterval(() => {
+      void cleanupExpiredUploads().catch((error) => {
+        console.warn('[uploads-cleanup] Scheduled cleanup failed:', error);
+      });
+    }, UPLOADS_CLEANUP_INTERVAL_MS);
+  }
 
   // Helper to initialize GoogleGenAI on the server
   function getGoogleAI() {
@@ -1357,7 +1733,8 @@ async function startServer() {
   // HTML5 client bootstrapping and deployment diagnostics.
   // This endpoint only reports whether server-side secrets exist; it never
   // returns secret values to the browser.
-  app.get('/api/health', (req, res) => {
+  app.get('/api/health', asyncRoute(async (_req, res) => {
+    const demucs = await probeDemucsAvailability();
     return res.json({
       ok: true,
       runtime: 'server',
@@ -1366,10 +1743,144 @@ async function startServer() {
         gptText: isGptTextConfigured(),
         elevenLabs: getElevenLabsApiKeys().length > 0,
         ffmpeg: Boolean(FFMPEG_BINARY),
-        demucsConfigured: Boolean(process.env.DEMUCS_COMMAND || process.env.DEMUCS_PYTHON),
+        demucsConfigured: demucs.available,
       },
+      demucs,
       timestamp: new Date().toISOString(),
     });
+  }));
+
+  const buildElevenLabsQuotaAdminSummary = () => {
+    const period = getElevenLabsQuotaPeriod();
+    const allEvents = readAiUsageEvents();
+    const periodEvents = allEvents.filter(event => {
+      const timestamp = Date.parse(event.timestamp);
+      return timestamp >= period.startTime && timestamp < period.endTime;
+    });
+    const usageUsers = summarizeUsageUsers(periodEvents);
+    const usersById = new Map(usageUsers.map(user => [user.userId, user]));
+    for (const allocation of elevenLabsQuotaStore.allocations) {
+      if (allocation.periodKey !== period.key || usersById.has(allocation.userId)) continue;
+      usersById.set(allocation.userId, {
+        userId: allocation.userId,
+        displayName: allocation.displayName,
+        department: '',
+        identitySource: allocation.identitySource,
+        ipAddresses: [],
+        requests: 0,
+        elevenLabsCredits: 0,
+        geminiTokens: 0,
+        gptTokens: 0,
+        totalTokens: 0,
+        lastUsedAt: allocation.updatedAt,
+        details: [],
+      });
+    }
+
+    const users = Array.from(usersById.values()).map(user => ({
+      userId: user.userId,
+      displayName: user.displayName,
+      department: user.department,
+      identitySource: user.identitySource,
+      ipAddresses: user.ipAddresses,
+      lastUsedAt: user.lastUsedAt,
+      ...buildElevenLabsQuotaStatus(user.userId, period, user.elevenLabsCredits),
+    })).sort((left, right) => {
+      if (left.blocked !== right.blocked) return left.blocked ? -1 : 1;
+      return right.usedCredits - left.usedCredits || Date.parse(right.lastUsedAt) - Date.parse(left.lastUsedAt);
+    });
+
+    return {
+      enabled: ELEVENLABS_QUOTA_ENABLED,
+      defaultMonthlyCredits: ELEVENLABS_MONTHLY_CREDITS,
+      period: {
+        key: period.key,
+        start: period.start,
+        end: period.end,
+        timeZone: ELEVENLABS_QUOTA_TIME_ZONE,
+      },
+      accountBillingCycle: buildElevenLabsAccountQuotaStatus(allEvents),
+      users,
+    };
+  };
+
+  app.get('/api/usage/quota', (req, res) => {
+    const actor = resolveUsageActor(req, res);
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({
+      user: actor,
+      quota: buildElevenLabsQuotaStatus(actor.userId),
+    });
+  });
+
+  app.get('/api/usage/quotas', requireSfxLibraryAdmin, (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json(buildElevenLabsQuotaAdminSummary());
+  });
+
+  app.put('/api/usage/quotas/account', requireSfxLibraryAdmin, (req, res) => {
+    const totalCredits = Math.round(Number(req.body?.totalCredits));
+    if (
+      !Number.isFinite(totalCredits)
+      || totalCredits < 0
+      || totalCredits > MAX_ELEVENLABS_ACCOUNT_CYCLE_CREDITS
+    ) {
+      return res.status(400).json({ error: '本账期总额度无效。' });
+    }
+
+    const period = getElevenLabsBillingCyclePeriod();
+    elevenLabsQuotaStore.accountAllocations = elevenLabsQuotaStore.accountAllocations.filter(
+      entry => entry.periodKey !== period.key,
+    );
+    if (totalCredits !== ELEVENLABS_ACCOUNT_CYCLE_CREDITS) {
+      elevenLabsQuotaStore.accountAllocations.push({
+        periodKey: period.key,
+        totalCredits,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    persistElevenLabsQuotaStore();
+    return res.json(buildElevenLabsQuotaAdminSummary());
+  });
+
+  app.put('/api/usage/quotas', requireSfxLibraryAdmin, (req, res) => {
+    const userId = normalizeIdentityText(req.body?.userId, 160);
+    const bonusCredits = Math.round(Number(req.body?.bonusCredits));
+    if (
+      !userId
+      || !Number.isFinite(bonusCredits)
+      || bonusCredits < -ELEVENLABS_MONTHLY_CREDITS
+      || bonusCredits > MAX_ELEVENLABS_BONUS_CREDITS
+    ) {
+      return res.status(400).json({ error: '成员或额度调整值无效。' });
+    }
+
+    const period = getElevenLabsQuotaPeriod();
+    const periodUsers = summarizeUsageUsers(readAiUsageEvents().filter(event => {
+      const timestamp = Date.parse(event.timestamp);
+      return timestamp >= period.startTime && timestamp < period.endTime;
+    }));
+    const user = periodUsers.find(item => item.userId === userId);
+    const existing = getCurrentElevenLabsQuotaAllocation(userId, period.key);
+    if (!user && !existing) {
+      return res.status(404).json({ error: '当前月份没有找到该成员或设备。' });
+    }
+
+    elevenLabsQuotaStore.allocations = elevenLabsQuotaStore.allocations.filter(
+      entry => !(entry.periodKey === period.key && entry.userId === userId),
+    );
+    if (bonusCredits !== 0) {
+      elevenLabsQuotaStore.allocations.push({
+        periodKey: period.key,
+        userId,
+        displayName: user?.displayName || existing?.displayName || userId,
+        identitySource: user?.identitySource || existing?.identitySource || 'unknown',
+        bonusCredits,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    persistElevenLabsQuotaStore();
+    return res.json(buildElevenLabsQuotaAdminSummary());
   });
 
   app.get('/api/usage/summary', requireSfxLibraryAdmin, asyncRoute(async (req, res) => {
@@ -1425,6 +1936,13 @@ async function startServer() {
         totalTokens: 0,
         requests: 0,
         unmeteredRequests: 0,
+        unmeteredEvents: [] as Array<{
+          timestamp: string;
+          feature: string;
+          model: string;
+          displayName: string;
+          identitySource: UsageIdentitySource;
+        }>,
       };
 
       for (const event of providerEvents) {
@@ -1434,7 +1952,16 @@ async function startServer() {
         totals.reasoningTokens += event.reasoningTokens;
         totals.totalTokens += event.totalTokens;
         totals.requests += 1;
-        if (provider === 'elevenlabs' && event.credits === 0) totals.unmeteredRequests += 1;
+        if (provider === 'elevenlabs' && event.credits === 0) {
+          totals.unmeteredRequests += 1;
+          totals.unmeteredEvents.push({
+            timestamp: event.timestamp,
+            feature: event.feature,
+            model: event.model,
+            displayName: event.displayName,
+            identitySource: event.identitySource,
+          });
+        }
         const primaryAmount = provider === 'elevenlabs' ? event.credits : event.totalTokens;
         models.set(event.model, (models.get(event.model) || 0) + primaryAmount);
 
@@ -1479,6 +2006,9 @@ async function startServer() {
       return {
         status: configured ? 'tracking' as const : 'not_configured' as const,
         ...totals,
+        unmeteredEvents: totals.unmeteredEvents
+          .sort((left, right) => Date.parse(right.timestamp) - Date.parse(left.timestamp))
+          .slice(0, 20),
         models: Array.from(models, ([model, amount]) => ({ model, amount }))
           .sort((left, right) => right.amount - left.amount),
         features: Array.from(features.values()).map(feature => ({
@@ -1794,6 +2324,61 @@ async function startServer() {
         });
       });
       return undefined;
+    } finally {
+      await Promise.all([safeUnlink(inputPath), safeUnlink(outputPath)]);
+    }
+  }));
+
+  app.post('/api/audio/convert', upload.single('media'), asyncRoute(async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ error: '请上传需要转换的音频或视频文件。' });
+    }
+
+    const inputPath = req.file.path;
+    const format = normalizeAudioExportFormat(req.body?.format);
+    const sampleRate = normalizeSampleRate(req.body?.sampleRate);
+    const bitrate = normalizeAudioBitrate(req.body?.bitrate);
+    const outputExtension = format === 'wav' ? '.wav' : format === 'ogg' ? '.ogg' : format === 'aac' ? '.aac' : '.mp3';
+    const outputMimeType = format === 'wav'
+      ? 'audio/wav'
+      : format === 'ogg'
+        ? 'audio/ogg'
+        : format === 'aac'
+          ? 'audio/aac'
+          : 'audio/mpeg';
+    const outputPath = path.resolve(uploadsDir, `audio-convert-${randomUUID()}${outputExtension}`);
+    if (!isPathInside(uploadsDir, outputPath)) {
+      await safeUnlink(inputPath);
+      throw Object.assign(new Error('音频转换临时输出路径无效。'), { status: 500 });
+    }
+
+    try {
+      await runFfmpegFile([
+        '-y',
+        '-i', inputPath,
+        '-map', '0:a:0',
+        '-vn',
+        '-map_metadata', '-1',
+        ...getAudioOutputArgs(format, sampleRate, bitrate, 24, 'stereo'),
+        outputPath,
+      ], 180_000);
+
+      res.type(outputMimeType);
+      await new Promise<void>((resolve, reject) => {
+        res.sendFile(outputPath, (error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
+      return undefined;
+    } catch (error: any) {
+      const ffmpegUnavailable = /ffmpeg.*(?:not recognized|not found)|ENOENT/i.test(String(error?.message || error));
+      throw Object.assign(
+        new Error(ffmpegUnavailable
+          ? '本地 FFmpeg 不可用，无法进行 OGG/服务端音频转码。'
+          : `音频转换失败：${String(error?.message || error).trim().split(/\r?\n/).slice(-1)[0] || '未知错误'}`),
+        { status: ffmpegUnavailable ? 503 : 422 },
+      );
     } finally {
       await Promise.all([safeUnlink(inputPath), safeUnlink(outputPath)]);
     }
@@ -2368,6 +2953,122 @@ async function startServer() {
     };
   };
 
+  const optimizeAudioDesignVideoForAnalysis = async (
+    sourcePath: string,
+    sourceMimeType: string,
+    displayName: string,
+  ): Promise<{
+    videoPath: string;
+    mimeType: string;
+    displayName: string;
+    optimized: boolean;
+    cleanupPath?: string;
+  }> => {
+    let sourceStat: fs.Stats;
+    try {
+      sourceStat = await fs.promises.stat(sourcePath);
+    } catch {
+      return {
+        videoPath: sourcePath,
+        mimeType: sourceMimeType,
+        displayName,
+        optimized: false,
+      };
+    }
+
+    if (sourceStat.size <= AUDIO_DESIGN_VIDEO_OPTIMIZE_THRESHOLD_BYTES) {
+      return {
+        videoPath: sourcePath,
+        mimeType: sourceMimeType,
+        displayName,
+        optimized: false,
+      };
+    }
+
+    const optimizedPath = path.resolve(uploadsDir, `audio_design_analysis_${randomUUID()}.mp4`);
+    if (!isPathInside(uploadsDir, optimizedPath)) {
+      throw Object.assign(new Error('无法创建安全的视频分析压缩文件。'), { status: 500 });
+    }
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        execFile(
+          FFMPEG_BINARY,
+          [
+            '-hide_banner',
+            '-loglevel', 'error',
+            '-y',
+            '-i', sourcePath,
+            '-map', '0:v:0',
+            '-map', '0:a?',
+            '-vf', 'fps=2,scale=960:540:force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2',
+            '-c:v', 'libx264',
+            '-preset', 'veryfast',
+            '-crf', '30',
+            '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac',
+            '-b:a', '48k',
+            '-ac', '1',
+            '-ar', '16000',
+            '-movflags', '+faststart',
+            optimizedPath,
+          ],
+          {
+            timeout: 10 * 60_000,
+            windowsHide: true,
+            maxBuffer: 4 * 1024 * 1024,
+          },
+          (error, _stdout, stderr) => {
+            if (!error) {
+              resolve();
+              return;
+            }
+            const processError = error as NodeJS.ErrnoException & { killed?: boolean };
+            const ffmpegUnavailable = processError.code === 'ENOENT'
+              || /ffmpeg.*(?:not recognized|not found)|ENOENT/i.test(`${error.message}\n${stderr}`);
+            reject(Object.assign(
+              new Error(ffmpegUnavailable
+                ? '服务器 FFmpeg 不可用，无法自动压缩大视频。'
+                : `自动压缩大视频失败：${String(stderr || error.message).trim().split(/\r?\n/).slice(-1)[0] || error.message}`),
+              { status: ffmpegUnavailable ? 503 : processError.killed ? 504 : 422 },
+            ));
+          },
+        );
+      });
+
+      const optimizedStat = await fs.promises.stat(optimizedPath);
+      if (!optimizedStat.isFile() || optimizedStat.size <= 0 || optimizedStat.size >= sourceStat.size) {
+        await safeUnlink(optimizedPath);
+        return {
+          videoPath: sourcePath,
+          mimeType: sourceMimeType,
+          displayName,
+          optimized: false,
+        };
+      }
+
+      console.log(
+        `Audio design analysis video optimized: ${displayName} ${sourceStat.size} -> ${optimizedStat.size} bytes`,
+      );
+      return {
+        videoPath: optimizedPath,
+        mimeType: 'video/mp4',
+        displayName: `${displayName}（分析压缩版）`,
+        optimized: true,
+        cleanupPath: optimizedPath,
+      };
+    } catch (error) {
+      await safeUnlink(optimizedPath);
+      console.warn('Audio design video optimization failed; using original video:', error);
+      return {
+        videoPath: sourcePath,
+        mimeType: sourceMimeType,
+        displayName,
+        optimized: false,
+      };
+    }
+  };
+
   const buildTranslatedDubbingAtempoFilter = (tempo: number) => {
     const parts: number[] = [];
     let remaining = Math.min(2, Math.max(0.5, tempo));
@@ -2509,12 +3210,12 @@ async function startServer() {
     return recoveredClips;
   };
 
-  type AudioExportFormat = 'mp3' | 'wav' | 'aac';
+  type AudioExportFormat = 'mp3' | 'wav' | 'aac' | 'ogg';
   type AudioExportChannelMode = 'mono' | 'stereo';
 
   const normalizeAudioExportFormat = (value: unknown): AudioExportFormat => {
     const normalized = String(value || '').trim().toLowerCase();
-    if (normalized === 'wav' || normalized === 'aac') return normalized;
+    if (normalized === 'wav' || normalized === 'aac' || normalized === 'ogg') return normalized;
     return 'mp3';
   };
 
@@ -2525,7 +3226,7 @@ async function startServer() {
 
   const normalizeAudioBitrate = (value: unknown) => {
     const normalized = String(value || '').trim().toLowerCase();
-    return ['128k', '192k', '256k', '320k'].includes(normalized) ? normalized : '192k';
+    return ['64k', '96k', '128k', '192k', '256k', '320k'].includes(normalized) ? normalized : '192k';
   };
 
   const normalizeBitDepth = (value: unknown) => {
@@ -2561,6 +3262,9 @@ async function startServer() {
     if (format === 'aac') {
       return [...args, '-c:a', 'aac', '-b:a', bitrate];
     }
+    if (format === 'ogg') {
+      return [...args, '-c:a', 'libvorbis', '-b:a', bitrate];
+    }
     return [...args, '-c:a', 'libmp3lame', '-b:a', bitrate];
   };
 
@@ -2582,6 +3286,12 @@ async function startServer() {
       return {
         extension: '.mp4',
         args: ['-ar', String(sampleRate), ...channelArgs, '-c:a', 'libmp3lame', '-b:a', bitrate],
+      };
+    }
+    if (format === 'ogg') {
+      return {
+        extension: '.mkv',
+        args: ['-ar', String(sampleRate), ...channelArgs, '-c:a', 'libvorbis', '-b:a', bitrate],
       };
     }
     return {
@@ -3465,6 +4175,39 @@ async function startServer() {
   }));
 
   app.post(
+    '/api/ai/gemini/audio-design-video-keyframes',
+    upload.single('video'),
+    asyncRoute(async (req, res) => {
+      if (!req.file) {
+        return res.status(400).json({ error: '请选择一个视频文件。' });
+      }
+
+      const uploadedPath = path.resolve(req.file.path);
+      const uploadsRoot = `${path.resolve(uploadsDir)}${path.sep}`;
+      try {
+        if (!uploadedPath.startsWith(uploadsRoot)) {
+          return res.status(400).json({ error: '视频临时路径无效。' });
+        }
+        if (!req.file.mimetype.startsWith('video/')) {
+          return res.status(415).json({ error: '关键帧回退分析只支持视频文件。' });
+        }
+
+        const duration = await getMediaDurationSeconds(uploadedPath).catch(() => 30);
+        const frames = await extractServerVideoKeyframes(req.file.filename, duration, { dense: false });
+        return res.json({
+          frames: frames.map((frame, index) => ({
+            data: `data:image/jpeg;base64,${frame.base64}`,
+            mimeType: 'image/jpeg',
+            label: `服务器关键帧：${normalizeUploadDisplayName(req.body?.originalName, req.file?.originalname)} ${index + 1}/${frames.length}，时间 ${frame.timestamp} 秒`,
+          })),
+        });
+      } finally {
+        await fs.promises.unlink(uploadedPath).catch(() => undefined);
+      }
+    }),
+  );
+
+  app.post(
     '/api/ai/gemini/audio-design-video-preupload',
     upload.single('video'),
     asyncRoute(async (req, res) => {
@@ -3475,6 +4218,7 @@ async function startServer() {
       const uploadedPath = path.resolve(req.file.path);
       const uploadsRoot = `${path.resolve(uploadsDir)}${path.sep}`;
       let geminiAliasPath: string | undefined;
+      let optimizedVideoPath: string | undefined;
       let uploadedVideo: any;
       let cacheStored = false;
 
@@ -3488,17 +4232,23 @@ async function startServer() {
 
         await cleanupExpiredAudioDesignPreuploads();
 
-        const geminiUpload = await createGeminiUploadAlias(uploadedPath, req.file.mimetype);
-        geminiAliasPath = geminiUpload.aliasPath;
         const originalDisplayName = normalizeUploadDisplayName(
           req.body?.originalName,
           req.file.originalname,
         );
+        const analysisVideo = await optimizeAudioDesignVideoForAnalysis(
+          uploadedPath,
+          req.file.mimetype,
+          originalDisplayName,
+        );
+        optimizedVideoPath = analysisVideo.cleanupPath;
+        const geminiUpload = await createGeminiUploadAlias(analysisVideo.videoPath, analysisVideo.mimeType);
+        geminiAliasPath = geminiUpload.aliasPath;
         const aiClient = getGoogleAI();
         uploadedVideo = await aiClient.files.upload({
           file: geminiUpload.aliasPath,
           config: {
-            mimeType: req.file.mimetype,
+            mimeType: analysisVideo.mimeType,
             displayName: geminiUpload.aliasName,
           },
         });
@@ -3523,13 +4273,13 @@ async function startServer() {
         }
 
         const uploadId = randomUUID();
-        const mimeType = uploadedVideo.mimeType || req.file.mimetype;
+        const mimeType = uploadedVideo.mimeType || analysisVideo.mimeType;
         const expiresAt = Date.now() + AUDIO_DESIGN_PREUPLOAD_TTL_MS;
         audioDesignVideoPreuploads.set(uploadId, {
           uploadId,
           fileUri: uploadedVideo.uri,
           mimeType,
-          displayName: originalDisplayName,
+          displayName: analysisVideo.displayName,
           geminiFileName: uploadedVideo.name,
           expiresAt,
         });
@@ -3537,12 +4287,14 @@ async function startServer() {
 
         return res.json({
           uploadId,
-          displayName: originalDisplayName,
+          displayName: analysisVideo.displayName,
           mimeType,
           expiresAt,
+          optimized: analysisVideo.optimized,
         });
       } finally {
         await safeUnlink(geminiAliasPath);
+        await safeUnlink(optimizedVideoPath);
         if (uploadedPath.startsWith(uploadsRoot)) await safeUnlink(uploadedPath);
         if (uploadedVideo?.name && !cacheStored) {
           await getGoogleAI().files.delete({ name: uploadedVideo.name }).catch((error) => {
@@ -3581,9 +4333,11 @@ async function startServer() {
       video: Boolean(rawTarget.video),
       avatar: Boolean(rawTarget.avatar),
       sunnyIsland: Boolean(rawTarget.sunnyIsland),
+      gift: Boolean(rawTarget.gift),
+      activity: Boolean(rawTarget.activity),
     };
     const isFallbackAnalysis = String(analysisMode) === 'fallback';
-    const canUseNativeVideo = target.game || target.video || target.avatar || target.sunnyIsland || isFallbackAnalysis;
+    const canUseNativeVideo = target.game || target.video || target.avatar || target.sunnyIsland || target.gift || target.activity || isFallbackAnalysis;
     if (!canUseNativeVideo) {
       return res.status(400).json({ error: '当前模式不支持完整视频预上传分析。' });
     }
@@ -3593,7 +4347,7 @@ async function startServer() {
       mimeType: cachedVideo.mimeType,
       label: `完整视频：${cachedVideo.displayName}`,
       videoMetadata: {
-        fps: target.avatar ? 2 : 1,
+        fps: target.avatar || target.gift ? 2 : 1,
       },
     }], String(requirements), target, Boolean(isInstrumental), { scope });
     return res.json(result);
@@ -3610,6 +4364,7 @@ async function startServer() {
       const uploadedPath = path.resolve(req.file.path);
       const uploadsRoot = `${path.resolve(uploadsDir)}${path.sep}`;
       let geminiAliasPath: string | undefined;
+      let optimizedVideoPath: string | undefined;
       try {
         if (!uploadedPath.startsWith(uploadsRoot)) {
           return res.status(400).json({ error: '视频临时路径无效。' });
@@ -3631,23 +4386,31 @@ async function startServer() {
           video: Boolean(rawTarget.video),
           avatar: Boolean(rawTarget.avatar),
           sunnyIsland: Boolean(rawTarget.sunnyIsland),
+          gift: Boolean(rawTarget.gift),
+          activity: Boolean(rawTarget.activity),
         };
         const analysisMode = String(req.body?.analysisMode || 'professional');
         const isFallbackAnalysis = analysisMode === 'fallback';
-        if (!isFallbackAnalysis && !target.video && !target.avatar) {
-          return res.status(400).json({ error: '只有影视/广告或 Avatar 模式可使用专业视频分析。' });
+        if (!isFallbackAnalysis && !target.video && !target.avatar && !target.gift && !target.activity) {
+          return res.status(400).json({ error: '只有影视/广告、Avatar、礼物或活动模式可使用专业视频分析。' });
         }
 
-        const geminiUpload = await createGeminiUploadAlias(uploadedPath, req.file.mimetype);
-        geminiAliasPath = geminiUpload.aliasPath;
         const originalDisplayName = normalizeUploadDisplayName(
           req.body?.originalName,
           req.file.originalname,
         );
-        const result = await analyzeAudioDesignVideoFile(
-          geminiUpload.aliasPath,
+        const analysisVideo = await optimizeAudioDesignVideoForAnalysis(
+          uploadedPath,
           req.file.mimetype,
           originalDisplayName,
+        );
+        optimizedVideoPath = analysisVideo.cleanupPath;
+        const geminiUpload = await createGeminiUploadAlias(analysisVideo.videoPath, analysisVideo.mimeType);
+        geminiAliasPath = geminiUpload.aliasPath;
+        const result = await analyzeAudioDesignVideoFile(
+          geminiUpload.aliasPath,
+          analysisVideo.mimeType,
+          analysisVideo.displayName,
           String(req.body?.requirements || ''),
           target,
           String(req.body?.isInstrumental) !== 'false',
@@ -3656,6 +4419,7 @@ async function startServer() {
         return res.json(result);
       } finally {
         await safeUnlink(geminiAliasPath);
+        await safeUnlink(optimizedVideoPath);
         if (uploadedPath.startsWith(uploadsRoot)) await safeUnlink(uploadedPath);
       }
     }),
@@ -3680,13 +4444,30 @@ async function startServer() {
   }));
 
   app.post('/api/ai/gemini/sfx-requirements', asyncRoute(async (req, res) => {
-    const { inputText = '', screenshot = null, templateType, projectName = null } = req.body || {};
+    const { inputText = '', screenshot = null, templateType, projectName = null, existingItems = [] } = req.body || {};
     const allowedTemplates = ['game_sfx_general', 'game_sfx_middleware', 'voiceover_general', 'voiceover_multilang'];
     if (!allowedTemplates.includes(templateType)) {
       return res.status(400).json({ error: 'Invalid templateType' });
     }
     const normalizedProjectName = typeof projectName === 'string' ? projectName.trim().slice(0, 80) : null;
-    const result = await generateSfxRequirements(String(inputText), screenshot, templateType, normalizedProjectName || null);
+    const normalizedExistingItems = Array.isArray(existingItems)
+      ? existingItems.slice(0, 100).map((item) => (
+          item && typeof item === 'object'
+            ? Object.fromEntries(
+                Object.entries(item as Record<string, unknown>)
+                  .filter(([key]) => /^[a-zA-Z0-9_]+$/.test(key))
+                  .map(([key, value]) => [key, String(value ?? '').slice(0, 500)]),
+              )
+            : {}
+        ))
+      : [];
+    const result = await generateSfxRequirements(
+      String(inputText),
+      screenshot,
+      templateType,
+      normalizedProjectName || null,
+      normalizedExistingItems,
+    );
     return res.json(result);
   }));
 
@@ -4051,7 +4832,10 @@ ${JSON.stringify(normalizedVoices)}
     return res.json(preview);
   }));
 
-  app.post('/api/ai/elevenlabs/sound-effect', asyncRoute(async (req, res) => {
+  app.post(
+    '/api/ai/elevenlabs/sound-effect',
+    requireElevenLabsQuota(() => ELEVENLABS_SOUND_EFFECT_CREDITS_PER_GENERATION),
+    asyncRoute(async (req, res) => {
     const text = String(req.body?.text || '').trim();
     if (!text) return res.status(400).json({ error: 'text is required' });
     const rawDuration = req.body?.duration;
@@ -4063,9 +4847,16 @@ ${JSON.stringify(normalizedVoices)}
       ? await translateToEnglish(text)
       : text;
     return sendAudioBlob(res, await generateSoundEffect(englishText || text, duration, { qualityMode }));
-  }));
+    }),
+  );
 
-  app.post('/api/ai/elevenlabs/music', asyncRoute(async (req, res) => {
+  app.post(
+    '/api/ai/elevenlabs/music',
+    requireElevenLabsQuota(req => estimateTimedCredits(
+      parseNumber(req.body?.duration, 30, 1, 60),
+      ELEVENLABS_MUSIC_CREDITS_PER_MINUTE,
+    )),
+    asyncRoute(async (req, res) => {
     const text = String(req.body?.text || '').trim();
     if (!text) return res.status(400).json({ error: 'text is required' });
     const qualityMode = normalizeElevenLabsQualityMode(req.body?.qualityMode);
@@ -4077,7 +4868,8 @@ ${JSON.stringify(normalizedVoices)}
       typeof req.body?.lyrics === 'string' ? req.body.lyrics : undefined,
       { qualityMode },
     ));
-  }));
+    }),
+  );
 
   const localVoiceCloneLanguages: Record<string, string> = Object.fromEntries(
     AUDIO_LANGUAGE_REGISTRY
@@ -5306,7 +6098,10 @@ ${JSON.stringify(normalizedVoices)}
     }
   }));
 
-  app.post('/api/ai/elevenlabs/voice', asyncRoute(async (req, res) => {
+  app.post(
+    '/api/ai/elevenlabs/voice',
+    requireElevenLabsQuota(req => estimateTextGenerationCredits(String(req.body?.text || ''))),
+    asyncRoute(async (req, res) => {
     const text = String(req.body?.text || '').trim();
     if (!text) return res.status(400).json({ error: 'text is required' });
     const fallbackText = String(req.body?.fallbackText || text).trim();
@@ -5333,13 +6128,21 @@ ${JSON.stringify(normalizedVoices)}
         },
       );
     }));
-  }));
+    }),
+  );
 
   app.get('/api/ai/elevenlabs/voices', asyncRoute(async (req, res) => {
     return res.json({ voices: await fetchAvailableVoices() });
   }));
 
-  app.post('/api/ai/elevenlabs/speech-to-speech', aiUpload.single('audio'), asyncRoute(async (req, res) => {
+  app.post(
+    '/api/ai/elevenlabs/speech-to-speech',
+    aiUpload.single('audio'),
+    requireElevenLabsQuota(req => estimateTimedCredits(
+      estimateUploadedMediaDuration(req),
+      ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE,
+    )),
+    asyncRoute(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'audio is required' });
     const audio = new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype });
     const voiceId = validateVoiceId(req.body?.voiceId);
@@ -5359,15 +6162,31 @@ ${JSON.stringify(normalizedVoices)}
         parseNumber(req.body?.style, 0.05, 0, 1),
       );
     }));
-  }));
+    }),
+  );
 
-  app.post('/api/ai/elevenlabs/audio-isolation', aiUpload.single('audio'), asyncRoute(async (req, res) => {
+  app.post(
+    '/api/ai/elevenlabs/audio-isolation',
+    aiUpload.single('audio'),
+    requireElevenLabsQuota(req => estimateTimedCredits(
+      estimateUploadedMediaDuration(req),
+      ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE,
+    )),
+    asyncRoute(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'audio is required' });
     const audio = new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype });
     return sendAudioBlob(res, await isolateAudio(audio));
-  }));
+    }),
+  );
 
-  app.post('/api/ai/elevenlabs/speech-to-text', aiUpload.single('audio'), asyncRoute(async (req, res) => {
+  app.post(
+    '/api/ai/elevenlabs/speech-to-text',
+    aiUpload.single('audio'),
+    requireElevenLabsQuota(req => estimateTimedCredits(
+      estimateUploadedMediaDuration(req),
+      ELEVENLABS_SPEECH_TO_TEXT_CREDITS_PER_MINUTE,
+    )),
+    asyncRoute(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'audio is required' });
     const sourceExtension = getSafeUploadExtension(req.file.originalname, req.file.mimetype, '.bin');
     const isVideo = req.file.mimetype.startsWith('video/') || ALLOWED_VIDEO_EXTENSIONS.has(sourceExtension);
@@ -5417,9 +6236,18 @@ ${JSON.stringify(normalizedVoices)}
     } finally {
       await Promise.all([safeUnlink(sourcePath), safeUnlink(extractedAudioPath)]);
     }
-  }));
+    }),
+  );
 
-  app.post('/api/ai/elevenlabs/translate-dubbing', aiUpload.single('audio'), asyncRoute(async (req, res) => {
+  app.post(
+    '/api/ai/elevenlabs/translate-dubbing',
+    aiUpload.single('audio'),
+    requireElevenLabsQuota(req => {
+      const duration = estimateUploadedMediaDuration(req);
+      return estimateTimedCredits(duration, ELEVENLABS_SPEECH_TO_TEXT_CREDITS_PER_MINUTE)
+        + estimateTimedCredits(duration, 900);
+    }),
+    asyncRoute(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'audio is required' });
 
     const voiceId = validateVoiceId(req.body?.voiceId);
@@ -5500,12 +6328,21 @@ ${JSON.stringify(normalizedVoices)}
       try { fs.unlinkSync(sourcePath); } catch {}
       try { fs.unlinkSync(generatedPath); } catch {}
     }
-  }));
+    }),
+  );
 
   // Official Automatic Dubbing v2 flow. Unlike the legacy route above, this
   // lets ElevenLabs preserve speaker identity, emotion, timing and background
   // audio instead of translating into one selected TTS voice and stretching it.
-  app.post('/api/ai/elevenlabs/translate-dubbing-v2', aiUpload.single('audio'), asyncRoute(async (req, res) => {
+  app.post(
+    '/api/ai/elevenlabs/translate-dubbing-v2',
+    aiUpload.single('audio'),
+    requireElevenLabsQuota(req => {
+      const duration = estimateUploadedMediaDuration(req);
+      return estimateTimedCredits(duration, ELEVENLABS_SPEECH_TO_TEXT_CREDITS_PER_MINUTE)
+        + estimateTimedCredits(duration, ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE);
+    }),
+    asyncRoute(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'audio is required' });
 
     const apiKey = process.env.ELEVENLABS_API_KEY || process.env.VITE_ELEVENLABS_API_KEY || '';
@@ -5636,6 +6473,18 @@ ${JSON.stringify(normalizedVoices)}
         sourceDurationPromise,
         getMediaDurationSeconds(outputPath).catch(() => 0),
       ]);
+      recordAiUsage({
+        provider: 'elevenlabs',
+        model: 'dubbing_v2',
+        inputTokens: 0,
+        outputTokens: 0,
+        reasoningTokens: 0,
+        totalTokens: 0,
+        credits: estimateTimedCredits(
+          sourceDuration || estimateAudioDurationSecondsFromBlob(sourceAudio),
+          ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE,
+        ),
+      });
       const sourceText = String(transcription.text || '').trim();
       let translatedText = '';
       if (sourceText) {
@@ -5660,7 +6509,8 @@ ${JSON.stringify(normalizedVoices)}
       try { fs.unlinkSync(sourcePath); } catch {}
       try { fs.unlinkSync(downloadedPath); } catch {}
     }
-  }));
+    }),
+  );
 
   // 5. File Upload Endpoint (Supports both raw binary stream and multipart/form-data)
   app.post('/api/sfx/upload', (req, res, next) => {
@@ -6595,7 +7445,20 @@ CRITICAL SUBTITLE OCR PASS:
   });
 
   // 8. Generate Timeline Clip Audio using ElevenLabs API
-  app.post('/api/video/generate-clip', async (req, res) => {
+  app.post('/api/video/generate-clip', requireElevenLabsQuota(req => {
+    const resolvedType = req.body?.trackType
+      || (req.body?.trackId === 'dubbing' ? 'dubbing' : req.body?.trackId === 'bgm' ? 'bgm' : 'sfx');
+    if (resolvedType === 'dubbing') {
+      return estimateTextGenerationCredits(String(req.body?.text || ''));
+    }
+    if (resolvedType === 'bgm') {
+      return estimateTimedCredits(
+        parseNumber(req.body?.duration, 30, 3, 600),
+        ELEVENLABS_MUSIC_CREDITS_PER_MINUTE,
+      );
+    }
+    return ELEVENLABS_SOUND_EFFECT_CREDITS_PER_GENERATION;
+  }), async (req, res) => {
     try {
       const { prompt, trackId, trackType, text, voiceId, duration } = req.body;
       const qualityMode = normalizeElevenLabsQualityMode(req.body?.qualityMode);
@@ -6771,7 +7634,13 @@ CRITICAL SUBTITLE OCR PASS:
         }
 
         const hasElevenLabsKey = getElevenLabsApiKeys().length > 0;
-        if (hasElevenLabsKey) {
+        const quotaReservation = hasElevenLabsKey
+          ? reserveElevenLabsQuota(
+              resolveUsageActor(req, res),
+              estimateTimedCredits(duration, ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE),
+            )
+          : null;
+        if (hasElevenLabsKey && quotaReservation?.release) {
           let isolatedTempPath = '';
           try {
             const isolatedBlob = await isolateAudio(new Blob([fs.readFileSync(original.filePath)], { type: 'audio/wav' }));
@@ -6802,8 +7671,12 @@ CRITICAL SUBTITLE OCR PASS:
             ]);
           } finally {
             await safeUnlink(isolatedTempPath);
+            quotaReservation.release();
           }
         } else {
+          if (hasElevenLabsKey && !quotaReservation?.release) {
+            console.log('ElevenLabs audio isolation skipped because this member has reached the monthly quota.');
+          }
           await runFfmpegFile([
             '-y',
             '-hide_banner',

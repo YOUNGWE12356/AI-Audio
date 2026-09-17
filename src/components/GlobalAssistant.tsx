@@ -961,7 +961,7 @@ const buildPlan = (
   if (detectAudioTask(prompt, file) || detectFactoryTask(prompt) || detectAnalysisTask(prompt) || soundIntent === 'analysis') {
     const audioTargets = extractAudioTargets(prompt);
     const requestedAudioFormat = extractRequestedAudioFormat(prompt);
-    const isRequestedFormatSupported = !requestedAudioFormat || requestedAudioFormat === 'mp3' || requestedAudioFormat === 'wav';
+    const isRequestedFormatSupported = !requestedAudioFormat || requestedAudioFormat === 'mp3' || requestedAudioFormat === 'wav' || requestedAudioFormat === 'ogg';
     const wantsFormatConversion = Boolean(requestedAudioFormat)
       || /格式转换|转换格式|转格式|提取音频|convert.*(?:mp3|wav|flac|ogg|aac|m4a)/.test(normalized);
     const wantsFactoryProcessing = detectFactoryTask(prompt) || wantsFormatConversion;
@@ -985,7 +985,7 @@ const buildPlan = (
       if (audioTargets.targetSampleRate !== undefined) steps.push(`设置目标采样率为 ${audioTargets.targetSampleRate} Hz`);
       if (audioTargets.targetBitrate !== undefined) steps.push(`设置目标比特率为 ${audioTargets.targetBitrate} kbps`);
       if (audioTargets.targetLufs !== undefined) steps.push(`启用响度统一并设置目标为 ${audioTargets.targetLufs} LUFS，同时保留峰值保护`);
-      steps.push(isRequestedFormatSupported ? '先生成处理结果并试听，确认音量和音质后再下载' : '请选择当前支持的 MP3 或 WAV，或等待目标编码器接入');
+      steps.push(isRequestedFormatSupported ? '先生成处理结果并试听，确认音量和音质后再下载' : '请选择当前支持的 MP3、WAV 或 OGG，或等待目标编码器接入');
     } else {
       steps.push('分析结果生成后提供试听和下载');
     }
@@ -994,7 +994,7 @@ const buildPlan = (
         ? `${requestedAudioFormat.toUpperCase()} 暂不可转换`
         : hasProcessingTarget && wantsAnalysis ? '分析并处理音频' : wantsFormatConversion ? '转换音频格式' : hasProcessingTarget ? '调整音频参数' : '分析音频',
       summary: !isRequestedFormatSupported && requestedAudioFormat
-        ? `已识别目标格式 ${requestedAudioFormat.toUpperCase()}；当前转换器仅支持 MP3 和 WAV`
+        ? `已识别目标格式 ${requestedAudioFormat.toUpperCase()}；当前转换器仅支持 MP3、WAV 和 OGG`
         : file ? `已载入 ${file.name}` : '将使用音频工具处理你的任务',
       tab: 'audio-tools',
       kind: 'audio',
@@ -1097,6 +1097,7 @@ export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceReq
   const [analysisStatus, setAnalysisStatus] = useState('正在理解任务...');
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dragActive, setDragActive] = useState(false);
   const [memory, setMemory] = useState<AssistantMemory>(() => loadAssistantMemory());
   const [libraryIndex, setLibraryIndex] = useState<SfxLibraryIndex>(() => readSfxLibraryIndex());
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1116,6 +1117,43 @@ export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceReq
     if (fileInputRef.current) fileInputRef.current.value = '';
     setOpen(true);
   };
+
+  const attachAssistantFile = useCallback((nextFile?: File) => {
+    if (!nextFile) return;
+    setFile(nextFile);
+    setPlan(null);
+    setError(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }, [setFile, setPlan]);
+
+  const handleAssistantFileInputChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    attachAssistantFile(event.target.files?.[0]);
+  }, [attachAssistantFile]);
+
+  const handleAssistantFileDragOver = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    setDragActive(true);
+  }, []);
+
+  const handleAssistantFileDragEnter = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+    event.preventDefault();
+    setDragActive(true);
+  }, []);
+
+  const handleAssistantFileDragLeave = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setDragActive(false);
+  }, []);
+
+  const handleAssistantFileDrop = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.files.length) return;
+    event.preventDefault();
+    setDragActive(false);
+    attachAssistantFile(event.dataTransfer.files[0]);
+  }, [attachAssistantFile]);
 
   const appendConversation = (role: AssistantConversationMessage['role'], content: string) => {
     const message = content.trim();
@@ -1513,7 +1551,13 @@ export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceReq
               </div>
             )}
 
-            <div className="relative">
+            <div
+              className={`relative rounded-2xl transition ${dragActive ? 'ring-2 ring-emerald-300 ring-offset-2 ring-offset-white/50' : ''}`}
+              onDragEnter={handleAssistantFileDragEnter}
+              onDragOver={handleAssistantFileDragOver}
+              onDragLeave={handleAssistantFileDragLeave}
+              onDrop={handleAssistantFileDrop}
+            >
             <div
               onClick={() => fileInputRef.current?.click()}
               aria-label="上传音频、视频、图片或文档"
@@ -1525,7 +1569,7 @@ export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceReq
                 type="file"
                 accept="audio/*,video/*,image/*,.txt,.md,.csv,.tsv,.json,.docx,.xlsx,.pdf"
                 className="hidden"
-                onChange={(event) => setFile(event.target.files?.[0])}
+                onChange={handleAssistantFileInputChange}
               />
               <div className="flex items-center justify-start gap-2">
                 <div className="pointer-events-auto flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-full border border-emerald-200/70 bg-white/75 text-emerald-600 shadow-sm transition hover:border-emerald-300 hover:bg-white hover:text-emerald-700">
@@ -1563,8 +1607,13 @@ export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceReq
                 if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') analyzeRequest();
               }}
               placeholder="告诉我你想完成什么……"
-              className="min-h-28 w-full resize-y rounded-2xl border border-emerald-200/65 bg-white/26 px-3 py-3 pb-12 text-xs leading-relaxed text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100"
+              className={`min-h-28 w-full resize-y rounded-2xl border px-3 py-3 pb-12 text-xs leading-relaxed text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 ${dragActive ? 'border-emerald-400 bg-emerald-50/80' : 'border-emerald-200/65 bg-white/26'}`}
             />
+            {dragActive ? (
+              <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-2xl border border-emerald-300 bg-emerald-50/85 text-xs font-bold text-emerald-700 shadow-inner">
+                松开即可上传到智能助手
+              </div>
+            ) : null}
             </div>
             {file && (
               <p className="px-1 text-[10px] text-slate-400">

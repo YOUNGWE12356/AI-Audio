@@ -22,7 +22,7 @@ import {
   FileSpreadsheet
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { generateSfxRequirements } from '../services/geminiService';
+import { generateSfxRequirements, type ExistingSfxRequirementItem } from '../services/geminiService';
 import type { AssistantRequirementsRequest } from './GlobalAssistant';
 
 type TemplateType = 'game_sfx_general' | 'game_sfx_middleware' | 'voiceover_general' | 'voiceover_multilang';
@@ -50,7 +50,8 @@ const DEMO_ROWS: Record<TemplateType, any[]> = {
       duration_logic: "1s, 单次播放",
       scene: "通用与主界面&游戏内的ui点击按键",
       description: "清脆的交互点击声，带有轻微的拟物触感与中高频数字质感",
-      script_tone: "-",
+      script: "-",
+      tone: "-",
       remarks: "常用全局 UI 按钮，声音要小巧，响度控制在 -14 LUFS 左右",
       video_link: "UI点击演示.mp4"
     },
@@ -61,7 +62,8 @@ const DEMO_ROWS: Record<TemplateType, any[]> = {
       duration_logic: "loop, 循环播放",
       scene: "关卡内战斗场景、遭遇战",
       description: "热血、紧张有战斗感的电子摇滚乐，由重击鼓点、失真吉他与动感合成器主导",
-      script_tone: "-",
+      script: "-",
+      tone: "-",
       remarks: "需要无缝循环，包含一个 4s 的 Intro 前奏，BPM 135",
       video_link: "核心战斗参考.mp4"
     },
@@ -72,7 +74,8 @@ const DEMO_ROWS: Record<TemplateType, any[]> = {
       duration_logic: "0.8s, 单次播放",
       scene: "主角执行前冲闪避、瞬移的一瞬间",
       description: "带有疾风气流撕裂声，高频气流破空音色叠合电声粒子回馈",
-      script_tone: "-",
+      script: "-",
+      tone: "-",
       remarks: "瞬态触发极快，高音需要做压限，避免连续触发破音",
       video_link: "前冲动作.mp4"
     },
@@ -83,7 +86,8 @@ const DEMO_ROWS: Record<TemplateType, any[]> = {
       duration_logic: "1.2s, 随机多样本",
       scene: "玩家拾取金币或重要战利品时",
       description: "清脆悦耳的高频金属撞击声，带有闪闪发光的粒子声尾音",
-      script_tone: "-",
+      script: "-",
+      tone: "-",
       remarks: "提供 3 个随机音调微调样本，增强连续拾取时的多变性",
       video_link: "拾取反馈.mp4"
     }
@@ -158,8 +162,8 @@ const TEMPLATE_INFO = {
   game_sfx_general: {
     name: "游戏音效配乐通用表",
     desc: "适合把音效、BGM、配音需求放在同一张综合音频需求表里",
-    headers: ["序号", "类型", "文件命名", "时长&播放逻辑", "应用场景", "描述", "台词/语气", "备注", "动效视频"],
-    keys: ["index", "audio_type", "filename", "duration_logic", "scene", "description", "script_tone", "remarks", "video_link"]
+    headers: ["序号", "类型", "文件命名", "时长&播放逻辑", "应用场景", "描述", "台词", "语气", "备注", "动效视频"],
+    keys: ["index", "audio_type", "filename", "duration_logic", "scene", "description", "script", "tone", "remarks", "video_link"]
   },
   game_sfx_middleware: {
     name: "FMOD / Wwise 引擎中间件需求表",
@@ -182,7 +186,7 @@ const TEMPLATE_INFO = {
 };
 
 const DEFAULT_COLUMN_WIDTHS: Record<TemplateType, number[]> = {
-  game_sfx_general: [52, 88, 150, 128, 180, 220, 180, 180, 140],
+  game_sfx_general: [52, 88, 150, 128, 180, 220, 190, 160, 180, 140],
   game_sfx_middleware: [52, 150, 165, 90, 180, 220, 180, 140, 120, 140, 90],
   voiceover_general: [52, 190, 150, 170, 300],
   voiceover_multilang: [52, 150, 190, 150, 260, 220, 220],
@@ -190,6 +194,63 @@ const DEFAULT_COLUMN_WIDTHS: Record<TemplateType, number[]> = {
 
 const MIN_COLUMN_WIDTH = 52;
 const MAX_COLUMN_WIDTH = 560;
+
+const getColumnWidthsForTemplate = (
+  widthsByTemplate: Record<TemplateType, number[]>,
+  type: TemplateType,
+) => {
+  const defaults = DEFAULT_COLUMN_WIDTHS[type];
+  const saved = widthsByTemplate[type] || [];
+  return TEMPLATE_INFO[type].keys.map((_, index) => saved[index] || defaults[index] || 140);
+};
+
+const trimRequirementSeparators = (value: string) => value
+  .trim()
+  .replace(/^[\s,，、;；。.\n\r]+|[\s,，、;；。.\n\r]+$/g, '')
+  .trim();
+
+const splitRequirementInputSegments = (value: string) => (
+  value
+    .split(/[\n\r,，、;；]+/g)
+    .map(segment => trimRequirementSeparators(segment))
+    .filter(Boolean)
+);
+
+const getAddedRequirementText = (currentText: string, previousText: string) => {
+  const current = currentText.trim();
+  const previous = previousText.trim();
+  if (!current) return '';
+  if (!previous) return current;
+  if (current === previous) return '';
+  if (current.startsWith(previous)) {
+    return trimRequirementSeparators(current.slice(previous.length));
+  }
+
+  const previousSegments = new Set(splitRequirementInputSegments(previous).map(normalizeRequirementText));
+  const addedSegments = splitRequirementInputSegments(current).filter(segment => {
+    const normalized = normalizeRequirementText(segment);
+    return normalized && !previousSegments.has(normalized);
+  });
+  return addedSegments.join('，');
+};
+
+const getUncoveredRequirementText = (currentText: string, existingRows: any[], type: TemplateType) => {
+  const segments = splitRequirementInputSegments(currentText);
+  if (segments.length === 0 || existingRows.length === 0) return currentText.trim();
+  const existingRowTexts = existingRows.map(row => normalizeRequirementText(getRowFieldText(
+    row,
+    TEMPLATE_INFO[type].keys.filter(key => key !== 'index'),
+  ))).filter(Boolean);
+  const uncoveredSegments = segments.filter(segment => {
+    const normalizedSegment = normalizeRequirementText(segment);
+    if (!normalizedSegment) return false;
+    return !existingRowTexts.some(rowText => (
+      rowText.includes(normalizedSegment)
+      || (normalizedSegment.length >= 4 && normalizedSegment.includes(rowText) && rowText.length >= 4)
+    ));
+  });
+  return uncoveredSegments.join('，');
+};
 
 const LOADING_STEPS = [
   "AI 正在识别用户上传的参考文件与文字...",
@@ -221,9 +282,98 @@ const normalizeRequirementText = (value: unknown) => String(value || '')
   .toLowerCase()
   .replace(/[\s\u3000，。！？、…,.!?;；:："'“”‘’【】\[\]()（）]/g, '');
 
+const getRowFieldText = (row: any, keys: string[]) => (
+  keys
+    .map(key => String(row?.[key] ?? '').trim())
+    .filter(Boolean)
+    .join('|')
+);
+
+const getRequirementDuplicateKeys = (row: any, type: TemplateType) => {
+  const keys = TEMPLATE_INFO[type].keys;
+  const duplicateKeys = new Set<string>();
+  const filename = normalizeGeneratedFilename(row?.filename);
+  if (filename) duplicateKeys.add(`filename:${filename}`);
+  const eventName = normalizeGeneratedFilename(row?.event_name);
+  if (eventName) duplicateKeys.add(`event:${eventName}`);
+
+  const scriptText = normalizeRequirementText(
+    row?.script || row?.script_tone || row?.script_zh || row?.script_en || row?.script_ko || '',
+  );
+  if (scriptText) duplicateKeys.add(`script:${scriptText}`);
+
+  const semanticText = normalizeRequirementText(getRowFieldText(
+    row,
+    keys.filter(key => !['index', 'filename', 'event_name', 'video_link', 'reference'].includes(key)),
+  ));
+  if (semanticText) duplicateKeys.add(`semantic:${semanticText}`);
+
+  const sceneActionText = normalizeRequirementText(getRowFieldText(
+    row,
+    keys.filter(key => ['audio_type', 'scene', 'description', 'duration_logic', 'duration', 'playback_logic'].includes(key)),
+  ));
+  if (sceneActionText) duplicateKeys.add(`scene:${sceneActionText}`);
+
+  return Array.from(duplicateKeys);
+};
+
+const filterNewRequirementItems = (items: any[], existingRows: any[], type: TemplateType) => {
+  const seenKeys = new Set<string>();
+  existingRows.forEach(row => {
+    getRequirementDuplicateKeys(row, type).forEach(key => seenKeys.add(key));
+  });
+
+  return items.filter(item => {
+    const keys = getRequirementDuplicateKeys(item, type);
+    if (keys.length === 0) return true;
+    if (keys.some(key => seenKeys.has(key))) return false;
+    keys.forEach(key => seenKeys.add(key));
+    return true;
+  });
+};
+
+const createExistingRequirementSummary = (
+  rows: any[],
+  type: TemplateType,
+): ExistingSfxRequirementItem[] => rows.slice(0, 80).map(row => {
+  const summary: ExistingSfxRequirementItem = {};
+  TEMPLATE_INFO[type].keys.forEach(key => {
+    if (key === 'index') return;
+    const value = getRequirementCellValue(row, key);
+    if (value !== undefined && value !== null && String(value).trim()) {
+      (summary as Record<string, string>)[key] = String(value).slice(0, 500);
+    }
+  });
+  return summary;
+}).filter(item => Object.keys(item).length > 0);
+
 const stripScriptToneLabel = (value: unknown) => String(value ?? '')
   .trim()
   .replace(/^台词\s*[：:]\s*/u, '');
+
+const splitScriptToneValue = (value: unknown) => {
+  const text = stripScriptToneLabel(value);
+  if (!text || text === '-') return { script: text || '-', tone: '-' };
+  const match = text.match(/^(.*?)(?:[；;。.]?\s*(?:语气|情绪|口吻|表演|语气描述)\s*[：:]\s*)(.+)$/u);
+  if (!match) return { script: text, tone: '' };
+  const script = match[1].trim().replace(/[；;。.]$/u, '').trim();
+  const tone = match[2].trim();
+  return {
+    script: script || '-',
+    tone: tone || '',
+  };
+};
+
+const getRequirementCellValue = (row: any, key: string) => {
+  if (key === 'script' && (row?.script === undefined || row?.script === null || row?.script === '')) {
+    return splitScriptToneValue(row?.script_tone).script;
+  }
+  if (key === 'tone' && (row?.tone === undefined || row?.tone === null || row?.tone === '')) {
+    return splitScriptToneValue(row?.script_tone).tone;
+  }
+  if (key === 'script_tone') return stripScriptToneLabel(row?.script_tone);
+  return row?.[key] ?? '';
+};
 
 const inferGeneralAudioType = (item: any) => {
   const explicitType = String(item?.audio_type || item?.type || '').trim().toUpperCase();
@@ -239,6 +389,8 @@ const inferGeneralAudioType = (item: any) => {
     item?.scene,
     item?.description,
     item?.script_tone,
+    item?.script,
+    item?.tone,
     item?.remarks,
   ].filter(Boolean).join(' ').toLowerCase();
   if (/(配音|人声|台词|旁白|对白|语音|voice|voiceover|vocal|dialogue|dialog|speech)/i.test(combinedText)) return 'VO';
@@ -579,11 +731,18 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const consumedAssistantRequestRef = useRef<string | null>(null);
+  const submittedInputByTemplateRef = useRef<Record<TemplateType, string>>({
+    game_sfx_general: '',
+    game_sfx_middleware: '',
+    voiceover_general: '',
+    voiceover_multilang: '',
+  });
   const columnResizeRef = useRef<{ templateType: TemplateType; index: number; startX: number; startWidth: number } | null>(null);
   const [resizingColumn, setResizingColumn] = useState<number | null>(null);
   const rows = rowsByTemplate[templateType] || [];
   const hasCurrentRequirementDraft = draftByTemplate[templateType] || false;
   const selectedProjectName = PROJECT_OPTIONS.find(project => project.id === selectedProject)?.name || null;
+  const currentColumnWidths = getColumnWidthsForTemplate(columnWidthsByTemplate, templateType);
 
   useEffect(() => {
     if (!success || rows.length === 0) return;
@@ -681,12 +840,11 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
   const handleColumnResizeStart = (event: React.PointerEvent, index: number) => {
     event.preventDefault();
     event.stopPropagation();
-    const currentWidths = columnWidthsByTemplate[templateType] || DEFAULT_COLUMN_WIDTHS[templateType];
     columnResizeRef.current = {
       templateType,
       index,
       startX: event.clientX,
-      startWidth: currentWidths[index] || 140,
+      startWidth: currentColumnWidths[index] || 140,
     };
     setResizingColumn(index);
   };
@@ -837,7 +995,7 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
           newRow[key] = `event:/SFX/Module/new_${newIndex}`;
         } else if (key === 'duration' || key === 'duration_logic') {
           newRow[key] = "1s";
-        } else if (key === 'script_tone') {
+        } else if (key === 'script' || key === 'tone') {
           newRow[key] = "-";
         } else if (key === 'distance_3d') {
           newRow[key] = "20";
@@ -874,8 +1032,14 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
         if (key === 'index') return;
         if (type === 'game_sfx_general' && key === 'audio_type') {
           normalizedRow[key] = inferGeneralAudioType(item);
-        } else if (type === 'game_sfx_general' && key === 'script_tone') {
-          normalizedRow[key] = stripScriptToneLabel(item?.[key] || (inferGeneralAudioType(item) === 'VO' ? '' : '-'));
+        } else if (type === 'game_sfx_general' && key === 'script') {
+          const legacyScriptTone = splitScriptToneValue(item?.script_tone);
+          const script = String(item?.script ?? '').trim();
+          normalizedRow[key] = script || legacyScriptTone.script || (inferGeneralAudioType(item) === 'VO' ? '' : '-');
+        } else if (type === 'game_sfx_general' && key === 'tone') {
+          const legacyScriptTone = splitScriptToneValue(item?.script_tone);
+          const tone = String(item?.tone ?? '').trim();
+          normalizedRow[key] = tone || legacyScriptTone.tone || (inferGeneralAudioType(item) === 'VO' ? '' : '-');
         } else {
           normalizedRow[key] = item?.[key] ?? '';
         }
@@ -941,7 +1105,8 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
         duration_logic: `${duration > 0 ? `${duration.toFixed(2)}s` : '按字幕时长'}, 字幕配音`,
         scene: `视频字幕 ${cueIndex}，${start.toFixed(2)}s-${end.toFixed(2)}s`,
         description: `根据视频画面字幕生成的配音需求，角色/说话人：${clip.speaker || 'unknown'}。需匹配画面语境、字幕节奏和原始情绪。`,
-        script_tone: `${text}；语气：结合画面表情、动作与剧情情绪自然演绎`,
+        script: text,
+        tone: '结合画面表情、动作与剧情情绪自然演绎',
         remarks: `字幕ID：${clip.subtitleId || `subtitle-${cueIndex}`}；时间依据：${clip.timingSource || 'subtitle'}；后续制作时建议按字幕出现/消失边界控制口型与语速。`,
         video_link: screenshot?.name || '上传视频',
       };
@@ -979,10 +1144,10 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
     const existingVoTexts = new Set(
       items
         .filter(item => inferGeneralAudioType(item) === 'VO')
-        .map(item => normalizeRequirementText(item.script_tone || item.description || item.scene)),
+        .map(item => normalizeRequirementText(item.script || item.script_tone || item.description || item.scene)),
     );
     const uniqueVoRows = voRows.filter(row => {
-      const normalizedText = normalizeRequirementText(row.script_tone);
+      const normalizedText = normalizeRequirementText(row.script || row.script_tone);
       if (!normalizedText || existingVoTexts.has(normalizedText)) return false;
       existingVoTexts.add(normalizedText);
       return true;
@@ -1015,6 +1180,22 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
     const requestTemplateType = templateType;
     const requestReferenceFile = screenshot;
     const requestReferenceBase64 = screenshotBase64;
+    const requestExistingRows = mode === 'append'
+      ? rowsByTemplate[requestTemplateType] || []
+      : [];
+    const requestExistingItems = mode === 'append'
+      ? createExistingRequirementSummary(requestExistingRows, requestTemplateType)
+      : [];
+    const currentInputText = inputText.trim();
+    const lastSubmittedInputText = submittedInputByTemplateRef.current[requestTemplateType] || '';
+    const appendAddedInputTextFromHistory = mode === 'append'
+      ? getAddedRequirementText(currentInputText, lastSubmittedInputText)
+      : '';
+    const appendAddedInputText = appendAddedInputTextFromHistory
+      || (mode === 'append' ? getUncoveredRequirementText(currentInputText, requestExistingRows, requestTemplateType) : '');
+    const requestInputText = mode === 'append' && appendAddedInputText
+      ? `继续添加模式：本次用户新补充的需求描述如下，请优先只根据这些新补充内容生成新行，不要重复当前表格已有需求。\n${appendAddedInputText}`
+      : currentInputText;
 
     // Start automated loading step simulator
     const interval = setInterval(() => {
@@ -1036,11 +1217,20 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
         : Promise.resolve([]);
 
       const [response, detectedVoRows] = await Promise.all([
-        generateSfxRequirements(inputText.trim(), imageObj, requestTemplateType, selectedProjectName),
+        generateSfxRequirements(
+          requestInputText,
+          imageObj,
+          requestTemplateType,
+          selectedProjectName,
+          requestExistingItems,
+        ),
         detectedVoRowsPromise,
       ]);
       
-      if (response && Array.isArray(response.items) && response.items.length > 0) {
+      if (mode === 'append' && response && Array.isArray(response.items) && response.items.length === 0) {
+        setSuccessMessage('没有追加新需求：本次没有识别到区别于当前表格的新条目。请补充新的文字描述或上传新的参考文件后再继续添加。');
+        setSuccess(true);
+      } else if (response && Array.isArray(response.items) && response.items.length > 0) {
         const normalizedItems = simplifySingletonFilenameSuffixes(response.items);
         const projectAwareItems = selectedProject === 'jinn'
           ? normalizeJinnRequirementItems(response.items)
@@ -1071,15 +1261,29 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
               ? normalizeSunnyIslandRequirementItems(mergedItems)
             : normalizeGeneralRequirementItems(mergedItems);
         if (mode === 'append') {
-          setRowsForTemplate(requestTemplateType, prevRows => [
-            ...prevRows,
-            ...normalizeGeneratedRows(generatedItems, prevRows.length + 1, requestTemplateType),
-          ], true);
-          setSuccessMessage(`已继续添加 ${generatedItems.length} 条新需求到当前表格末尾${isTableReference && sourceItemCount < response.items.length ? `（已按参考表 ${sourceItemCount} 行校正）` : ''}${detectedVoRows.length ? `，其中包含 ${detectedVoRows.length} 条视频字幕配音需求` : ''}。`);
+          const uniqueGeneratedItems = filterNewRequirementItems(generatedItems, requestExistingRows, requestTemplateType);
+          const duplicateCount = Math.max(0, generatedItems.length - uniqueGeneratedItems.length);
+          if (uniqueGeneratedItems.length === 0) {
+            setSuccessMessage(
+              duplicateCount > 0
+                ? `没有追加新需求：AI 返回的 ${duplicateCount} 条内容都已存在于当前表格中，已自动过滤。请补充新的文字描述或上传新的参考文件后再继续添加。`
+                : '没有追加新需求：本次没有识别到区别于当前表格的新条目。请补充新的文字描述或上传新的参考文件后再继续添加。',
+            );
+          } else {
+            setRowsForTemplate(requestTemplateType, prevRows => {
+              const safeUniqueItems = filterNewRequirementItems(uniqueGeneratedItems, prevRows, requestTemplateType);
+              return [
+                ...prevRows,
+                ...normalizeGeneratedRows(safeUniqueItems, prevRows.length + 1, requestTemplateType),
+              ];
+            }, true);
+            setSuccessMessage(`已继续添加 ${uniqueGeneratedItems.length} 条新需求到当前表格末尾${duplicateCount > 0 ? `，并自动过滤 ${duplicateCount} 条重复需求` : ''}${isTableReference && sourceItemCount < response.items.length ? `（已按参考表 ${sourceItemCount} 行校正）` : ''}${detectedVoRows.length ? `，其中包含 ${detectedVoRows.length} 条视频字幕配音需求` : ''}。`);
+          }
         } else {
           setRowsForTemplate(requestTemplateType, normalizeGeneratedRows(generatedItems, 1, requestTemplateType), true);
           setSuccessMessage(`已生成 ${generatedItems.length} 条需求，并替换为当前这版需求表${isTableReference && sourceItemCount < response.items.length ? `（已按参考表 ${sourceItemCount} 行校正）` : ''}${detectedVoRows.length ? `，其中包含 ${detectedVoRows.length} 条视频字幕配音需求` : ''}。`);
         }
+        submittedInputByTemplateRef.current[requestTemplateType] = currentInputText;
         setSuccess(true);
       } else {
         throw new Error('AI 未生成任何需求，请确认服装名和 ID 格式，或检查 Gemini API 配置后重试。');
@@ -1102,8 +1306,8 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
     // Build lines
     const rowsContent = rows.map(row => {
       return keys.map(key => {
-        const rawVal = row[key] !== undefined && row[key] !== null ? row[key] : "";
-        const val = String(key === 'script_tone' ? stripScriptToneLabel(rawVal) : rawVal);
+        const rawVal = getRequirementCellValue(row, key);
+        const val = String(rawVal !== undefined && rawVal !== null ? rawVal : "");
         // Escape quotes
         return `"${val.replace(/"/g, '""')}"`;
       }).join(',');
@@ -1537,7 +1741,7 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
                 {currentTemplate.keys.map((key, idx) => (
                   <col
                     key={key}
-                    style={{ width: `${(columnWidthsByTemplate[templateType] || DEFAULT_COLUMN_WIDTHS[templateType])[idx] || 140}px` }}
+                    style={{ width: `${currentColumnWidths[idx] || 140}px` }}
                   />
                 ))}
                 <col style={{ width: '64px' }} />
@@ -1570,8 +1774,7 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
                 {rows.map((row, rowIndex) => (
                   <tr key={rowIndex} className="hover:bg-slate-50/60 transition-colors">
                     {currentTemplate.keys.map((key) => {
-                      const rawValue = row[key] !== undefined && row[key] !== null ? row[key] : "";
-                      const value = key === 'script_tone' ? stripScriptToneLabel(rawValue) : rawValue;
+                      const value = getRequirementCellValue(row, key);
                       const isIndex = key === 'index';
                       return (
                         <td key={key} className="p-1 px-2.5">

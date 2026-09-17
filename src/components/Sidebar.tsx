@@ -12,7 +12,6 @@ import {
   Mic, 
   Settings, 
   Folder, 
-  Volume2,
   Database,
   ClipboardList,
   SlidersHorizontal,
@@ -20,6 +19,7 @@ import {
   X
 } from 'lucide-react';
 import { TabType } from '../types';
+import wpLogoUrl from '../assets/wp-logo.png';
 
 const SIDEBAR_MIN_WIDTH = 72;
 const SIDEBAR_COMPACT_WIDTH = 160;
@@ -111,11 +111,14 @@ export default function Sidebar({ currentTab, setCurrentTab, isMobileOpen, onMob
       {/* Brand Logo */}
       <div className={`${variant === 'desktop' && isDesktopCompact ? 'px-3 py-5 justify-center' : 'px-6 py-6'} border-b border-slate-100 flex items-center gap-3`}>
         <div className={`flex min-w-0 flex-1 items-center ${variant === 'desktop' && isDesktopCompact ? 'justify-center gap-0' : 'gap-3'}`}>
-          <div className="w-9 h-9 shrink-0 bg-gradient-to-tr from-emerald-500 to-emerald-600 rounded-xl flex items-center justify-center shadow-lg shadow-emerald-500/10">
-            <Volume2 className="text-white w-5 h-5" />
-          </div>
-          <div className={`min-w-0 ${variant === 'desktop' && isDesktopCompact ? 'hidden' : ''}`}>
-            <h1 className="truncate text-sm font-bold tracking-tight text-slate-800">AI Audio</h1>
+          <img
+            src={wpLogoUrl}
+            alt="AI Audio"
+            className="h-9 w-9 shrink-0 rounded-xl object-contain shadow-lg shadow-emerald-500/10"
+          />
+          <div className={`min-w-0 flex-1 flex-col items-center text-center ${variant === 'desktop' && isDesktopCompact ? 'hidden' : 'flex'}`}>
+            <h1 className="max-w-full truncate text-sm font-bold tracking-tight text-slate-800">AI Audio</h1>
+            <p className="mt-1 max-w-full truncate text-[9px] font-semibold leading-none text-slate-500">高音甜 中音准 低音沉</p>
           </div>
         </div>
         {variant === 'mobile' && (

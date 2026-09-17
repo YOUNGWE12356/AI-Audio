@@ -8,6 +8,7 @@ import { Ban, Database, LockKeyhole, LogOut, Plus, ShieldCheck, Trash2 } from 'l
 import UsageDashboard from './UsageDashboard';
 import { clearLocalStoragePreservingClientIdentity } from '../services/clientIdentity';
 import { fetchAccessBlacklist, saveAccessBlacklist } from '../services/accessBlacklistService';
+import type { UsageUser } from '../services/usageService';
 import {
   loginSfxLibraryAdmin,
   logoutSfxLibraryAdmin,
@@ -26,6 +27,7 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
   const [blacklistedIps, setBlacklistedIps] = useState<string[]>([]);
   const [blacklistInput, setBlacklistInput] = useState('');
   const [blacklistLoading, setBlacklistLoading] = useState(false);
+  const [blacklistUpdatingUserId, setBlacklistUpdatingUserId] = useState<string | null>(null);
   const [blacklistFeedback, setBlacklistFeedback] = useState<string | null>(null);
 
   useEffect(() => {
@@ -105,6 +107,34 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
     }
   };
 
+  const handleSetMemberBlacklist = async (user: UsageUser, shouldBlock: boolean) => {
+    const memberIps = Array.from(new Set(user.ipAddresses.filter(Boolean)));
+    if (memberIps.length === 0 || blacklistLoading) return;
+    if (shouldBlock && typeof window !== 'undefined' && !window.confirm(
+      `确定将 ${user.displayName} 的 ${memberIps.length} 个已记录 IP 加入黑名单吗？\n\n${memberIps.join(', ')}\n\n这些 IP 的所有访问都会立即被拦截；若包含当前设备 IP，当前设置页也会被拦截。`,
+    )) return;
+
+    setBlacklistLoading(true);
+    setBlacklistUpdatingUserId(user.userId);
+    setBlacklistFeedback(null);
+    try {
+      const memberIpSet = new Set(memberIps);
+      const nextIps = shouldBlock
+        ? Array.from(new Set([...blacklistedIps, ...memberIps]))
+        : blacklistedIps.filter(ip => !memberIpSet.has(ip));
+      const savedIps = await saveAccessBlacklist(nextIps);
+      setBlacklistedIps(savedIps);
+      setBlacklistFeedback(
+        `已将 ${user.displayName} 的 ${memberIps.length} 个 IP ${shouldBlock ? '加入' : '移出'}黑名单。`,
+      );
+    } catch (error) {
+      setBlacklistFeedback(error instanceof Error ? error.message : '保存 IP 黑名单失败。');
+    } finally {
+      setBlacklistUpdatingUserId(null);
+      setBlacklistLoading(false);
+    }
+  };
+
   const handleClearCache = async () => {
     if (typeof window === 'undefined' || !confirm('确定清空本地浏览器缓存与历史工程记录吗？服务器文件不会被删除。')) return;
     await logoutSfxLibraryAdmin();
@@ -171,7 +201,13 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
         </button>
       </header>
 
-      <UsageDashboard />
+      <UsageDashboard
+        blacklistedIps={blacklistedIps}
+        blacklistLoading={blacklistLoading}
+        blacklistUpdatingUserId={blacklistUpdatingUserId}
+        blacklistFeedback={blacklistFeedback}
+        onSetMemberBlacklist={handleSetMemberBlacklist}
+      />
 
       <section className="mt-8 border-t border-slate-200 pt-6">
         <div className="flex items-center gap-2">

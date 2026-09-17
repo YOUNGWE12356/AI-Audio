@@ -42,7 +42,12 @@ export async function loadPersistentHistory(): Promise<HistoryItem[]> {
     metadata = [];
   }
   if (!canUseIndexedDb()) return metadata;
-  const database = await openDatabase();
+  let database: IDBDatabase;
+  try {
+    database = await openDatabase();
+  } catch {
+    return metadata;
+  }
   try {
     const entries = await new Promise<StoredHistoryEntry[]>((resolve, reject) => {
       const request = database.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).getAll();
@@ -66,6 +71,8 @@ export async function loadPersistentHistory(): Promise<HistoryItem[]> {
           ...(attachments ? { attachments } : {}),
         };
       });
+  } catch {
+    return metadata;
   } finally {
     database.close();
   }
@@ -77,7 +84,7 @@ export async function persistHistory(items: HistoryItem[]): Promise<void> {
       ...item,
       // Blob URLs are tab-scoped; IndexedDB (when available) restores the file.
       // Keep the metadata record usable in browsers without IndexedDB.
-      ...(item.url.startsWith('blob:') ? { url: '' } : {}),
+      ...(item.url?.startsWith('blob:') ? { url: '' } : {}),
     }))));
   } catch {
     // Storage quota or privacy mode should not interrupt generation.

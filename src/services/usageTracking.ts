@@ -28,12 +28,37 @@ export const recordAiUsage = (event: AiUsageEvent) => {
   }
 };
 
-export const recordElevenLabsResponseUsage = (response: Response, model: string) => {
+const ELEVENLABS_CREDIT_HEADER_NAMES = [
+  'character-cost',
+  'x-character-cost',
+  'credits-used',
+  'x-credits-used',
+  'elevenlabs-character-cost',
+  'x-elevenlabs-character-cost',
+  'elevenlabs-credits-used',
+  'x-elevenlabs-credits-used',
+  'xi-character-cost',
+  'xi-credits-used',
+];
+
+const parseElevenLabsCreditHeader = (response: Response) => {
+  for (const headerName of ELEVENLABS_CREDIT_HEADER_NAMES) {
+    const rawValue = response.headers.get(headerName);
+    if (rawValue === null) continue;
+    const credits = Number(rawValue);
+    if (Number.isFinite(credits)) return Math.max(0, credits);
+  }
+  return null;
+};
+
+export const recordElevenLabsResponseUsage = (
+  response: Response,
+  model: string,
+  options: { fallbackCredits?: number } = {},
+) => {
   if (!response.ok) return;
-  const rawCredits = response.headers.get('character-cost')
-    || response.headers.get('credits-used')
-    || response.headers.get('x-character-cost');
-  const credits = Number(rawCredits);
+  const headerCredits = parseElevenLabsCreditHeader(response);
+  const fallbackCredits = toUsageNumber(options.fallbackCredits);
   recordAiUsage({
     provider: 'elevenlabs',
     model,
@@ -41,6 +66,6 @@ export const recordElevenLabsResponseUsage = (response: Response, model: string)
     outputTokens: 0,
     reasoningTokens: 0,
     totalTokens: 0,
-    credits: Number.isFinite(credits) ? Math.max(0, credits) : 0,
+    credits: headerCredits ?? fallbackCredits,
   });
 };

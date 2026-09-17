@@ -158,6 +158,7 @@ type SearchScope = '全部' | '音效库' | '音乐' | '公司音效';
 const SEARCH_SCOPE_OPTIONS: SearchScope[] = ['全部', '音效库', '音乐', '公司音效'];
 const SFX_LIBRARY_RATINGS_KEY = 'ai-audio-sfx-library-ratings-v1';
 const SFX_LIBRARY_FAVORITES_KEY = 'ai-audio-sfx-library-favorites-v1';
+const SFX_LIBRARY_SEARCH_HISTORY_KEY = 'ai-audio-sfx-library-search-history-v1';
 const RATING_VALUES = [1, 2, 3, 4, 5] as const;
 
 type SoundRatings = Record<string, number>;
@@ -196,6 +197,31 @@ const readStoredSoundFavorites = (): SoundFavoriteOverrides => {
   } catch {
     return {};
   }
+};
+
+const readStoredSearchHistory = (): string[] => {
+  if (typeof window === 'undefined') return [];
+  try {
+    const saved = localStorage.getItem(SFX_LIBRARY_SEARCH_HISTORY_KEY);
+    if (!saved) return [];
+    const parsed = JSON.parse(saved);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      .map(item => item.trim())
+      .slice(0, 5);
+  } catch {
+    return [];
+  }
+};
+
+const getNextSearchHistory = (previous: string[], query: string): string[] => {
+  const normalizedQuery = query.trim();
+  if (!normalizedQuery) return previous;
+  return [
+    normalizedQuery,
+    ...previous.filter(item => item.trim().toLowerCase() !== normalizedQuery.toLowerCase()),
+  ].slice(0, 5);
 };
 
 const isUploadedAudioAsset = (sound: SoundEffect) => {
@@ -672,6 +698,150 @@ interface SoundRatingControlProps {
   onRate: (soundId: string, rating: number) => void;
 }
 
+const LIBRARY_WAVEFORM_BAR_COUNT = 48;
+
+const getFallbackWaveformPeaks = (seedText: string, count = LIBRARY_WAVEFORM_BAR_COUNT) => {
+  let seed = 0;
+  for (let index = 0; index < seedText.length; index++) {
+    seed = (seed * 31 + seedText.charCodeAt(index)) >>> 0;
+  }
+
+  return Array.from({ length: count }, (_, index) => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    const randomValue = seed / 0xffffffff;
+    const envelope = 0.55 + 0.35 * Math.sin((index / Math.max(1, count - 1)) * Math.PI);
+    const transient = index % 7 === 0 ? 0.18 : 0;
+    return Math.max(0.12, Math.min(1, (0.22 + randomValue * 0.72) * envelope + transient));
+  });
+};
+
+const extractWaveformPeaksFromBuffer = (
+  audioBuffer: AudioBuffer,
+  count = LIBRARY_WAVEFORM_BAR_COUNT,
+) => {
+  const channelCount = audioBuffer.numberOfChannels;
+  const sampleCount = audioBuffer.length;
+  if (!channelCount || !sampleCount) return [];
+
+  const segmentSize = Math.max(1, Math.floor(sampleCount / count));
+  const peaks = Array.from({ length: count }, (_, segmentIndex) => {
+    const start = segmentIndex * segmentSize;
+    const end = Math.min(sampleCount, start + segmentSize);
+    const stride = Math.max(1, Math.floor((end - start) / 180));
+    let peak = 0;
+
+    for (let channelIndex = 0; channelIndex < channelCount; channelIndex++) {
+      const channelData = audioBuffer.getChannelData(channelIndex);
+      for (let sampleIndex = start; sampleIndex < end; sampleIndex += stride) {
+        const value = Math.abs(channelData[sampleIndex] || 0);
+        if (value > peak) peak = value;
+      }
+    }
+
+    return peak;
+  });
+
+  const maxPeak = Math.max(...peaks, 0.001);
+  return peaks.map(peak => Math.max(0.08, Math.min(1, Math.pow(peak / maxPeak, 0.72))));
+};
+
+interface LibraryWaveformPreviewProps {
+  sound: SoundEffect;
+  peaks?: number[];
+  progress: number;
+  isPlaying: boolean;
+  onLoadWaveform: (sound: SoundEffect) => void;
+  onSeekPlay: (soundId: string, ratio: number) => void;
+}
+
+const LibraryWaveformPreview = React.memo(function LibraryWaveformPreview({
+  sound,
+  peaks,
+  progress,
+  isPlaying,
+  onLoadWaveform,
+  onSeekPlay,
+}: LibraryWaveformPreviewProps) {
+  const containerRef = useRef<HTMLButtonElement | null>(null);
+  const fallbackPeaks = useMemo(
+    () => getFallbackWaveformPeaks(`${sound.id}:${sound.fileName || sound.name}`),
+    [sound.fileName, sound.id, sound.name],
+  );
+  const displayPeaks = peaks || fallbackPeaks;
+
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element || peaks) return;
+
+    if (typeof IntersectionObserver === 'undefined') {
+      onLoadWaveform(sound);
+      return;
+    }
+
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some(entry => entry.isIntersecting)) {
+        onLoadWaveform(sound);
+        observer.disconnect();
+      }
+    }, { rootMargin: '180px' });
+
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [onLoadWaveform, peaks, sound]);
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    onLoadWaveform(sound);
+    const rect = event.currentTarget.getBoundingClientRect();
+    const ratio = rect.width > 0
+      ? Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width))
+      : 0;
+    onSeekPlay(sound.id, ratio);
+  };
+
+  return (
+    <button
+      ref={containerRef}
+      type="button"
+      aria-label={`从音波位置播放${sound.name}`}
+      className={`group/wave relative h-9 w-full overflow-hidden rounded-lg border px-2 transition-colors ${
+        isPlaying
+          ? 'border-emerald-200 bg-emerald-50/80'
+          : 'border-slate-100 bg-slate-50/90 hover:border-emerald-200 hover:bg-emerald-50/50'
+      }`}
+      title="点击音波任意位置，从对应时间开始播放"
+      onPointerDown={handlePointerDown}
+      onMouseEnter={() => onLoadWaveform(sound)}
+      onFocus={() => onLoadWaveform(sound)}
+    >
+      <div className="absolute inset-y-0 left-0 bg-emerald-100/70" style={{ width: `${progress}%` }} />
+      <div
+        aria-hidden="true"
+        className="absolute inset-y-1 z-20 w-0.5 rounded-full bg-emerald-700 shadow-[0_0_0_1px_rgba(255,255,255,0.85)]"
+        style={{ left: `${progress}%`, transform: 'translateX(-50%)' }}
+      />
+      <div className="relative z-10 flex h-full items-center gap-[2px]">
+        {displayPeaks.map((heightRatio, index) => {
+          const barProgress = (index / Math.max(1, displayPeaks.length - 1)) * 100;
+          const isActive = progress >= barProgress;
+          return (
+            <span
+              key={`${sound.id}-wave-${index}`}
+              aria-hidden="true"
+              className={`min-w-[2px] flex-1 rounded-full transition-colors ${
+                isActive
+                  ? 'bg-emerald-600'
+                  : (peaks ? 'bg-slate-300 group-hover/wave:bg-slate-400' : 'bg-slate-200')
+              }`}
+              style={{ height: `${Math.max(14, heightRatio * 100)}%` }}
+            />
+          );
+        })}
+      </div>
+    </button>
+  );
+});
+
 const SoundRatingControl = React.memo(function SoundRatingControl({
   soundId,
   soundName,
@@ -814,7 +984,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchScope, setSearchScope] = useState<SearchScope>('全部');
-  const [searchHistory, setSearchHistory] = useState<string[]>(['金属撞击', '科幻激光', 'Q版点击']);
+  const [searchHistory, setSearchHistory] = useState<string[]>(readStoredSearchHistory);
   const [showFilters, setShowFilters] = useState<boolean>(true);
 
   // Custom expandable parent sections
@@ -864,6 +1034,14 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
       if (assistantSubcategory.trim()) setSearchQuery('');
     }
   }, [assistantCategory, assistantSearchQuery, assistantSubcategory, categories]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SFX_LIBRARY_SEARCH_HISTORY_KEY, JSON.stringify(searchHistory.slice(0, 5)));
+    } catch {
+      // Ignore storage failures such as private mode quota restrictions.
+    }
+  }, [searchHistory]);
 
   // Category management helper states
   const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
@@ -1341,6 +1519,47 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   const getAudioDownloadUrl = (sound: SoundEffect) => (
     sound.downloadUrl || sound.url || getAudioSourceUrl(sound)
   );
+
+  const loadSoundWaveform = useCallback((sound: SoundEffect) => {
+    if (!sound?.id) return;
+    if (waveformPeaksRef.current[sound.id] || waveformRequestsRef.current[sound.id]) return;
+
+    const fallbackPeaks = getFallbackWaveformPeaks(`${sound.id}:${sound.fileName || sound.name}`);
+    const request = (async () => {
+      try {
+        const audioUrl = getAudioDownloadUrl(sound);
+        if (!audioUrl) return fallbackPeaks;
+
+        const response = await fetch(audioUrl);
+        if (!response.ok) throw new Error(`Waveform fetch failed: ${response.status}`);
+
+        const arrayBuffer = await response.arrayBuffer();
+        const AudioContextCtor = window.AudioContext || (window as any).webkitAudioContext;
+        if (!AudioContextCtor) return fallbackPeaks;
+
+        const audioContext = waveformAudioContextRef.current || new AudioContextCtor();
+        waveformAudioContextRef.current = audioContext;
+        const decodedBuffer = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+        const peaks = extractWaveformPeaksFromBuffer(decodedBuffer);
+        return peaks.length > 0 ? peaks : fallbackPeaks;
+      } catch (error) {
+        console.warn(`Failed to load waveform for ${sound.name}:`, error);
+        return fallbackPeaks;
+      }
+    })();
+
+    waveformRequestsRef.current[sound.id] = request;
+    request
+      .then((peaks) => {
+        setWaveformPeaks(prev => {
+          if (prev[sound.id]) return prev;
+          return { ...prev, [sound.id]: peaks };
+        });
+      })
+      .finally(() => {
+        delete waveformRequestsRef.current[sound.id];
+      });
+  }, []);
 
   const handleDownloadSingleSound = (sound: SoundEffect) => {
     if (!sound) return;
@@ -2110,8 +2329,13 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   );
 
   const [selectedSoundId, setSelectedSoundId] = useState<string>('sfx-1');
-  const [isPropertiesPanelOpen, setIsPropertiesPanelOpen] = useState(true);
+  const [isPropertiesPanelOpen, setIsPropertiesPanelOpen] = useState(false);
   const selectedSound = sounds.find(s => s.id === selectedSoundId) || sounds[0] || { duration: 1, name: '', fileName: '', format: '', tags: [], size: '', channels: '', sampleRate: '', designer: '', path: '' };
+
+  const handleSoundNameDoubleClick = (soundId: string) => {
+    setSelectedSoundId(soundId);
+    setIsPropertiesPanelOpen(current => (current && selectedSoundId === soundId ? false : true));
+  };
 
   // Global playback control states
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
@@ -2123,6 +2347,14 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
 
   // Audio elements map for each sound to render waveform progress
   const [playbackProgress, setPlaybackProgress] = useState<{ [key: string]: number }>({});
+  const [waveformPeaks, setWaveformPeaks] = useState<Record<string, number[]>>({});
+  const waveformPeaksRef = useRef<Record<string, number[]>>({});
+  const waveformRequestsRef = useRef<Record<string, Promise<number[]>>>({});
+  const waveformAudioContextRef = useRef<AudioContext | null>(null);
+
+  useEffect(() => {
+    waveformPeaksRef.current = waveformPeaks;
+  }, [waveformPeaks]);
 
   // Core Flow A: Import / Drag-and-drop file upload states
   const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
@@ -2437,6 +2669,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
+  const audioProgressAnimationRef = useRef<number | null>(null);
 
   // A ref to keep track of the latest state values to avoid closure issues during asynchronous operations
   const stateRef = useRef({ sounds, selectedSoundId, isPlaying });
@@ -2444,8 +2677,59 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     stateRef.current = { sounds, selectedSoundId, isPlaying };
   }, [sounds, selectedSoundId, isPlaying]);
 
+  const stopAudioProgressSync = useCallback(() => {
+    if (audioProgressAnimationRef.current !== null) {
+      window.cancelAnimationFrame(audioProgressAnimationRef.current);
+      audioProgressAnimationRef.current = null;
+    }
+  }, []);
+
+  const syncAudioProgressFromElement = useCallback((soundId = stateRef.current.selectedSoundId) => {
+    const audioElement = audioPlayerRef.current;
+    if (!audioElement) return;
+
+    const cur = audioElement.currentTime;
+    const dur = audioElement.duration;
+
+    if (Number.isNaN(cur) || Number.isNaN(dur) || !Number.isFinite(dur) || dur <= 0) {
+      return;
+    }
+
+    const nextProgress = Math.max(0, Math.min(100, (cur / dur) * 100));
+    setCurrentTime(cur);
+    setLoadedDuration(dur);
+    setPlaybackProgress(prev => {
+      if (Math.abs((prev[soundId] || 0) - nextProgress) < 0.05) return prev;
+      return {
+        ...prev,
+        [soundId]: nextProgress,
+      };
+    });
+  }, []);
+
+  const startAudioProgressSync = useCallback((soundId = stateRef.current.selectedSoundId) => {
+    stopAudioProgressSync();
+
+    const tick = () => {
+      syncAudioProgressFromElement(soundId);
+      const audioElement = audioPlayerRef.current;
+      if (audioElement && !audioElement.paused && !audioElement.ended) {
+        audioProgressAnimationRef.current = window.requestAnimationFrame(tick);
+      } else {
+        audioProgressAnimationRef.current = null;
+      }
+    };
+
+    audioProgressAnimationRef.current = window.requestAnimationFrame(tick);
+  }, [stopAudioProgressSync, syncAudioProgressFromElement]);
+
+  useEffect(() => {
+    return () => stopAudioProgressSync();
+  }, [stopAudioProgressSync]);
+
   // --- HTML5 Audio Control Sync ---
   useEffect(() => {
+    stopAudioProgressSync();
     // Whenever selectedSound changes, load, pause, and reset progress indicators
     setIsPlaying(false);
     setCurrentTime(0);
@@ -2458,7 +2742,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
       ...prev,
       [selectedSoundId]: 0
     }));
-  }, [selectedSoundId]);
+  }, [selectedSoundId, stopAudioProgressSync]);
 
   useEffect(() => {
     if (audioPlayerRef.current) {
@@ -2500,7 +2784,10 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
       audioPlayerRef.current.src = 'https://assets.mixkit.co/active_storage/sfx/2568/2568-84.wav';
       audioPlayerRef.current.load();
       audioPlayerRef.current.play()
-        .then(() => setIsPlaying(true))
+        .then(() => {
+          setIsPlaying(true);
+          startAudioProgressSync(stateRef.current.selectedSoundId);
+        })
         .catch(fallbackErr => {
           console.error("Fallback playback also failed:", fallbackErr);
         });
@@ -2516,15 +2803,21 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     if (currentSelectedId === soundId) {
       if (currentIsPlaying) {
         audioPlayerRef.current.pause();
+        stopAudioProgressSync();
+        syncAudioProgressFromElement(soundId);
         setIsPlaying(false);
       } else {
         audioPlayerRef.current.play()
-          .then(() => setIsPlaying(true))
+          .then(() => {
+            setIsPlaying(true);
+            startAudioProgressSync(soundId);
+          })
           .catch(err => handlePlaybackError(err));
       }
     } else {
       setSelectedSoundId(soundId);
       setIsPlaying(false);
+      stopAudioProgressSync();
       setLoadedDuration(null);
 
       const targetSound = stateRef.current.sounds.find(s => s.id === soundId);
@@ -2537,7 +2830,10 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
         setTimeout(() => {
           if (audioPlayerRef.current) {
             audioPlayerRef.current.play()
-              .then(() => setIsPlaying(true))
+              .then(() => {
+                setIsPlaying(true);
+                startAudioProgressSync(soundId);
+              })
               .catch(err => handlePlaybackError(err));
           }
         }, 30);
@@ -2545,34 +2841,77 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     }
   };
 
+  const handleWaveformSeekPlay = useCallback((soundId: string, ratio: number) => {
+    const audioElement = audioPlayerRef.current;
+    if (!audioElement) return;
+
+    const targetSound = stateRef.current.sounds.find(sound => sound.id === soundId);
+    if (!targetSound) return;
+
+    const boundedRatio = Math.max(0, Math.min(1, ratio));
+    const startPlayback = () => {
+      const realDuration = Number.isFinite(audioElement.duration) && audioElement.duration > 0
+        ? audioElement.duration
+        : targetSound.duration;
+      const nextTime = Math.max(0, Math.min(realDuration || 0, boundedRatio * (realDuration || 0)));
+
+      if (Number.isFinite(nextTime)) {
+        audioElement.currentTime = nextTime;
+        setCurrentTime(nextTime);
+        setLoadedDuration(realDuration || null);
+        setPlaybackProgress(prev => ({
+          ...prev,
+          [soundId]: realDuration ? (nextTime / realDuration) * 100 : 0,
+        }));
+      }
+
+      audioElement.play()
+        .then(() => {
+          setIsPlaying(true);
+          startAudioProgressSync(soundId);
+        })
+        .catch(err => handlePlaybackError(err));
+    };
+
+    const targetSourceUrl = getAudioSourceUrl(targetSound);
+    const isSwitchingSound = stateRef.current.selectedSoundId !== soundId || !audioElement.src.includes(targetSourceUrl);
+
+    if (isSwitchingSound) {
+      setSelectedSoundId(soundId);
+      setIsPlaying(false);
+      stopAudioProgressSync();
+      setLoadedDuration(null);
+      audioElement.src = targetSourceUrl;
+      audioElement.load();
+    }
+
+    const startWhenReady = () => {
+      if (audioElement.readyState >= 1 && Number.isFinite(audioElement.duration) && audioElement.duration > 0) {
+        startPlayback();
+        return;
+      }
+
+      audioElement.addEventListener('loadedmetadata', startPlayback, { once: true });
+    };
+
+    if (isSwitchingSound) {
+      window.setTimeout(startWhenReady, 30);
+      return;
+    }
+
+    startWhenReady();
+  }, []);
+
   const togglePlayPause = () => {
     handlePlaySound(stateRef.current.selectedSoundId);
   };
 
   const handleTimeUpdate = () => {
-    if (audioPlayerRef.current) {
-      const cur = audioPlayerRef.current.currentTime;
-      const dur = audioPlayerRef.current.duration;
-      
-      // Safeguard against NaN/Infinity/unloaded audio metadata
-      if (isNaN(cur) || isNaN(dur) || !isFinite(dur) || dur <= 0) {
-        return;
-      }
-      
-      setCurrentTime(cur);
-      
-      // Keep loadedDuration in sync with the real audio element
-      setLoadedDuration(dur);
-      
-      // Update progress map for current selected item
-      setPlaybackProgress(prev => ({
-        ...prev,
-        [selectedSoundId]: (cur / dur) * 100
-      }));
-    }
+    syncAudioProgressFromElement();
   };
 
   const handleAudioEnded = () => {
+    stopAudioProgressSync();
     if (!isLooping) {
       setIsPlaying(false);
       setCurrentTime(0);
@@ -2719,13 +3058,12 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   // --- Handlers ---
   const handleFuzzySearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (searchQuery.trim() && !searchHistory.includes(searchQuery.trim())) {
-      setSearchHistory(prev => [searchQuery.trim(), ...prev.slice(0, 4)]);
-    }
+    setSearchHistory(prev => getNextSearchHistory(prev, searchQuery));
   };
 
   const selectHistoryQuery = (q: string) => {
     setSearchQuery(q);
+    setSearchHistory(prev => getNextSearchHistory(prev, q));
   };
 
   const toggleFavorite = (sound: SoundEffect, e: React.MouseEvent<HTMLButtonElement>) => {
@@ -4364,21 +4702,22 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
               </div>
             </div>
 
-            {/* Suggestions & Search History */}
-            <div className="flex flex-wrap items-center gap-2 text-xs">
-              <span className="text-slate-400 text-[10px] font-bold">高频热词:</span>
-              <div className="flex flex-wrap gap-1">
+            {/* Search History */}
+            {searchHistory.length > 0 && (
+              <div className="flex flex-wrap gap-1 text-xs">
                 {searchHistory.map((q, idx) => (
                   <button
-                    key={idx}
+                    key={`${q}-${idx}`}
+                    type="button"
                     onClick={() => selectHistoryQuery(q)}
                     className="bg-slate-50 hover:bg-slate-100 border border-slate-200 px-2 py-0.5 rounded text-[10px] text-slate-500 hover:text-emerald-650 transition-colors flex items-center gap-0.5"
+                    title={`再次搜索：${q}`}
                   >
                     <span>{q}</span>
                   </button>
                 ))}
               </div>
-            </div>
+            )}
 
             {/* Advanced Filters Expand Toggle */}
             <div className="flex items-center justify-between border-t border-slate-100 pt-2.5">
@@ -4513,7 +4852,11 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
               <div className="space-y-2">
                 {filteredSounds.map((sound) => {
                   const isSelected = selectedSoundId === sound.id;
-                  const itemProgress = playbackProgress[sound.id] || 0;
+                  const realSelectedDuration = loadedDuration !== null ? loadedDuration : (selectedSound.duration || 1);
+                  const liveSelectedProgress = realSelectedDuration > 0
+                    ? Math.max(0, Math.min(100, (currentTime / realSelectedDuration) * 100))
+                    : 0;
+                  const itemProgress = isSelected ? liveSelectedProgress : (playbackProgress[sound.id] || 0);
                   const isItemPlaying = isPlaying && selectedSoundId === sound.id;
                   const isFavorite = isSoundFavorite(sound);
 
@@ -4522,9 +4865,8 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                       key={sound.id}
                       onClick={() => {
                         setSelectedSoundId(sound.id);
-                        setIsPropertiesPanelOpen(true);
                       }}
-                      className={`group grid grid-cols-1 gap-3 rounded-xl border p-3 transition-all cursor-pointer sm:grid-cols-[minmax(200px,55%)_56px_auto] sm:items-center sm:justify-start md:grid-cols-[minmax(180px,40%)_minmax(104px,128px)_56px_auto] ${
+                      className={`group grid grid-cols-1 gap-3 rounded-xl border p-3 transition-all cursor-pointer sm:grid-cols-[minmax(200px,55%)_56px_auto] sm:items-center sm:justify-start md:grid-cols-[minmax(180px,34%)_minmax(180px,260px)_56px_auto] ${
                         isSelected 
                           ? 'bg-emerald-50/60 border-emerald-300 shadow-sm' 
                           : 'bg-white border-slate-200 hover:border-slate-300'
@@ -4551,7 +4893,14 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                           )}
                         </button>
 
-                        <div className="min-w-0 flex-1">
+                        <div
+                          className="min-w-0 flex-1"
+                          onDoubleClick={(event) => {
+                            event.stopPropagation();
+                            handleSoundNameDoubleClick(sound.id);
+                          }}
+                          title="双击打开/关闭资源详情"
+                        >
                           <div className="flex items-center gap-2 min-w-0">
                             <span className={`text-[11px] font-black truncate ${isSelected ? 'text-emerald-700' : 'text-slate-700 group-hover:text-slate-900'}`} title={sound.name}>
                               {sound.name}
@@ -4569,26 +4918,15 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                       </div>
 
                       {/* Middle Block: Simplified wave progress display */}
-                      <div className="hidden min-w-0 w-full px-1.5 md:block">
-                        <div className="h-6 flex items-center gap-0.5 bg-slate-100/70 rounded px-1.5 relative overflow-hidden">
-                          {/* Simulated mini waveform heights */}
-                          {[40, 60, 20, 80, 50, 70, 90, 40, 30, 60, 80, 20, 50, 60, 80, 30, 50, 40].map((h, i) => {
-                            const activeLimit = (i / 18) * 100;
-                            const isBarActive = isSelected && itemProgress >= activeLimit;
-                            return (
-                              <div
-                                key={i}
-                                className={`flex-1 rounded-full transition-all`}
-                                style={{
-                                  height: `${h}%`,
-                                  backgroundColor: isBarActive 
-                                    ? '#059669' // emerald-600
-                                    : (isItemPlaying ? '#10b981' : '#cbd5e1') // emerald-500 / slate-300
-                                }}
-                              />
-                            );
-                          })}
-                        </div>
+                      <div className="hidden min-w-0 w-full md:block">
+                        <LibraryWaveformPreview
+                          sound={sound}
+                          peaks={waveformPeaks[sound.id]}
+                          progress={isSelected ? itemProgress : 0}
+                          isPlaying={isItemPlaying}
+                          onLoadWaveform={loadSoundWaveform}
+                          onSeekPlay={handleWaveformSeekPlay}
+                        />
                       </div>
 
                       <div className="hidden min-w-[50px] shrink-0 text-left font-mono text-[10px] text-slate-400 sm:block">
@@ -4598,6 +4936,18 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
 
                       {/* Right Block: Personal actions and rating */}
                       <div className="flex shrink-0 items-center justify-end gap-2 justify-self-end">
+                        <button
+                          type="button"
+                          aria-label={`下载${sound.name}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleDownloadSingleSound(sound);
+                          }}
+                          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-slate-300 transition-colors hover:bg-emerald-50 hover:text-emerald-600"
+                          title={`下载原文件：${sound.fileName || sound.name}`}
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                        </button>
                         <button
                           type="button"
                           aria-label={`${isFavorite ? '取消收藏' : '收藏'}${sound.name}`}
@@ -4651,6 +5001,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                     const dur = audioPlayerRef.current.duration;
                     if (dur && !isNaN(dur) && isFinite(dur)) {
                       audioPlayerRef.current.currentTime = ratio * dur;
+                      syncAudioProgressFromElement();
                     }
                   }
                 }}
@@ -4752,6 +5103,12 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
             <audio
               ref={audioPlayerRef}
               src={getAudioSourceUrl(selectedSound)}
+              onLoadedMetadata={() => syncAudioProgressFromElement()}
+              onPlay={() => startAudioProgressSync()}
+              onPause={() => {
+                stopAudioProgressSync();
+                syncAudioProgressFromElement();
+              }}
               onTimeUpdate={handleTimeUpdate}
               onEnded={handleAudioEnded}
             />

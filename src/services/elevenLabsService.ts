@@ -67,6 +67,38 @@ export const ELEVENLABS_MUSIC_OUTPUT_FORMAT = 'mp3_48000_192';
 export const ELEVENLABS_SOUND_MODEL = 'eleven_text_to_sound_v2';
 export const ELEVENLABS_SOUND_OUTPUT_FORMAT = 'pcm_48000';
 
+export const ELEVENLABS_MUSIC_CREDITS_PER_MINUTE = 900;
+export const ELEVENLABS_SOUND_EFFECT_CREDITS_PER_GENERATION = 200;
+export const ELEVENLABS_SPEECH_TO_TEXT_CREDITS_PER_MINUTE = 330;
+export const ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE = 1000;
+
+const countBillableCharacters = (text: string) => Array.from(text.trim()).length;
+
+export const estimateTextGenerationCredits = (text: string) => (
+  Math.max(1, countBillableCharacters(text))
+);
+
+export const estimateTimedCredits = (
+  durationSeconds: number | undefined,
+  creditsPerMinute: number,
+  minimumCredits = 1,
+) => {
+  const safeDuration = typeof durationSeconds === 'number' && Number.isFinite(durationSeconds) && durationSeconds > 0
+    ? durationSeconds
+    : 1;
+  return Math.max(minimumCredits, Math.ceil((safeDuration / 60) * creditsPerMinute));
+};
+
+export const estimateAudioDurationSecondsFromBlob = (audioFile: File | Blob) => {
+  const size = Number(audioFile.size);
+  if (!Number.isFinite(size) || size <= 0) return undefined;
+  const mimeType = String(audioFile.type || '').toLowerCase();
+  const assumedBitsPerSecond = /wav|wave|pcm|aiff|aif|flac/.test(mimeType)
+    ? 768_000
+    : 128_000;
+  return Math.max(1, size * 8 / assumedBitsPerSecond);
+};
+
 export const wrapElevenLabsPcmAsWav = (pcm: ArrayBuffer | Uint8Array, sampleRate = 48000, channels = 1): Blob => {
   const pcmBytes = pcm instanceof Uint8Array ? pcm : new Uint8Array(pcm);
   const wav = new ArrayBuffer(44 + pcmBytes.byteLength);
@@ -310,7 +342,9 @@ export async function generateSoundEffect(text: string, duration?: number, optio
       throw new Error(await getElevenLabsErrorMessage(response));
     }
 
-    recordElevenLabsResponseUsage(response, ELEVENLABS_SOUND_MODEL);
+    recordElevenLabsResponseUsage(response, ELEVENLABS_SOUND_MODEL, {
+      fallbackCredits: ELEVENLABS_SOUND_EFFECT_CREDITS_PER_GENERATION,
+    });
     return wrapElevenLabsPcmAsWav(await response.arrayBuffer());
   });
 }
@@ -393,7 +427,12 @@ export async function generateMusic(
       throw new Error(message);
     }
 
-    recordElevenLabsResponseUsage(response, ELEVENLABS_MUSIC_MODEL);
+    recordElevenLabsResponseUsage(response, ELEVENLABS_MUSIC_MODEL, {
+      fallbackCredits: estimateTimedCredits(
+        normalizedDurationSeconds,
+        ELEVENLABS_MUSIC_CREDITS_PER_MINUTE,
+      ),
+    });
     return await response.blob();
   });
 }
@@ -464,7 +503,9 @@ export async function generateVoice(
           });
 
           if (response.ok) {
-            recordElevenLabsResponseUsage(response, modelId);
+            recordElevenLabsResponseUsage(response, modelId, {
+              fallbackCredits: estimateTextGenerationCredits(textForModel),
+            });
             return await response.blob();
           }
 
@@ -522,7 +563,9 @@ export async function generateVoice(
         });
 
         if (response.ok) {
-          recordElevenLabsResponseUsage(response, 'eleven_multilingual_v2');
+          recordElevenLabsResponseUsage(response, 'eleven_multilingual_v2', {
+            fallbackCredits: estimateTextGenerationCredits(fallbackText),
+          });
           return await response.blob();
         }
 
@@ -770,7 +813,12 @@ export async function generateSpeechToSpeech(
       throw new Error(await getElevenLabsErrorMessage(response));
     }
 
-    recordElevenLabsResponseUsage(response, 'eleven_multilingual_sts_v2');
+    recordElevenLabsResponseUsage(response, 'eleven_multilingual_sts_v2', {
+      fallbackCredits: estimateTimedCredits(
+        estimateAudioDurationSecondsFromBlob(audioFile),
+        ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE,
+      ),
+    });
     return await response.blob();
   });
 }
@@ -857,7 +905,12 @@ export async function isolateAudio(audioFile: File | Blob): Promise<Blob> {
       throw new Error(await getElevenLabsErrorMessage(response));
     }
 
-    recordElevenLabsResponseUsage(response, 'audio-isolation');
+    recordElevenLabsResponseUsage(response, 'audio-isolation', {
+      fallbackCredits: estimateTimedCredits(
+        estimateAudioDurationSecondsFromBlob(audioFile),
+        ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE,
+      ),
+    });
     return await response.blob();
   });
 }
@@ -949,7 +1002,12 @@ export async function transcribeSpeech(
       throw new Error(await getElevenLabsErrorMessage(response));
     }
 
-    recordElevenLabsResponseUsage(response, 'scribe_v2');
+    recordElevenLabsResponseUsage(response, 'scribe_v2', {
+      fallbackCredits: estimateTimedCredits(
+        estimateAudioDurationSecondsFromBlob(audioFile),
+        ELEVENLABS_SPEECH_TO_TEXT_CREDITS_PER_MINUTE,
+      ),
+    });
     return await response.json();
   });
 }

@@ -9,9 +9,11 @@ import {
   analyzeAudioDesign,
   analyzeAudioDesignPreuploadedVideo,
   analyzeAudioDesignVideo,
+  AudioDesignMedia,
   AudioDesignScope,
   AudioDesignResult,
   createEnglishMusicPromptForElevenLabs,
+  extractAudioDesignVideoKeyframes,
   preuploadAudioDesignVideo,
   regenerateLyrics,
   translateTextToLanguage,
@@ -46,6 +48,15 @@ const limitGeneratedMediaHistory = (items: HistoryItem[]) => {
   });
 };
 
+const mergeHistoryLists = (storedItems: HistoryItem[], currentItems: HistoryItem[]) => {
+  const mergedById = new Map<string, HistoryItem>();
+  storedItems.forEach(item => mergedById.set(item.id, item));
+  currentItems.forEach(item => mergedById.set(item.id, item));
+  return Array.from(mergedById.values()).sort((left, right) => (
+    left.timestamp < right.timestamp ? 1 : left.timestamp > right.timestamp ? -1 : 0
+  ));
+};
+
 // Modular Components
 import Sidebar from './components/Sidebar';
 import Workbench from './components/Workbench';
@@ -73,12 +84,8 @@ function WorkspaceLoading() {
 }
 
 export default function App() {
-  const sharedTool = typeof window !== 'undefined'
-    ? new URLSearchParams(window.location.search).get('tool')
-    : null;
-  const isVoiceConversionShare = sharedTool === 'voice-conversion';
-  const [currentTab, setCurrentTab] = useState<TabType>(isVoiceConversionShare ? 'dubbing-studio' : 'workbench');
-  const [visitedTabs, setVisitedTabs] = useState<Set<TabType>>(() => new Set(isVoiceConversionShare ? ['dubbing-studio'] : ['workbench']));
+  const [currentTab, setCurrentTab] = useState<TabType>('workbench');
+  const [visitedTabs, setVisitedTabs] = useState<Set<TabType>>(() => new Set(['workbench']));
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   const [assistantAudioRequest, setAssistantAudioRequest] = useState<AssistantAudioRequest | null>(null);
   const [assistantVideoRequest, setAssistantVideoRequest] = useState<AssistantVideoRequest | null>(null);
@@ -132,36 +139,7 @@ export default function App() {
     });
   }, [currentTab]);
 
-  // Pre-filled sample historic creations for a complete look on first load
-  const [historyList, setHistoryListState] = useState<HistoryItem[]>([
-    {
-      id: 'h-1',
-      type: 'music',
-      title: '独立音乐 - Epic Cyberpunk Horizon',
-      prompt: 'epic synthwave track with heavy bass, retro drums, space guitar, and glowing cyber vibe',
-      url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3',
-      timestamp: '2026-07-08 00:05',
-      details: '30秒 · 纯音乐'
-    },
-    {
-      id: 'h-2',
-      type: 'sfx',
-      title: '独立音效 - Mechanical Footstep (Foley)',
-      prompt: 'robotic heavy metallic steps on solid surface, slow pacing, high detail',
-      url: 'https://actions.google.com/sounds/v1/science_fiction/heavy_industrial_machine.ogg',
-      timestamp: '2026-07-08 00:15',
-      details: '5秒 · 电影声效'
-    },
-    {
-      id: 'h-3',
-      type: 'voice',
-      title: '角色配音',
-      prompt: '欢迎来到AI多模态音频创作中心。在这里，我们将文字、画面与声音完美融合，创造前所未有的视听享受。',
-      url: 'https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg',
-      timestamp: '2026-07-08 00:28',
-      details: '12秒 · 平静自然'
-    }
-  ]);
+  const [historyList, setHistoryListState] = useState<HistoryItem[]>([]);
   const [historyHydrated, setHistoryHydrated] = useState(false);
   const setHistoryList = useCallback<React.Dispatch<React.SetStateAction<HistoryItem[]>>>((action) => {
     setHistoryListState((previous) => limitGeneratedMediaHistory(
@@ -175,7 +153,9 @@ export default function App() {
     void loadPersistentHistory()
       .then((storedHistory) => {
         if (!active) return;
-        if (storedHistory.length > 0) setHistoryListState(limitGeneratedMediaHistory(storedHistory));
+        setHistoryListState((currentHistory) => limitGeneratedMediaHistory(
+          mergeHistoryLists(storedHistory, currentHistory),
+        ));
       })
       .catch(() => undefined)
       .finally(() => {
@@ -194,7 +174,7 @@ export default function App() {
   // Audio Director States
   const [files, setFiles] = useState<FileItem[]>([]);
   const [requirements, setRequirements] = useState('');
-  const [target, setTarget] = useState({ game: true, video: false, avatar: false, sunnyIsland: false });
+  const [target, setTarget] = useState({ game: true, video: false, avatar: false, sunnyIsland: false, gift: false, activity: false });
   const [loading, setLoading] = useState(false);
   const [analysisStage, setAnalysisStage] = useState('正在准备素材...');
   const [error, setError] = useState<string | null>(null);
@@ -451,7 +431,7 @@ export default function App() {
     // Full-video preupload is only useful for professional video paths.
     // Quick/game analysis intentionally uses local keyframes, so uploading the
     // original video there would add latency without improving the result.
-    if (!hasGeminiKey || !(target.video || target.avatar)) {
+    if (!hasGeminiKey || !(target.video || target.avatar || target.gift || target.activity)) {
       preuploadAbortControllersRef.current.forEach(controller => controller.abort('not-professional'));
       preuploadAbortControllersRef.current.clear();
       preuploadPromisesRef.current.clear();
@@ -480,7 +460,9 @@ export default function App() {
       updatePreuploadState(item.id, {
         status: 'uploading',
         progress: 0,
-        message: '正在后台预上传视频...',
+        message: item.file.size > 50 * 1024 * 1024
+          ? '视频超过 50MB，后台会先生成分析压缩版...'
+          : '正在后台预上传视频...',
       });
 
       const preuploadPromise = preuploadAudioDesignVideo(item.file, {
@@ -498,7 +480,9 @@ export default function App() {
             status: 'ready',
             progress: 100,
             uploadId: upload.uploadId,
-            message: '视频已预上传，点击分析会更快。',
+            message: upload.optimized
+              ? '大视频已压缩为分析版并预上传，点击分析会更快。'
+              : '视频已预上传，点击分析会更快。',
           });
         })
         .catch((error) => {
@@ -519,7 +503,7 @@ export default function App() {
 
       preuploadPromisesRef.current.set(item.id, preuploadPromise);
     });
-  }, [files, hasGeminiKey, target.video, target.avatar]);
+  }, [files, hasGeminiKey, target.video, target.avatar, target.gift, target.activity]);
 
   useEffect(() => {
     return () => {
@@ -809,8 +793,8 @@ export default function App() {
       const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 16);
       const durationLabel = requestedDuration ? `${requestedDuration}秒` : '自动时长';
       const details = generationPrompt !== prompt
-        ? `${durationLabel} · 电影声效 · 已自动英译`
-        : `${durationLabel} · 电影声效`;
+        ? `${durationLabel} · 48kHz WAV · 电影声效 · 已自动英译`
+        : `${durationLabel} · 48kHz WAV · 电影声效`;
       setPendingSfxOptions({
         optionA: {
           url: urlA,
@@ -996,9 +980,11 @@ export default function App() {
     }
 
     const videoFiles = files.filter(item => item.type.startsWith('video/'));
-    const wantsProfessionalVideo = Boolean(target.video || target.avatar);
-    if (wantsProfessionalVideo && videoFiles.length > 0 && (videoFiles.length !== 1 || files.length !== 1)) {
-      setError('影视/广告与 Avatar 的完整视频分析一次只能单独使用 1 个视频。请移除其他视频、图片、音频或 PDF；如需综合多份素材，请改用快速分析模式。');
+    const hasLargeVideo = videoFiles.some(item => item.file.size > 50 * 1024 * 1024);
+    const wantsProfessionalVideo = Boolean(target.video || target.avatar || target.gift || target.activity);
+    const needsProfessionalVideoAnalysis = wantsProfessionalVideo && Boolean(scope.sfx);
+    if (needsProfessionalVideoAnalysis && videoFiles.length > 0 && (videoFiles.length !== 1 || files.length !== 1)) {
+      setError('影视/广告、Avatar、礼物与活动的完整视频音效分析一次只能单独使用 1 个视频。请移除其他视频、图片、音频或 PDF；如需综合多份素材或只分析音乐，请关闭音效后使用快速分析。');
       return;
     }
 
@@ -1010,7 +996,7 @@ export default function App() {
     setError(null);
 
     try {
-      const useProfessionalVideo = wantsProfessionalVideo && videoFiles.length === 1;
+      const useProfessionalVideo = needsProfessionalVideoAnalysis && videoFiles.length === 1;
       const waitForReadyPreupload = async (fileItem: FileItem) => {
         const latestBeforeWait = filesRef.current.find(item => item.id === fileItem.id) || fileItem;
         if (latestBeforeWait.preupload?.status === 'ready' && latestBeforeWait.preupload.uploadId) {
@@ -1048,72 +1034,97 @@ export default function App() {
         return null;
       };
 
+      const prepareFilesWithServerVideoKeyframes = async (stagePrefix: string) => {
+        const prepared: AudioDesignMedia[] = [];
+        for (let index = 0; index < files.length; index += 1) {
+          const item = files[index];
+          const prefix = `${index + 1}/${files.length}`;
+          if (item.type.startsWith('video/')) {
+            setAnalysisStage(`${stagePrefix}，正在服务器提取关键帧（${prefix}）...`);
+            prepared.push(...await extractAudioDesignVideoKeyframes(item.file, {
+              signal: controller.signal,
+              onProgress: setAnalysisStage,
+            }));
+            continue;
+          }
+
+          prepared.push(...await prepareFilesForGemini([item.file], {
+            signal: controller.signal,
+            onProgress: (message) => setAnalysisStage(`${message}（${prefix}）`),
+          }));
+        }
+        return prepared;
+      };
+
       const canUseSingleVideoPreupload = videoFiles.length === 1 && files.length === 1;
       let res: AudioDesignResult;
 
       if (useProfessionalVideo) {
-        const preuploadId = canUseSingleVideoPreupload
-          ? await waitForReadyPreupload(videoFiles[0])
-          : null;
-        if (preuploadId) {
-          setAnalysisStage(target.avatar
-            ? '视频已预上传，正在进行 Avatar 高精度分析...'
-            : '视频已预上传，正在进行影视级完整分析...');
-          res = await analyzeAudioDesignPreuploadedVideo(
-            preuploadId,
+        try {
+          const preuploadId = canUseSingleVideoPreupload
+            ? await waitForReadyPreupload(videoFiles[0])
+            : null;
+          if (preuploadId) {
+            setAnalysisStage(target.avatar || target.gift
+              ? '视频已预上传，正在进行短视频高精度分析...'
+              : '视频已预上传，正在进行影视级完整分析...');
+            res = await analyzeAudioDesignPreuploadedVideo(
+              preuploadId,
+              requirements,
+              target,
+              isInstrumental,
+              {
+                signal: controller.signal,
+                analysisMode: 'professional',
+                scope,
+              },
+            );
+          } else {
+            setAnalysisStage(target.avatar || target.gift
+              ? '正在上传视频；超过 50MB 会自动压缩分析副本...'
+              : '正在上传视频；超过 50MB 会自动压缩分析副本...');
+            res = await analyzeAudioDesignVideo(
+              videoFiles[0].file,
+              requirements,
+              target,
+              isInstrumental,
+              {
+                signal: controller.signal,
+                onProgress: setAnalysisStage,
+                scope,
+              },
+            );
+          }
+        } catch (videoAnalysisError) {
+          if (controller.signal.aborted) throw videoAnalysisError;
+          console.warn('Full video analysis failed; falling back to server keyframes:', videoAnalysisError);
+          const fileData = await prepareFilesWithServerVideoKeyframes('完整视频处理失败，正在改用关键帧继续分析');
+          setAnalysisStage('正在用服务器关键帧生成音频方案...');
+          res = await analyzeAudioDesign(
+            fileData,
             requirements,
             target,
             isInstrumental,
-            {
-              signal: controller.signal,
-              analysisMode: 'professional',
-              scope,
-            },
-          );
-        } else {
-          setAnalysisStage(target.avatar
-            ? '正在上传视频，准备 Avatar 高精度分析...'
-            : '正在上传视频，准备影视级完整分析...');
-          res = await analyzeAudioDesignVideo(
-            videoFiles[0].file,
-            requirements,
-            target,
-            isInstrumental,
-            {
-              signal: controller.signal,
-              onProgress: setAnalysisStage,
-              scope,
-            },
+            { signal: controller.signal, scope },
           );
         }
       } else {
         // Fast mode reduces videos to compact keyframes and resizes images.
-        let fileData: Awaited<ReturnType<typeof prepareFilesForGemini>> | null = null;
+        let fileData: AudioDesignMedia[] | null = null;
         try {
-          fileData = await prepareFilesForGemini(files.map(item => item.file), {
-            signal: controller.signal,
-            onProgress: setAnalysisStage,
-          });
+          fileData = hasLargeVideo
+            ? await prepareFilesWithServerVideoKeyframes('视频超过 50MB，正在使用服务器轻量关键帧分析')
+            : await prepareFilesForGemini(files.map(item => item.file), {
+                signal: controller.signal,
+                onProgress: setAnalysisStage,
+              });
         } catch (prepareError) {
-          const canUseServerVideoFallback = videoFiles.length === 1 && files.length === 1;
-          if (!canUseServerVideoFallback || controller.signal.aborted) {
+          if (videoFiles.length === 0 || controller.signal.aborted) {
             throw prepareError;
           }
 
-          console.warn('Local video keyframe extraction failed; falling back to server video analysis:', prepareError);
-          setAnalysisStage('浏览器抽帧失败，正在上传完整视频交由服务器分析...');
-          res = await analyzeAudioDesignVideo(
-            videoFiles[0].file,
-            requirements,
-            target,
-            isInstrumental,
-            {
-              signal: controller.signal,
-              onProgress: setAnalysisStage,
-              analysisMode: 'fallback',
-              scope,
-            },
-          );
+          console.warn('Local video keyframe extraction failed; falling back to server keyframes:', prepareError);
+          fileData = await prepareFilesWithServerVideoKeyframes('浏览器抽帧失败');
         }
 
         if (fileData) {

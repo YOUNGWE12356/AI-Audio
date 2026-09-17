@@ -55,6 +55,12 @@ export default function SfxStudio({
   const [activeSfxOptionId, setActiveSfxOptionId] = useState<string | null>(null);
   const historyAudioRefs = useRef<{ [key: string]: HTMLAudioElement | null }>({});
 
+  const getSfxDownloadExtension = (url: string) => {
+    if (url.startsWith('blob:')) return 'wav';
+    const match = url.split('?')[0].match(/\.([a-z0-9]+)$/i);
+    return match?.[1]?.toLowerCase() || 'wav';
+  };
+
   const handleHistoryPlayPause = (id: string) => {
     if (playingHistoryId && playingHistoryId !== id && historyAudioRefs.current[playingHistoryId]) {
       historyAudioRefs.current[playingHistoryId]?.pause();
@@ -79,7 +85,7 @@ export default function SfxStudio({
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-6">
         <div>
           <h2 className="text-xl font-black text-slate-800">AI 音效</h2>
-          <p className="text-xs text-slate-500 mt-1">专业拟音与科幻特技合成，输入文字描述即可收获极具张力的电影声效。</p>
+          <p className="text-xs text-slate-500 mt-1">通过文字描述生成音效DEMO</p>
         </div>
       </div>
 
@@ -200,8 +206,8 @@ export default function SfxStudio({
                     activeId={activeSfxOptionId}
                     setActiveId={setActiveSfxOptionId}
                     editableTitle
-                    downloadFileName={`${sanitizeAudioFileName(option.title, `generated_sfx_${id}`)}.mp3`}
-                    downloadLabel={`下载 MP3 音效（版本 ${id}）`}
+                    downloadFileName={`${sanitizeAudioFileName(option.title, `generated_sfx_${id}`)}.wav`}
+                    downloadLabel={`下载 WAV 音效（版本 ${id}）`}
                     onRename={(title) => {
                       setPendingSfxOptions(prev => ({
                         optionA: id === 'A' && prev.optionA ? { ...prev.optionA, title } : prev.optionA,
@@ -216,12 +222,12 @@ export default function SfxStudio({
 
           <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-4 shadow-sm">
             <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center justify-between">
-              <span>已归档的音效 ({sfxHistory.length})</span>
+              <span>生成历史音效 ({sfxHistory.length})</span>
               <span className="text-[10px] text-slate-400 font-normal">本会话</span>
             </h3>
 
             {sfxHistory.length === 0 ? (
-              <p className="text-slate-400 text-[10px] text-center py-6">暂无历史音效。成功生成的音效将在下面自动保存。</p>
+              <p className="text-slate-400 text-[10px] text-center py-6">暂无生成历史。成功生成的音效会自动显示在这里。</p>
             ) : (
               <div className="space-y-2 max-h-64 overflow-y-auto pr-1 custom-scrollbar">
                 {sfxHistory.map((item) => {
@@ -253,7 +259,7 @@ export default function SfxStudio({
                         <span className="text-[9px] text-slate-400 font-mono hidden sm:inline">{item.timestamp.split(' ')[1]}</span>
                         <a
                           href={item.url}
-                          download={`${item.id}.mp3`}
+                          download={`${sanitizeAudioFileName(item.title, item.id)}.${getSfxDownloadExtension(item.url)}`}
                           className="p-1 hover:bg-emerald-50 hover:text-emerald-700 text-slate-400 rounded transition-colors"
                           title="下载"
                         >

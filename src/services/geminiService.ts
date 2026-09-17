@@ -534,6 +534,70 @@ export interface AudioDesignVideoPreuploadResult {
   displayName: string;
   mimeType: string;
   expiresAt: number;
+  optimized?: boolean;
+}
+
+export async function extractAudioDesignVideoKeyframes(
+  video: File,
+  options: {
+    signal?: AbortSignal;
+    onProgress?: (message: string) => void;
+  } = {},
+): Promise<AudioDesignMedia[]> {
+  if (!isBrowser) {
+    throw new Error('该方法仅用于 HTML5 客户端上传视频。');
+  }
+
+  return new Promise<AudioDesignMedia[]>((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(new Error('已取消本次分析。'));
+      return;
+    }
+
+    const request = new XMLHttpRequest();
+    const handleAbort = () => request.abort();
+    const cleanup = () => options.signal?.removeEventListener('abort', handleAbort);
+    options.signal?.addEventListener('abort', handleAbort, { once: true });
+
+    request.open('POST', '/api/ai/gemini/audio-design-video-keyframes');
+    setClientIdentityHeader(request);
+    request.responseType = 'json';
+    request.timeout = 90_000;
+    request.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      const percent = Math.min(95, Math.round((event.loaded / event.total) * 95));
+      options.onProgress?.(`正在上传视频用于服务器关键帧分析 ${percent}%...`);
+    };
+    request.upload.onload = () => {
+      options.onProgress?.('上传完成，服务器正在提取关键帧...');
+    };
+    request.onload = () => {
+      cleanup();
+      const response = request.response || {};
+      if (request.status >= 200 && request.status < 300 && Array.isArray(response.frames)) {
+        resolve(response.frames as AudioDesignMedia[]);
+        return;
+      }
+      reject(new Error(response.error || `服务器关键帧分析失败 (${request.status})`));
+    };
+    request.onerror = () => {
+      cleanup();
+      reject(new Error('服务器关键帧分析上传失败，请检查网络后重试。'));
+    };
+    request.ontimeout = () => {
+      cleanup();
+      reject(new Error('服务器关键帧分析超过 90 秒，请缩短视频后重试。'));
+    };
+    request.onabort = () => {
+      cleanup();
+      reject(new Error('已取消本次分析。'));
+    };
+
+    const formData = new FormData();
+    formData.append('originalName', video.name);
+    formData.append('video', video, createAsciiVideoUploadName(video.name, video.type));
+    request.send(formData);
+  });
 }
 
 export async function preuploadAudioDesignVideo(
@@ -568,7 +632,7 @@ export async function preuploadAudioDesignVideo(
       options.onProgress?.(percent, `正在后台上传视频 ${percent}%...`);
     };
     request.upload.onload = () => {
-      options.onProgress?.(96, '视频已传到服务器，Gemini 正在预处理...');
+      options.onProgress?.(96, '视频已传到服务器，正在必要时压缩并交给 Gemini 预处理...');
     };
     request.onload = () => {
       cleanup();
@@ -603,7 +667,7 @@ export async function preuploadAudioDesignVideo(
 export async function analyzeAudioDesignVideo(
   video: File,
   requirements: string,
-  target: { game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean },
+  target: { game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean; gift?: boolean; activity?: boolean },
   isInstrumental: boolean,
   options: {
     signal?: AbortSignal;
@@ -642,9 +706,9 @@ export async function analyzeAudioDesignVideo(
         return;
       }
 
-      options.onProgress?.(target.avatar
-        ? '上传完成，Gemini 正在进行高精度逐秒分析...'
-        : '上传完成，Gemini 正在分析完整画面与声音...');
+      options.onProgress?.(target.avatar || target.gift
+        ? '上传完成，服务器会先压缩大视频，再进行短视频高精度分析...'
+        : '上传完成，服务器会先压缩大视频，再分析完整画面与声音...');
     };
     request.onload = () => {
       cleanup();
@@ -683,7 +747,7 @@ export async function analyzeAudioDesignVideo(
 export async function analyzeAudioDesignPreuploadedVideo(
   uploadId: string,
   requirements: string,
-  target: { game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean },
+  target: { game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean; gift?: boolean; activity?: boolean },
   isInstrumental: boolean,
   options: {
     signal?: AbortSignal;
@@ -710,7 +774,7 @@ export async function analyzeAudioDesignVideoFile(
   mimeType: string,
   displayName: string,
   requirements: string,
-  target: { game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean },
+  target: { game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean; gift?: boolean; activity?: boolean },
   isInstrumental: boolean,
   scope?: AudioDesignScope,
 ): Promise<AudioDesignResult> {
@@ -748,7 +812,7 @@ export async function analyzeAudioDesignVideoFile(
       mimeType: uploadedFile.mimeType,
       label: `完整视频：${displayName}`,
       videoMetadata: {
-        fps: target.avatar ? 2 : 1,
+        fps: target.avatar || target.gift ? 2 : 1,
       },
     }], requirements, target, isInstrumental, { scope });
   } catch (error) {
@@ -768,7 +832,7 @@ export async function analyzeAudioDesignVideoFile(
 export async function analyzeAudioDesign(
   files: AudioDesignMedia[],
   requirements: string,
-  target: { game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean },
+  target: { game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean; gift?: boolean; activity?: boolean },
   isInstrumental: boolean,
   options: { signal?: AbortSignal; scope?: AudioDesignScope } = {},
 ): Promise<AudioDesignResult> {
@@ -780,11 +844,11 @@ export async function analyzeAudioDesign(
       target,
       isInstrumental,
       scope: analysisScope,
-    }, { signal: options.signal, timeoutMs: 90_000 });
+    }, { signal: options.signal, timeoutMs: 180_000 });
   }
 
   let targetDesc = target.game && target.video ? "游戏CG宣传片" : target.game ? "游戏" : target.video ? "视频" : "音频设计";
-  const isGameTrack = target.game && !target.video && !target.avatar && !target.sunnyIsland;
+  const isGameTrack = (target.game || target.activity) && !target.video && !target.avatar && !target.sunnyIsland && !target.gift;
   const includeMusicTimeline = !isGameTrack;
   const hasVideoInput = files.some(file => (
     file.mimeType.startsWith('video/')
@@ -799,6 +863,10 @@ export async function analyzeAudioDesign(
       : '仅音效设计';
   if (target.avatar) {
     targetDesc = "科幻巨制《阿凡达》(Avatar) 风格奇幻自然场景";
+  } else if (target.gift) {
+    targetDesc = "礼物动效短视频，通常 4-12 秒，画面动作密集，重点服务礼物出现、爆发、闪光、粒子、结算和反馈音效";
+  } else if (target.activity) {
+    targetDesc = "游戏活动页或运营活动场景，通常以背景图和少量背景变化为主，配乐保持统一氛围，音效强调按钮、奖励、弹窗、转场和重点反馈";
   } else if (target.sunnyIsland) {
     targetDesc = "治愈系田园日常《小岛有晴天》(Sunny Day on the Island) 温暖舒缓场景";
   }
@@ -810,6 +878,20 @@ export async function analyzeAudioDesign(
     ${analysisScope.music ? `1. **高精度但符合音乐规律的时间线设计 (timelineDesign)**：逐秒观察画面动作，但配乐段落必须按真实叙事与音乐乐句自适应划分，不设固定段数。常规段落约 5-8 秒；画面与情绪持续稳定时可延长，只有明显转场、关键动作或强烈情绪拐点才提前切段，严禁连续设计大量 2-3 秒的情绪切换。
     2. **宏大管弦交响与原始部落打击乐 (BGM)**：配乐应融合史诗科幻管弦、原野木管（原野木笛）和原始部落大鼓打击乐（wood drum, hand percussion），传递人与大自然的灵性连接，空灵、原始而极其震撼。${isInstrumental ? '本次为纯音乐，严禁加入可辨识的人声、吟唱、合唱、呼喊或歌词，只能用乐器音色塑造原始感。' : '本次可使用人声，但人声出现的时间、情绪和演唱方式必须写入同一份 timelineDesign。'}` : ''}
     ${analysisScope.sfx ? '**外星奇幻生态声景 (Foley)**：音效命名和设计应该充满潘多拉星球外星动植物的奇特生命律动、夜光森林荧光植物的发光嗡嗡声（ambient bioluminescent glow）、斑溪兽（Banshee）的飞掠振翅与嘶鸣、灵魂之树的空灵触碰共鸣（使用神秘高频合成器与奇异声学共鸣音效）。' : ''}
+    `;
+  } else if (target.gift) {
+    additionalSpecialInstructions = `
+    【礼物动效特别设计要求（最高优先级）】：
+    **短视频定位**：礼物素材通常是 4-12 秒的短动效，核心不是长叙事，而是“出现 → 蓄力 → 爆发/展示 → 收尾”的声音反馈。
+    ${analysisScope.sfx ? '**礼物音效重点**：优先捕捉画面里的闪光、粒子、能量聚集、物体出现、金币/奖励、UI弹出、镜头冲击、魔法或科技质感等节点；音效可以比普通场景更密集，但仍只保留最重要的 6-10 个触发点，时间码要精确。' : ''}
+    ${analysisScope.music ? '**礼物配乐重点**：若只分析音乐，给出简短、可循环或可一次性铺底的整体氛围，避免过度拆分；如视频很短，timelineDesign 可按 2-4 个阶段概括，但不能为了细节强行逐帧切段。' : ''}
+    `;
+  } else if (target.activity) {
+    additionalSpecialInstructions = `
+    【活动场景特别设计要求（最高优先级）】：
+    **活动页定位**：活动素材通常像游戏音轨，以活动主题背景图、少量背景变化、入口按钮、奖励领取、弹窗、转场和任务反馈为主。
+    ${analysisScope.music ? '**活动配乐重点**：配乐按活动主题输出统一整体方案，适合长时间循环和页面停留；不要按背景图的细小变化拆成复杂时间线。' : ''}
+    ${analysisScope.sfx ? '**活动音效重点**：勾选音效时需要更仔细识别按钮点击、奖励出现、弹窗打开/关闭、任务完成、列表滑动、转场与重点视觉反馈，可给出具体触发时机和制作建议。' : ''}
     `;
   } else if (target.sunnyIsland) {
     additionalSpecialInstructions = `
@@ -871,9 +953,9 @@ export async function analyzeAudioDesign(
     4. 快速动作段落优先标记 Foley、撞击、转场和节奏卡点；安静段落标记氛围、留白和音乐动态。
     ` : ''}
     
-    ${target.video || target.avatar ? `
+    ${target.video || target.avatar || target.gift || target.activity ? `
     【高精度影视级特别设计要求（最高优先级）】：
-    由于本项目属于“影视广告”创作类型，本次请求的设计方案需要达到专业精度：
+    由于本项目属于“影视广告 / Avatar / 礼物 / 活动”等需要精细画面判断的创作类型，本次请求在勾选音效时需要达到专业精度：
     ${analysisScope.sfx ? `1. **音效命名细致化 (name)**：
        - 所有生成的音效命名（name）必须采用统一且高精度的英文规范命名（如: sfx_foley_footstep_wood_01, sfx_ambient_wind_howl_loop_02, sfx_scifi_laser_shot_03），禁止使用模糊词，应区分出类型、材质、道具、变化序号等。
     2. **动作场景及时间码精准化 (scene)**：
@@ -1358,11 +1440,27 @@ const createAvatarRequirementItems = (inputText: string) => {
   });
 };
 
+export interface ExistingSfxRequirementItem {
+  audio_type?: string;
+  filename?: string;
+  event_name?: string;
+  scene?: string;
+  description?: string;
+  script_tone?: string;
+  remarks?: string;
+  tone?: string;
+  script?: string;
+  script_zh?: string;
+  script_en?: string;
+  script_ko?: string;
+}
+
 export async function generateSfxRequirements(
   inputText: string,
   referenceFile: { data: string; mimeType: string } | null,
   templateType: 'game_sfx_general' | 'game_sfx_middleware' | 'voiceover_general' | 'voiceover_multilang',
   projectName: string | null = null,
+  existingItems: ExistingSfxRequirementItem[] = [],
 ): Promise<{ items: any[]; sourceItemCount?: number }> {
   const normalizedProjectName = projectName?.trim().toLowerCase() || '';
   const isJinnProject = normalizedProjectName === 'jinn';
@@ -1372,7 +1470,7 @@ export async function generateSfxRequirements(
   // Avatar names are a strict five-row template. Generate them locally when
   // the user supplied an explicit costume name and ID, so a long AI response
   // cannot be truncated before the deterministic names reach the table.
-  if (isAvatarProject && !referenceFile) {
+  if (isAvatarProject && !referenceFile && existingItems.length === 0) {
     const avatarItems = createAvatarRequirementItems(inputText);
     if (avatarItems) return { items: avatarItems };
   }
@@ -1383,6 +1481,7 @@ export async function generateSfxRequirements(
       screenshot: referenceFile,
       templateType,
       projectName,
+      existingItems,
     });
   }
 
@@ -1400,7 +1499,8 @@ export async function generateSfxRequirements(
       - duration_logic (时长&播放逻辑): 声效时长描述及触发/播放逻辑，例如 "1s, 单次播放", "10s, 循环播放", "3s, 随机多样本触发"。
       - scene (应用场景): 音效触发的具体场景与时机描述，如 "通用与主界面&游戏内的ui点击按键"。
       - description (描述): 对声音声学物理表现与听觉感受的文字描述，如 "清脆的交互点击声，带有科技高频感"。
-      - script_tone (台词/语气): SFX/BGM 行填 "-"；VO 行必须填写识别到或创作出的台词文案，并包含语气提示。不要在内容开头重复写“台词：”，例如 "欢迎回来，指挥官。语气：沉稳、亲切、略带科技感"。
+      - script (台词): SFX/BGM 行填 "-"；VO 行必须填写识别到或创作出的台词文案，不要混入语气说明。
+      - tone (语气): SFX/BGM 行填 "-"；VO 行填写情绪、语速、口吻、年龄感、性别倾向等表演提示，例如 "沉稳、亲切、略带科技感"。
       - remarks (备注): 混音、响度或音频程序实现的注意事项，如 "链接&视频说明" 或 "需要混响衰减处理"。
       - video_link (动效视频): 默认为 "链接&视频说明" 或类似视频占位说明。
     `;
@@ -1412,7 +1512,7 @@ export async function generateSfxRequirements(
           type: Type.ARRAY,
           items: {
             type: Type.OBJECT,
-            required: ["index", "audio_type", "filename", "duration_logic", "scene", "description", "script_tone", "remarks", "video_link"],
+            required: ["index", "audio_type", "filename", "duration_logic", "scene", "description", "script", "tone", "remarks", "video_link"],
             properties: {
               index: { type: Type.INTEGER },
               audio_type: { type: Type.STRING },
@@ -1420,7 +1520,8 @@ export async function generateSfxRequirements(
               duration_logic: { type: Type.STRING },
               scene: { type: Type.STRING },
               description: { type: Type.STRING },
-              script_tone: { type: Type.STRING },
+              script: { type: Type.STRING },
+              tone: { type: Type.STRING },
               remarks: { type: Type.STRING },
               video_link: { type: Type.STRING }
             }
@@ -1583,6 +1684,29 @@ export async function generateSfxRequirements(
     ${JSON.stringify(sunnyIslandReferenceNames)}
   `
     : '';
+  const existingItemsForPrompt = existingItems
+    .slice(0, 80)
+    .map((item, index) => ({
+      index: index + 1,
+      type: item.audio_type || '',
+      filename: item.filename || '',
+      event_name: item.event_name || '',
+      scene: item.scene || '',
+      description: item.description || '',
+      script: item.script || item.script_tone || item.script_zh || '',
+      remarks: item.remarks || item.tone || '',
+    }))
+    .filter(item => Object.values(item).some(value => String(value || '').trim()));
+  const appendDedupInstruction = existingItemsForPrompt.length > 0
+    ? `
+    【继续添加模式：已有需求排重约束】
+    当前需求表里已经有以下条目，本次只允许根据“新加入的文字描述或新上传的参考文件”生成新增需求；禁止把这些已有条目换个说法再次输出。
+    判断重复时不要只看 filename，也要看应用场景、声音对象、动作、描述、台词和 BGM 用途；含义相同就算重复。
+    如果用户没有提供任何新需求，或本次输入只能识别出已有需求，请返回空 items 数组，不要为了凑数生成重复或泛化条目。
+    已有需求摘要：
+    ${JSON.stringify(existingItemsForPrompt)}
+    `
+    : '';
 
   const prompt = `
     你是一个顶级的游戏音频总监、声音设计师和配音导演。
@@ -1590,6 +1714,7 @@ export async function generateSfxRequirements(
 
     ${inputInterpretationInstruction}
     ${sunnyIslandReferenceContext}
+    ${appendDedupInstruction}
 
     请严格遵守以下规则进行处理：
     1. **多模态输入识别与需求数量控制**：
@@ -1598,7 +1723,7 @@ export async function generateSfxRequirements(
        - **普通图片/视觉参考图**：如果上传文件不是表格，而是画面、角色、场景、UI 或概念图，请根据画面内容生成适合当前模板的音乐/音效/配音需求，不要求 1:1。
        - **音频文件**：音频通常作为 BGM/音乐参考处理。请聆听并分析风格、情绪、速度、节奏密度、配器、音色、段落结构、循环/无缝衔接需求和适用场景；优先生成 BGM 或音乐方向需求。如果用户文字另有说明，再结合文字修正。
        - **视频文件**：视频默认只分析画面、镜头节奏、角色动作、UI变化、场景氛围和画面中的可见字幕；请忽略视频内嵌音频，因为它大概率与画面无关。不要根据视频原声推断音乐或音效。
-       - **视频字幕 / 配音需求混合输出**：如果视频画面中有字幕，或用户文字/参考文件里出现角色台词、旁白、对白、播报、引导语、口语化文案等配音需求，必须识别字幕内容和语境，并生成对应 VO 配音需求。即使当前选择的是“游戏音效配乐通用表”或其它音效/BGM模板，也不能忽略配音需求；通用表里请把音效、BGM、VO 放在同一个 items 数组中，VO 行使用 \`Vo_\` 文件名，\`audio_type\` 填 \`VO\`，\`script_tone\` 直接填写文案和语气，不要在开头加“台词：”。
+       - **视频字幕 / 配音需求混合输出**：如果视频画面中有字幕，或用户文字/参考文件里出现角色台词、旁白、对白、播报、引导语、口语化文案等配音需求，必须识别字幕内容和语境，并生成对应 VO 配音需求。即使当前选择的是“游戏音效配乐通用表”或其它音效/BGM模板，也不能忽略配音需求；通用表里请把音效、BGM、VO 放在同一个 items 数组中，VO 行使用 \`Vo_\` 文件名，\`audio_type\` 填 \`VO\`，\`script\` 只填写台词文案，\`tone\` 单独填写语气和表演提示。
        - **同一素材的一次性综合需求**：同一个视频、图片或文字需求可能同时包含 SFX、BGM 和 VO。除非用户明确只要某一种类型，否则请一次性输出素材中可识别的所有音频需求，避免让用户反复切模板才能得到完整结果。
        - **空泛输入或只选模板**：当用户没有提供具体列表、表格或参考文件，只选择模板或输入非常抽象的提示词时，自动头脑风暴生成 6-10 行典型专业条目。
 
@@ -1623,12 +1748,12 @@ export async function generateSfxRequirements(
        - **时长与播放逻辑**：用声效术语编写，例如 "1s, 单次播放", "loop, 循环播放"。
        - **3D 距离规范 (distance_3d)**：${isJinnProject ? '严格使用 Jinn 参考规则：怪物相关默认 `"35"`，道具和武器相关默认 `"20"`，无法明确归类时也默认 `"20"`；明确的 2D 屏幕声填写 `"-"`。' : '对于 FMOD/Wwise 中间件需求表，如果是 3D 事件（如备注或播放逻辑里包含 3D 空间、3D 空间定位等），必须在 `distance_3d` 中增加一个 3D 距离，默认值为 `"20"`（或根据音量、场景大小评估为 "15", "30" 等数字字符串）；如果是 2D 事件，则该字段输出为 `"-"`。'}
        - **多语种台词生成**：在多语种配音模板下，根据简中台词，翻译并创作出对应的英语台词和韩语台词。台词要带有文学色彩、符合游戏中的魔幻/科幻/写实风格，不能是粗暴的机器人机翻。
-       - **通用表中的 VO 行**：当模板是“游戏音效配乐通用表”时，配音需求不要丢弃；请把配音行作为普通综合音频需求行输出，\`audio_type\` 为 \`VO\`，\`filename\` 使用 \`Vo_[SpeakerOrRole]_[Intent]\`，\`description\` 写声音角色/声线方向，\`script_tone\` 直接写台词文案与语气，\`remarks\` 写配音制作、口型、情绪或交付注意事项。
+       - **通用表中的 VO 行**：当模板是“游戏音效配乐通用表”时，配音需求不要丢弃；请把配音行作为普通综合音频需求行输出，\`audio_type\` 为 \`VO\`，\`filename\` 使用 \`Vo_[SpeakerOrRole]_[Intent]\`，\`description\` 写声音角色/声线方向，\`script\` 只写台词文案，\`tone\` 单独写语气、情绪、语速和表演提示，\`remarks\` 写配音制作、口型、情绪或交付注意事项。
        - **通用表排序规则**：当模板是“游戏音效配乐通用表”时，输出顺序不要跟随用户文字描述顺序；必须先集中输出所有 SFX，再输出所有 BGM，最后输出所有 VO/人声/配音/台词需求。同一大类内部再保留需求的自然逻辑顺序。
 
     4. **输出格式**：
        - 必须输出符合以下模板要求的 JSON 数组。
-       - 为避免生成结果过长导致 JSON 截断，每个字段都要简洁：description、remarks、script_tone 尽量控制在 120 个中文字符内；除非用户原始表格本身包含更多条目，否则一次最多输出 24 行。
+       - 为避免生成结果过长导致 JSON 截断，每个字段都要简洁：description、remarks、script、tone 尽量控制在 120 个中文字符内；除非用户原始表格本身包含更多条目，否则一次最多输出 24 行。
        - 视频字幕类 VO 行不要重复写长段分析；优先保留台词、语气、时间/场景和制作注意事项。
        ${templateDescription}
 

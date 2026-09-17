@@ -126,7 +126,7 @@ const FACTORY_FORMAT_OPTIONS: Array<{
 }> = [
   { value: 'mp3', label: 'MP3', description: '高兼容压缩，适合快速交付/预览', supported: true },
   { value: 'wav', label: 'WAV', description: '无损 PCM，适合后期制作/入库', supported: true },
-  { value: 'ogg', label: 'OGG', description: '游戏常用压缩格式，待接入编码器', supported: false },
+  { value: 'ogg', label: 'OGG', description: '游戏常用压缩格式，适合引擎预览/轻量交付', supported: true },
   { value: 'flac', label: 'FLAC', description: '无损压缩归档格式，待接入编码器', supported: false },
   { value: 'aac', label: 'AAC', description: '移动端常用高效压缩，待接入编码器', supported: false },
   { value: 'm4a', label: 'M4A', description: 'Apple/移动端封装，待接入编码器', supported: false },
@@ -152,6 +152,43 @@ async function decodeAudioOnServer(file: File, audioCtx: AudioContext): Promise<
     throw new Error(message || `服务端音轨提取失败（${response.status}）。`);
   }
   return audioCtx.decodeAudioData(await response.arrayBuffer());
+}
+
+const getFactoryMimeType = (format: FactoryAudioFormat) => {
+  if (format === 'mp3') return 'audio/mpeg';
+  if (format === 'ogg') return 'audio/ogg';
+  if (format === 'wav') return 'audio/wav';
+  return 'application/octet-stream';
+};
+
+async function encodeFactoryAudioOnServer(
+  sourceBuffer: AudioBuffer,
+  sourceName: string,
+  options: {
+    format: FactoryAudioFormat;
+    sampleRate: number;
+    bitrate: number;
+  },
+): Promise<Blob> {
+  const wavBlob = encodeWav(sourceBuffer);
+  const formData = new FormData();
+  formData.append('media', wavBlob, `${sourceName.replace(/\.[^/.]+$/, '') || 'audio'}-factory-source.wav`);
+  formData.append('format', options.format);
+  formData.append('sampleRate', String(options.sampleRate));
+  formData.append('bitrate', `${options.bitrate}k`);
+
+  const response = await fetch('/api/audio/convert', {
+    method: 'POST',
+    body: formData,
+  });
+  if (!response.ok) {
+    const contentType = response.headers.get('content-type') || '';
+    const message = contentType.includes('application/json')
+      ? String((await response.json().catch(() => null))?.error || '')
+      : await response.text().catch(() => '');
+    throw new Error(message || `${options.format.toUpperCase()} 服务端转码失败（${response.status}）。`);
+  }
+  return response.blob();
 }
 
 async function decodeAudioWithFallback(file: File, arrayBuffer: ArrayBuffer, audioCtx: AudioContext): Promise<AudioBuffer> {
@@ -534,7 +571,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
       if (requestedFormatOption?.supported) {
         setFactoryFormat(assistantAudioRequest.targetFormat);
       } else {
-        setFactoryError(`${assistantAudioRequest.targetFormat.toUpperCase()} 格式编码暂未接入，当前仅支持 MP3 或 WAV。`);
+        setFactoryError(`${assistantAudioRequest.targetFormat.toUpperCase()} 格式编码暂未接入，当前支持 MP3、WAV 或 OGG。`);
       }
     }
     if (!assistantAudioRequest.file) {
@@ -572,7 +609,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
     if (!factoryBlob || !primaryFactoryResult) return;
     const baseName = primaryFactoryResult.sourceName.replace(/\.[^/.]+$/, '') || 'converted_audio';
     const outputName = `${baseName}_converted.${factoryFormat}`;
-    const mimeType = factoryFormat === 'mp3' ? 'audio/mpeg' : 'audio/wav';
+    const mimeType = getFactoryMimeType(factoryFormat);
     const outputFile = new File([factoryBlob], outputName, { type: mimeType, lastModified: Date.now() });
 
     downloadFile(factoryBlob, primaryFactoryResult.sourceName, factoryFormat);
@@ -701,8 +738,8 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
     file: File,
     onStepProgress: (stepProgress: number, message: string) => void,
   ): Promise<FactoryConversionResult> => {
-    if (factoryFormat !== 'mp3' && factoryFormat !== 'wav') {
-      throw new Error(`${factoryFormat.toUpperCase()} 格式编码暂未接入，请先选择 MP3 或 WAV。`);
+    if (!['mp3', 'wav', 'ogg'].includes(factoryFormat)) {
+      throw new Error(`${factoryFormat.toUpperCase()} 格式编码暂未接入，请先选择 MP3、WAV 或 OGG。`);
     }
 
     onStepProgress(0.15, `正在读取：${file.name}`);
@@ -733,7 +770,13 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
     onStepProgress(0.85, `正在封装为 ${factoryFormat.toUpperCase()}：${file.name}`);
     const finalBlob = factoryFormat === 'wav'
       ? encodeWav(resampledBuffer)
-      : encodeMp3(resampledBuffer, factoryBitrate);
+      : factoryFormat === 'ogg'
+        ? await encodeFactoryAudioOnServer(resampledBuffer, file.name, {
+          format: factoryFormat,
+          sampleRate: factorySampleRate,
+          bitrate: factoryBitrate,
+        })
+        : encodeMp3(resampledBuffer, factoryBitrate);
 
     return {
       id: `${file.name}-${file.size}-${file.lastModified}`,
@@ -875,8 +918,14 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
       } else if (factoryFormat === 'mp3') {
         // MP3
         finalBlob = encodeMp3(resampledBuffer, factoryBitrate);
+      } else if (factoryFormat === 'ogg') {
+        finalBlob = await encodeFactoryAudioOnServer(resampledBuffer, factoryFile.name, {
+          format: factoryFormat,
+          sampleRate: factorySampleRate,
+          bitrate: factoryBitrate,
+        });
       } else {
-        throw new Error(`${factoryFormat.toUpperCase()} 格式编码暂未接入，请先选择 MP3 或 WAV。`);
+        throw new Error(`${factoryFormat.toUpperCase()} 格式编码暂未接入，请先选择 MP3、WAV 或 OGG。`);
       }
 
       setFactoryProgress(100);
@@ -2220,7 +2269,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                     <div>
                       <p className="text-xs font-bold text-slate-700">点击上传、批量多选，或将媒体文件/文件夹拖拽到此处</p>
                       <p className="text-[10px] text-slate-400 mt-0.5 max-w-xs mx-auto leading-snug">
-                        支持多文件和文件夹批量转换，可转换为高保真 WAV 或高压缩 MP3 格式。
+                        支持多文件和文件夹批量转换，可转换为高保真 WAV、高压缩 MP3 或游戏常用 OGG 格式。
                       </p>
                     </div>
                     <button
@@ -2293,8 +2342,8 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                     </select>
                   </div>
 
-                  {/* Bitrate Selector (Only for MP3) */}
-                  {factoryFormat === 'mp3' && (
+                  {/* Bitrate Selector (Compressed formats) */}
+                  {(factoryFormat === 'mp3' || factoryFormat === 'ogg') && (
                     <div className="space-y-1.5 md:col-span-2">
                       <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">目标压缩比特率 (Bitrate)</label>
                       <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 bg-slate-200/50 p-1 rounded-xl border border-slate-200/60">
@@ -2314,7 +2363,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                         ))}
                       </div>
                       <p className="text-[9px] text-slate-400 italic">
-                        96-128kbps 适合普通配音对话；192-320kbps 适合专业高保真歌曲伴奏。
+                        96-128kbps 适合普通配音对话与游戏预览；192-320kbps 适合专业高保真歌曲伴奏。
                       </p>
                     </div>
                   )}
@@ -2517,7 +2566,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                         <span>封装格式</span>
                         <span className="font-bold text-slate-800 bg-emerald-50 border border-emerald-200 px-1 rounded uppercase scale-95">{factoryFormat}</span>
                       </div>
-                      {factoryFormat === 'mp3' && (
+                      {(factoryFormat === 'mp3' || factoryFormat === 'ogg') && (
                         <div className="flex justify-between border-t border-slate-100/50 pt-1.5">
                           <span>恒定比特率 (CBR)</span>
                           <span className="font-bold text-slate-800">{factoryBitrate} kbps</span>
