@@ -3,41 +3,52 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useRef, useState } from 'react';
-import { 
-  Upload, 
-  FileText, 
-  CheckCircle2, 
-  Copy, 
-  Download, 
-  RefreshCw, 
-  ChevronRight, 
-  Loader2, 
-  X, 
-  Volume2, 
-  Music, 
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  Upload,
+  FileText,
+  CheckCircle2,
+  Copy,
+  Download,
+  RefreshCw,
+  ChevronRight,
+  Loader2,
+  X,
+  Volume2,
+  Music,
   AlertCircle,
   Gamepad2,
+  Gift,
   Clapperboard,
+  CalendarDays,
   Sliders,
   Sparkles,
   DownloadCloud,
   Clock,
-  Sun
+  Sun,
+  Gauge
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { FileItem } from '../types';
-import { AudioDesignResult } from '../services/geminiService';
+import { AudioDesignResult, AudioDesignScope } from '../services/geminiService';
 import { generateSoundEffect, generateMusic } from '../services/elevenLabsService';
 
 // Self-contained ElevenLabs Player for Demo Sound Effects inside table
-const ElevenLabsPlayer = ({ text, id, type = 'sfx' }: { text: string; id: string; type?: 'sfx' | 'music' }) => {
+const ElevenLabsPlayer = ({
+  text,
+  id,
+  type = 'sfx',
+  onSendToMusicStudio,
+}: {
+  text: string;
+  id: string;
+  type?: 'sfx' | 'music';
+  onSendToMusicStudio?: (prompt: string) => void;
+}) => {
   const [loading, setLoading] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-
-  const hasKey = Boolean(process.env.ELEVENLABS_API_KEY || (typeof window !== 'undefined' && localStorage.getItem('ELEVENLABS_API_KEY')));
 
   const extractDuration = (input: string) => {
     const match = input.match(/\[Duration:\s*(\d+)s\]/i);
@@ -45,21 +56,22 @@ const ElevenLabsPlayer = ({ text, id, type = 'sfx' }: { text: string; id: string
   };
 
   const handleGenerate = async () => {
-    if (!hasKey) {
-      setError('ElevenLabs API Key 未配置。请前往设置页面添加。');
+    if (type === 'music' && onSendToMusicStudio) {
+      onSendToMusicStudio(text.trim());
       return;
     }
+
     setLoading(true);
     setError(null);
     try {
       const duration = extractDuration(text);
-      const blob = type === 'music' 
+      const blob = type === 'music'
         ? await generateMusic(text, duration)
         : await generateSoundEffect(text, duration);
-      
+
       const url = URL.createObjectURL(blob);
       setAudioUrl(url);
-      
+
       // Auto play
       setTimeout(() => {
         if (audioRef.current) {
@@ -73,6 +85,21 @@ const ElevenLabsPlayer = ({ text, id, type = 'sfx' }: { text: string; id: string
     }
   };
 
+  if (type === 'music' && onSendToMusicStudio) {
+    return (
+      <button
+        type="button"
+        disabled={!text.trim()}
+        onClick={() => onSendToMusicStudio(text.trim())}
+        className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-2 rounded-xl text-[10px] flex items-center gap-1.5 transition-all shadow-md shadow-emerald-600/10 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        <Music className="w-3 h-3" />
+        <span>生成 DEMO</span>
+        <ChevronRight className="w-3 h-3" />
+      </button>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-1 mt-1">
       <div className="flex items-center gap-2">
@@ -81,8 +108,8 @@ const ElevenLabsPlayer = ({ text, id, type = 'sfx' }: { text: string; id: string
             onClick={handleGenerate}
             disabled={loading}
             className={`flex items-center gap-1 text-[10px] font-semibold text-white ${
-              type === 'music' 
-                ? 'bg-indigo-600 hover:bg-indigo-700' 
+              type === 'music'
+                ? 'bg-indigo-600 hover:bg-indigo-700'
                 : 'bg-emerald-600 hover:bg-emerald-700'
             } px-2.5 py-1 rounded-lg transition-all disabled:opacity-50`}
           >
@@ -91,15 +118,15 @@ const ElevenLabsPlayer = ({ text, id, type = 'sfx' }: { text: string; id: string
             ) : (
               <Volume2 className="w-2.5 h-2.5" />
             )}
-            {loading ? '生成中...' : (type === 'music' ? '声景生成' : '声效试听')}
+            {loading ? '生成中...' : (type === 'music' ? '生成音乐' : '声效试听')}
           </button>
         ) : (
           <div className="flex items-center gap-2 bg-[#12141D] border border-gray-800 px-2 py-0.5 rounded-lg">
-            <audio 
-              ref={audioRef} 
-              src={audioUrl} 
-              controls 
-              className="h-6 w-32 custom-audio-player-mini" 
+            <audio
+              ref={audioRef}
+              src={audioUrl}
+              controls
+              className="h-6 w-32 custom-audio-player-mini"
             />
             <a
               href={audioUrl}
@@ -139,6 +166,21 @@ const filmDemoResult: AudioDesignResult = {
     rhythm: "慢速自由（Rubato）到中速进行曲风，速度约 72-118 BPM",
     suggestedInstruments: ["立式钢琴", "爱尔兰竖琴", "管弦乐交响合唱团", "空灵女声吟唱", "低频大鼓"],
     emotionalCurve: "0-5s 宁静神秘；5-12s 悬念递增；12-20s 气势磅礴；20-24s 戛然而止留下无尽回味。"
+  },
+  videoMotionTempo: {
+    detected: true,
+    primaryBpm: 116,
+    bpmRangeMin: 112,
+    bpmRangeMax: 120,
+    alternateBpms: [58, 232],
+    confidence: "中",
+    motionPattern: "角色挥动法杖与身体重心起伏形成规律动作脉冲",
+    analysisBasis: "12-20 秒内连续挥臂、蓄力和身体起伏约每 0.52 秒出现一次明显动作重音，前后循环存在少量加速。",
+    syncGuidance: "以法杖挥至最外侧和脚步落地作为强拍，蓄力抬手可对齐弱拍；高潮动作前允许逐步加速。",
+    segments: [
+      { timecode: "00:12-00:16", motion: "蓄力抬手与身体起伏", bpm: 112, confidence: "中" },
+      { timecode: "00:16-00:20", motion: "连续挥杖与重心摆动", bpm: 120, confidence: "中" }
+    ]
   },
   sfxSchemes: [
     {
@@ -182,8 +224,8 @@ const filmDemoResult: AudioDesignResult = {
       style: "新古典奇幻史诗交响乐 (Neo-Classical Epic Fantasy Orchestral)",
       instrumentation: "独奏钢琴, 凯尔特竖琴, 史诗弦乐群, 圣洁女声合唱团, 大号与圆号群, 影视大鼓",
       sunoPrompt: {
-        chinese: "新古典史诗奇幻配乐，寂静空灵的独奏钢琴开场，中段弦乐与空灵女声吟唱渐进，随后圣洁的大合唱与圆号爆发，高潮定格，延音余韵收束",
-        english: "neo-classical cinematic epic fantasy orchestral soundtrack, starting with quiet haunting solo piano and Celtic harp, building up with soaring emotional solo soprano voice, cinematic strings crescendo, exploding into massive holy choir and French horns, leading to a sudden climax break and beautiful sustaining reverb tail, ultra high detail, 105 BPM, key of D minor",
+        chinese: "新古典史诗奇幻管弦配乐；完整连贯的歌曲；核心乐器：独奏钢琴、凯尔特竖琴、史诗弦乐、圆号、影视大鼓；105 BPM；D minor；空灵女声与圣洁合唱。",
+        english: "Neo-classical epic fantasy orchestral; cohesive full-length song; featuring solo piano, Celtic harp, cinematic strings, French horns, taiko; 105 BPM; D minor; ethereal female vocals and sacred choir.",
         bpm: "105",
         key: "D minor",
         structure: "Intro (0-5s) -> Build-up (5-12s) -> Climax Verse (12-20s) -> Reverb Outro (20-24s)",
@@ -220,8 +262,8 @@ const filmDemoResult: AudioDesignResult = {
       style: "神秘北欧民谣融合现代电子声景 (Nordic Ambient Folk & Cyber Soundscape)",
       instrumentation: "尼古赫帕琴 (Nyckelharpa), 尼泊尔竹笛, 重低音合成器 (Sub-bass), 模拟脉冲敲击, 迷幻合唱",
       sunoPrompt: {
-        chinese: "北欧极简民谣融合赛博朋克声景，空灵竹笛与拉弦琴神秘开场，中段加入合成器重低音和脉冲敲击拉开张力，后段冷酷吟唱与电子节拍高潮，定格收尾",
-        english: "Nordic minimal folk mixed with cyber soundscape, haunting ancient wood flute and Nyckelharpa solo, building with sub-bass drone and metallic analog pulses, exploding into cold vocal chanting and heavy electronic beats, sudden drop into silent echo tail, dark mystic atmospheric, 80 BPM, key of A minor",
+        chinese: "北欧极简民谣融合赛博电子声景；完整连贯的歌曲；核心乐器：尼古赫帕琴、竹笛、重低音合成器、模拟脉冲、电子鼓；80 BPM；A minor；冷峻克制的吟唱。",
+        english: "Nordic minimal folk with cyber soundscape; cohesive full-length song; featuring Nyckelharpa, bamboo flute, sub-bass synth, analog pulses, electronic drums; 80 BPM; A minor; restrained cold vocal chanting.",
         bpm: "80",
         key: "A minor",
         structure: "Intro (0-5s) -> Cyber Rise (5-12s) -> Heavy Beat (12-20s) -> Silence Tail (20-24s)",
@@ -262,13 +304,15 @@ interface AudioDirectorProps {
   setFiles: React.Dispatch<React.SetStateAction<FileItem[]>>;
   requirements: string;
   setRequirements: (req: string) => void;
-  target: { game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean };
-  setTarget: React.Dispatch<React.SetStateAction<{ game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean }>>;
+  target: { game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean; gift?: boolean; activity?: boolean };
+  setTarget: React.Dispatch<React.SetStateAction<{ game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean; gift?: boolean; activity?: boolean }>>;
   loading: boolean;
+  analysisStage: string;
   error: string | null;
   setError: (err: string | null) => void;
   result: AudioDesignResult | null;
-  onGenerate: () => void;
+  onGenerate: (scope: AudioDesignScope) => void;
+  onCancel: () => void;
   copyToClipboard: (text: string, id?: string) => void;
   copyTableToClipboard: (scheme: any, id: string) => void;
   downloadTableAsCSV: (scheme: any) => void;
@@ -286,6 +330,7 @@ interface AudioDirectorProps {
   editingLyrics: boolean;
   handleRegenerateLyrics: () => void;
   onLoadDemo?: (demo: AudioDesignResult) => void;
+  onSendMusicPrompt?: (prompt: string) => void;
 }
 
 export default function AudioDirector({
@@ -296,10 +341,12 @@ export default function AudioDirector({
   target,
   setTarget,
   loading,
+  analysisStage,
   error,
   setError,
   result,
   onGenerate,
+  onCancel,
   copyToClipboard,
   copyTableToClipboard,
   downloadTableAsCSV,
@@ -316,32 +363,66 @@ export default function AudioDirector({
   setLyricEditDirection,
   editingLyrics,
   handleRegenerateLyrics,
-  onLoadDemo
+  onLoadDemo,
+  onSendMusicPrompt,
 }: AudioDirectorProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [pasteMessage, setPasteMessage] = useState<string | null>(null);
+  const [analysisScope, setAnalysisScope] = useState<AudioDesignScope>({ music: true, sfx: false });
+  const isProfessionalTarget = Boolean(target.video || target.avatar || target.gift || target.activity);
+  const needsProfessionalVideoAnalysis = isProfessionalTarget && analysisScope.sfx;
+  const isGameTrack = (target.game || target.activity) && !target.video && !target.avatar && !target.sunnyIsland && !target.gift;
+  const videoFileCount = files.filter(item => item.type.startsWith('video/')).length;
+  const hasInvalidProfessionalSelection = needsProfessionalVideoAnalysis
+    && videoFileCount > 0
+    && (videoFileCount !== 1 || files.length !== 1);
+  const hasSfxResult = Boolean(result?.sfxSchemes?.length);
+  const hasMusicResult = Boolean(result?.bgmRecommendations?.length);
 
-  const processFiles = async (selectedFiles: FileList | null) => {
+  const toggleAnalysisScope = (kind: keyof AudioDesignScope) => {
+    const nextScope = { ...analysisScope, [kind]: !analysisScope[kind] };
+    if (!nextScope.music && !nextScope.sfx) return;
+    setAnalysisScope(nextScope);
+    if (!nextScope.sfx && activeTab === 'sfx') setActiveTab('bgm');
+    if (!nextScope.music && activeTab === 'bgm') setActiveTab('sfx');
+  };
+
+  const handleGenerate = () => {
+    setActiveTab(analysisScope.sfx ? 'sfx' : 'bgm');
+    onGenerate(analysisScope);
+  };
+
+  const processFiles = async (selectedFiles: FileList | File[] | null, source: 'upload' | 'paste' = 'upload') => {
     if (selectedFiles && selectedFiles.length > 0) {
-      const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
-      const oversizedFiles = Array.from(selectedFiles).filter(f => f.size > MAX_FILE_SIZE);
-      
+      const filesToProcess = Array.from(selectedFiles);
+      const MAX_VIDEO_SIZE = 100 * 1024 * 1024;
+      const MAX_DIRECT_SIZE = 20 * 1024 * 1024;
+      const oversizedFiles = filesToProcess.filter((file) => (
+        file.type.startsWith('video/')
+          ? file.size > MAX_VIDEO_SIZE
+          : file.size > MAX_DIRECT_SIZE
+      ));
+
       if (oversizedFiles.length > 0) {
-        setError(`部分文件超过 100MB 限制: ${oversizedFiles.map(f => f.name).join(', ')}`);
+        setError(`文件过大：视频上限 100MB，图片、音频和 PDF 上限 20MB。请处理：${oversizedFiles.map(f => f.name).join(', ')}`);
         return;
       }
 
       setIsUploading(true);
       setError(null);
-      await new Promise(resolve => setTimeout(resolve, 800)); // Visual upload latency
+      setPasteMessage(source === 'paste' ? '已从剪贴板导入截图，可直接开始分析。' : null);
 
-      const newFiles = Array.from(selectedFiles).map((file: File) => ({
+      const newFiles = filesToProcess.map((file: File) => ({
+        id: typeof crypto !== 'undefined' && 'randomUUID' in crypto
+          ? crypto.randomUUID()
+          : `file-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
         file,
         preview: URL.createObjectURL(file),
         type: file.type
       }));
       setFiles(prev => [...prev, ...newFiles]);
       setIsUploading(false);
-      
+
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
@@ -349,6 +430,37 @@ export default function AudioDirector({
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     processFiles(e.target.files);
   };
+
+  const getClipboardImageFile = (clipboardData: DataTransfer | null): File | null => {
+    if (!clipboardData) return null;
+    const imageItem = Array.from(clipboardData.items || [])
+      .find(item => item.kind === 'file' && item.type.startsWith('image/'));
+    const pastedFile = imageItem?.getAsFile();
+    if (pastedFile) {
+      const extension = pastedFile.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png';
+      return new File(
+        [pastedFile],
+        `pasted-screenshot-${Date.now()}.${extension}`,
+        { type: pastedFile.type || 'image/png' },
+      );
+    }
+    return Array.from(clipboardData.files || []).find(file => file.type.startsWith('image/')) || null;
+  };
+
+  const handlePaste = (e: React.ClipboardEvent | ClipboardEvent) => {
+    if (isUploading) return;
+    const imageFile = getClipboardImageFile(e.clipboardData);
+    if (!imageFile) return;
+    e.preventDefault();
+    e.stopPropagation();
+    void processFiles([imageFile], 'paste');
+  };
+
+  useEffect(() => {
+    const handleWindowPaste = (event: ClipboardEvent) => handlePaste(event);
+    window.addEventListener('paste', handleWindowPaste);
+    return () => window.removeEventListener('paste', handleWindowPaste);
+  }, [isUploading]);
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
@@ -369,7 +481,9 @@ export default function AudioDirector({
   };
 
   const handleSunoClick = (prompt: string) => {
-    copyToClipboard(prompt);
+    const englishPrompt = prompt.trim();
+    if (!englishPrompt) return;
+    copyToClipboard(englishPrompt);
     window.open('https://suno.com/create', '_blank');
   };
 
@@ -378,11 +492,7 @@ export default function AudioDirector({
       {/* Intro Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-6">
         <div>
-          <div className="flex items-center gap-2">
-            <Sparkles className="w-4 h-4 text-emerald-600" />
-            <span className="text-xs font-bold text-emerald-600 uppercase tracking-widest">AI Multimodal Audio Director</span>
-          </div>
-          <h2 className="text-xl font-black text-slate-800 mt-1">AI 音频设计</h2>
+          <h2 className="text-xl font-black text-slate-800">AI 音频设计</h2>
           <p className="text-xs text-slate-500 mt-1">多模态一次解析：自动产出全片声音轨道（音效与音乐）设计方案。</p>
         </div>
       </div>
@@ -396,13 +506,17 @@ export default function AudioDirector({
               <Upload className="w-3.5 h-3.5 text-emerald-600" />
               <span>上传创意素材</span>
             </h3>
-            
+
             <div
               onDrop={handleDrop}
               onDragOver={handleDragOver}
+              onPaste={handlePaste}
+              tabIndex={0}
+              role="button"
+              aria-label="上传、拖拽或粘贴创意素材"
               className={`border-2 border-dashed rounded-xl p-6 text-center transition-all cursor-pointer ${
-                isUploading 
-                  ? 'border-emerald-500 bg-emerald-500/5' 
+                isUploading
+                  ? 'border-emerald-500 bg-emerald-500/5'
                   : 'border-slate-200 hover:border-emerald-500/50 hover:bg-slate-50/50'
               }`}
               onClick={() => fileInputRef.current?.click()}
@@ -415,7 +529,7 @@ export default function AudioDirector({
                 multiple
                 className="hidden"
               />
-              
+
               {isUploading ? (
                 <div className="flex flex-col items-center gap-2">
                   <Loader2 className="w-8 h-8 text-emerald-600 animate-spin" />
@@ -425,10 +539,17 @@ export default function AudioDirector({
                 <div className="flex flex-col items-center gap-2 group">
                   <Upload className="w-8 h-8 text-slate-400 group-hover:text-emerald-600 transition-colors" />
                   <p className="text-xs font-bold text-slate-700">拖拽文件到这里，或点击浏览</p>
-                  <p className="text-[10px] text-slate-400">支持 视频、音频、图片、PDF 需求文档 (最大100M)</p>
+                  <p className="text-[10px] text-slate-400">视频最大 100MB，超过 50MB 会自动压缩分析副本；图片、音频与 PDF 最大 20MB；截图可直接 Ctrl+V 粘贴</p>
                 </div>
               )}
             </div>
+
+            {pasteMessage && (
+              <div className="flex items-center gap-1.5 rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-[10px] font-medium text-emerald-700">
+                <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                <span>{pasteMessage}</span>
+              </div>
+            )}
 
             {/* Uploaded Files Queue */}
             {files.length > 0 && (
@@ -439,18 +560,41 @@ export default function AudioDirector({
                     const isVideo = item.type.startsWith('video/');
                     const isImage = item.type.startsWith('image/');
                     const isAudio = item.type.startsWith('audio/');
-                    
+                    const preuploadTone = item.preupload?.status === 'ready'
+                      ? 'text-emerald-600'
+                      : item.preupload?.status === 'error'
+                        ? 'text-amber-600'
+                        : 'text-sky-600';
+                    const preuploadLabel = item.preupload
+                      ? item.preupload.status === 'ready'
+                        ? '预上传已就绪'
+                        : item.preupload.status === 'error'
+                          ? item.preupload.message || '预上传失败，将走原流程'
+                          : item.preupload.message || '正在后台预上传'
+                      : null;
+
                     return (
-                      <div key={index} className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs">
+                      <div key={item.id} className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs">
                         <div className="flex items-center gap-2 min-w-0">
                           {isImage && <img src={item.preview} className="w-8 h-8 rounded-lg object-cover shrink-0" />}
                           {isVideo && <Clapperboard className="w-5 h-5 text-emerald-600 shrink-0" />}
                           {isAudio && <Volume2 className="w-5 h-5 text-emerald-600 shrink-0" />}
                           {!isImage && !isVideo && !isAudio && <FileText className="w-5 h-5 text-slate-400 shrink-0" />}
-                          
+
                           <div className="min-w-0">
                             <p className="text-[11px] font-bold text-slate-700 truncate">{item.file.name}</p>
                             <p className="text-[9px] text-slate-400">{(item.file.size / (1024 * 1024)).toFixed(1)} MB</p>
+                            {isVideo && preuploadLabel && (
+                              <p
+                                className={`text-[9px] font-bold truncate ${preuploadTone}`}
+                                title={item.preupload?.error || preuploadLabel}
+                              >
+                                {preuploadLabel}
+                                {item.preupload?.status !== 'ready' && item.preupload?.status !== 'error'
+                                  ? ` ${item.preupload?.progress || 0}%`
+                                  : ''}
+                              </p>
+                            )}
                           </div>
                         </div>
                         <button
@@ -465,6 +609,17 @@ export default function AudioDirector({
                 </div>
               </div>
             )}
+
+            {/* Custom Text Requirements */}
+            <div className="space-y-2">
+              <label className="text-[11px] font-bold text-slate-700">输入您的文字设计需求（选填）</label>
+              <textarea
+                value={requirements}
+                onChange={(e) => setRequirements(e.target.value)}
+                placeholder="例如：生成充满赛博朋克科幻感的背景音乐，并重点标记战斗中光剑碰撞及脚步声的声音出现时刻..."
+                className="w-full h-24 bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500 transition-all resize-none placeholder-slate-400"
+              />
+            </div>
           </div>
 
           {/* Core Configuration & Extra Prompts */}
@@ -480,10 +635,10 @@ export default function AudioDirector({
               <div className="grid grid-cols-2 gap-3">
                 <button
                   type="button"
-                  onClick={() => setTarget({ game: true, video: false, avatar: false, sunnyIsland: false })}
+                  onClick={() => setTarget({ game: true, video: false, avatar: false, sunnyIsland: false, gift: false, activity: false })}
                   className={`flex items-center justify-center gap-2 py-2 px-3 border rounded-xl text-xs font-semibold transition-all ${
-                    target.game 
-                      ? 'bg-emerald-50 border-emerald-500 text-emerald-700 font-bold shadow-sm' 
+                    target.game
+                      ? 'bg-emerald-50 border-emerald-500 text-emerald-700 font-bold shadow-sm'
                       : 'bg-slate-50 border-slate-200 text-slate-500 hover:text-slate-800'
                   }`}
                 >
@@ -492,10 +647,10 @@ export default function AudioDirector({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setTarget({ game: false, video: true, avatar: false, sunnyIsland: false })}
+                  onClick={() => setTarget({ game: false, video: true, avatar: false, sunnyIsland: false, gift: false, activity: false })}
                   className={`flex items-center justify-center gap-2 py-2 px-3 border rounded-xl text-xs font-semibold transition-all ${
-                    target.video 
-                      ? 'bg-emerald-50 border-emerald-500 text-emerald-700 font-bold shadow-sm' 
+                    target.video
+                      ? 'bg-emerald-50 border-emerald-500 text-emerald-700 font-bold shadow-sm'
                       : 'bg-slate-50 border-slate-200 text-slate-500 hover:text-slate-800'
                   }`}
                 >
@@ -504,10 +659,10 @@ export default function AudioDirector({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setTarget({ game: false, video: false, avatar: true, sunnyIsland: false })}
+                  onClick={() => setTarget({ game: false, video: false, avatar: true, sunnyIsland: false, gift: false, activity: false })}
                   className={`flex items-center justify-center gap-2 py-2 px-3 border rounded-xl text-xs font-semibold transition-all ${
-                    target.avatar 
-                      ? 'bg-emerald-50 border-emerald-500 text-emerald-700 font-bold shadow-sm' 
+                    target.avatar
+                      ? 'bg-emerald-50 border-emerald-500 text-emerald-700 font-bold shadow-sm'
                       : 'bg-slate-50 border-slate-200 text-slate-500 hover:text-slate-800'
                   }`}
                 >
@@ -516,29 +671,87 @@ export default function AudioDirector({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setTarget({ game: false, video: false, avatar: false, sunnyIsland: true })}
+                  onClick={() => setTarget({ game: false, video: false, avatar: false, sunnyIsland: true, gift: false, activity: false })}
                   className={`flex items-center justify-center gap-2 py-2 px-3 border rounded-xl text-xs font-semibold transition-all ${
-                    target.sunnyIsland 
-                      ? 'bg-emerald-50 border-emerald-500 text-emerald-700 font-bold shadow-sm' 
+                    target.sunnyIsland
+                      ? 'bg-emerald-50 border-emerald-500 text-emerald-700 font-bold shadow-sm'
                       : 'bg-slate-50 border-slate-200 text-slate-500 hover:text-slate-800'
                   }`}
                 >
                   <Sun className="w-4 h-4 shrink-0 text-amber-500 animate-pulse" />
                   <span>小岛有晴天</span>
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setTarget({ game: false, video: false, avatar: false, sunnyIsland: false, gift: true, activity: false })}
+                  className={`flex items-center justify-center gap-2 py-2 px-3 border rounded-xl text-xs font-semibold transition-all ${
+                    target.gift
+                      ? 'bg-emerald-50 border-emerald-500 text-emerald-700 font-bold shadow-sm'
+                      : 'bg-slate-50 border-slate-200 text-slate-500 hover:text-slate-800'
+                  }`}
+                >
+                  <Gift className="w-4 h-4 shrink-0 text-pink-500" />
+                  <span>礼物</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTarget({ game: false, video: false, avatar: false, sunnyIsland: false, gift: false, activity: true })}
+                  className={`flex items-center justify-center gap-2 py-2 px-3 border rounded-xl text-xs font-semibold transition-all ${
+                    target.activity
+                      ? 'bg-emerald-50 border-emerald-500 text-emerald-700 font-bold shadow-sm'
+                      : 'bg-slate-50 border-slate-200 text-slate-500 hover:text-slate-800'
+                  }`}
+                >
+                  <CalendarDays className="w-4 h-4 shrink-0 text-indigo-500" />
+                  <span>活动</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-[11px] font-bold text-slate-700">分析内容</label>
+              <div className="grid grid-cols-2 gap-3">
+                <label className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-semibold transition-all ${
+                  analysisScope.music
+                    ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
+                    : 'border-slate-200 bg-slate-50 text-slate-500 hover:text-slate-800'
+                }`}>
+                  <input
+                    type="checkbox"
+                    checked={analysisScope.music}
+                    onChange={() => toggleAnalysisScope('music')}
+                    className="h-3.5 w-3.5 accent-emerald-600"
+                  />
+                  <Music className="h-3.5 w-3.5 shrink-0" />
+                  <span>音乐</span>
+                </label>
+                <label className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-semibold transition-all ${
+                  analysisScope.sfx
+                    ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
+                    : 'border-slate-200 bg-slate-50 text-slate-500 hover:text-slate-800'
+                }`}>
+                  <input
+                    type="checkbox"
+                    checked={analysisScope.sfx}
+                    onChange={() => toggleAnalysisScope('sfx')}
+                    className="h-3.5 w-3.5 accent-emerald-600"
+                  />
+                  <Volume2 className="h-3.5 w-3.5 shrink-0" />
+                  <span>音效</span>
+                </label>
               </div>
             </div>
 
             {/* Instrumental/Vocal Toggle */}
-            <div className="space-y-2">
+            {analysisScope.music && <div className="space-y-2">
               <label className="text-[11px] font-bold text-slate-700">音乐轨道生成偏好</label>
               <div className="grid grid-cols-2 gap-3">
                 <button
                   type="button"
                   onClick={() => setIsInstrumental(true)}
                   className={`py-2 px-3 border rounded-xl text-xs font-semibold transition-all ${
-                    isInstrumental 
-                      ? 'bg-emerald-50 border-emerald-500 text-emerald-700' 
+                    isInstrumental
+                      ? 'bg-emerald-50 border-emerald-500 text-emerald-700'
                       : 'bg-slate-50 border-slate-200 text-slate-500'
                   }`}
                 >
@@ -548,67 +761,49 @@ export default function AudioDirector({
                   type="button"
                   onClick={() => setIsInstrumental(false)}
                   className={`py-2 px-3 border rounded-xl text-xs font-semibold transition-all ${
-                    !isInstrumental 
-                      ? 'bg-emerald-50 border-emerald-500 text-emerald-700' 
+                    !isInstrumental
+                      ? 'bg-emerald-50 border-emerald-500 text-emerald-700'
                       : 'bg-slate-50 border-slate-200 text-slate-500'
                   }`}
                 >
                   带歌词/伴奏 (Vocal)
                 </button>
               </div>
-            </div>
-
-            {/* Custom Text Requirements */}
-            <div className="space-y-2">
-              <label className="text-[11px] font-bold text-slate-700">输入您的文字设计需求（选填）</label>
-              <textarea
-                value={requirements}
-                onChange={(e) => setRequirements(e.target.value)}
-                placeholder="例如：生成充满赛博朋克科幻感的背景音乐，并重点标记战斗中光剑碰撞及脚步声的声音出现时刻..."
-                className="w-full h-24 bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500 transition-all resize-none placeholder-slate-400"
-              />
-            </div>
-
-            {/* Scene Shortcuts for Quick Demands */}
-            <div className="space-y-1.5">
-              <p className="text-[9px] font-bold text-slate-450 uppercase">快捷配景需求一键载入：</p>
-              <div className="flex flex-wrap gap-1.5">
-                {[
-                  '科幻星际飞船起飞与激光战争',
-                  '中世纪奇幻城堡与林间雨夜 Foley',
-                  '横版像素冒险游戏草地脚步与拾取金币',
-                  '悬疑微电影心跳声、暗色声景与脚步尾随'
-                ].map((item, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => setRequirements(item)}
-                    className="text-[9px] bg-slate-50 hover:bg-emerald-50 text-slate-600 hover:text-emerald-700 border border-slate-200 px-2.5 py-1 rounded cursor-pointer transition-all"
-                  >
-                    {item}
-                  </button>
-                ))}
-              </div>
-            </div>
+            </div>}
 
             {/* Submit Action */}
             <button
-              onClick={onGenerate}
-              disabled={loading || (files.length === 0 && !requirements.trim())}
+              onClick={handleGenerate}
+              disabled={loading || hasInvalidProfessionalSelection || (files.length === 0 && !requirements.trim())}
               className="w-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-bold py-3.5 rounded-xl text-xs tracking-wider uppercase transition-all shadow-md shadow-emerald-600/10 disabled:opacity-50 flex items-center justify-center gap-2 mt-2 cursor-pointer"
             >
               {loading ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>正在调用 AI 解析素材并进行规划...</span>
+                  <span>分析中</span>
                 </>
               ) : (
                 <>
                   <Sparkles className="w-4 h-4" />
-                  <span>开始生成设计方案</span>
+                  <span>{hasInvalidProfessionalSelection
+                    ? '请先调整专业视频素材'
+                    : analysisScope.music && analysisScope.sfx
+                      ? '开始生成设计方案'
+                      : analysisScope.music
+                        ? '开始分析音乐'
+                        : '开始分析音效'}</span>
                 </>
               )}
             </button>
+            {loading && (
+              <button
+                type="button"
+                onClick={onCancel}
+                className="w-full border border-slate-200 bg-white hover:bg-red-50 hover:border-red-200 text-slate-500 hover:text-red-600 font-semibold py-2.5 rounded-xl text-xs transition-all"
+              >
+                取消本次分析
+              </button>
+            )}
           </div>
         </div>
 
@@ -629,7 +824,7 @@ export default function AudioDirector({
               <Loader2 className="w-10 h-10 text-emerald-600 animate-spin" />
               <div className="space-y-1">
                 <p className="text-sm font-bold text-slate-800">多模态大模型正在协同创作中</p>
-                <p className="text-xs text-slate-500">正在分析视频/图片画幅信息，编写 Foley 排程表，起草 Suno 音乐配曲...</p>
+                <p className="text-xs text-slate-500">{analysisStage}</p>
               </div>
             </div>
           )}
@@ -649,7 +844,10 @@ export default function AudioDirector({
                   <button
                     type="button"
                     onClick={() => {
-                      setTarget({ game: false, video: true, avatar: false, sunnyIsland: false });
+                      setTarget({ game: false, video: true, avatar: false, sunnyIsland: false, gift: false, activity: false });
+                      setIsInstrumental(false);
+                      setAnalysisScope({ music: true, sfx: true });
+                      setActiveTab('sfx');
                       onLoadDemo(filmDemoResult);
                     }}
                     className="bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 text-xs font-bold px-4 py-2.5 rounded-xl transition-all flex items-center gap-2 shadow-sm cursor-pointer"
@@ -666,12 +864,12 @@ export default function AudioDirector({
           {!loading && result && (
             <div className="space-y-5">
               {/* Output Tabs Selection */}
-              <div className="bg-white border border-slate-200 p-1.5 rounded-xl flex shadow-sm">
+              {hasSfxResult && hasMusicResult && <div className="bg-white border border-slate-200 p-1.5 rounded-xl flex shadow-sm">
                 <button
                   onClick={() => setActiveTab('sfx')}
                   className={`flex-1 py-2 px-4 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 ${
-                    activeTab === 'sfx' 
-                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
+                    activeTab === 'sfx'
+                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                       : 'text-slate-500 hover:text-slate-800'
                   }`}
                 >
@@ -681,18 +879,18 @@ export default function AudioDirector({
                 <button
                   onClick={() => setActiveTab('bgm')}
                   className={`flex-1 py-2 px-4 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 ${
-                    activeTab === 'bgm' 
-                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
+                    activeTab === 'bgm'
+                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                       : 'text-slate-500 hover:text-slate-800'
                   }`}
                 >
                   <Music className="w-3.5 h-3.5" />
                   <span>背景音乐配乐方案</span>
                 </button>
-              </div>
+              </div>}
 
               {/* TAB 1: SFX CUE SHEET TABLE */}
-              {activeTab === 'sfx' && (
+              {activeTab === 'sfx' && hasSfxResult && (
                 <div className="space-y-4">
                   {/* Summary Overview */}
                   <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3 shadow-sm">
@@ -764,11 +962,107 @@ export default function AudioDirector({
               )}
 
               {/* TAB 2: BGM RECOMMENDATIONS */}
-              {activeTab === 'bgm' && (
+              {activeTab === 'bgm' && hasMusicResult && (
                 <div className="space-y-4">
+                  {result.videoMotionTempo && (
+                    <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm space-y-4" data-testid="video-motion-tempo">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="flex items-start gap-2.5">
+                          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-amber-50 text-amber-600 border border-amber-100">
+                            <Gauge className="h-4 w-4" />
+                          </div>
+                          <div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h4 className="text-xs font-black text-slate-800">视频动作速度分析</h4>
+                              <span className="rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-700">独立于推荐配乐 BPM</span>
+                            </div>
+                            <p className="mt-1 text-[10px] leading-relaxed text-slate-500">根据人物或主体的重复动作周期估算，用于查找卡点音乐，不代表下方配乐方案的速度。</p>
+                          </div>
+                        </div>
+                        <span className="w-fit shrink-0 whitespace-nowrap rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-bold text-slate-600">
+                          可信度：{result.videoMotionTempo.confidence}
+                        </span>
+                      </div>
+
+                      {result.videoMotionTempo.detected ? (
+                        <>
+                          <div className="grid grid-cols-2 border-y border-slate-200 sm:grid-cols-4 sm:divide-x sm:divide-slate-200">
+                            <div className="p-3">
+                              <p className="text-[9px] font-bold text-amber-700">主要动作速度</p>
+                              <p className="mt-1 text-xl font-black text-slate-800">{result.videoMotionTempo.primaryBpm}<span className="ml-1 text-[10px] font-bold text-slate-500">BPM</span></p>
+                            </div>
+                            <div className="border-l border-slate-200 p-3 sm:border-l-0">
+                              <p className="text-[9px] font-bold text-slate-500">稳定区间</p>
+                              <p className="mt-1 text-sm font-black text-slate-800">{result.videoMotionTempo.bpmRangeMin}-{result.videoMotionTempo.bpmRangeMax} BPM</p>
+                            </div>
+                            <div className="border-t border-slate-200 p-3 sm:border-t-0">
+                              <p className="text-[9px] font-bold text-slate-500">动作间隔</p>
+                              <p className="mt-1 text-sm font-black text-slate-800">{Math.round(60000 / result.videoMotionTempo.primaryBpm)} ms</p>
+                            </div>
+                            <div className="border-l border-t border-slate-200 p-3 sm:border-l-0 sm:border-t-0">
+                              <p className="text-[9px] font-bold text-slate-500">半速 / 倍速候选</p>
+                              <p className="mt-1 text-sm font-black text-slate-800">{result.videoMotionTempo.alternateBpms.length > 0 ? result.videoMotionTempo.alternateBpms.join(' / ') : '无'}</p>
+                            </div>
+                          </div>
+                          <div className="grid divide-y divide-slate-200 md:grid-cols-2 md:divide-x md:divide-y-0">
+                            <div className="pb-3.5 md:pb-0 md:pr-4">
+                              <p className="text-[9px] font-bold text-slate-500">识别动作与分析依据</p>
+                              <p className="mt-1.5 text-[11px] font-semibold leading-relaxed text-slate-700">{result.videoMotionTempo.motionPattern}</p>
+                              <p className="mt-1 text-[10px] leading-relaxed text-slate-500">{result.videoMotionTempo.analysisBasis}</p>
+                            </div>
+                            <div className="pt-3.5 md:pl-4 md:pt-0">
+                              <p className="text-[9px] font-bold text-slate-500">卡点建议</p>
+                              <p className="mt-1.5 text-[11px] font-semibold leading-relaxed text-slate-700">{result.videoMotionTempo.syncGuidance}</p>
+                            </div>
+                          </div>
+                          {result.videoMotionTempo.segments.length > 0 && (
+                            <div className="overflow-x-auto rounded-xl border border-slate-200">
+                              <table className="w-full min-w-[420px] text-left text-[10px]">
+                                <thead className="bg-slate-50 text-slate-500">
+                                  <tr>
+                                    <th className="px-3 py-2 font-bold">时间段</th>
+                                    <th className="px-3 py-2 font-bold">画面动作</th>
+                                    <th className="px-3 py-2 font-bold">局部速度</th>
+                                    <th className="px-3 py-2 font-bold">可信度</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100 text-slate-700">
+                                  {result.videoMotionTempo.segments.map((segment, index) => (
+                                    <tr key={`${segment.timecode}-${index}`}>
+                                      <td className="whitespace-nowrap px-3 py-2 font-mono font-bold">{segment.timecode}</td>
+                                      <td className="px-3 py-2 font-semibold">{segment.motion}</td>
+                                      <td className="whitespace-nowrap px-3 py-2 font-bold text-amber-700">{segment.bpm} BPM</td>
+                                      <td className="whitespace-nowrap px-3 py-2">{segment.confidence}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5">
+                          <p className="text-xs font-bold text-slate-700">暂时无法稳定估算视频动作速度</p>
+                          <p className="mt-1 text-[10px] leading-relaxed text-slate-500">{result.videoMotionTempo.analysisBasis}</p>
+                          <p className="mt-1 text-[10px] leading-relaxed text-slate-500">{result.videoMotionTempo.syncGuidance}</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {!isGameTrack && <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm space-y-1">
+                    <h5 className="text-[10px] font-bold text-slate-450 uppercase">画面整体情绪基线（两套方案共同参考）</h5>
+                    <p className="text-xs text-slate-700 leading-relaxed font-semibold">
+                      {result.musicAnalysis.emotionalCurve}
+                    </p>
+                  </div>}
+
                   {/* BGM Specs Cards */}
                   {result.bgmRecommendations.map((bgm, idx) => (
-                    <div key={idx} className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
+                    <div
+                      key={idx}
+                      data-testid={`bgm-recommendation-${idx}`}
+                      className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm"
+                    >
                       {/* Section Head */}
                       <div className="px-5 py-4 bg-slate-50/50 border-b border-slate-200 flex items-center justify-between">
                         <div>
@@ -779,13 +1073,13 @@ export default function AudioDirector({
 
                       {/* Music parameters */}
                       <div className="p-5 space-y-4 text-xs">
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 bg-slate-50 p-4 rounded-xl border border-slate-200">
+                        {!isGameTrack && <div className="grid grid-cols-2 md:grid-cols-4 gap-3 bg-slate-50 p-4 rounded-xl border border-slate-200">
                           <div>
                             <p className="text-[10px] text-slate-450 uppercase font-bold">配乐乐器</p>
                             <p className="text-slate-700 font-semibold mt-0.5 truncate">{bgm.instrumentation}</p>
                           </div>
                           <div>
-                            <p className="text-[10px] text-slate-450 uppercase font-bold">估算速度</p>
+                            <p className="text-[10px] text-slate-450 uppercase font-bold">推荐配乐速度</p>
                             <p className="text-slate-700 font-semibold mt-0.5">{bgm.sunoPrompt.bpm} BPM</p>
                           </div>
                           <div>
@@ -796,22 +1090,49 @@ export default function AudioDirector({
                             <p className="text-[10px] text-slate-450 uppercase font-bold">曲式结构</p>
                             <p className="text-slate-700 font-semibold mt-0.5 truncate">{bgm.sunoPrompt.structure}</p>
                           </div>
-                        </div>
+                        </div>}
+
+                        {isGameTrack && <div className="space-y-3">
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 bg-slate-50 p-4 rounded-xl border border-slate-200">
+                            <div>
+                              <p className="text-[10px] text-slate-450 uppercase font-bold">核心配器</p>
+                              <p className="text-slate-700 font-semibold mt-0.5 leading-relaxed">{bgm.instrumentation}</p>
+                            </div>
+                            <div>
+                              <p className="text-[10px] text-slate-450 uppercase font-bold">推荐配乐速度</p>
+                              <p className="text-slate-700 font-semibold mt-0.5">{bgm.sunoPrompt.bpm} BPM</p>
+                            </div>
+                            <div>
+                              <p className="text-[10px] text-slate-450 uppercase font-bold">建议调性</p>
+                              <p className="text-slate-700 font-semibold mt-0.5">{bgm.sunoPrompt.key}</p>
+                            </div>
+                          </div>
+
+                          {bgm.visualRationale && <div className="space-y-1">
+                            <h5 className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider flex items-center gap-1.5">
+                              <Sparkles className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                              <span>画面适配说明</span>
+                            </h5>
+                            <p className="text-slate-700 bg-emerald-50/50 p-3.5 rounded-xl leading-relaxed border border-emerald-100 font-semibold">
+                              {bgm.visualRationale}
+                            </p>
+                          </div>}
+                        </div>}
 
                         {/* Music emotional curve description */}
-                        <div className="space-y-1">
-                          <h5 className="text-[10px] font-bold text-slate-450 uppercase">情绪起伏曲线与剪辑点</h5>
+                        {!isGameTrack && <div className="space-y-1">
+                          <h5 className="text-[10px] font-bold text-slate-450 uppercase">本方案动态曲线与剪辑点</h5>
                           <p className="text-slate-700 bg-slate-50 p-3.5 rounded-xl leading-relaxed border border-slate-200 font-semibold">
-                            {result.musicAnalysis.emotionalCurve}
+                            {bgm.sunoPrompt.dynamics}
                           </p>
-                        </div>
+                        </div>}
 
                         {/* Timeline Music Design copy */}
-                        {bgm.timelineDesign && bgm.timelineDesign.length > 0 && (
+                        {!isGameTrack && bgm.timelineDesign && bgm.timelineDesign.length > 0 && (
                           <div className="space-y-3 pt-2">
                             <h5 className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider flex items-center gap-1.5">
                               <Clock className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                              <span>分秒级配乐细致设计案 (Music Production Timeline)</span>
+                              <span>自适应配乐段落设计案 (Music Production Timeline)</span>
                             </h5>
                             <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4.5 space-y-4 shadow-sm">
                               <div className="relative border-l border-emerald-200 ml-3 pl-5 space-y-5">
@@ -856,38 +1177,67 @@ export default function AudioDirector({
                           <div className="flex items-center justify-between">
                             <h5 className="text-[10px] font-bold text-emerald-700 uppercase tracking-widest flex items-center gap-1">
                               <Music className="w-3 h-3 text-emerald-600" />
-                              <span>Suno AI 专业生成词 (Style Prompt)</span>
+                              <span>Suno 整体音乐生成词</span>
                             </h5>
                             <button
-                              onClick={() => copyToClipboard(bgm.sunoPrompt.english, `suno-p-${idx}`)}
-                              className="text-[10px] text-slate-500 hover:text-emerald-700 flex items-center gap-1 transition-colors cursor-pointer"
+                              type="button"
+                              data-testid={`copy-suno-english-${idx}`}
+                              title="仅复制英文 Suno 生成词"
+                              disabled={!bgm.sunoPrompt.english.trim()}
+                              onClick={() => copyToClipboard(bgm.sunoPrompt.english.trim(), `suno-p-${idx}`)}
+                              className="text-[10px] text-slate-500 hover:text-emerald-700 flex items-center gap-1 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                             >
                               <Copy className="w-3 h-3" />
-                              <span>{copiedId === `suno-p-${idx}` ? '已复制' : '复制提示词'}</span>
+                              <span>{copiedId === `suno-p-${idx}` ? '已复制英文' : '复制英文生成词'}</span>
                             </button>
                           </div>
-                          <p className="font-mono text-[11px] text-slate-850 bg-white p-3 rounded-lg border border-slate-200 leading-relaxed italic select-all">
-                            {bgm.sunoPrompt.english}
+
+                          <p className="text-[10px] text-slate-400">
+                            整首音乐的简短风格概述，不含时间线；复制时仅复制英文。
                           </p>
-                          
-                          {/* SfxPlayer block for direct sound scene generation */}
-                          <div className="pt-2">
-                            <ElevenLabsPlayer text={bgm.sunoPrompt.english} id={`dir-bgm-${idx}`} type="music" />
+
+                          <div className="space-y-1.5">
+                            <p className="text-[10px] font-bold text-slate-500">中文理解版</p>
+                            <p
+                              data-testid={`suno-prompt-chinese-${idx}`}
+                              className="text-[11px] text-slate-700 bg-emerald-50/50 p-3 rounded-lg border border-emerald-100 leading-relaxed"
+                            >
+                              {bgm.sunoPrompt.chinese}
+                            </p>
                           </div>
 
-                          <div className="pt-2 flex justify-end">
-                            <button
-                              onClick={() => handleSunoClick(bgm.sunoPrompt.english)}
-                              className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-2 rounded-xl text-[10px] flex items-center gap-1.5 transition-all shadow-md shadow-emerald-600/10 cursor-pointer"
+                          <div className="space-y-1.5">
+                            <p className="text-[10px] font-bold text-slate-500">English Prompt（复制内容）</p>
+                            <p
+                              data-testid={`suno-prompt-english-${idx}`}
+                              className="font-mono text-[11px] text-slate-850 bg-white p-3 rounded-lg border border-slate-200 leading-relaxed italic select-all"
                             >
-                              <span>复制提示词并跳转 Suno 创作</span>
+                              {bgm.sunoPrompt.english}
+                            </p>
+                          </div>
+
+                          <div className="pt-2 flex flex-wrap justify-end gap-2">
+                            <ElevenLabsPlayer
+                              text={bgm.sunoPrompt.english}
+                              id={`dir-bgm-${idx}`}
+                              type="music"
+                              onSendToMusicStudio={onSendMusicPrompt}
+                            />
+
+                            <button
+                              type="button"
+                              disabled={!bgm.sunoPrompt.english.trim()}
+                              onClick={() => handleSunoClick(bgm.sunoPrompt.english)}
+                              className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-2 rounded-xl text-[10px] flex items-center gap-1.5 transition-all shadow-md shadow-emerald-600/10 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              <span>复制英文并跳转 Suno 创作</span>
                               <ChevronRight className="w-3 h-3" />
                             </button>
                           </div>
                         </div>
 
                         {/* Lyrics editing block (if Vocal is enabled) */}
-                        {bgm.lyrics && !isInstrumental && (
+                        {!isGameTrack && bgm.lyrics && !isInstrumental && (
                           <div className="space-y-3 pt-2">
                             <h5 className="text-[10px] font-bold text-slate-700 uppercase tracking-wider">配曲歌词智能设计 (Lyrical Architecture)</h5>
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -925,7 +1275,7 @@ export default function AudioDirector({
       <AnimatePresence>
         {selectedLyrics && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50 backdrop-blur-sm">
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
@@ -947,14 +1297,14 @@ export default function AudioDirector({
                 </div>
                 <div className="space-y-2">
                   <label className="text-xs font-bold text-slate-700 block">输入修改方向与情感倾向</label>
-                  <textarea 
+                  <textarea
                     value={lyricEditDirection}
                     onChange={(e) => setLyricEditDirection(e.target.value)}
                     placeholder="例如：更伤感绝望一点、增加一些太空的冰冷画面描述、增加副歌的爆点和韵律感..."
                     className="w-full h-24 bg-slate-50 border border-slate-200 focus:ring-1 focus:ring-emerald-500 rounded-xl p-3.5 text-xs focus:outline-none text-slate-800 transition-all resize-none placeholder-slate-400"
                   />
                 </div>
-                <button 
+                <button
                   onClick={handleRegenerateLyrics}
                   disabled={editingLyrics || !lyricEditDirection.trim()}
                   className="w-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white py-3 rounded-xl text-xs font-bold disabled:opacity-50 transition-all flex items-center justify-center gap-2 cursor-pointer"

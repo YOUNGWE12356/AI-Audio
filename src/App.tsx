@@ -3,77 +3,180 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef, useEffect } from 'react';
-import { analyzeAudioDesign, AudioDesignResult, regenerateLyrics, translateToEnglish } from './services/geminiService';
+import React, { lazy, Suspense, useState, useRef, useEffect, useCallback } from 'react';
+import { Menu } from 'lucide-react';
+import {
+  analyzeAudioDesign,
+  analyzeAudioDesignPreuploadedVideo,
+  analyzeAudioDesignVideo,
+  AudioDesignMedia,
+  AudioDesignScope,
+  AudioDesignResult,
+  createEnglishMusicPromptForElevenLabs,
+  extractAudioDesignVideoKeyframes,
+  preuploadAudioDesignVideo,
+  regenerateLyrics,
+  translateTextToLanguage,
+  translateToEnglish,
+} from './services/geminiService';
 import { generateSoundEffect, generateMusic, generateVoice } from './services/elevenLabsService';
 import { FileItem, HistoryItem, TabType } from './types';
-import { ELEVENLABS_VOICES } from './data/voices';
+import { ELEVENLABS_VOICES, VoiceItem } from './data/voices';
+import { fetchPlatformHealth } from './services/platformService';
+import { prepareFilesForGemini } from './utils/mediaPreparation';
+import { loadPersistentHistory, persistHistory } from './services/historyStorage';
+
+export interface PendingMusicOption {
+  id: 'A' | 'B';
+  url: string;
+  title: string;
+  prompt: string;
+  timestamp: string;
+  details: string;
+  duration: number;
+  type: 'instrumental' | 'vocal';
+}
+
+const GENERATED_MEDIA_HISTORY_LIMIT = 100;
+
+const limitGeneratedMediaHistory = (items: HistoryItem[]) => {
+  let generatedMediaCount = 0;
+  return items.filter((item) => {
+    if (item.type !== 'music' && item.type !== 'sfx') return true;
+    generatedMediaCount += 1;
+    return generatedMediaCount <= GENERATED_MEDIA_HISTORY_LIMIT;
+  });
+};
+
+const mergeHistoryLists = (storedItems: HistoryItem[], currentItems: HistoryItem[]) => {
+  const mergedById = new Map<string, HistoryItem>();
+  storedItems.forEach(item => mergedById.set(item.id, item));
+  currentItems.forEach(item => mergedById.set(item.id, item));
+  return Array.from(mergedById.values()).sort((left, right) => (
+    left.timestamp < right.timestamp ? 1 : left.timestamp > right.timestamp ? -1 : 0
+  ));
+};
 
 // Modular Components
 import Sidebar from './components/Sidebar';
 import Workbench from './components/Workbench';
-import AudioDirector from './components/AudioDirector';
-import MusicStudio from './components/MusicStudio';
-import SfxStudio from './components/SfxStudio';
-import DubbingStudio from './components/DubbingStudio';
-import AudioTools from './components/AudioTools';
-import SettingsComponent from './components/Settings';
-import SfxLibrary from './components/SfxLibrary';
-import SfxRequirements from './components/SfxRequirements';
-import VideoSoundtrack from './components/VideoSoundtrack';
+
+const AudioDirector = lazy(() => import('./components/AudioDirector'));
+const MusicStudio = lazy(() => import('./components/MusicStudio'));
+const SfxStudio = lazy(() => import('./components/SfxStudio'));
+const DubbingStudio = lazy(() => import('./components/DubbingStudio'));
+const AudioTools = lazy(() => import('./components/AudioTools'));
+const SettingsComponent = lazy(() => import('./components/Settings'));
+const SfxLibrary = lazy(() => import('./components/SfxLibrary'));
+const SfxRequirements = lazy(() => import('./components/SfxRequirements'));
+const VideoSoundtrack = lazy(() => import('./components/VideoSoundtrack'));
+import GlobalAssistant, { AssistantAudioRequest, AssistantDirectorRequest, AssistantLibraryRequest, AssistantMusicRequest, AssistantRequirementsRequest, AssistantSfxRequest, AssistantVideoRequest, AssistantVoiceRequest } from './components/GlobalAssistant';
+
+function WorkspaceLoading() {
+  return (
+    <div className="flex min-h-full items-center justify-center p-8" role="status" aria-live="polite">
+      <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-5 py-4 text-sm font-medium text-slate-600 shadow-sm">
+        <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-blue-500" aria-hidden="true" />
+        正在加载工作空间…
+      </div>
+    </div>
+  );
+}
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState<TabType>('workbench');
+  const [visitedTabs, setVisitedTabs] = useState<Set<TabType>>(() => new Set(['workbench']));
+  const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
+  const [assistantAudioRequest, setAssistantAudioRequest] = useState<AssistantAudioRequest | null>(null);
+  const [assistantVideoRequest, setAssistantVideoRequest] = useState<AssistantVideoRequest | null>(null);
+  const [assistantVoiceRequest, setAssistantVoiceRequest] = useState<AssistantVoiceRequest | null>(null);
+  const [assistantRequirementsRequest, setAssistantRequirementsRequest] = useState<AssistantRequirementsRequest | null>(null);
+  const [assistantLibrarySearchQuery, setAssistantLibrarySearchQuery] = useState('');
+  const [assistantLibraryCategory, setAssistantLibraryCategory] = useState('');
+  const [assistantLibrarySubcategory, setAssistantLibrarySubcategory] = useState('');
+  const [assistantMusicAutoRunId, setAssistantMusicAutoRunId] = useState<string | null>(null);
+  const [assistantSfxAutoRunId, setAssistantSfxAutoRunId] = useState<string | null>(null);
+  const [assistantRunningTaskIds, setAssistantRunningTaskIds] = useState<Set<string>>(() => new Set());
+
+  const updateAssistantTaskRunning = useCallback((requestId: string, running: boolean) => {
+    setAssistantRunningTaskIds((previous) => {
+      const next = new Set(previous);
+      if (running) next.add(requestId);
+      else next.delete(requestId);
+      return next;
+    });
+  }, []);
   
-  // API key states & dynamic check
-  const [hasGeminiKey, setHasGeminiKey] = useState(() => 
-    Boolean(process.env.GEMINI_API_KEY || (typeof window !== 'undefined' && localStorage.getItem('GEMINI_API_KEY')))
-  );
-  const [hasElevenLabsKey, setHasElevenLabsKey] = useState(() => 
-    Boolean(process.env.ELEVENLABS_API_KEY || (typeof window !== 'undefined' && localStorage.getItem('ELEVENLABS_API_KEY')))
-  );
+  // The HTML5 client only reads service availability from the same-origin API.
+  // Secret values remain on the server and are never embedded into the bundle.
+  const [hasGeminiKey, setHasGeminiKey] = useState(false);
+  const [hasElevenLabsKey, setHasElevenLabsKey] = useState(false);
+  const elevenLabsQualityMode = 'pro' as const;
+  const isElevenLabsProMode = true;
 
   const handleKeysUpdated = () => {
-    setHasGeminiKey(Boolean(process.env.GEMINI_API_KEY || (typeof window !== 'undefined' && localStorage.getItem('GEMINI_API_KEY'))));
-    setHasElevenLabsKey(Boolean(process.env.ELEVENLABS_API_KEY || (typeof window !== 'undefined' && localStorage.getItem('ELEVENLABS_API_KEY'))));
+    fetchPlatformHealth()
+      .then((health) => {
+        setHasGeminiKey(health.services.gemini);
+        setHasElevenLabsKey(health.services.elevenLabs);
+      })
+      .catch(() => {
+        setHasGeminiKey(false);
+        setHasElevenLabsKey(false);
+      });
   };
 
-  // Pre-filled sample historic creations for a complete look on first load
-  const [historyList, setHistoryList] = useState<HistoryItem[]>([
-    {
-      id: 'h-1',
-      type: 'music',
-      title: '独立音乐 - Epic Cyberpunk Horizon',
-      prompt: 'epic synthwave track with heavy bass, retro drums, space guitar, and glowing cyber vibe',
-      url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3',
-      timestamp: '2026-07-08 00:05',
-      details: '30秒 · 纯音乐'
-    },
-    {
-      id: 'h-2',
-      type: 'sfx',
-      title: '独立音效 - Mechanical Footstep (Foley)',
-      prompt: 'robotic heavy metallic steps on solid surface, slow pacing, high detail',
-      url: 'https://actions.google.com/sounds/v1/science_fiction/heavy_industrial_machine.ogg',
-      timestamp: '2026-07-08 00:15',
-      details: '5秒 · 电影声效'
-    },
-    {
-      id: 'h-3',
-      type: 'voice',
-      title: '角色配音 - Rachel (知性御姐)',
-      prompt: '欢迎来到AI多模态音频创作中心。在这里，我们将文字、画面与声音完美融合，创造前所未有的视听享受。',
-      url: 'https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg',
-      timestamp: '2026-07-08 00:28',
-      details: '12秒 · 平静自然'
-    }
-  ]);
+  useEffect(() => {
+    handleKeysUpdated();
+  }, []);
+
+  useEffect(() => {
+    setVisitedTabs(prev => {
+      if (prev.has(currentTab)) return prev;
+      const next = new Set(prev);
+      next.add(currentTab);
+      return next;
+    });
+  }, [currentTab]);
+
+  const [historyList, setHistoryListState] = useState<HistoryItem[]>([]);
+  const [historyHydrated, setHistoryHydrated] = useState(false);
+  const setHistoryList = useCallback<React.Dispatch<React.SetStateAction<HistoryItem[]>>>((action) => {
+    setHistoryListState((previous) => limitGeneratedMediaHistory(
+      typeof action === 'function' ? action(previous) : action,
+    ));
+  }, []);
+  const previousHistoryListRef = useRef(historyList);
+
+  useEffect(() => {
+    let active = true;
+    void loadPersistentHistory()
+      .then((storedHistory) => {
+        if (!active) return;
+        setHistoryListState((currentHistory) => limitGeneratedMediaHistory(
+          mergeHistoryLists(storedHistory, currentHistory),
+        ));
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (active) setHistoryHydrated(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!historyHydrated) return;
+    void persistHistory(historyList).catch(() => undefined);
+  }, [historyHydrated, historyList]);
 
   // Audio Director States
   const [files, setFiles] = useState<FileItem[]>([]);
   const [requirements, setRequirements] = useState('');
-  const [target, setTarget] = useState({ game: true, video: false, avatar: false, sunnyIsland: false });
+  const [target, setTarget] = useState({ game: true, video: false, avatar: false, sunnyIsland: false, gift: false, activity: false });
   const [loading, setLoading] = useState(false);
+  const [analysisStage, setAnalysisStage] = useState('正在准备素材...');
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AudioDesignResult | null>(null);
   const [activeTab, setActiveTab] = useState<'sfx' | 'bgm'>('sfx');
@@ -83,14 +186,38 @@ export default function App() {
   const [isInstrumental, setIsInstrumental] = useState(true);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const analysisAbortRef = useRef<AbortController | null>(null);
+  const analysisRunningRef = useRef(false);
+  const filesRef = useRef<FileItem[]>([]);
+  const previousFilesRef = useRef<FileItem[]>([]);
+  const objectUrlsRef = useRef<{
+    pendingSfxOptionAUrl: string | null;
+    pendingSfxOptionBUrl: string | null;
+    pendingMusicOptionAUrl: string | null;
+    pendingMusicOptionBUrl: string | null;
+    pendingVoiceOptionAUrl: string | null;
+    pendingVoiceOptionBUrl: string | null;
+  }>({
+    pendingSfxOptionAUrl: null,
+    pendingSfxOptionBUrl: null,
+    pendingMusicOptionAUrl: null,
+    pendingMusicOptionBUrl: null,
+    pendingVoiceOptionAUrl: null,
+    pendingVoiceOptionBUrl: null,
+  });
+  const preuploadAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const preuploadPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
 
   // Standalone SFX Generator States
   const [standalonePrompt, setStandalonePrompt] = useState('');
-  const [standaloneDuration, setStandaloneDuration] = useState(5);
+  const [standaloneDuration, setStandaloneDuration] = useState(1);
+  const [standaloneDurationMode, setStandaloneDurationMode] = useState<'auto' | 'fixed'>('auto');
   const [standaloneLoading, setStandaloneLoading] = useState(false);
-  const [standaloneAudioUrl, setStandaloneAudioUrl] = useState<string | null>(null);
   const [standaloneError, setStandaloneError] = useState<string | null>(null);
-  const standaloneAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [pendingSfxOptions, setPendingSfxOptions] = useState<{
+    optionA: { url: string; title: string; prompt: string; timestamp: string; details: string; duration: number } | null;
+    optionB: { url: string; title: string; prompt: string; timestamp: string; details: string; duration: number } | null;
+  }>({ optionA: null, optionB: null });
 
   // Standalone Music Generator States
   const [standaloneMusicPrompt, setStandaloneMusicPrompt] = useState('');
@@ -99,13 +226,18 @@ export default function App() {
   const [standaloneMusicLyrics, setStandaloneMusicLyrics] = useState('');
   const [standaloneMusicLoading, setStandaloneMusicLoading] = useState(false);
   const [standaloneMusicAudioUrl, setStandaloneMusicAudioUrl] = useState<string | null>(null);
+  const [pendingMusicOptions, setPendingMusicOptions] = useState<{
+    optionA: PendingMusicOption | null;
+    optionB: PendingMusicOption | null;
+  }>({ optionA: null, optionB: null });
   const [standaloneMusicError, setStandaloneMusicError] = useState<string | null>(null);
   const standaloneMusicAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // Standalone Voiceover Generator States
   const [standaloneVoiceText, setStandaloneVoiceText] = useState('');
-  const [standaloneVoiceGender, setStandaloneVoiceGender] = useState<'male' | 'female'>('female');
-  const [standaloneVoiceRole, setStandaloneVoiceRole] = useState('21m00Tcm4TlvDq8ikWAM'); 
+  const [standaloneVoiceGender, setStandaloneVoiceGender] = useState<'male' | 'female'>('male');
+  const [standaloneVoiceRole, setStandaloneVoiceRole] = useState(''); 
+  const [selectedStandaloneVoice, setSelectedStandaloneVoice] = useState<VoiceItem | null>(null);
   const [standaloneVoiceEmotion, setStandaloneVoiceEmotion] = useState('');
   const [standaloneVoiceLang, setStandaloneVoiceLang] = useState('zh');
   const [standaloneVoiceSpeed, setStandaloneVoiceSpeed] = useState<number>(1.0);
@@ -114,23 +246,272 @@ export default function App() {
   const [standaloneVoiceError, setStandaloneVoiceError] = useState<string | null>(null);
   const standaloneVoiceAudioRef = useRef<HTMLAudioElement | null>(null);
 
+  const handleAssistantAudioRequest = useCallback((request: AssistantAudioRequest) => {
+    setAssistantAudioRequest(request);
+    setCurrentTab('audio-tools');
+  }, []);
+
+  const handleAssistantVoiceRequest = useCallback(async (request: AssistantVoiceRequest) => {
+    if (request.mode && request.mode !== 'tts') {
+      setAssistantVoiceRequest(request);
+      setCurrentTab('dubbing-studio');
+      return;
+    }
+    const sourceText = request.text.trim();
+    let preparedText = sourceText;
+    let translationApplied = false;
+
+    // A target-language instruction should also transform the speakable text.
+    // Keep the original as metadata so the user can compare or recover it later.
+    const targetLanguageNames: Record<string, string> = {
+      en: 'English',
+      ar: 'Arabic',
+      ja: 'Japanese',
+      ko: 'Korean',
+      fr: 'French',
+      de: 'German',
+      es: 'Spanish',
+    };
+    const targetLanguageName = targetLanguageNames[request.language];
+    if (targetLanguageName && /[\u3400-\u9fff]/.test(sourceText)) {
+      try {
+        const translated = request.language === 'en'
+          ? (await translateToEnglish(sourceText)).trim()
+          : (await translateTextToLanguage(sourceText, targetLanguageName, { preserveTone: true })).trim();
+        if (translated && translated !== sourceText) {
+          preparedText = translated;
+          translationApplied = true;
+        }
+      } catch (error) {
+        console.error('助手台词翻译失败，保留原文:', error);
+      }
+    }
+
+    setStandaloneVoiceText(preparedText);
+    setStandaloneVoiceLang(request.language);
+    setStandaloneVoiceGender(request.gender);
+    // Let the user choose from the ranked voice list instead of silently reusing
+    // a previous voice or generating with an arbitrary gender-only fallback.
+    setStandaloneVoiceRole('');
+    setSelectedStandaloneVoice(null);
+    setCurrentTab('dubbing-studio');
+    setAssistantVoiceRequest({
+      ...request,
+      text: preparedText,
+      sourceText: sourceText !== preparedText ? sourceText : undefined,
+      translationApplied,
+    });
+  }, []);
+
+  const handleAssistantVideoRequest = useCallback((request: AssistantVideoRequest) => {
+    setAssistantVideoRequest(request);
+    setCurrentTab('video-soundtrack');
+  }, []);
+
+  const handleAssistantDirectorRequest = useCallback((request: AssistantDirectorRequest) => {
+    setRequirements(request.prompt);
+    if (request.file) {
+      setFiles((previous) => {
+        previous.forEach((item) => URL.revokeObjectURL(item.preview));
+        return [{
+          id: `assistant-director-${request.id}`,
+          file: request.file!,
+          preview: URL.createObjectURL(request.file!),
+          type: request.file!.type || 'application/octet-stream',
+        }];
+      });
+    }
+    setCurrentTab('audio-director');
+  }, []);
+
+  const handleAssistantRequirementsRequest = useCallback((request: AssistantRequirementsRequest) => {
+    setAssistantRequirementsRequest(request);
+    setCurrentTab('sfx-requirements');
+  }, []);
+
+  const handleAssistantLibraryRequest = useCallback((request: AssistantLibraryRequest) => {
+    setAssistantLibrarySearchQuery(request.searchQuery);
+    setAssistantLibraryCategory(request.category || '');
+    setAssistantLibrarySubcategory(request.subcategory || '');
+    setCurrentTab('sfx-library');
+  }, []);
+
+  const handleAssistantMusicRequest = useCallback((request: AssistantMusicRequest) => {
+    setStandaloneMusicPrompt(request.prompt);
+    if (request.durationSeconds !== undefined) {
+      setStandaloneMusicDuration(Math.max(10, Math.min(60, Math.round(request.durationSeconds / 5) * 5)));
+    }
+    setStandaloneMusicType(request.musicType || 'instrumental');
+    setCurrentTab('music-studio');
+    updateAssistantTaskRunning(request.id, true);
+    setAssistantMusicAutoRunId(request.id);
+  }, [updateAssistantTaskRunning]);
+
+  const handleAssistantSfxRequest = useCallback((request: AssistantSfxRequest) => {
+    setStandalonePrompt(request.prompt);
+    if (request.durationSeconds !== undefined) {
+      setStandaloneDuration(Math.max(1, Math.min(20, Math.round(request.durationSeconds))));
+      setStandaloneDurationMode('fixed');
+    } else {
+      setStandaloneDurationMode('auto');
+    }
+    setCurrentTab('sfx-studio');
+    updateAssistantTaskRunning(request.id, true);
+    setAssistantSfxAutoRunId(request.id);
+  }, [updateAssistantTaskRunning]);
+
   // Two alternatives state for standalone voiceover generation
   const [pendingVoiceOptions, setPendingVoiceOptions] = useState<{
-    optionA: { url: string; voiceLabel: string; emotionLabel: string; processedText: string; timestamp: string; details: string; speed: number } | null;
-    optionB: { url: string; voiceLabel: string; emotionLabel: string; processedText: string; timestamp: string; details: string; speed: number } | null;
+    optionA: { url: string; voiceLabel: string; displayName: string; emotionLabel: string; processedText: string; timestamp: string; details: string; speed: number } | null;
+    optionB: { url: string; voiceLabel: string; displayName: string; emotionLabel: string; processedText: string; timestamp: string; details: string; speed: number } | null;
   }>({ optionA: null, optionB: null });
+
+  useEffect(() => {
+    const currentPreviewUrls = new Set(files.map(file => file.preview));
+    previousFilesRef.current.forEach((file) => {
+      if (!currentPreviewUrls.has(file.preview)) {
+        URL.revokeObjectURL(file.preview);
+      }
+    });
+    previousFilesRef.current = files;
+  }, [files]);
+
+  useEffect(() => {
+    const retainedUrls = new Set(historyList.map(item => item.url));
+    previousHistoryListRef.current.forEach((item) => {
+      if (item.url.startsWith('blob:') && !retainedUrls.has(item.url)) {
+        URL.revokeObjectURL(item.url);
+      }
+    });
+    previousHistoryListRef.current = historyList;
+  }, [historyList]);
 
   // Cleanup object URLs on unmount
   useEffect(() => {
     return () => {
-      files.forEach(f => URL.revokeObjectURL(f.preview));
-      if (standaloneAudioUrl) URL.revokeObjectURL(standaloneAudioUrl);
-      if (standaloneMusicAudioUrl) URL.revokeObjectURL(standaloneMusicAudioUrl);
-      if (standaloneVoiceAudioUrl) URL.revokeObjectURL(standaloneVoiceAudioUrl);
-      if (pendingVoiceOptions.optionA) URL.revokeObjectURL(pendingVoiceOptions.optionA.url);
-      if (pendingVoiceOptions.optionB) URL.revokeObjectURL(pendingVoiceOptions.optionB.url);
+      const latestUrls = objectUrlsRef.current;
+      previousFilesRef.current.forEach(f => URL.revokeObjectURL(f.preview));
+      if (latestUrls.pendingSfxOptionAUrl) URL.revokeObjectURL(latestUrls.pendingSfxOptionAUrl);
+      if (latestUrls.pendingSfxOptionBUrl) URL.revokeObjectURL(latestUrls.pendingSfxOptionBUrl);
+      if (latestUrls.pendingMusicOptionAUrl) URL.revokeObjectURL(latestUrls.pendingMusicOptionAUrl);
+      if (latestUrls.pendingMusicOptionBUrl) URL.revokeObjectURL(latestUrls.pendingMusicOptionBUrl);
+      if (latestUrls.pendingVoiceOptionAUrl) URL.revokeObjectURL(latestUrls.pendingVoiceOptionAUrl);
+      if (latestUrls.pendingVoiceOptionBUrl) URL.revokeObjectURL(latestUrls.pendingVoiceOptionBUrl);
+      previousHistoryListRef.current.forEach((item) => {
+        if (item.url.startsWith('blob:')) URL.revokeObjectURL(item.url);
+      });
     };
-  }, [files, standaloneAudioUrl, standaloneMusicAudioUrl, standaloneVoiceAudioUrl, pendingVoiceOptions]);
+  }, []);
+
+  useEffect(() => {
+    filesRef.current = files;
+  }, [files]);
+
+  useEffect(() => {
+    objectUrlsRef.current = {
+      pendingSfxOptionAUrl: pendingSfxOptions.optionA?.url || null,
+      pendingSfxOptionBUrl: pendingSfxOptions.optionB?.url || null,
+      pendingMusicOptionAUrl: pendingMusicOptions.optionA?.url || null,
+      pendingMusicOptionBUrl: pendingMusicOptions.optionB?.url || null,
+      pendingVoiceOptionAUrl: pendingVoiceOptions.optionA?.url || null,
+      pendingVoiceOptionBUrl: pendingVoiceOptions.optionB?.url || null,
+    };
+  }, [pendingSfxOptions, pendingMusicOptions, pendingVoiceOptions]);
+
+  useEffect(() => {
+    const liveFileIds = new Set(files.map(item => item.id));
+    preuploadAbortControllersRef.current.forEach((controller, fileId) => {
+      if (!liveFileIds.has(fileId)) {
+        controller.abort('removed');
+        preuploadAbortControllersRef.current.delete(fileId);
+        preuploadPromisesRef.current.delete(fileId);
+      }
+    });
+
+    // Full-video preupload is only useful for professional video paths.
+    // Quick/game analysis intentionally uses local keyframes, so uploading the
+    // original video there would add latency without improving the result.
+    if (!hasGeminiKey || !(target.video || target.avatar || target.gift || target.activity)) {
+      preuploadAbortControllersRef.current.forEach(controller => controller.abort('not-professional'));
+      preuploadAbortControllersRef.current.clear();
+      preuploadPromisesRef.current.clear();
+      return;
+    }
+
+    const updatePreuploadState = (fileId: string, patch: NonNullable<FileItem['preupload']>) => {
+      setFiles(prev => prev.map(item => {
+        if (item.id !== fileId) return item;
+        return {
+          ...item,
+          preupload: {
+            ...(item.preupload || { status: 'uploading' as const, progress: 0 }),
+            ...patch,
+          },
+        };
+      }));
+    };
+
+    files.forEach((item) => {
+      if (!item.type.startsWith('video/')) return;
+      if (item.preupload || preuploadPromisesRef.current.has(item.id)) return;
+
+      const controller = new AbortController();
+      preuploadAbortControllersRef.current.set(item.id, controller);
+      updatePreuploadState(item.id, {
+        status: 'uploading',
+        progress: 0,
+        message: item.file.size > 50 * 1024 * 1024
+          ? '视频超过 50MB，后台会先生成分析压缩版...'
+          : '正在后台预上传视频...',
+      });
+
+      const preuploadPromise = preuploadAudioDesignVideo(item.file, {
+        signal: controller.signal,
+        onProgress: (progress, message) => {
+          updatePreuploadState(item.id, {
+            status: progress >= 96 ? 'processing' : 'uploading',
+            progress,
+            message,
+          });
+        },
+      })
+        .then((upload) => {
+          updatePreuploadState(item.id, {
+            status: 'ready',
+            progress: 100,
+            uploadId: upload.uploadId,
+            message: upload.optimized
+              ? '大视频已压缩为分析版并预上传，点击分析会更快。'
+              : '视频已预上传，点击分析会更快。',
+          });
+        })
+        .catch((error) => {
+          if (controller.signal.aborted) return;
+          const detail = error instanceof Error ? error.message : '视频预上传失败。';
+          updatePreuploadState(item.id, {
+            status: 'error',
+            progress: 0,
+            error: detail,
+            message: detail.includes('Gemini API 所在地区不支持')
+              ? 'Gemini API 当前地区不支持视频分析，点击分析仍会尝试原流程。'
+              : '预上传失败，点击分析时会尝试原流程。',
+          });
+        })
+        .finally(() => {
+          preuploadAbortControllersRef.current.delete(item.id);
+        });
+
+      preuploadPromisesRef.current.set(item.id, preuploadPromise);
+    });
+  }, [files, hasGeminiKey, target.video, target.avatar, target.gift, target.activity]);
+
+  useEffect(() => {
+    return () => {
+      preuploadAbortControllersRef.current.forEach(controller => controller.abort('unmount'));
+      preuploadAbortControllersRef.current.clear();
+      preuploadPromisesRef.current.clear();
+    };
+  }, []);
 
   // Voiceover generator handler
   const handleStandaloneVoiceGenerate = async () => {
@@ -140,6 +521,10 @@ export default function App() {
     }
     if (!standaloneVoiceText.trim()) {
       setStandaloneVoiceError('请输入要配音的角色台词文本');
+      return;
+    }
+    if (!standaloneVoiceRole.trim()) {
+      setStandaloneVoiceError('当前配音库暂无可用声线，请先在 ElevenLabs 添加或恢复声线');
       return;
     }
 
@@ -182,8 +567,9 @@ export default function App() {
         }
       }
 
-      // Strip all bracketed expressions completely from the text sent to ElevenLabs to prevent them from being spoken aloud!
-      // The spoken text should ONLY contain the plain dialogue content.
+      // Eleven v3 understands bracketed performance directions such as [excited] / [whispering].
+      // Keep the bracketed text for v3, but provide a clean fallback text for older models so tags are not spoken aloud.
+      const elevenV3Text = processedText;
       const finalSpokenText = processedText
         .replace(bracketRegex, ' ')
         .replace(/\s+/g, ' ')
@@ -207,9 +593,9 @@ export default function App() {
       const selectedVoiceObj = ELEVENLABS_VOICES.find(v => v.id === standaloneVoiceRole);
       if (selectedVoiceObj) {
         detectedGender = selectedVoiceObj.gender;
-      } else if (/男|male|man|sir|boy|uncle|大叔|老头|绅士|爷爷|爸爸|Josh|Adam|Arnold/i.test(standaloneVoiceRole)) {
+      } else if (/男|male|man|sir|boy|uncle|大叔|老头|绅士|爷爷|爸爸/i.test(standaloneVoiceRole)) {
         detectedGender = 'male';
-      } else if (/女|female|woman|lady|girl|princess|公主|御姐|loli|萝莉|Rachel|Glinda|Domi/i.test(standaloneVoiceRole)) {
+      } else if (/女|female|woman|lady|girl|princess|公主|御姐|loli|萝莉|Glinda/i.test(standaloneVoiceRole)) {
         detectedGender = 'female';
       } else {
         detectedGender = standaloneVoiceGender || 'female';
@@ -219,14 +605,20 @@ export default function App() {
       // Intelligent parsing for unified emotions
       const rawEmoDesc = bracketMatches.map(m => m[1].trim()).filter(Boolean).join(', ');
       
-      // 语调控制已去除，不再根据情绪标签动态调整配音稳定性、相似度或语气风格，以保持发音的自然与平顺。
-      const stability = 0.50;
-      const similarity = 0.75;
-      const styleExaggeration = 0.0;
+      const normalizedEmotionText = allTranslatedEmotions.join(' ').toLowerCase();
+      const isHighEnergyEmotion = /excited|energetic|angry|furious|shout|shouting|surprised|fear|scared|urgent|tense|happy|joy|cheerful|激动|兴奋|愤怒|惊讶|紧张|开心|高兴|热血/.test(normalizedEmotionText);
+      const isSoftEmotion = /whisper|whispering|soft|calm|gentle|sad|cry|crying|tired|weak|warm|温柔|轻声|低语|悲伤|难过|哭|平静|疲惫/.test(normalizedEmotionText);
+      const stability = isSoftEmotion ? (isElevenLabsProMode ? 0.50 : 0.55) : (isElevenLabsProMode ? 0.45 : 0.50);
+      const similarity = isElevenLabsProMode ? 0.82 : 0.75;
+      const styleExaggeration = isHighEnergyEmotion
+        ? (isElevenLabsProMode ? 0.28 : 0.16)
+        : isSoftEmotion
+          ? (isElevenLabsProMode ? 0.10 : 0.04)
+          : (isElevenLabsProMode ? 0.14 : 0.0);
 
       // Intelligent fallback parsing for custom voice descriptions
       const voiceDesc = englishRole;
-      let voiceId = detectedGender === 'male' ? 'pNInz6obpg7IdgWAs6g8' : '21m00Tcm4TlvDq8ikWAM'; // Default Adam / Rachel
+      let voiceId = englishRole;
 
       // Check if voiceDesc matches any predefined ELEVENLABS_VOICES ID or is a direct 20-character ID
       const directVoiceMatch = ELEVENLABS_VOICES.find(v => v.id === voiceDesc);
@@ -237,39 +629,63 @@ export default function App() {
       } else {
         if (detectedGender === 'male') {
           if (/旁白|稳重|磁性|深沉|男声|默认|narrator|deep|mature|calm|voiceover|default/.test(voiceDesc)) {
-            voiceId = 'pNInz6obpg7IdgWAs6g8'; // Adam
+            voiceId = standaloneVoiceRole;
           } else if (/冒险|战士|热血|强壮|粗犷|活力|勇敢|青年|warrior|brave|adventure|excited|strong|young/.test(voiceDesc)) {
-            voiceId = 'VR6A4Yft7Sg8ulqRrrWh'; // Arnold
+            voiceId = standaloneVoiceRole;
           } else if (/智者|老人|长者|老头|沙哑|沧桑|sage|old|elder|wise|hoarse|raspy/.test(voiceDesc)) {
-            voiceId = 'TxGEqn7CgACfIwFn9zCc'; // Josh
+            voiceId = standaloneVoiceRole;
           }
         } else {
           if (/知性|温柔|御姐|老师|干练|女声|默认|intellectual|gentle|sweet|mature|default/.test(voiceDesc)) {
-            voiceId = '21m00Tcm4TlvDq8ikWAM'; // Rachel
+            voiceId = standaloneVoiceRole;
           } else if (/公主|优雅|甜美|高贵|唯美|少女|princess|elegant|noble|beautiful|young lady|girl/.test(voiceDesc)) {
             voiceId = 'z9fAnlkF97DxeAlidscJ'; // Glinda
           } else if (/二次元|动漫|可爱|萝莉|活泼|赛博|cyber|cute|anime|loli|lively|energetic/.test(voiceDesc)) {
-            voiceId = 'AZnzlk1XhkZOKCF79rt9'; // Domi
+            voiceId = standaloneVoiceRole;
           }
         }
       }
 
-      const [blobA, blobB] = await Promise.all([
-        generateVoice(
-          finalSpokenText,
-          voiceId,
-          stability,
-          similarity,
-          styleExaggeration
-        ),
-        generateVoice(
-          finalSpokenText,
-          voiceId,
-          stability,
-          similarity,
-          styleExaggeration
-        )
-      ]);
+      const selectedGeneratedVoice = selectedStandaloneVoice?.id === voiceId ? selectedStandaloneVoice : null;
+      const sharedVoiceOptions = selectedGeneratedVoice?.source === 'voice_library'
+        ? {
+            voiceSource: 'voice_library' as const,
+            publicOwnerId: selectedGeneratedVoice.publicOwnerId,
+            voiceName: selectedGeneratedVoice.name,
+          }
+        : {};
+      const takeSeedBase = Date.now() % 1_000_000_000;
+
+      // Generate the two selectable takes sequentially for the same ElevenLabs voice.
+      // Voice Library voices can trigger an internal "add voice" step on first use;
+      // parallel requests for the same voice may collide and return
+      // "Multiple voice additions/deletions for the same voice were called at the same time".
+      const blobA = await generateVoice(
+        elevenV3Text,
+        voiceId,
+        stability,
+        similarity,
+        styleExaggeration,
+        {
+          qualityMode: elevenLabsQualityMode,
+          fallbackText: finalSpokenText,
+          seed: takeSeedBase,
+          ...sharedVoiceOptions,
+        },
+      );
+      const blobB = await generateVoice(
+        elevenV3Text,
+        voiceId,
+        stability,
+        similarity,
+        styleExaggeration,
+        {
+          qualityMode: elevenLabsQualityMode,
+          fallbackText: finalSpokenText,
+          seed: takeSeedBase + 1,
+          ...sharedVoiceOptions,
+        },
+      );
       const urlA = URL.createObjectURL(blobA);
       const urlB = URL.createObjectURL(blobB);
       
@@ -278,7 +694,6 @@ export default function App() {
 
       const matchedVoice = ELEVENLABS_VOICES.find(v => v.id === voiceId);
       const voiceLabel = matchedVoice ? matchedVoice.name : (voiceDesc || (detectedGender === 'male' ? '自定义男声' : '自定义女声'));
-      const emotionLabel = rawEmoDesc || '默认情绪';
       const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 16);
       const details = `${processedText.length}字 · ${standaloneVoiceLang.toUpperCase()}语种 · 语速${standaloneVoiceSpeed}x`;
 
@@ -286,7 +701,8 @@ export default function App() {
         optionA: {
           url: urlA,
           voiceLabel: `${voiceLabel} (版本 A)`,
-          emotionLabel,
+          displayName: `角色配音 - ${voiceLabel} (版本 A)`,
+          emotionLabel: rawEmoDesc || '默认情绪',
           processedText,
           timestamp,
           details,
@@ -295,13 +711,39 @@ export default function App() {
         optionB: {
           url: urlB,
           voiceLabel: `${voiceLabel} (版本 B)`,
-          emotionLabel,
+          displayName: `角色配音 - ${voiceLabel} (版本 B)`,
+          emotionLabel: rawEmoDesc || '默认情绪',
           processedText,
           timestamp,
           details,
           speed: standaloneVoiceSpeed
         }
       });
+      setHistoryList(prev => [
+        {
+          id: `voice-A-${Date.now()}`,
+          type: 'voice',
+          title: `角色配音 - ${voiceLabel} (版本 A)`,
+          prompt: processedText,
+          url: urlA,
+          timestamp,
+          details,
+          inputText: processedText,
+          speed: standaloneVoiceSpeed
+        },
+        {
+          id: `voice-B-${Date.now()}`,
+          type: 'voice',
+          title: `角色配音 - ${voiceLabel} (版本 B)`,
+          prompt: processedText,
+          url: urlB,
+          timestamp,
+          details,
+          inputText: processedText,
+          speed: standaloneVoiceSpeed
+        },
+        ...prev,
+      ]);
 
       // Auto play Option A to give instant feedback
       setTimeout(() => {
@@ -332,33 +774,91 @@ export default function App() {
     setStandaloneLoading(true);
     setStandaloneError(null);
     try {
-      const blob = await generateSoundEffect(standalonePrompt.trim(), standaloneDuration);
-      const url = URL.createObjectURL(blob);
-      setStandaloneAudioUrl(url);
+      const prompt = standalonePrompt.trim();
+      const englishPrompt = await translateToEnglish(prompt);
+      const generationPrompt = englishPrompt.trim() || prompt;
+      const requestedDuration = standaloneDurationMode === 'fixed' ? standaloneDuration : undefined;
+      const [blobA, blobB] = await Promise.all([
+        generateSoundEffect(generationPrompt, requestedDuration, {
+          qualityMode: elevenLabsQualityMode,
+        }),
+        generateSoundEffect(generationPrompt, requestedDuration, {
+          qualityMode: elevenLabsQualityMode,
+        }),
+      ]);
+      const urlA = URL.createObjectURL(blobA);
+      const urlB = URL.createObjectURL(blobB);
 
-      const newHistoryItem: HistoryItem = {
-        id: `sfx-${Date.now()}`,
-        type: 'sfx',
-        title: `独立音效 - ${standalonePrompt.trim().substring(0, 20)}${standalonePrompt.trim().length > 20 ? '...' : ''}`,
-        prompt: standalonePrompt.trim(),
-        url: url,
-        timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
-        details: `${standaloneDuration}秒 · 电影声效`
-      };
-      setHistoryList(prev => [newHistoryItem, ...prev]);
+      const baseTitle = `独立音效 - ${prompt.substring(0, 20)}${prompt.length > 20 ? '...' : ''}`;
+      const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 16);
+      const durationLabel = requestedDuration ? `${requestedDuration}秒` : '自动时长';
+      const details = generationPrompt !== prompt
+        ? `${durationLabel} · 48kHz WAV · 电影声效 · 已自动英译`
+        : `${durationLabel} · 48kHz WAV · 电影声效`;
+      setPendingSfxOptions({
+        optionA: {
+          url: urlA,
+          title: `${baseTitle}（版本 A）`,
+          prompt,
+          timestamp,
+          details,
+          duration: requestedDuration || 0,
+        },
+        optionB: {
+          url: urlB,
+          title: `${baseTitle}（版本 B）`,
+          prompt,
+          timestamp,
+          details,
+          duration: requestedDuration || 0,
+        },
+      });
+      setHistoryList(prev => [
+        {
+          id: `sfx-${Date.now()}-A`,
+          type: 'sfx',
+          title: `${baseTitle}（版本 A）`,
+          prompt,
+          url: urlA,
+          timestamp,
+          details,
+          inputText: prompt,
+        },
+        {
+          id: `sfx-${Date.now()}-B`,
+          type: 'sfx',
+          title: `${baseTitle}（版本 B）`,
+          prompt,
+          url: urlB,
+          timestamp,
+          details,
+          inputText: prompt,
+        },
+        ...prev,
+      ]);
       
-      // Auto play
-      setTimeout(() => {
-        if (standaloneAudioRef.current) {
-          standaloneAudioRef.current.play().catch(e => console.error(e));
-        }
-      }, 150);
+      // Auto play option A
     } catch (err: any) {
       setStandaloneError(err.message || '生成失败，请重试');
     } finally {
       setStandaloneLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!assistantSfxAutoRunId || !standalonePrompt.trim() || standaloneLoading) return;
+    const requestId = assistantSfxAutoRunId;
+    let started = false;
+    const timer = window.setTimeout(() => {
+      started = true;
+      setAssistantSfxAutoRunId(null);
+      void handleStandaloneGenerate().finally(() => updateAssistantTaskRunning(requestId, false));
+    }, 120);
+    return () => {
+      window.clearTimeout(timer);
+      if (!started) updateAssistantTaskRunning(requestId, false);
+    };
+  }, [assistantSfxAutoRunId, standalonePrompt, standaloneLoading, updateAssistantTaskRunning]);
 
   // Standalone Music generator handler
   const handleStandaloneMusicGenerate = async () => {
@@ -373,26 +873,69 @@ export default function App() {
 
     setStandaloneMusicLoading(true);
     setStandaloneMusicError(null);
+    setStandaloneMusicAudioUrl(null);
+    setPendingMusicOptions({ optionA: null, optionB: null });
     try {
-      const blob = await generateMusic(
-        standaloneMusicPrompt.trim(), 
-        standaloneMusicDuration, 
-        standaloneMusicType === 'instrumental',
-        standaloneMusicLyrics.trim()
-      );
-      const url = URL.createObjectURL(blob);
-      setStandaloneMusicAudioUrl(url);
-      
-      const newHistoryItem: HistoryItem = {
-        id: `music-${Date.now()}`,
-        type: 'music',
-        title: `独立音乐 - ${standaloneMusicPrompt.trim().substring(0, 20)}${standaloneMusicPrompt.trim().length > 20 ? '...' : ''}`,
-        prompt: standaloneMusicPrompt.trim(),
-        url: url,
-        timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
-        details: `${standaloneMusicDuration}秒 · ${standaloneMusicType === 'instrumental' ? '纯伴奏' : '歌词人声'}`
+      const prompt = standaloneMusicPrompt.trim();
+      let generationPrompt = prompt;
+      let usedPromptRewrite = false;
+
+      try {
+        const rewrittenPrompt = await createEnglishMusicPromptForElevenLabs(prompt, {
+          instrumental: standaloneMusicType === 'instrumental',
+        });
+        generationPrompt = rewrittenPrompt.trim() || prompt;
+        usedPromptRewrite = generationPrompt !== prompt;
+      } catch (rewriteError) {
+        console.error('Music prompt auto-rewrite failed:', rewriteError);
+        throw new Error('自动改写音乐提示词失败，请检查 Gemini 配置后重试，或先手动输入英文音乐提示词。');
+      }
+
+      const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 16);
+      const details = `${standaloneMusicDuration}秒 · ${standaloneMusicType === 'instrumental' ? '纯伴奏' : '歌词人声'}${usedPromptRewrite ? ' · 已自动改写提示词' : ''}`;
+      const baseTitle = `独立音乐 - ${prompt.substring(0, 20)}${prompt.length > 20 ? '...' : ''}`;
+      const createMusicOption = async (id: 'A' | 'B'): Promise<PendingMusicOption> => {
+        const versionPrompt = id === 'A'
+          ? generationPrompt
+          : `${generationPrompt}. Alternate take, different arrangement and performance variation while keeping the same core mood.`;
+        const blob = await generateMusic(
+          versionPrompt,
+          standaloneMusicDuration,
+          standaloneMusicType === 'instrumental',
+          standaloneMusicLyrics.trim(),
+          { qualityMode: elevenLabsQualityMode },
+        );
+        return {
+          id,
+          url: URL.createObjectURL(blob),
+          title: `${baseTitle}（版本 ${id}）`,
+          prompt,
+          timestamp,
+          details,
+          duration: standaloneMusicDuration,
+          type: standaloneMusicType,
+        };
       };
-      setHistoryList(prev => [newHistoryItem, ...prev]);
+      // The two takes are independent requests; run them concurrently so the
+      // user waits for one generation window instead of two back-to-back calls.
+      const [optionA, optionB] = await Promise.all([
+        createMusicOption('A'),
+        createMusicOption('B'),
+      ]);
+      setPendingMusicOptions({ optionA, optionB });
+      setStandaloneMusicAudioUrl(optionA.url);
+      
+      const historyItems: HistoryItem[] = [optionA, optionB].map((option) => ({
+        id: `music-${Date.now()}-${option.id}`,
+        type: 'music',
+        title: option.title,
+        prompt,
+        url: option.url,
+        timestamp,
+        details,
+        inputText: `${prompt}${standaloneMusicLyrics.trim() ? `\n歌词：${standaloneMusicLyrics.trim()}` : ''}`,
+      }));
+      setHistoryList(prev => [...historyItems, ...prev]);
 
       // Auto play
       setTimeout(() => {
@@ -407,44 +950,208 @@ export default function App() {
     }
   };
 
+  useEffect(() => {
+    if (!assistantMusicAutoRunId || !standaloneMusicPrompt.trim() || standaloneMusicLoading) return;
+    const requestId = assistantMusicAutoRunId;
+    let started = false;
+    const timer = window.setTimeout(() => {
+      started = true;
+      setAssistantMusicAutoRunId(null);
+      void handleStandaloneMusicGenerate().finally(() => updateAssistantTaskRunning(requestId, false));
+    }, 120);
+    return () => {
+      window.clearTimeout(timer);
+      if (!started) updateAssistantTaskRunning(requestId, false);
+    };
+  }, [assistantMusicAutoRunId, standaloneMusicPrompt, standaloneMusicLoading, updateAssistantTaskRunning]);
+
   // AI Multimodal director planner handler
-  const onGenerate = async () => {
+  const onGenerate = async (scope: AudioDesignScope) => {
+    if (analysisRunningRef.current) return;
+
     if (files.length === 0 && !requirements.trim()) {
       setError('请至少选择上传一个创意素材文件或填写补充设计需求文本');
       return;
     }
-    
-    setLoading(true);
-    setError(null);
-    setResult(null);
 
     if (!hasGeminiKey) {
-      setError('GEMINI_API_KEY 未配置，请前往设置页面或 Secrets 面板添加。');
-      setLoading(false);
+      setError('GEMINI_API_KEY 未配置，请前往设置页面添加。');
       return;
     }
 
-    try {
-      // Process files into base64 structures
-      const fileData = await Promise.all(files.map(async f => {
-        return new Promise<{ data: string; mimeType: string }>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => {
-            const resData = reader.result as string;
-            resolve({ data: resData, mimeType: f.type });
-          };
-          reader.onerror = () => reject(new Error(`创意素材导入失败: ${f.file.name}`));
-          reader.readAsDataURL(f.file);
-        });
-      }));
+    const videoFiles = files.filter(item => item.type.startsWith('video/'));
+    const hasLargeVideo = videoFiles.some(item => item.file.size > 50 * 1024 * 1024);
+    const wantsProfessionalVideo = Boolean(target.video || target.avatar || target.gift || target.activity);
+    const needsProfessionalVideoAnalysis = wantsProfessionalVideo && Boolean(scope.sfx);
+    if (needsProfessionalVideoAnalysis && videoFiles.length > 0 && (videoFiles.length !== 1 || files.length !== 1)) {
+      setError('影视/广告、Avatar、礼物与活动的完整视频音效分析一次只能单独使用 1 个视频。请移除其他视频、图片、音频或 PDF；如需综合多份素材或只分析音乐，请关闭音效后使用快速分析。');
+      return;
+    }
 
-      // Call Gemini multimodal analyzer service
-      const res = await analyzeAudioDesign(fileData, requirements, target, isInstrumental);
+    analysisRunningRef.current = true;
+    const controller = new AbortController();
+    analysisAbortRef.current = controller;
+    setLoading(true);
+    setAnalysisStage('正在准备素材...');
+    setError(null);
+
+    try {
+      const useProfessionalVideo = needsProfessionalVideoAnalysis && videoFiles.length === 1;
+      const waitForReadyPreupload = async (fileItem: FileItem) => {
+        const latestBeforeWait = filesRef.current.find(item => item.id === fileItem.id) || fileItem;
+        if (latestBeforeWait.preupload?.status === 'ready' && latestBeforeWait.preupload.uploadId) {
+          return latestBeforeWait.preupload.uploadId;
+        }
+
+        const stopForUnsupportedGeminiLocation = (preupload?: FileItem['preupload']) => {
+          const detail = `${preupload?.error || ''} ${preupload?.message || ''}`;
+          if (/Gemini API 当前地区不支持|User location is not supported|地区不支持视频分析/i.test(detail)) {
+            throw new Error('当前 Gemini API 所在地区不支持视频分析，请切换到支持 Gemini API 的网络地区后重试。');
+          }
+        };
+        stopForUnsupportedGeminiLocation(latestBeforeWait.preupload);
+
+        const preuploadPromise = preuploadPromisesRef.current.get(fileItem.id);
+        const canWaitForPreupload = preuploadPromise
+          && latestBeforeWait.preupload
+          && ['uploading', 'processing'].includes(latestBeforeWait.preupload.status);
+        if (!canWaitForPreupload) return null;
+
+        setAnalysisStage('视频正在后台预上传，等待完成后直接分析...');
+        await preuploadPromise;
+        if (controller.signal.aborted) {
+          throw new Error('已取消本次分析。');
+        }
+
+        // Let the pre-upload catch handler commit its React state before the
+        // fallback decision is made.
+        await new Promise(resolve => window.setTimeout(resolve, 0));
+        const latestAfterWait = filesRef.current.find(item => item.id === fileItem.id);
+        if (latestAfterWait?.preupload?.status === 'ready' && latestAfterWait.preupload.uploadId) {
+          return latestAfterWait.preupload.uploadId;
+        }
+        stopForUnsupportedGeminiLocation(latestAfterWait?.preupload);
+        return null;
+      };
+
+      const prepareFilesWithServerVideoKeyframes = async (stagePrefix: string) => {
+        const prepared: AudioDesignMedia[] = [];
+        for (let index = 0; index < files.length; index += 1) {
+          const item = files[index];
+          const prefix = `${index + 1}/${files.length}`;
+          if (item.type.startsWith('video/')) {
+            setAnalysisStage(`${stagePrefix}，正在服务器提取关键帧（${prefix}）...`);
+            prepared.push(...await extractAudioDesignVideoKeyframes(item.file, {
+              signal: controller.signal,
+              onProgress: setAnalysisStage,
+            }));
+            continue;
+          }
+
+          prepared.push(...await prepareFilesForGemini([item.file], {
+            signal: controller.signal,
+            onProgress: (message) => setAnalysisStage(`${message}（${prefix}）`),
+          }));
+        }
+        return prepared;
+      };
+
+      const canUseSingleVideoPreupload = videoFiles.length === 1 && files.length === 1;
+      let res: AudioDesignResult;
+
+      if (useProfessionalVideo) {
+        try {
+          const preuploadId = canUseSingleVideoPreupload
+            ? await waitForReadyPreupload(videoFiles[0])
+            : null;
+          if (preuploadId) {
+            setAnalysisStage(target.avatar || target.gift
+              ? '视频已预上传，正在进行短视频高精度分析...'
+              : '视频已预上传，正在进行影视级完整分析...');
+            res = await analyzeAudioDesignPreuploadedVideo(
+              preuploadId,
+              requirements,
+              target,
+              isInstrumental,
+              {
+                signal: controller.signal,
+                analysisMode: 'professional',
+                scope,
+              },
+            );
+          } else {
+            setAnalysisStage(target.avatar || target.gift
+              ? '正在上传视频；超过 50MB 会自动压缩分析副本...'
+              : '正在上传视频；超过 50MB 会自动压缩分析副本...');
+            res = await analyzeAudioDesignVideo(
+              videoFiles[0].file,
+              requirements,
+              target,
+              isInstrumental,
+              {
+                signal: controller.signal,
+                onProgress: setAnalysisStage,
+                scope,
+              },
+            );
+          }
+        } catch (videoAnalysisError) {
+          if (controller.signal.aborted) throw videoAnalysisError;
+          console.warn('Full video analysis failed; falling back to server keyframes:', videoAnalysisError);
+          const fileData = await prepareFilesWithServerVideoKeyframes('完整视频处理失败，正在改用关键帧继续分析');
+          setAnalysisStage('正在用服务器关键帧生成音频方案...');
+          res = await analyzeAudioDesign(
+            fileData,
+            requirements,
+            target,
+            isInstrumental,
+            { signal: controller.signal, scope },
+          );
+        }
+      } else {
+        // Fast mode reduces videos to compact keyframes and resizes images.
+        let fileData: AudioDesignMedia[] | null = null;
+        try {
+          fileData = hasLargeVideo
+            ? await prepareFilesWithServerVideoKeyframes('视频超过 50MB，正在使用服务器轻量关键帧分析')
+            : await prepareFilesForGemini(files.map(item => item.file), {
+                signal: controller.signal,
+                onProgress: setAnalysisStage,
+              });
+        } catch (prepareError) {
+          if (videoFiles.length === 0 || controller.signal.aborted) {
+            throw prepareError;
+          }
+
+          console.warn('Local video keyframe extraction failed; falling back to server keyframes:', prepareError);
+          fileData = await prepareFilesWithServerVideoKeyframes('浏览器抽帧失败');
+        }
+
+        if (fileData) {
+          setAnalysisStage('正在上传关键帧并生成音频方案...');
+          res = await analyzeAudioDesign(
+            fileData,
+            requirements,
+            target,
+            isInstrumental,
+            { signal: controller.signal, scope },
+          );
+        }
+      }
       
-      if (!res || (!res.sfxSchemes && !res.bgmRecommendations)) {
+      if (
+        !res
+        || (scope.sfx && !res.sfxSchemes?.length)
+        || (scope.music && !res.bgmRecommendations?.length)
+      ) {
         throw new Error('多模态解析未返回合理的音频排程推荐，请尝试修改您的输入。');
       }
       
+      setAnalysisStage(scope.music && scope.sfx
+        ? '正在整理音效与配乐结果...'
+        : scope.music
+          ? '正在整理音乐分析结果...'
+          : '正在整理音效分析结果...');
       setResult(res);
 
       // Save plan result to history log
@@ -455,22 +1162,100 @@ export default function App() {
         prompt: requirements || '根据上传媒体文件进行全片音轨规划',
         url: '#',
         timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
-        details: `${res.sfxSchemes?.[0]?.items?.length || 0}项音效排程 · 1项BGM推荐`
+        details: [
+          scope.sfx ? `${res.sfxSchemes[0]?.items?.length || 0}项音效排程` : '',
+          scope.music ? `${res.bgmRecommendations?.length || 0}项BGM推荐` : '',
+          files.length ? `${files.length} 个参考文件` : '',
+        ].filter(Boolean).join(' · '),
+        inputText: requirements,
+        attachments: files.map(file => ({
+          name: file.file.name,
+          type: file.file.type,
+          size: file.file.size,
+          file: file.file,
+        })),
       };
       setHistoryList(prev => [newHistoryItem, ...prev]);
 
     } catch (err: any) {
-      console.error('Director generation failed:', err);
-      setError(err.message || '生成失败，请重新检查大模型状态。');
+      if (controller.signal.aborted) {
+        setAnalysisStage('已取消本次分析。');
+        setError(null);
+      } else {
+        console.error('Director generation failed:', err);
+        setError(err.message || '生成失败，请重新检查大模型状态。');
+      }
     } finally {
-      setLoading(false);
+      if (analysisAbortRef.current === controller) {
+        analysisAbortRef.current = null;
+        analysisRunningRef.current = false;
+        setLoading(false);
+      }
     }
   };
 
+  const cancelAnalysis = () => {
+    const controller = analysisAbortRef.current;
+    if (controller && !controller.signal.aborted) {
+      setAnalysisStage('正在取消本次分析...');
+      controller.abort('user');
+    }
+  };
+
+  const sendDirectorPromptToMusicStudio = (prompt: string) => {
+    const normalizedPrompt = prompt.trim();
+    if (!normalizedPrompt) return;
+    setStandaloneMusicPrompt(normalizedPrompt);
+    setStandaloneMusicType(isInstrumental ? 'instrumental' : 'vocal');
+    setCurrentTab('music-studio');
+  };
+
   // Helper utility functions
-  const copyToClipboard = (text: string, id?: string) => {
-    navigator.clipboard.writeText(text);
-    if (id) {
+  const copyToClipboard = async (text: string, id?: string) => {
+    if (!text) return;
+
+    // Keep a synchronous fallback for embedded HTML5 browsers, where the
+    // asynchronous Clipboard API may lose its user-gesture permission.
+    const copyWithSelection = () => {
+      let copiedByEvent = false;
+      const handleCopy = (event: ClipboardEvent) => {
+        if (!event.clipboardData) return;
+        event.clipboardData.setData('text/plain', text);
+        event.preventDefault();
+        copiedByEvent = true;
+      };
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      document.addEventListener('copy', handleCopy);
+      try {
+        textarea.focus();
+        textarea.select();
+        textarea.setSelectionRange(0, textarea.value.length);
+        const commandCopied = document.execCommand('copy');
+        return commandCopied || copiedByEvent;
+      } catch {
+        return false;
+      } finally {
+        document.removeEventListener('copy', handleCopy);
+        textarea.remove();
+      }
+    };
+
+    let copied = copyWithSelection();
+    if (!copied) {
+      try {
+        await navigator.clipboard.writeText(text);
+        copied = true;
+      } catch {
+        copied = false;
+      }
+    }
+
+    if (copied && id) {
       setCopiedId(id);
       setTimeout(() => setCopiedId(null), 2000);
     }
@@ -542,139 +1327,283 @@ export default function App() {
   };
 
   return (
-    <div id="app-root-container" className="flex h-screen w-full bg-slate-50 text-slate-800 overflow-hidden font-sans antialiased">
+    <div id="app-root-container" className="flex h-dvh min-h-0 w-full overflow-hidden bg-slate-50 font-sans text-slate-800 antialiased">
       {/* Global Sidebar Component */}
-      <Sidebar currentTab={currentTab} setCurrentTab={setCurrentTab} />
+      <Sidebar
+        currentTab={currentTab}
+        setCurrentTab={setCurrentTab}
+        isMobileOpen={isMobileNavOpen}
+        onMobileClose={() => setIsMobileNavOpen(false)}
+      />
       
-      {/* Right Side Workspace Frame */}
-      <main id="app-workspace-viewport" className="flex-1 overflow-y-auto bg-slate-50 relative custom-scrollbar">
-        {currentTab === 'workbench' && (
-          <Workbench 
-            setCurrentTab={setCurrentTab} 
-            historyList={historyList} 
-            hasGeminiKey={hasGeminiKey}
-            hasElevenLabsKey={hasElevenLabsKey}
-          />
-        )}
+      <div
+        className="flex min-w-0 flex-1 flex-col"
+        aria-hidden={isMobileNavOpen ? true : undefined}
+        inert={isMobileNavOpen ? true : undefined}
+      >
+        <header className="flex h-16 shrink-0 items-center gap-3 border-b border-slate-200 bg-white px-4 lg:hidden">
+          <button
+            type="button"
+            onClick={() => setIsMobileNavOpen(true)}
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-600 shadow-sm transition-colors hover:bg-slate-50 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+            aria-label="打开导航菜单"
+            aria-expanded={isMobileNavOpen}
+            aria-controls="sidebar-mobile"
+          >
+            <Menu className="h-5 w-5" />
+          </button>
+          <div className="min-w-0">
+            <p className="truncate text-sm font-bold tracking-tight text-slate-800">AI Audio Suite</p>
+            <p className="truncate text-[10px] font-semibold text-emerald-600">多模态音频创作中心</p>
+          </div>
+        </header>
 
-        {currentTab === 'audio-director' && (
-          <AudioDirector
-            files={files}
-            setFiles={setFiles}
-            requirements={requirements}
-            setRequirements={setRequirements}
-            target={target}
-            setTarget={setTarget}
-            loading={loading}
-            error={error}
-            setError={setError}
-            result={result}
-            onGenerate={onGenerate}
-            copyToClipboard={copyToClipboard}
-            copyTableToClipboard={copyTableToClipboard}
-            downloadTableAsCSV={downloadTableAsCSV}
-            copiedId={copiedId}
-            isUploading={isUploading}
-            setIsUploading={setIsUploading}
-            isInstrumental={isInstrumental}
-            setIsInstrumental={setIsInstrumental}
-            activeTab={activeTab}
-            setActiveTab={setActiveTab}
-            selectedLyrics={selectedLyrics}
-            setSelectedLyrics={setSelectedLyrics}
-            lyricEditDirection={lyricEditDirection}
-            setLyricEditDirection={setLyricEditDirection}
-            editingLyrics={editingLyrics}
-            handleRegenerateLyrics={handleRegenerateLyrics}
-            onLoadDemo={setResult}
-          />
-        )}
+        {/* Right Side Workspace Frame */}
+        <WorkspaceErrorBoundary>
+          <main id="app-workspace-viewport" className="relative min-h-0 min-w-0 flex-1 overflow-auto bg-slate-50 [scrollbar-gutter:stable] custom-scrollbar">
+            <Suspense fallback={<WorkspaceLoading />}>
+            {visitedTabs.has('workbench') && (
+              <section hidden={currentTab !== 'workbench'} className="min-h-full">
+                <Workbench
+                  setCurrentTab={setCurrentTab}
+                  historyList={historyList}
+                  assistantPanel={
+                    <GlobalAssistant
+                      embedded
+                      onNavigate={setCurrentTab}
+                      onAudioRequest={handleAssistantAudioRequest}
+                      onVoiceRequest={handleAssistantVoiceRequest}
+                      onVideoRequest={handleAssistantVideoRequest}
+                      onMusicRequest={handleAssistantMusicRequest}
+                      onSfxRequest={handleAssistantSfxRequest}
+                      onDirectorRequest={handleAssistantDirectorRequest}
+                      onRequirementsRequest={handleAssistantRequirementsRequest}
+                      onLibraryRequest={handleAssistantLibraryRequest}
+                      externalTaskRunning={assistantRunningTaskIds.size > 0}
+                    />
+                  }
+                />
+              </section>
+            )}
 
-        {currentTab === 'music-studio' && (
-          <MusicStudio
-            standaloneMusicPrompt={standaloneMusicPrompt}
-            setStandaloneMusicPrompt={setStandaloneMusicPrompt}
-            standaloneMusicDuration={standaloneMusicDuration}
-            setStandaloneMusicDuration={setStandaloneMusicDuration}
-            standaloneMusicType={standaloneMusicType}
-            setStandaloneMusicType={setStandaloneMusicType}
-            standaloneMusicLyrics={standaloneMusicLyrics}
-            setStandaloneMusicLyrics={setStandaloneMusicLyrics}
-            standaloneMusicLoading={standaloneMusicLoading}
-            standaloneMusicAudioUrl={standaloneMusicAudioUrl}
-            setStandaloneMusicAudioUrl={setStandaloneMusicAudioUrl}
-            standaloneMusicError={standaloneMusicError}
-            standaloneMusicAudioRef={standaloneMusicAudioRef}
-            handleStandaloneMusicGenerate={handleStandaloneMusicGenerate}
-            historyList={historyList}
-          />
-        )}
+            {visitedTabs.has('audio-director') && (
+              <section hidden={currentTab !== 'audio-director'} className="min-h-full">
+                <AudioDirector
+                  files={files}
+                  setFiles={setFiles}
+                  requirements={requirements}
+                  setRequirements={setRequirements}
+                  target={target}
+                  setTarget={setTarget}
+                  loading={loading}
+                  analysisStage={analysisStage}
+                  error={error}
+                  setError={setError}
+                  result={result}
+                  onGenerate={onGenerate}
+                  onCancel={cancelAnalysis}
+                  copyToClipboard={copyToClipboard}
+                  copyTableToClipboard={copyTableToClipboard}
+                  downloadTableAsCSV={downloadTableAsCSV}
+                  copiedId={copiedId}
+                  isUploading={isUploading}
+                  setIsUploading={setIsUploading}
+                  isInstrumental={isInstrumental}
+                  setIsInstrumental={setIsInstrumental}
+                  activeTab={activeTab}
+                  setActiveTab={setActiveTab}
+                  selectedLyrics={selectedLyrics}
+                  setSelectedLyrics={setSelectedLyrics}
+                  lyricEditDirection={lyricEditDirection}
+                  setLyricEditDirection={setLyricEditDirection}
+                  editingLyrics={editingLyrics}
+                  handleRegenerateLyrics={handleRegenerateLyrics}
+                  onLoadDemo={setResult}
+                  onSendMusicPrompt={sendDirectorPromptToMusicStudio}
+                />
+              </section>
+            )}
 
-        {currentTab === 'sfx-studio' && (
-          <SfxStudio
-            standalonePrompt={standalonePrompt}
-            setStandalonePrompt={setStandalonePrompt}
-            standaloneDuration={standaloneDuration}
-            setStandaloneDuration={setStandaloneDuration}
-            standaloneLoading={standaloneLoading}
-            standaloneAudioUrl={standaloneAudioUrl}
-            setStandaloneAudioUrl={setStandaloneAudioUrl}
-            standaloneError={standaloneError}
-            standaloneAudioRef={standaloneAudioRef}
-            handleStandaloneGenerate={handleStandaloneGenerate}
-            historyList={historyList}
-          />
-        )}
+            {visitedTabs.has('music-studio') && (
+              <section hidden={currentTab !== 'music-studio'} className="min-h-full">
+                <MusicStudio
+                  standaloneMusicPrompt={standaloneMusicPrompt}
+                  setStandaloneMusicPrompt={setStandaloneMusicPrompt}
+                  standaloneMusicDuration={standaloneMusicDuration}
+                  setStandaloneMusicDuration={setStandaloneMusicDuration}
+                  standaloneMusicType={standaloneMusicType}
+                  setStandaloneMusicType={setStandaloneMusicType}
+                  standaloneMusicLyrics={standaloneMusicLyrics}
+                  setStandaloneMusicLyrics={setStandaloneMusicLyrics}
+                  standaloneMusicLoading={standaloneMusicLoading}
+                  standaloneMusicAudioUrl={standaloneMusicAudioUrl}
+                  setStandaloneMusicAudioUrl={setStandaloneMusicAudioUrl}
+                  pendingMusicOptions={pendingMusicOptions}
+                  setPendingMusicOptions={setPendingMusicOptions}
+                  standaloneMusicError={standaloneMusicError}
+                  standaloneMusicAudioRef={standaloneMusicAudioRef}
+                  handleStandaloneMusicGenerate={handleStandaloneMusicGenerate}
+                  historyList={historyList}
+                />
+              </section>
+            )}
 
-        {currentTab === 'dubbing-studio' && (
-          <DubbingStudio
-            standaloneVoicePrompt={standaloneVoiceText}
-            setStandaloneVoicePrompt={setStandaloneVoiceText}
-            standaloneVoiceGender={standaloneVoiceGender}
-            setStandaloneVoiceGender={setStandaloneVoiceGender}
-            standaloneVoiceRole={standaloneVoiceRole}
-            setStandaloneVoiceRole={setStandaloneVoiceRole}
-            standaloneVoiceLang={standaloneVoiceLang}
-            setStandaloneVoiceLang={setStandaloneVoiceLang}
-            standaloneVoiceSpeed={standaloneVoiceSpeed}
-            setStandaloneVoiceSpeed={setStandaloneVoiceSpeed}
-            standaloneVoiceLoading={standaloneVoiceLoading}
-            standaloneVoiceAudioUrl={standaloneVoiceAudioUrl}
-            setStandaloneVoiceAudioUrl={setStandaloneVoiceAudioUrl}
-            standaloneVoiceError={standaloneVoiceError}
-            standaloneVoiceAudioRef={standaloneVoiceAudioRef}
-            handleStandaloneVoiceGenerate={handleStandaloneVoiceGenerate}
-            historyList={historyList}
-            setHistoryList={setHistoryList}
-            pendingVoiceOptions={pendingVoiceOptions}
-            setPendingVoiceOptions={setPendingVoiceOptions}
-          />
-        )}
+            {visitedTabs.has('sfx-studio') && (
+              <section hidden={currentTab !== 'sfx-studio'} className="min-h-full">
+                <SfxStudio
+                  standalonePrompt={standalonePrompt}
+                  setStandalonePrompt={setStandalonePrompt}
+                  standaloneDuration={standaloneDuration}
+                  setStandaloneDuration={setStandaloneDuration}
+                  standaloneDurationMode={standaloneDurationMode}
+                  setStandaloneDurationMode={setStandaloneDurationMode}
+                  standaloneLoading={standaloneLoading}
+                  standaloneError={standaloneError}
+                  handleStandaloneGenerate={handleStandaloneGenerate}
+                  historyList={historyList}
+                  pendingSfxOptions={pendingSfxOptions}
+                  setPendingSfxOptions={setPendingSfxOptions}
+                />
+              </section>
+            )}
 
-        {currentTab === 'audio-tools' && (
-          <AudioTools />
-        )}
+            {visitedTabs.has('dubbing-studio') && (
+              <section hidden={currentTab !== 'dubbing-studio'} className="min-h-full">
+                <DubbingStudio
+                  standaloneVoicePrompt={standaloneVoiceText}
+                  setStandaloneVoicePrompt={setStandaloneVoiceText}
+                  standaloneVoiceGender={standaloneVoiceGender}
+                  setStandaloneVoiceGender={setStandaloneVoiceGender}
+                  standaloneVoiceRole={standaloneVoiceRole}
+                  setStandaloneVoiceRole={setStandaloneVoiceRole}
+                  setSelectedStandaloneVoice={setSelectedStandaloneVoice}
+                  standaloneVoiceLang={standaloneVoiceLang}
+                  setStandaloneVoiceLang={setStandaloneVoiceLang}
+                  standaloneVoiceSpeed={standaloneVoiceSpeed}
+                  setStandaloneVoiceSpeed={setStandaloneVoiceSpeed}
+                  standaloneVoiceLoading={standaloneVoiceLoading}
+                  standaloneVoiceAudioUrl={standaloneVoiceAudioUrl}
+                  setStandaloneVoiceAudioUrl={setStandaloneVoiceAudioUrl}
+                  standaloneVoiceError={standaloneVoiceError}
+                  standaloneVoiceAudioRef={standaloneVoiceAudioRef}
+                  handleStandaloneVoiceGenerate={handleStandaloneVoiceGenerate}
+                  historyList={historyList}
+                  setHistoryList={setHistoryList}
+                  pendingVoiceOptions={pendingVoiceOptions}
+                  setPendingVoiceOptions={setPendingVoiceOptions}
+                  assistantVoiceRequest={assistantVoiceRequest}
+                />
+              </section>
+            )}
 
-        {currentTab === 'settings' && (
-          <SettingsComponent 
-            onKeysUpdated={handleKeysUpdated}
-          />
-        )}
+            {visitedTabs.has('audio-tools') && (
+              <section hidden={currentTab !== 'audio-tools'} className="min-h-full">
+                <AudioTools
+                  assistantAudioRequest={assistantAudioRequest}
+                  onAssistantTaskRunningChange={updateAssistantTaskRunning}
+                />
+              </section>
+            )}
 
-        {currentTab === 'sfx-library' && (
-          <SfxLibrary />
-        )}
+            {visitedTabs.has('settings') && (
+              <section hidden={currentTab !== 'settings'} className="min-h-full">
+                <SettingsComponent
+                  onKeysUpdated={handleKeysUpdated}
+                />
+              </section>
+            )}
 
-        {currentTab === 'sfx-requirements' && (
-          <SfxRequirements 
-            hasGeminiKey={hasGeminiKey}
-          />
-        )}
+            {visitedTabs.has('sfx-library') && (
+              <section hidden={currentTab !== 'sfx-library'} className="min-h-full">
+                <SfxLibrary
+                  assistantSearchQuery={assistantLibrarySearchQuery}
+                  assistantCategory={assistantLibraryCategory}
+                  assistantSubcategory={assistantLibrarySubcategory}
+                />
+              </section>
+            )}
 
-        {currentTab === 'video-soundtrack' && (
-          <VideoSoundtrack />
-        )}
-      </main>
+            {visitedTabs.has('sfx-requirements') && (
+              <section hidden={currentTab !== 'sfx-requirements'} className="min-h-full">
+                <SfxRequirements
+                  hasGeminiKey={hasGeminiKey}
+                  assistantRequest={assistantRequirementsRequest}
+                />
+              </section>
+            )}
+
+            {visitedTabs.has('video-soundtrack') && (
+              <section hidden={currentTab !== 'video-soundtrack'} className="min-h-full">
+                <VideoSoundtrack
+                  assistantVideoRequest={assistantVideoRequest}
+                  onAssistantTaskRunningChange={updateAssistantTaskRunning}
+                />
+              </section>
+            )}
+            </Suspense>
+          </main>
+        </WorkspaceErrorBoundary>
+      </div>
+      <GlobalAssistant
+        onNavigate={setCurrentTab}
+        onAudioRequest={handleAssistantAudioRequest}
+        onVoiceRequest={handleAssistantVoiceRequest}
+        onVideoRequest={handleAssistantVideoRequest}
+        onMusicRequest={handleAssistantMusicRequest}
+        onSfxRequest={handleAssistantSfxRequest}
+        onDirectorRequest={handleAssistantDirectorRequest}
+        onRequirementsRequest={handleAssistantRequirementsRequest}
+        onLibraryRequest={handleAssistantLibraryRequest}
+        externalTaskRunning={assistantRunningTaskIds.size > 0}
+      />
     </div>
   );
+}
+
+interface WorkspaceErrorBoundaryProps {
+  children: React.ReactNode;
+}
+
+interface WorkspaceErrorBoundaryState {
+  hasError: boolean;
+}
+
+class WorkspaceErrorBoundary extends React.Component<WorkspaceErrorBoundaryProps, WorkspaceErrorBoundaryState> {
+  state: WorkspaceErrorBoundaryState = { hasError: false };
+
+  static getDerivedStateFromError(): WorkspaceErrorBoundaryState {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error('工作区渲染失败:', error, info.componentStack);
+  }
+
+  handleRetry = () => {
+    (this as any).setState({ hasError: false });
+  };
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex min-h-full items-center justify-center p-8">
+          <div className="w-full max-w-md rounded-2xl border border-amber-200 bg-amber-50 p-5 text-center shadow-sm">
+            <p className="text-sm font-bold text-amber-900">当前功能暂时无法加载</p>
+            <p className="mt-2 text-xs leading-relaxed text-amber-800">
+              智能助手仍然可用。你可以重试当前功能，或从左侧导航切换到其他模块。
+            </p>
+            <button
+              type="button"
+              onClick={this.handleRetry}
+              className="mt-4 inline-flex h-9 items-center justify-center rounded-lg bg-amber-700 px-4 text-xs font-bold text-white transition hover:bg-amber-800"
+            >
+              重试当前功能
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return (this as any).props.children;
+  }
 }

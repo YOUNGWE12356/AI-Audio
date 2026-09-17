@@ -19,6 +19,7 @@ import {
   Copy,
   Check,
   Globe,
+  Languages,
   FileText,
   Calendar,
   Layers,
@@ -29,6 +30,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { transcribeSpeech } from '../services/elevenLabsService';
+import { translateTextToLanguage } from '../services/geminiService';
 
 interface TranscriptionHistoryItem {
   id: string;
@@ -39,7 +41,22 @@ interface TranscriptionHistoryItem {
   languageProbability?: number;
 }
 
-export default function SpeechToText() {
+interface SpeechToTextProps {
+  initialFile?: File;
+  assistantRequestId?: string;
+}
+
+const translationLanguageOptions = [
+  { value: 'Chinese Mandarin', label: '中文', filenameSuffix: 'zh' },
+  { value: 'English', label: '英文', filenameSuffix: 'en' },
+  { value: 'Japanese', label: '日文', filenameSuffix: 'ja' },
+  { value: 'Korean', label: '韩文', filenameSuffix: 'ko' },
+  { value: 'French', label: '法文', filenameSuffix: 'fr' },
+  { value: 'German', label: '德文', filenameSuffix: 'de' },
+  { value: 'Spanish', label: '西班牙文', filenameSuffix: 'es' },
+];
+
+export default function SpeechToText({ initialFile, assistantRequestId }: SpeechToTextProps) {
   const [file, setFile] = useState<File | null>(null);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
@@ -68,6 +85,10 @@ export default function SpeechToText() {
     language_code?: string;
     language_probability?: number;
   } | null>(null);
+  const [targetTranslationLanguage, setTargetTranslationLanguage] = useState('Chinese Mandarin');
+  const [translatedText, setTranslatedText] = useState('');
+  const [translationLoading, setTranslationLoading] = useState(false);
+  const [translationError, setTranslationError] = useState<string | null>(null);
 
   // Action Success Alerts
   const [copied, setCopied] = useState(false);
@@ -131,8 +152,15 @@ export default function SpeechToText() {
     setFileUrl(URL.createObjectURL(selectedFile));
     setIsPlaying(false);
     setTranscriptionResult(null);
+    setTranslatedText('');
+    setTranslationError(null);
     setError(null);
   };
+
+  useEffect(() => {
+    if (!initialFile || !assistantRequestId) return;
+    handleFileChange(initialFile);
+  }, [assistantRequestId]);
 
   const triggerFileInput = () => {
     if (fileInputRef.current) {
@@ -200,14 +228,6 @@ export default function SpeechToText() {
   };
 
   const handleTranscribe = async () => {
-    const hasKey = Boolean(
-      (typeof window !== 'undefined' && localStorage.getItem('ELEVENLABS_API_KEY')) || 
-      (typeof process !== 'undefined' && process.env?.ELEVENLABS_API_KEY)
-    );
-    if (!hasKey) {
-      setError('ELEVENLABS_API_KEY 未配置，请前往设置页面或 Secrets 面板添加。');
-      return;
-    }
     if (!file) {
       setError('请先上传或录制需要转录的音频文件');
       return;
@@ -218,6 +238,8 @@ export default function SpeechToText() {
     try {
       const result = await transcribeSpeech(file, languageCode, tagAudioEvents);
       setTranscriptionResult(result);
+      setTranslatedText('');
+      setTranslationError(null);
 
       // Add to local history list
       if (result.text && result.text.trim()) {
@@ -245,6 +267,22 @@ export default function SpeechToText() {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const handleTranslateText = async () => {
+    const sourceText = transcriptionResult?.text?.trim();
+    if (!sourceText) return;
+
+    setTranslationLoading(true);
+    setTranslationError(null);
+    try {
+      const translated = await translateTextToLanguage(sourceText, targetTranslationLanguage, { preserveTone: true });
+      setTranslatedText(translated);
+    } catch (err: any) {
+      setTranslationError(err.message || '翻译失败，请稍后重试。');
+    } finally {
+      setTranslationLoading(false);
+    }
+  };
+
   const handleDownloadTxt = (text: string, title: string) => {
     const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -267,6 +305,8 @@ export default function SpeechToText() {
       language_code: item.languageCode,
       language_probability: item.languageProbability
     });
+    setTranslatedText('');
+    setTranslationError(null);
   };
 
   const formatDuration = (sec: number) => {
@@ -274,6 +314,9 @@ export default function SpeechToText() {
     const secs = sec % 60;
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
+
+  const selectedTranslationOption =
+    translationLanguageOptions.find((option) => option.value === targetTranslationLanguage) || translationLanguageOptions[0];
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
@@ -535,6 +578,92 @@ export default function SpeechToText() {
                     <Download className="w-3 h-3" />
                     下载 TXT
                   </button>
+                </div>
+
+                <div className="border-t border-slate-100 pt-3 space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-1.5">
+                      <Languages className="w-3.5 h-3.5 text-emerald-600" />
+                      <span className="text-[11px] font-bold text-slate-700">翻译</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <label className="sr-only" htmlFor="stt-translation-language">
+                        目标语言
+                      </label>
+                      <select
+                        id="stt-translation-language"
+                        value={targetTranslationLanguage}
+                        onChange={(event) => {
+                          setTargetTranslationLanguage(event.target.value);
+                          setTranslatedText('');
+                          setTranslationError(null);
+                        }}
+                        className="h-7 rounded-lg border border-slate-200 bg-white px-2 text-[10px] font-bold text-slate-600 outline-none hover:border-emerald-200 focus:border-emerald-400"
+                      >
+                        {translationLanguageOptions.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={handleTranslateText}
+                        disabled={translationLoading || !transcriptionResult.text.trim()}
+                        className="flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50 rounded-lg transition-colors cursor-pointer border border-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {translationLoading ? (
+                          <>
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                            翻译中...
+                          </>
+                        ) : (
+                          <>
+                            <Globe className="w-3 h-3" />
+                            翻译
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {translationError && (
+                    <div className="flex items-start gap-2 rounded-lg border border-rose-100 bg-rose-50 px-3 py-2 text-[10px] text-rose-600">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                      <span>{translationError}</span>
+                    </div>
+                  )}
+
+                  {translatedText && (
+                    <div className="space-y-2 rounded-xl border border-emerald-100 bg-emerald-50/50 p-3">
+                      <p className="text-xs text-slate-800 leading-relaxed font-medium select-text break-words">
+                        {translatedText}
+                      </p>
+                      <div className="flex items-center justify-end gap-2 border-t border-emerald-100 pt-2">
+                        <button
+                          type="button"
+                          onClick={() => handleCopyText(translatedText)}
+                          className="flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-bold text-slate-600 hover:text-emerald-700 hover:bg-white/70 rounded-lg transition-colors cursor-pointer border border-emerald-100"
+                        >
+                          <Copy className="w-3 h-3" />
+                          复制译文
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleDownloadTxt(
+                              translatedText,
+                              `${file?.name || 'transcription'}_${selectedTranslationOption.filenameSuffix}`,
+                            )
+                          }
+                          className="flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-bold text-slate-600 hover:text-emerald-700 hover:bg-white/70 rounded-lg transition-colors cursor-pointer border border-emerald-100"
+                        >
+                          <Download className="w-3 h-3" />
+                          下载译文 TXT
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             ) : (

@@ -3,157 +3,284 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
-import { 
-  Settings, 
-  CheckCircle2, 
-  AlertCircle,
-  Database,
-  Trash2,
-  Cpu,
-  Sparkles,
-  HelpCircle
-} from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Ban, Database, LockKeyhole, LogOut, Plus, ShieldCheck, Trash2 } from 'lucide-react';
+import UsageDashboard from './UsageDashboard';
+import { clearLocalStoragePreservingClientIdentity } from '../services/clientIdentity';
+import { fetchAccessBlacklist, saveAccessBlacklist } from '../services/accessBlacklistService';
+import type { UsageUser } from '../services/usageService';
+import {
+  loginSfxLibraryAdmin,
+  logoutSfxLibraryAdmin,
+} from '../services/sfxLibraryAdminService';
 
 interface SettingsProps {
   onKeysUpdated?: () => void;
 }
 
 export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
+  const [isAuthorized, setIsAuthorized] = useState(false);
+  const [adminPassword, setAdminPassword] = useState('');
+  const [passwordFeedback, setPasswordFeedback] = useState<string | null>(null);
+  const [isVerifying, setIsVerifying] = useState(false);
   const [cleared, setCleared] = useState(false);
+  const [blacklistedIps, setBlacklistedIps] = useState<string[]>([]);
+  const [blacklistInput, setBlacklistInput] = useState('');
+  const [blacklistLoading, setBlacklistLoading] = useState(false);
+  const [blacklistUpdatingUserId, setBlacklistUpdatingUserId] = useState<string | null>(null);
+  const [blacklistFeedback, setBlacklistFeedback] = useState<string | null>(null);
 
-  const handleClearCache = () => {
-    if (typeof window !== 'undefined' && confirm('确定要清空本地浏览器缓存与历史工程记录吗？这不会影响服务器已保存的文件，但会清空您的本地操作历史。')) {
-      localStorage.clear();
-      setCleared(true);
-      if (onKeysUpdated) {
-        onKeysUpdated();
-      }
-      setTimeout(() => setCleared(false), 2500);
-      window.location.reload();
+  useEffect(() => {
+    if (!isAuthorized) return;
+    let cancelled = false;
+    setBlacklistLoading(true);
+    fetchAccessBlacklist()
+      .then(ips => {
+        if (!cancelled) setBlacklistedIps(ips);
+      })
+      .catch(error => {
+        if (!cancelled) setBlacklistFeedback(error instanceof Error ? error.message : '无法读取 IP 黑名单。');
+      })
+      .finally(() => {
+        if (!cancelled) setBlacklistLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [isAuthorized]);
+
+  const handleUnlockManager = async () => {
+    if (!adminPassword.trim() || isVerifying) return;
+    setIsVerifying(true);
+    setPasswordFeedback(null);
+    try {
+      await loginSfxLibraryAdmin(adminPassword.trim());
+      setIsAuthorized(true);
+      setAdminPassword('');
+      onKeysUpdated?.();
+    } catch (error) {
+      setIsAuthorized(false);
+      setPasswordFeedback(error instanceof Error ? error.message : '管理密码验证失败。');
+    } finally {
+      setIsVerifying(false);
     }
   };
 
+  const handleLockManager = async () => {
+    await logoutSfxLibraryAdmin();
+    setIsAuthorized(false);
+    setPasswordFeedback(null);
+    onKeysUpdated?.();
+  };
+
+  const handleAddBlacklistIp = async () => {
+    const ip = blacklistInput.trim();
+    if (!ip || blacklistLoading) return;
+    if (blacklistedIps.includes(ip)) {
+      setBlacklistFeedback('该 IP 已在黑名单中。');
+      return;
+    }
+    setBlacklistLoading(true);
+    setBlacklistFeedback(null);
+    try {
+      const nextIps = await saveAccessBlacklist([...blacklistedIps, ip]);
+      setBlacklistedIps(nextIps);
+      setBlacklistInput('');
+      setBlacklistFeedback('已加入黑名单。');
+    } catch (error) {
+      setBlacklistFeedback(error instanceof Error ? error.message : '保存 IP 黑名单失败。');
+    } finally {
+      setBlacklistLoading(false);
+    }
+  };
+
+  const handleRemoveBlacklistIp = async (ip: string) => {
+    if (blacklistLoading) return;
+    setBlacklistLoading(true);
+    setBlacklistFeedback(null);
+    try {
+      const nextIps = await saveAccessBlacklist(blacklistedIps.filter(item => item !== ip));
+      setBlacklistedIps(nextIps);
+      setBlacklistFeedback('已移出黑名单。');
+    } catch (error) {
+      setBlacklistFeedback(error instanceof Error ? error.message : '保存 IP 黑名单失败。');
+    } finally {
+      setBlacklistLoading(false);
+    }
+  };
+
+  const handleSetMemberBlacklist = async (user: UsageUser, shouldBlock: boolean) => {
+    const memberIps = Array.from(new Set(user.ipAddresses.filter(Boolean)));
+    if (memberIps.length === 0 || blacklistLoading) return;
+    if (shouldBlock && typeof window !== 'undefined' && !window.confirm(
+      `确定将 ${user.displayName} 的 ${memberIps.length} 个已记录 IP 加入黑名单吗？\n\n${memberIps.join(', ')}\n\n这些 IP 的所有访问都会立即被拦截；若包含当前设备 IP，当前设置页也会被拦截。`,
+    )) return;
+
+    setBlacklistLoading(true);
+    setBlacklistUpdatingUserId(user.userId);
+    setBlacklistFeedback(null);
+    try {
+      const memberIpSet = new Set(memberIps);
+      const nextIps = shouldBlock
+        ? Array.from(new Set([...blacklistedIps, ...memberIps]))
+        : blacklistedIps.filter(ip => !memberIpSet.has(ip));
+      const savedIps = await saveAccessBlacklist(nextIps);
+      setBlacklistedIps(savedIps);
+      setBlacklistFeedback(
+        `已将 ${user.displayName} 的 ${memberIps.length} 个 IP ${shouldBlock ? '加入' : '移出'}黑名单。`,
+      );
+    } catch (error) {
+      setBlacklistFeedback(error instanceof Error ? error.message : '保存 IP 黑名单失败。');
+    } finally {
+      setBlacklistUpdatingUserId(null);
+      setBlacklistLoading(false);
+    }
+  };
+
+  const handleClearCache = async () => {
+    if (typeof window === 'undefined' || !confirm('确定清空本地浏览器缓存与历史工程记录吗？服务器文件不会被删除。')) return;
+    await logoutSfxLibraryAdmin();
+    clearLocalStoragePreservingClientIdentity();
+    setCleared(true);
+    onKeysUpdated?.();
+    setTimeout(() => window.location.reload(), 800);
+  };
+
+  if (!isAuthorized) {
+    return (
+      <div className="mx-auto flex min-h-[calc(100dvh-4rem)] w-full max-w-md items-center px-4 py-10 lg:min-h-dvh">
+        <section className="w-full rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700">
+            <ShieldCheck className="h-5 w-5" />
+          </div>
+          <h1 className="mt-4 text-lg font-bold text-slate-900">设置访问验证</h1>
+          <p className="mt-1 text-xs leading-5 text-slate-500">输入管理密码后才能查看用量统计和系统设置。</p>
+
+          <label className="mt-5 block text-[11px] font-semibold text-slate-600" htmlFor="settings-admin-password">
+            管理密码
+          </label>
+          <input
+            id="settings-admin-password"
+            type="password"
+            autoComplete="current-password"
+            value={adminPassword}
+            onChange={(event) => setAdminPassword(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') void handleUnlockManager();
+            }}
+            placeholder="请输入管理密码"
+            className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+          />
+          {passwordFeedback ? <p className="mt-2 text-[11px] text-rose-600">{passwordFeedback}</p> : null}
+          <button
+            type="button"
+            onClick={() => void handleUnlockManager()}
+            disabled={isVerifying || !adminPassword.trim()}
+            className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 py-2.5 text-xs font-bold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <LockKeyhole className="h-4 w-4" />
+            {isVerifying ? '正在验证...' : '验证并进入设置'}
+          </button>
+        </section>
+      </div>
+    );
+  }
+
   return (
-    <div id="settings-view" className="flex-1 p-6 space-y-6 max-w-4xl mx-auto w-full">
-      {/* Workspace Banner */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-6">
+    <div className="mx-auto w-full max-w-7xl p-4 sm:p-6 lg:p-8">
+      <header className="flex items-center justify-between gap-4 border-b border-slate-200 pb-5">
         <div>
-          <div className="flex items-center gap-2">
-            <Settings className="w-4 h-4 text-emerald-600" />
-            <span className="text-xs font-bold text-emerald-600 uppercase tracking-widest">Global Settings & Status</span>
-          </div>
-          <h2 className="text-xl font-black text-slate-800 mt-1">设置 & 状态监控</h2>
-          <p className="text-xs text-slate-500 mt-1">查看系统集成服务状态，管理本地缓存与历史工程数据。</p>
+          <h1 className="text-xl font-bold text-slate-900">设置</h1>
+          <p className="mt-1 text-xs text-slate-500">用量统计与本地数据管理</p>
         </div>
-      </div>
+        <button
+          type="button"
+          onClick={() => void handleLockManager()}
+          className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+        >
+          <LogOut className="h-4 w-4" />
+          退出设置
+        </button>
+      </header>
 
-      <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-start">
-        {/* Left Status monitor card */}
-        <div className="md:col-span-7 space-y-5">
-          <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-6 shadow-sm">
-            <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-2 border-b border-slate-100 pb-3">
-              <Cpu className="w-4 h-4 text-emerald-600" />
-              <span>服务集成状态</span>
-            </h3>
+      <UsageDashboard
+        blacklistedIps={blacklistedIps}
+        blacklistLoading={blacklistLoading}
+        blacklistUpdatingUserId={blacklistUpdatingUserId}
+        blacklistFeedback={blacklistFeedback}
+        onSetMemberBlacklist={handleSetMemberBlacklist}
+      />
 
-            <div className="space-y-4">
-              {/* Gemini status */}
-              <div className="flex items-center justify-between p-4 bg-slate-50 border border-slate-150 rounded-xl">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 bg-emerald-50 text-emerald-600 rounded-lg">
-                    <Sparkles className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-slate-800">Gemini AI API</h4>
-                    <p className="text-[10px] text-slate-400 mt-0.5">负责多模态创意素材分析、声音排程规划与提示词优化</p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-1.5 text-emerald-600 font-bold text-xs shrink-0 bg-emerald-50 px-2 py-1 rounded-lg">
-                  <CheckCircle2 className="w-3.5 h-3.5" />
-                  <span>已启用 (云端托管)</span>
-                </div>
-              </div>
-
-              {/* ElevenLabs status */}
-              <div className="flex items-center justify-between p-4 bg-slate-50 border border-slate-150 rounded-xl">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 bg-emerald-50 text-emerald-600 rounded-lg">
-                    <Database className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-slate-800">ElevenLabs Audio API</h4>
-                    <p className="text-[10px] text-slate-400 mt-0.5">负责高保真声音合成、环境音效与角色克隆配音生成</p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-1.5 text-emerald-600 font-bold text-xs shrink-0 bg-emerald-50 px-2 py-1 rounded-lg">
-                  <CheckCircle2 className="w-3.5 h-3.5" />
-                  <span>已启用 (云端托管)</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="bg-emerald-50/50 border border-emerald-100 rounded-xl p-4 text-xs text-emerald-800 leading-relaxed">
-              <div className="flex items-start gap-2">
-                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                <p>
-                  <strong>安全须知：</strong>当前系统的所有 API 密钥与敏感凭证均已通过服务器后台环境变量（Secrets）进行安全托管，且均处于健康运行状态。您在前端无需手动输入、保存或管理任何密钥。
-                </p>
-              </div>
-            </div>
-          </div>
-
-          {/* Local Cache management */}
-          <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-5 shadow-sm">
-            <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-2 border-b border-slate-100 pb-3">
-              <Database className="w-4 h-4 text-slate-600" />
-              <span>数据与本地存储</span>
-            </h3>
-
-            <div className="space-y-2 text-xs text-slate-500">
-              <p>为了给您提供连贯的体验，您的创意工程进度（如剪辑轨道、配音列表、上传的文件记录）会临时保存在本地浏览器的 LocalStorage 中。</p>
-              <p className="text-[10px] text-slate-400 leading-relaxed mt-1">如果您在使用过程中遇到页面卡顿、数据不同步或需要全新重置，可以选择清空本地浏览器缓存。该操作将彻底重置本地的所有会话与历史记录。</p>
-            </div>
-
-            <div className="pt-2">
-              <button
-                onClick={handleClearCache}
-                className="w-full bg-slate-50 hover:bg-red-50 text-slate-700 hover:text-red-600 border border-slate-200 hover:border-red-200 font-bold py-3 rounded-xl text-xs flex items-center justify-center gap-2 shadow-sm transition-all"
-              >
-                <Trash2 className="w-4 h-4" />
-                <span>{cleared ? '本地缓存已清空，正在重载页面...' : '清空本地缓存并重置应用'}</span>
-              </button>
-            </div>
-          </div>
+      <section className="mt-8 border-t border-slate-200 pt-6">
+        <div className="flex items-center gap-2">
+          <Ban className="h-4 w-4 text-slate-500" />
+          <h2 className="text-sm font-bold text-slate-800">设备 IP 黑名单</h2>
         </div>
-
-        {/* Right Info Card */}
-        <div className="md:col-span-5 space-y-4 text-xs text-slate-500">
-          <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-4 shadow-sm">
-            <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-2 border-b border-slate-100 pb-3">
-              <HelpCircle className="w-4 h-4 text-emerald-600" />
-              <span>设置说明</span>
-            </h3>
-
-            <div className="space-y-3.5 leading-relaxed">
-              <div className="space-y-1">
-                <p className="font-bold text-slate-700">1. 为什么去掉了 API 密钥配置？</p>
-                <p>为了保证用户密钥的安全并简化操作流程，本应用已将所有的核心 AI 接口密钥统一迁移到安全隔离的服务器后端托管。前端无需再手动配置或输入，直接即可开始流畅创作。</p>
-              </div>
-
-              <div className="space-y-1">
-                <p className="font-bold text-slate-700">2. 重置应用会丢失我的作品吗？</p>
-                <p>重置只会清空您在当前浏览器中留存的操作痕迹和本地历史工程列表，而对于您已经在各个功能模块（如配乐混音、AI 配音合成）中生成并下载的媒体文件不会产生任何影响。</p>
-              </div>
-
-              <div className="space-y-1">
-                <p className="font-bold text-slate-700">3. 如何使用克隆声线？</p>
-                <p>在 AI 配音模块中，系统已经内置了丰富的极品中文、游戏动漫、小说、媒体广告等顶级克隆声线。您可以直接使用它们进行完美的人声朗读与配音创作。</p>
-              </div>
-            </div>
-          </div>
+        <p className="mt-2 max-w-3xl text-[11px] leading-5 text-slate-500">
+          被加入黑名单的设备会被服务端拒绝访问。这里使用服务器看到的连接 IP，不接受客户端自行修改的设备标识；请确认代理已正确传递真实来源 IP。
+        </p>
+        <div className="mt-4 flex max-w-xl gap-2">
+          <input
+            value={blacklistInput}
+            onChange={event => setBlacklistInput(event.target.value)}
+            onKeyDown={event => {
+              if (event.key === 'Enter') void handleAddBlacklistIp();
+            }}
+            placeholder="输入 IPv4 或 IPv6 地址"
+            className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-xs outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+          />
+          <button
+            type="button"
+            onClick={() => void handleAddBlacklistIp()}
+            disabled={blacklistLoading || !blacklistInput.trim()}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-2.5 text-xs font-bold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            加入
+          </button>
         </div>
-      </div>
+        {blacklistFeedback ? <p className="mt-2 text-[11px] text-slate-500">{blacklistFeedback}</p> : null}
+        <div className="mt-4 max-w-xl overflow-hidden rounded-lg border border-slate-200 bg-white">
+          {blacklistLoading && blacklistedIps.length === 0 ? (
+            <p className="px-3 py-4 text-xs text-slate-400">正在读取黑名单...</p>
+          ) : blacklistedIps.length === 0 ? (
+            <p className="px-3 py-4 text-xs text-slate-400">暂无被禁止的设备 IP。</p>
+          ) : (
+            <ul className="divide-y divide-slate-100">
+              {blacklistedIps.map(ip => (
+                <li key={ip} className="flex items-center justify-between gap-3 px-3 py-2.5 text-xs text-slate-700">
+                  <code className="font-mono">{ip}</code>
+                  <button
+                    type="button"
+                    onClick={() => void handleRemoveBlacklistIp(ip)}
+                    disabled={blacklistLoading}
+                    className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-semibold text-rose-600 hover:bg-rose-50 disabled:opacity-50"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    移除
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </section>
+
+      <section className="mt-8 border-t border-slate-200 pt-6">
+        <div className="flex items-center gap-2">
+          <Database className="h-4 w-4 text-slate-500" />
+          <h2 className="text-sm font-bold text-slate-800">本地数据</h2>
+        </div>
+        <p className="mt-2 max-w-3xl text-[11px] leading-5 text-slate-500">
+          工程进度、剪辑轨道、配音列表和操作历史会临时保存在当前浏览器中。清空操作不会删除服务器保存的音频文件。
+        </p>
+        <button
+          type="button"
+          onClick={() => void handleClearCache()}
+          className="mt-4 inline-flex items-center gap-2 rounded-lg border border-rose-200 bg-white px-4 py-2.5 text-xs font-bold text-rose-600 hover:bg-rose-50"
+        >
+          <Trash2 className="h-4 w-4" />
+          {cleared ? '缓存已清空，正在重新加载...' : '清空本地缓存'}
+        </button>
+      </section>
     </div>
   );
 }

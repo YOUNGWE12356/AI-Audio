@@ -8,6 +8,7 @@ export interface SubCategory {
   name: string;
   english: string;
   description: string;
+  childCategories?: SubCategory[];
 }
 
 export interface CategoryGroup {
@@ -23,6 +24,7 @@ export interface SoundEffect {
   fileName: string;
   category: string;
   subcategory?: string;
+  childCategory?: string;
   tags: string[];
   duration: number; // in seconds
   format: 'WAV' | 'OGG' | 'MP3';
@@ -32,6 +34,12 @@ export interface SoundEffect {
   designer: string;
   path: string;
   url: string;
+  storageKey?: string;
+  previewUrl?: string;
+  downloadUrl?: string;
+  processingStatus?: 'ready' | 'processing' | 'error';
+  source?: 'uploaded' | 'generated' | 'external' | 'library';
+  generatedKind?: 'music' | 'sfx';
   isFavorite?: boolean;
 }
 
