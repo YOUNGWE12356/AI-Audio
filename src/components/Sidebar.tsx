@@ -23,9 +23,9 @@ import wpLogoUrl from '../assets/wp-logo.png';
 
 const SIDEBAR_MIN_WIDTH = 72;
 const SIDEBAR_COMPACT_WIDTH = 160;
-const SIDEBAR_DEFAULT_WIDTH = 192;
+const SIDEBAR_DEFAULT_WIDTH = 208;
 const SIDEBAR_MAX_WIDTH = 520;
-const SIDEBAR_WIDTH_READY_KEY = 'ai-audio-sidebar-width-ready';
+const SIDEBAR_WIDTH_READY_KEY = 'ai-audio-sidebar-width-ready-v2';
 
 interface SidebarProps {
   currentTab: TabType;
@@ -118,7 +118,7 @@ export default function Sidebar({ currentTab, setCurrentTab, isMobileOpen, onMob
           />
           <div className={`min-w-0 flex-1 flex-col items-center text-center ${variant === 'desktop' && isDesktopCompact ? 'hidden' : 'flex'}`}>
             <h1 className="max-w-full truncate text-sm font-bold tracking-tight text-slate-800">AI Audio</h1>
-            <p className="mt-1 max-w-full truncate text-[9px] font-semibold leading-none text-slate-500">高音甜 中音准 低音沉</p>
+            <p className="mt-1 max-w-full whitespace-nowrap text-[9px] font-semibold leading-none text-slate-500">高音甜 中音准 低音沉</p>
           </div>
         </div>
         {variant === 'mobile' && (
