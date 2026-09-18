@@ -246,16 +246,6 @@ function QuotaManagement({
                     <div className="flex items-center justify-end gap-1.5">
                       <button
                         type="button"
-                        onClick={() => onSetBonus(user, Math.max(-user.baseCredits, user.bonusCredits - 20_000))}
-                        disabled={isUpdating || user.limitCredits <= 0}
-                        className="inline-flex h-7 items-center gap-1 rounded-md border border-slate-200 px-2 font-semibold text-slate-600 hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-40"
-                        title="本月减少 20,000 积分"
-                        aria-label={`将 ${user.displayName} 的本月额度减少 20,000 积分`}
-                      >
-                        <Minus className="h-3 w-3" />2 万
-                      </button>
-                      <button
-                        type="button"
                         onClick={() => onSetBonus(user, Math.max(-user.baseCredits, user.bonusCredits - 10_000))}
                         disabled={isUpdating || user.limitCredits <= 0}
                         className="inline-flex h-7 items-center gap-1 rounded-md border border-slate-200 px-2 font-semibold text-slate-600 hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-40"
@@ -272,15 +262,6 @@ function QuotaManagement({
                         title="本月追加 10,000 积分"
                       >
                         <Plus className="h-3 w-3" />1 万
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onSetBonus(user, user.bonusCredits + 20_000)}
-                        disabled={isUpdating}
-                        className="inline-flex h-7 items-center gap-1 rounded-md border border-slate-200 px-2 font-semibold text-slate-600 hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700 disabled:opacity-50"
-                        title="本月追加 20,000 积分"
-                      >
-                        <Plus className="h-3 w-3" />2 万
                       </button>
                       {user.bonusCredits !== 0 ? (
                         <button
