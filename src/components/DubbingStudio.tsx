@@ -637,9 +637,10 @@ export default function DubbingStudio({
   const [v3EnhancementLoading, setV3EnhancementLoading] = useState(false);
   const [v3EnhancementError, setV3EnhancementError] = useState<string | null>(null);
 
+  type DubbingSubTab = 'tts' | 'sts' | 'convert' | 'translate' | 'stt';
   // Active sub-tab state ('tts' = Text-to-Speech, 'sts' = Speech-to-Speech, 'convert' = Voice Conversion, 'stt' = Speech-to-Text)
-  const [activeSubTab, setActiveSubTab] = useState<'tts' | 'sts' | 'convert' | 'translate' | 'stt'>('tts');
-  const [visitedSubTabs, setVisitedSubTabs] = useState<Set<'tts' | 'sts' | 'convert' | 'translate' | 'stt'>>(() => new Set(['tts']));
+  const [activeSubTab, setActiveSubTab] = useState<DubbingSubTab>('tts');
+  const [visitedSubTabs, setVisitedSubTabs] = useState<Set<DubbingSubTab>>(() => new Set(['tts']));
   const [ttsInputMode, setTtsInputMode] = useState<'single' | 'batch'>('single');
   const [subNavWidth, setSubNavWidth] = useState(() => {
     if (typeof window === 'undefined') return DUBBING_SUBNAV_DEFAULT_WIDTH;
