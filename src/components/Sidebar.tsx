@@ -4,6 +4,7 @@
  */
 
 import React from 'react';
+import { AuthProfile } from './AuthGate';
 import { 
   LayoutDashboard, 
   Sparkles, 
@@ -163,16 +164,7 @@ export default function Sidebar({ currentTab, setCurrentTab, isMobileOpen, onMob
 
       </div>
 
-      {/* Footer User Profile (Light Emerald style) */}
-      <div className={`${variant === 'desktop' && isDesktopCompact ? 'justify-center p-3' : 'p-4'} border-t border-slate-100 bg-slate-50 flex items-center gap-3`}>
-        <div className="w-8 h-8 rounded-full bg-gradient-to-r from-emerald-500 to-emerald-600 flex items-center justify-center text-xs font-bold text-white shadow-sm">
-          AD
-        </div>
-        <div className={`flex-1 min-w-0 ${variant === 'desktop' && isDesktopCompact ? 'hidden' : ''}`}>
-          <p className="text-xs font-semibold text-slate-700 truncate">Audio Director</p>
-          <p className="text-[10px] text-slate-500 truncate">Professional Edition</p>
-        </div>
-      </div>
+      <AuthProfile compact={variant === 'desktop' && isDesktopCompact} />
     </>
   );
 

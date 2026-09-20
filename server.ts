@@ -1,5 +1,8 @@
 import 'dotenv/config';
 import express from 'express';
+import { createFeishuAuth } from './src/services/feishuAuthServer';
+import { PointsStore, pointsMonth, validateMonth } from './src/services/pointsStore';
+import { POINTS_RULES, pointsMiddleware, mediaSeconds, timedPoints, textPoints } from './src/services/pointsBilling';
 import path from 'path';
 import fs from 'fs';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
@@ -95,6 +98,7 @@ async function startServer() {
   app.disable('x-powered-by');
 
   const dataDir = path.join(process.cwd(), 'data');
+  const pointsStore = new PointsStore(path.join(dataDir, 'creation-points.json'));
   const accessBlacklistPath = path.join(dataDir, 'access-blacklist.json');
   const normalizeIpAddress = (value: unknown) => {
     if (typeof value !== 'string') return '';
@@ -136,6 +140,8 @@ async function startServer() {
     Promise.resolve(handler(req, res)).catch(next);
   };
 
+  app.use(createFeishuAuth());
+
   // Use JSON middleware with large payload support for categories/sounds state and inline media references.
   app.use(express.json({ limit: '120mb' }));
 
@@ -155,7 +161,7 @@ async function startServer() {
   );
   const resolveUsageActor = (req: express.Request, res: express.Response): UsageActor => {
     const ipAddress = getRequestIpAddress(req);
-    // A future Feishu auth middleware should set this server-verified value before this middleware.
+    // Feishu auth middleware sets this server-verified value before usage tracking.
     // Client-provided headers are never treated as authenticated Feishu identity.
     const feishuUser = res.locals.feishuUser as {
       openId?: unknown;
@@ -225,6 +231,11 @@ async function startServer() {
     return '其他 AI 功能';
   };
 
+  const pointsActor = (req: express.Request, res: express.Response) => {
+    const actor = resolveUsageActor(req, res);
+    return { userId: actor.userId, displayName: actor.displayName, identitySource: actor.identitySource };
+  };
+
   app.use((req, res, next) => {
     const endpoint = req.path;
     usageRequestContext.run({
@@ -248,7 +259,7 @@ async function startServer() {
       || process.env.VITE_SFX_LIBRARY_ADMIN_PASSWORD
       || '',
   ).trim();
-  const sfxLibraryAdminSessions = new Map<string, number>();
+  const sfxLibraryAdminSessions = new Map<string, { expiresAt: number; openId: string }>();
   const sfxLibraryEventClients = new Set<express.Response>();
   const SFX_LIBRARY_ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
   let sfxLibraryRevision = Date.now();
@@ -516,7 +527,7 @@ async function startServer() {
   };
 
   const elevenLabsQuotaPath = path.join(dataDir, 'elevenlabs-quotas.json');
-  const ELEVENLABS_QUOTA_ENABLED = String(process.env.ELEVENLABS_QUOTA_ENABLED || 'true').toLowerCase() !== 'false';
+  const ELEVENLABS_QUOTA_ENABLED = false; // Legacy credits are read-only cost telemetry; creation points enforce budgets.
   const ELEVENLABS_MONTHLY_CREDITS = Math.max(
     1_000,
     Number.parseInt(process.env.ELEVENLABS_MONTHLY_CREDITS || '20000', 10) || 20_000,
@@ -701,33 +712,11 @@ async function startServer() {
     };
   };
 
-  const reserveElevenLabsQuota = (actor: UsageActor, requestedCredits: number) => {
-    const normalizedRequestedCredits = Math.max(1, Math.ceil(Number(requestedCredits) || 1));
-    const quota = buildElevenLabsQuotaStatus(actor.userId);
-    if (ELEVENLABS_QUOTA_ENABLED && normalizedRequestedCredits > quota.remainingCredits) {
-      return { quota, release: null };
-    }
-    if (!ELEVENLABS_QUOTA_ENABLED) return { quota, release: () => undefined };
-
-    activeElevenLabsQuotaReservations.set(
-      actor.userId,
-      (activeElevenLabsQuotaReservations.get(actor.userId) || 0) + normalizedRequestedCredits,
-    );
-    let released = false;
-    return {
-      quota,
-      release: () => {
-        if (released) return;
-        released = true;
-        const remainingReservation = Math.max(
-          0,
-          (activeElevenLabsQuotaReservations.get(actor.userId) || 0) - normalizedRequestedCredits,
-        );
-        if (remainingReservation > 0) activeElevenLabsQuotaReservations.set(actor.userId, remainingReservation);
-        else activeElevenLabsQuotaReservations.delete(actor.userId);
-      },
-    };
-  };
+  const reserveElevenLabsQuota = (actor: UsageActor, _requestedCredits: number) => ({
+    quota: buildElevenLabsQuotaStatus(actor.userId),
+    // Creation points enforce personal and company budgets; provider credits are telemetry.
+    release: () => undefined,
+  });
 
   const estimateUploadedMediaDuration = (req: express.Request) => {
     if (!req.file) return undefined;
@@ -739,26 +728,46 @@ async function startServer() {
 
   const requireElevenLabsQuota = (
     estimateCredits: (req: express.Request) => number,
-  ): express.RequestHandler => (req, res, next) => {
-    const actor = resolveUsageActor(req, res);
-    const reservation = reserveElevenLabsQuota(actor, estimateCredits(req));
-    if (!reservation.release) {
-      return res.status(429).json({
-        code: 'ELEVENLABS_USER_QUOTA_EXCEEDED',
-        error: `本月 ElevenLabs 个人积分不足。已用 ${Math.ceil(reservation.quota.usedCredits)} / ${reservation.quota.limitCredits}，请联系管理员追加额度。`,
-        quota: reservation.quota,
-      });
+  ): express.RequestHandler => pointsMiddleware(pointsStore, pointsActor, async (req) => {
+    const feature = resolveUsageFeature(req);
+    if (req.path.endsWith('/translate-dubbing-v2')) throw Object.assign(new Error('Dubbing V2 尚未开放积分定价，请使用标准翻译配音。'), { status: 503 });
+    if (req.file) {
+      const seconds = await mediaSeconds(req.file, FFMPEG_BINARY, uploadsDir);
+      if (req.path.endsWith('/translate-dubbing')) {
+        // Reserve conservatively at 15 spoken characters/second; settlement cannot exceed the quote.
+        const points = timedPoints(seconds, 4) + Math.max(1, Math.ceil(seconds * 15 / 100));
+        return { points, feature, detail: `标准翻译配音：输入 ${seconds.toFixed(2)} 秒，转录 4 分/分钟 + 配音 1 分/100 字符（最多 ${points} 分）`,
+          actual: (body: any) => timedPoints(seconds, 4) + textPoints(String(body?.translatedText || '')) };
+      }
+      const rate = req.path.endsWith('/speech-to-text') ? 4 : 10;
+      return { points: timedPoints(seconds, rate), feature, detail: `输入 ${seconds.toFixed(2)} 秒 × ${rate} 分/分钟` };
     }
-    let completed = false;
-    const release = () => {
-      if (completed) return;
-      completed = true;
-      reservation.release?.();
-    };
-    res.once('finish', release);
-    res.once('close', release);
-    return next();
-  };
+    const points = Math.max(1, Math.ceil(estimateCredits(req) / 100));
+    return { points, feature, detail: `${feature}，单个生成版本 ${points} 分（规则 v1）` };
+  });
+
+  const localPoints = (kind: 'clone' | 'batch' | 'seed' | 'midi' | 'separate') => pointsMiddleware(pointsStore, pointsActor, async (req) => {
+    if (kind === 'clone' || kind === 'batch') {
+      const payload = kind === 'batch' ? JSON.parse(String(req.body?.payload || '{}')) : req.body;
+      const characters = kind === 'batch'
+        ? (payload.segments || []).reduce((sum: number, segment: any) => sum + Array.from(String(segment.targetText || '')).length, 0) * 2
+        : Array.from(String(payload.text || '')).length;
+      const points = timedPoints(Math.max(20, characters * 2), 3);
+      return { points, feature: '本地声音克隆', detail: `按输出时长 3 分/分钟；预冻结上限 ${points} 分，成功后按时长结算`,
+        actual: (body: any) => kind === 'batch'
+          ? (body?.timeline?.versions || []).reduce((total: number, version: any) => total + timedPoints(Number(version.outputDuration) || 1, 3), 0)
+          : timedPoints(Number(body?.outputDuration) || Number(body?.generatedDuration) || 1, 3) };
+    }
+    if (kind === 'separate') {
+      const seconds = parseNumber(req.body?.sourceDuration, 30, 0.05, 3600);
+      return { points: timedPoints(seconds, 10), feature: '视频音轨分离', detail: `${seconds} 秒；Demucs 2 分/分钟，云端提取 10 分/分钟，FFmpeg 免费`,
+        actual: (body: any) => body?.engine === 'demucs-local' ? timedPoints(seconds, 2) : body?.engine === 'elevenlabs-audio-isolation' ? timedPoints(seconds, 10) : 0 };
+    }
+    const file = kind === 'seed' ? (req.files as Record<string, Express.Multer.File[]>)?.source?.[0] : req.file;
+    if (!file) throw Object.assign(new Error('请上传音频文件。'), { status: 400 });
+    const seconds = await mediaSeconds(file, FFMPEG_BINARY, uploadsDir);
+    return { points: timedPoints(seconds, 3), feature: kind === 'seed' ? 'Seed-VC 换声' : '音频转 MIDI', detail: `输入 ${seconds.toFixed(2)} 秒 × 3 分/分钟` };
+  });
 
   const getDateKey = (timestamp: string, timeZone: string) => {
     const parts = new Intl.DateTimeFormat('en-CA', {
@@ -1015,21 +1024,47 @@ async function startServer() {
     return authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
   };
 
-  const hasValidSfxLibraryAdminSession = (req: express.Request) => {
+  const hasValidSfxLibraryAdminSession = (req: express.Request, res: express.Response) => {
     const token = getSfxLibraryAdminToken(req);
     if (!token) return false;
-    const expiresAt = sfxLibraryAdminSessions.get(token) || 0;
-    if (expiresAt <= Date.now()) {
+    const session = sfxLibraryAdminSessions.get(token);
+    if (!session || session.expiresAt <= Date.now()) {
       sfxLibraryAdminSessions.delete(token);
       return false;
     }
-    return true;
+    return session.openId === (res.locals.feishuUser?.openId || '');
   };
 
   const requireSfxLibraryAdmin: express.RequestHandler = (req, res, next) => {
-    if (hasValidSfxLibraryAdminSession(req)) return next();
+    if (hasValidSfxLibraryAdminSession(req, res)) return next();
     return res.status(401).json({ error: '需要有效的管理权限。' });
   };
+
+  // localGuest is set only by the authenticated, direct-loopback guest middleware.
+  const requirePointsManager: express.RequestHandler = (req, res, next) => {
+    if (res.locals.localGuest === true) return next();
+    return requireSfxLibraryAdmin(req, res, next);
+  };
+
+  app.get('/api/points/me', (req, res) => {
+    const actor = pointsActor(req, res);
+    pointsStore.register(actor);
+    res.json({ balance: pointsStore.balance(actor), rules: POINTS_RULES });
+  });
+  app.get('/api/points/admin', requirePointsManager, (req, res) => {
+    const month = validateMonth(req.query.month || pointsMonth());
+    const page = Math.max(1, Math.min(100000, Number.parseInt(String(req.query.page || '1'), 10) || 1));
+    const userId = typeof req.query.userId === 'string' ? req.query.userId : '';
+    res.json({ ...pointsStore.report(month, userId, page), rules: POINTS_RULES });
+  });
+  app.put('/api/points/admin/settings', requirePointsManager, (req, res) => {
+    pointsStore.settings(req.body?.month, req.body?.policy, pointsActor(req, res), req.body?.reason, req.body?.expected);
+    res.json({ ok: true });
+  });
+  app.put('/api/points/admin/member', requirePointsManager, (req, res) => {
+    pointsStore.setMemberLimit(req.body?.month, req.body?.userId, req.body?.limit, pointsActor(req, res), req.body?.reason);
+    res.json({ ok: true });
+  });
 
   app.get('/api/access/blacklist', requireSfxLibraryAdmin, (_req, res) => {
     return res.json({ ips: Array.from(accessBlacklist).sort() });
@@ -1432,12 +1467,12 @@ async function startServer() {
     }
     const token = randomUUID();
     const expiresAt = Date.now() + SFX_LIBRARY_ADMIN_SESSION_TTL_MS;
-    sfxLibraryAdminSessions.set(token, expiresAt);
+    sfxLibraryAdminSessions.set(token, { expiresAt, openId: res.locals.feishuUser?.openId || '' });
     return res.json({ authorized: true, token, expiresAt });
   });
 
   app.get('/api/sfx/admin/session', (req, res) => {
-    return res.json({ authorized: hasValidSfxLibraryAdminSession(req) });
+    return res.json({ authorized: hasValidSfxLibraryAdminSession(req, res) });
   });
 
   app.post('/api/sfx/admin/logout', (req, res) => {
@@ -1818,69 +1853,8 @@ async function startServer() {
     return res.json(buildElevenLabsQuotaAdminSummary());
   });
 
-  app.put('/api/usage/quotas/account', requireSfxLibraryAdmin, (req, res) => {
-    const totalCredits = Math.round(Number(req.body?.totalCredits));
-    if (
-      !Number.isFinite(totalCredits)
-      || totalCredits < 0
-      || totalCredits > MAX_ELEVENLABS_ACCOUNT_CYCLE_CREDITS
-    ) {
-      return res.status(400).json({ error: '本账期总额度无效。' });
-    }
-
-    const period = getElevenLabsBillingCyclePeriod();
-    elevenLabsQuotaStore.accountAllocations = elevenLabsQuotaStore.accountAllocations.filter(
-      entry => entry.periodKey !== period.key,
-    );
-    if (totalCredits !== ELEVENLABS_ACCOUNT_CYCLE_CREDITS) {
-      elevenLabsQuotaStore.accountAllocations.push({
-        periodKey: period.key,
-        totalCredits,
-        updatedAt: new Date().toISOString(),
-      });
-    }
-    persistElevenLabsQuotaStore();
-    return res.json(buildElevenLabsQuotaAdminSummary());
-  });
-
-  app.put('/api/usage/quotas', requireSfxLibraryAdmin, (req, res) => {
-    const userId = normalizeIdentityText(req.body?.userId, 160);
-    const bonusCredits = Math.round(Number(req.body?.bonusCredits));
-    if (
-      !userId
-      || !Number.isFinite(bonusCredits)
-      || bonusCredits < -ELEVENLABS_MONTHLY_CREDITS
-      || bonusCredits > MAX_ELEVENLABS_BONUS_CREDITS
-    ) {
-      return res.status(400).json({ error: '成员或额度调整值无效。' });
-    }
-
-    const period = getElevenLabsQuotaPeriod();
-    const periodUsers = summarizeUsageUsers(readAiUsageEvents().filter(event => {
-      const timestamp = Date.parse(event.timestamp);
-      return timestamp >= period.startTime && timestamp < period.endTime;
-    }));
-    const user = periodUsers.find(item => item.userId === userId);
-    const existing = getCurrentElevenLabsQuotaAllocation(userId, period.key);
-    if (!user && !existing) {
-      return res.status(404).json({ error: '当前月份没有找到该成员或设备。' });
-    }
-
-    elevenLabsQuotaStore.allocations = elevenLabsQuotaStore.allocations.filter(
-      entry => !(entry.periodKey === period.key && entry.userId === userId),
-    );
-    if (bonusCredits !== 0) {
-      elevenLabsQuotaStore.allocations.push({
-        periodKey: period.key,
-        userId,
-        displayName: user?.displayName || existing?.displayName || userId,
-        identitySource: user?.identitySource || existing?.identitySource || 'unknown',
-        bonusCredits,
-        updatedAt: new Date().toISOString(),
-      });
-    }
-    persistElevenLabsQuotaStore();
-    return res.json(buildElevenLabsQuotaAdminSummary());
+  app.put(['/api/usage/quotas/account', '/api/usage/quotas'], requireSfxLibraryAdmin, (_req, res) => {
+    res.status(410).json({ error: '旧 credits 配额已停用，请在创作积分管理中设置月度上限。' });
   });
 
   app.get('/api/usage/summary', requireSfxLibraryAdmin, asyncRoute(async (req, res) => {
@@ -2271,6 +2245,12 @@ async function startServer() {
     uploadsDir,
     ffmpegBinary: FFMPEG_BINARY,
     maxUploadBytes: MAX_UPLOAD_BYTES,
+    reservePoints: async (req, res) => {
+      const seconds = await mediaSeconds(req.file!, FFMPEG_BINARY, uploadsDir);
+      const points = timedPoints(seconds, 5);
+      const id = pointsStore.reserve(pointsActor(req, res), points, '高质量六轨分离', `输入 ${seconds.toFixed(2)} 秒 × 5 分/分钟，包含六轨`);
+      return (success) => pointsStore.finish(id, success ? points : 0, success ? '六轨生成完成' : '任务失败或取消，退回冻结积分');
+    },
   }));
 
   const sendAudioBlob = async (res: express.Response, blob: Blob) => {
@@ -2674,7 +2654,7 @@ async function startServer() {
     res.json({ engines: await readAudioToMidiStatus() });
   }));
 
-  app.post('/api/audio-to-midi/convert', upload.single('media'), asyncRoute(async (req, res) => {
+  app.post('/api/audio-to-midi/convert', upload.single('media'), localPoints('midi'), asyncRoute(async (req, res) => {
     if (!req.file) {
       return res.status(400).json({ error: '请上传需要转 MIDI 的音频或视频文件。' });
     }
@@ -5175,7 +5155,7 @@ ${JSON.stringify(normalizedVoices)}
     { name: 'source', maxCount: 1 },
     { name: 'reference', maxCount: 1 },
     { name: 'timelineSource', maxCount: 1 },
-  ]), asyncRoute(async (req, res) => {
+  ]), localPoints('seed'), asyncRoute(async (req, res) => {
     const uploaded = (req.files || {}) as Record<string, Express.Multer.File[]>;
     const sourceFile = uploaded.source?.[0];
     const referenceFile = uploaded.reference?.[0];
@@ -5346,7 +5326,7 @@ ${JSON.stringify(normalizedVoices)}
     }
   }));
 
-  app.post('/api/ai/local/voice-clone', aiUpload.single('reference'), asyncRoute(async (req, res) => {
+  app.post('/api/ai/local/voice-clone', aiUpload.single('reference'), localPoints('clone'), asyncRoute(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: '请上传一段参考音频或视频。' });
     const text = String(req.body?.text || '').trim();
     if (!text) return res.status(400).json({ error: '请输入需要生成的目标语言台词。' });
@@ -5483,7 +5463,7 @@ ${JSON.stringify(normalizedVoices)}
     }
   }));
 
-  app.post('/api/ai/local/voice-clone/batch', aiUpload.single('source'), asyncRoute(async (req, res) => {
+  app.post('/api/ai/local/voice-clone/batch', aiUpload.single('source'), localPoints('batch'), asyncRoute(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: '请上传包含多人对话的源音频或视频。' });
     let payload: any;
     try {
@@ -7571,7 +7551,7 @@ CRITICAL SUBTITLE OCR PASS:
     }
   });
 
-  app.post('/api/video/separate-original-audio', asyncRoute(async (req, res) => {
+  app.post('/api/video/separate-original-audio', localPoints('separate'), asyncRoute(async (req, res) => {
     const {
       videoFileName,
       sourceStartTime,
@@ -8275,6 +8255,7 @@ CRITICAL SUBTITLE OCR PASS:
         : err?.status || err?.statusCode || 500;
     const isJsonTruncationError = /Unterminated string in JSON|Unexpected end of JSON input|JSON at position/i.test(rawMessage);
     return res.status(status).json({
+      ...(typeof err?.code === 'string' && err.code.startsWith('POINTS_') ? { code: err.code } : {}),
       error: isPayloadTooLarge
         ? '上传内容超过 100MB 限制。'
         : isJsonTruncationError

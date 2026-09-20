@@ -56,6 +56,14 @@ export const installClientIdentity = () => {
     const headers = new Headers(input instanceof Request ? input.headers : undefined);
     new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
     headers.set(CLIENT_ID_HEADER, getClientId());
-    return nativeFetch(input, { ...init, headers });
+    return nativeFetch(input, { ...init, headers }).then((response) => {
+      if (response.headers.has('X-Creation-Points-Charged')) window.dispatchEvent(new Event('ai-audio:points-changed'));
+      if (response.status === 401) {
+        void response.clone().json().then((body) => {
+          if (body.code === 'AUTH_REQUIRED') window.dispatchEvent(new Event('ai-audio:auth-required'));
+        }).catch(() => undefined);
+      }
+      return response;
+    });
   };
 };
