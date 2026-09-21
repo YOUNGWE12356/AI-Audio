@@ -1028,164 +1028,164 @@ export async function analyzeAudioDesign(
           ...(shouldAnalyzeMotionTempo ? ["videoMotionTempo"] : []),
         ],
         properties: {
-          ...(analysisScope.sfx ? { sfxAnalysis: {
-            type: Type.OBJECT,
-            required: ["summary", "keyElements", "pacing"],
-            properties: {
-              summary: { type: Type.STRING },
-              keyElements: { type: Type.ARRAY, items: { type: Type.STRING } },
-              pacing: { type: Type.STRING }
-            }
-          } } : {}),
-          ...(analysisScope.music ? { musicAnalysis: {
-            type: Type.OBJECT,
-            required: ["mood", "rhythm", "suggestedInstruments", "emotionalCurve"],
-            properties: {
-              mood: { type: Type.STRING },
-              rhythm: { type: Type.STRING },
-              suggestedInstruments: { type: Type.ARRAY, items: { type: Type.STRING } },
-              emotionalCurve: { type: Type.STRING }
-            }
-          } } : {}),
-          ...(shouldAnalyzeMotionTempo ? { videoMotionTempo: {
-            type: Type.OBJECT,
-            required: [
-              "detected",
-              "primaryBpm",
-              "bpmRangeMin",
-              "bpmRangeMax",
-              "alternateBpms",
-              "confidence",
-              "motionPattern",
-              "analysisBasis",
-              "syncGuidance",
-              "segments"
-            ],
-            properties: {
-              detected: { type: Type.BOOLEAN },
-              primaryBpm: { type: Type.INTEGER },
-              bpmRangeMin: { type: Type.INTEGER },
-              bpmRangeMax: { type: Type.INTEGER },
-              alternateBpms: { type: Type.ARRAY, items: { type: Type.INTEGER } },
-              confidence: { type: Type.STRING },
-              motionPattern: { type: Type.STRING },
-              analysisBasis: { type: Type.STRING },
-              syncGuidance: { type: Type.STRING },
-              segments: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  required: ["timecode", "motion", "bpm", "confidence"],
-                  properties: {
-                    timecode: { type: Type.STRING },
-                    motion: { type: Type.STRING },
-                    bpm: { type: Type.INTEGER },
-                    confidence: { type: Type.STRING }
-                  }
-                }
-              }
-            }
-          } } : {}),
-          ...(analysisScope.sfx ? { sfxSchemes: {
-            type: Type.ARRAY,
-            items: {
+            ...(analysisScope.sfx ? { sfxAnalysis: {
               type: Type.OBJECT,
-              required: ["title", "items"],
+              required: ["summary", "keyElements", "pacing"],
               properties: {
-                title: { type: Type.STRING },
-                items: {
+                summary: { type: Type.STRING },
+                keyElements: { type: Type.ARRAY, items: { type: Type.STRING } },
+                pacing: { type: Type.STRING }
+              }
+            } } : {}),
+            ...(analysisScope.music ? { musicAnalysis: {
+              type: Type.OBJECT,
+              required: ["mood", "rhythm", "suggestedInstruments", "emotionalCurve"],
+              properties: {
+                mood: { type: Type.STRING },
+                rhythm: { type: Type.STRING },
+                suggestedInstruments: { type: Type.ARRAY, items: { type: Type.STRING } },
+                emotionalCurve: { type: Type.STRING }
+              }
+            } } : {}),
+            ...(shouldAnalyzeMotionTempo ? { videoMotionTempo: {
+              type: Type.OBJECT,
+              required: [
+                "detected",
+                "primaryBpm",
+                "bpmRangeMin",
+                "bpmRangeMax",
+                "alternateBpms",
+                "confidence",
+                "motionPattern",
+                "analysisBasis",
+                "syncGuidance",
+                "segments"
+              ],
+              properties: {
+                detected: { type: Type.BOOLEAN },
+                primaryBpm: { type: Type.INTEGER },
+                bpmRangeMin: { type: Type.INTEGER },
+                bpmRangeMax: { type: Type.INTEGER },
+                alternateBpms: { type: Type.ARRAY, items: { type: Type.INTEGER } },
+                confidence: { type: Type.STRING },
+                motionPattern: { type: Type.STRING },
+                analysisBasis: { type: Type.STRING },
+                syncGuidance: { type: Type.STRING },
+                segments: {
                   type: Type.ARRAY,
                   items: {
                     type: Type.OBJECT,
-                    required: ["name", "description", "scene", "logic"],
+                    required: ["timecode", "motion", "bpm", "confidence"],
                     properties: {
-                      name: { type: Type.STRING },
-                      description: { type: Type.STRING },
-                      scene: { type: Type.STRING },
-                      logic: { type: Type.STRING }
+                      timecode: { type: Type.STRING },
+                      motion: { type: Type.STRING },
+                      bpm: { type: Type.INTEGER },
+                      confidence: { type: Type.STRING }
                     }
                   }
                 }
               }
-            }
-          } } : {}),
-          ...(analysisScope.music ? { bgmRecommendations: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              required: [
-                "style",
-                "styleEnglish",
-                ...(isGameTrack ? ["instrumentation", "instrumentationEnglish", "visualRationale"] : []),
-                "bpm",
-                "key",
-                "vocalDirection",
-                "vocalDirectionEnglish",
-                ...(!isGameTrack ? ["timelineDesign"] : [])
-              ],
-              properties: {
-                style: { type: Type.STRING },
-                styleEnglish: { type: Type.STRING },
-                instrumentation: { type: Type.STRING },
-                instrumentationEnglish: { type: Type.STRING },
-                visualRationale: { type: Type.STRING },
-                bpm: { type: Type.INTEGER },
-                key: { type: Type.STRING },
-                vocalDirection: { type: Type.STRING },
-                vocalDirectionEnglish: { type: Type.STRING },
-                vocalInfo: {
-                  type: Type.OBJECT,
-                  properties: {
-                    type: { type: Type.STRING },
-                    gender: { type: Type.STRING },
-                    age: { type: Type.STRING },
-                    characteristics: { type: Type.STRING },
-                    mood: { type: Type.STRING },
-                    singingStyle: { type: Type.STRING }
-                  }
-                },
-                lyrics: {
-                  type: Type.OBJECT,
-                  properties: {
-                    content: {
-                      type: Type.ARRAY,
-                      items: {
-                        type: Type.OBJECT,
-                        properties: {
-                          section: { type: Type.STRING },
-                          text: { type: Type.STRING }
-                        }
+            } } : {}),
+            ...(analysisScope.sfx ? { sfxSchemes: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                required: ["title", "items"],
+                properties: {
+                  title: { type: Type.STRING },
+                  items: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      required: ["name", "description", "scene", "logic"],
+                      properties: {
+                        name: { type: Type.STRING },
+                        description: { type: Type.STRING },
+                        scene: { type: Type.STRING },
+                        logic: { type: Type.STRING }
                       }
                     }
                   }
-                },
-                timelineDesign: {
-                  type: Type.ARRAY,
-                  items: {
+                }
+              }
+            } } : {}),
+            ...(analysisScope.music ? { bgmRecommendations: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                required: [
+                  "style",
+                  "styleEnglish",
+                  ...(isGameTrack ? ["instrumentation", "instrumentationEnglish", "visualRationale"] : []),
+                  "bpm",
+                  "key",
+                  "vocalDirection",
+                  "vocalDirectionEnglish",
+                  ...(!isGameTrack ? ["timelineDesign"] : [])
+                ],
+                properties: {
+                  style: { type: Type.STRING },
+                  styleEnglish: { type: Type.STRING },
+                  instrumentation: { type: Type.STRING },
+                  instrumentationEnglish: { type: Type.STRING },
+                  visualRationale: { type: Type.STRING },
+                  bpm: { type: Type.INTEGER },
+                  key: { type: Type.STRING },
+                  vocalDirection: { type: Type.STRING },
+                  vocalDirectionEnglish: { type: Type.STRING },
+                  vocalInfo: {
                     type: Type.OBJECT,
-                    required: [
-                      "timecode",
-                      "instruments",
-                      "instrumentsEnglish",
-                      "emotion",
-                      "emotionEnglish",
-                      "description",
-                      "descriptionEnglish"
-                    ],
                     properties: {
-                      timecode: { type: Type.STRING },
-                      instruments: { type: Type.STRING },
-                      instrumentsEnglish: { type: Type.STRING },
-                      emotion: { type: Type.STRING },
-                      emotionEnglish: { type: Type.STRING },
-                      description: { type: Type.STRING },
-                      descriptionEnglish: { type: Type.STRING }
+                      type: { type: Type.STRING },
+                      gender: { type: Type.STRING },
+                      age: { type: Type.STRING },
+                      characteristics: { type: Type.STRING },
+                      mood: { type: Type.STRING },
+                      singingStyle: { type: Type.STRING }
+                    }
+                  },
+                  lyrics: {
+                    type: Type.OBJECT,
+                    properties: {
+                      content: {
+                        type: Type.ARRAY,
+                        items: {
+                          type: Type.OBJECT,
+                          properties: {
+                            section: { type: Type.STRING },
+                            text: { type: Type.STRING }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  timelineDesign: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      required: [
+                        "timecode",
+                        "instruments",
+                        "instrumentsEnglish",
+                        "emotion",
+                        "emotionEnglish",
+                        "description",
+                        "descriptionEnglish"
+                      ],
+                      properties: {
+                        timecode: { type: Type.STRING },
+                        instruments: { type: Type.STRING },
+                        instrumentsEnglish: { type: Type.STRING },
+                        emotion: { type: Type.STRING },
+                        emotionEnglish: { type: Type.STRING },
+                        description: { type: Type.STRING },
+                        descriptionEnglish: { type: Type.STRING }
+                      }
                     }
                   }
                 }
               }
-            }
-          } } : {})
+            } } : {})
         }
       }
     },

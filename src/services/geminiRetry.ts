@@ -437,7 +437,7 @@ export const isGeminiUnsupportedLocationError = (error: unknown) => (
 );
 
 export const createFriendlyGeminiUnsupportedLocationError = (error: unknown) => Object.assign(
-  new Error('当前 Gemini API 所在地区不支持此分析请求。请切换到支持 Gemini API 的网络/地区，或在服务端配置可用的 ARK_API_KEY / OPENAI_API_KEY 视觉模型后重试关键帧分析。'),
+  new Error('当前 Gemini API 所在地区不支持此分析请求。请切换到支持 Gemini API 的网络/地区，或在服务端配置可用的音频/视频理解模型后重试精准分析。'),
   { status: 400, cause: error },
 );
 

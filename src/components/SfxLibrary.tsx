@@ -61,6 +61,7 @@ import {
   SFX_LIBRARY_SOUNDS_KEY,
   publishSfxLibraryIndex,
 } from '../services/sfxLibraryIndex';
+import { scoreSfxSearchCandidate } from '../services/sfxSearchLexicon';
 
 interface ImportItem {
   id: string;
@@ -2926,51 +2927,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   // Returns a score of how well a sound matches the search query based on keywords, synonyms, and description
   const getMatchScore = (sound: SoundEffect, query: string): number => {
     if (!query.trim()) return 1;
-    const lowerQuery = query.toLowerCase().trim();
-    
-    let score = 0;
-    
-    // Exact word matching in filename, name, category, designer
-    if (sound.name.toLowerCase().includes(lowerQuery)) score += 10;
-    if (sound.fileName.toLowerCase().includes(lowerQuery)) score += 8;
-    if (sound.category.toLowerCase().includes(lowerQuery)) score += 5;
-    if (sound.subcategory?.toLowerCase().includes(lowerQuery)) score += 5;
-    if (sound.childCategory?.toLowerCase().includes(lowerQuery)) score += 5;
-    if (sound.path?.toLowerCase().includes(lowerQuery)) score += 7;
-    if (sound.designer.toLowerCase().includes(lowerQuery)) score += 4;
-
-    // Check tags matching
-    sound.tags.forEach(tag => {
-      if (lowerQuery.includes(tag.toLowerCase()) || tag.toLowerCase().includes(lowerQuery)) {
-        score += 6;
-      }
-    });
-
-    // Semantic Synonyms Mapping (Translating descriptions like '沉闷的金属撞击' into our tags)
-    // Map words that user might use to our database values
-    const synonyms: { [key: string]: string[] } = {
-      '金属': ['铁', '钢', '敲击', '磕碰', '硬', 'metal', 'clang', 'clink'],
-      '撞击': ['打击', '击打', '碰撞', '落', '打', '砸', 'impact', 'hit'],
-      '沉闷': ['重', '低频', '闷', '重击', '厚重', 'dull', 'heavy', 'muffled'],
-      '科幻': ['激光', '外星', '未来', '脉冲', '赛博', '能量', 'cyber', 'sci-fi', 'space'],
-      '点击': ['按钮', 'UI', '反馈', '简洁', '清脆', 'click', 'pop', 'bubble'],
-      '尖锐': ['刺耳', '高频', '激光', '警报', 'sharp', 'piercing'],
-      '爆炸': ['轰鸣', '炸', '重低音', '巨响', '震动', 'explosion', 'boom'],
-      '环境': ['背景', '自然', '风声', '流动', '环绕', 'ambient', 'loop']
-    };
-
-    Object.keys(synonyms).forEach(mainTag => {
-      const matchWords = synonyms[mainTag];
-      const foundMatchWord = matchWords.some(word => lowerQuery.includes(word));
-      if (foundMatchWord) {
-        // If query mentions synonymous words, reward sounds with this mainTag
-        if (sound.tags.includes(mainTag) || sound.name.includes(mainTag)) {
-          score += 5;
-        }
-      }
-    });
-
-    return score;
+    return scoreSfxSearchCandidate(query, sound);
   };
 
   // Filtered sounds list

@@ -1,3 +1,9 @@
+import {
+  buildExpandedSfxSearchText,
+  normalizeSfxSearchText,
+  scoreSfxSearchCandidate,
+} from './sfxSearchLexicon';
+
 export const SFX_LIBRARY_CATEGORIES_KEY = 'sfx_library_categories';
 export const SFX_LIBRARY_SOUNDS_KEY = 'sfx_library_sounds';
 export const SFX_LIBRARY_INDEX_EVENT = 'sfx-library-index-updated';
@@ -27,12 +33,7 @@ export const EMPTY_SFX_LIBRARY_INDEX: SfxLibraryIndex = {
 
 const asText = (value: unknown) => typeof value === 'string' ? value.trim() : '';
 
-const normalizeIndexText = (value: string) => value
-  .normalize('NFKC')
-  .toLocaleLowerCase()
-  .replace(/[\\/_.-]+/g, ' ')
-  .replace(/\s+/g, ' ')
-  .trim();
+const normalizeIndexText = normalizeSfxSearchText;
 
 const makeSearchText = (...values: unknown[]) => normalizeIndexText(
   values.flatMap(value => Array.isArray(value) ? value : [value])
@@ -40,6 +41,8 @@ const makeSearchText = (...values: unknown[]) => normalizeIndexText(
     .filter(Boolean)
     .join(' '),
 );
+
+const makeExpandedSearchText = (...values: unknown[]) => buildExpandedSfxSearchText(...values);
 
 export const buildSfxLibraryIndex = (
   categories: unknown,
@@ -63,7 +66,7 @@ export const buildSfxLibraryIndex = (
         kind: 'directory',
         name: categoryName,
         category: categoryName,
-        searchText: makeSearchText(categoryName, group.english),
+        searchText: makeExpandedSearchText(categoryName, group.english),
       });
       seenDirectories.add(categoryKey);
     }
@@ -83,7 +86,7 @@ export const buildSfxLibraryIndex = (
         name: subcategoryName,
         category: categoryName,
         subcategory: subcategoryName,
-        searchText: makeSearchText(categoryName, subcategoryName, sub.english, sub.description),
+        searchText: makeExpandedSearchText(categoryName, subcategoryName, sub.english, sub.description),
       });
       seenDirectories.add(subcategoryKey);
 
@@ -103,7 +106,7 @@ export const buildSfxLibraryIndex = (
           category: categoryName,
           subcategory: subcategoryName,
           childCategory: childCategoryName,
-          searchText: makeSearchText(categoryName, subcategoryName, childCategoryName, child.english, child.description),
+          searchText: makeExpandedSearchText(categoryName, subcategoryName, childCategoryName, child.english, child.description),
         });
         seenDirectories.add(childCategoryKey);
       });
@@ -126,7 +129,7 @@ export const buildSfxLibraryIndex = (
       childCategory: asText(item.childCategory) || undefined,
       path: asText(item.path) || undefined,
       tags,
-      searchText: makeSearchText(name, item.fileName, item.category, item.subcategory, item.childCategory, item.path, tags),
+      searchText: makeExpandedSearchText(name, item.fileName, item.category, item.subcategory, item.childCategory, item.path, tags),
     });
   });
 
@@ -153,18 +156,17 @@ export const publishSfxLibraryIndex = (categories: unknown, sounds: unknown) => 
 export const findSfxLibraryMatches = (prompt: string, index: SfxLibraryIndex) => {
   const normalizedPrompt = normalizeIndexText(prompt);
   if (!normalizedPrompt) return [] as SfxLibraryIndexEntry[];
-  const compactPrompt = normalizedPrompt.replace(/\s+/g, '');
   return index.entries
-    .filter(entry => {
-      const normalizedName = normalizeIndexText(entry.name);
-      const compactName = normalizedName.replace(/\s+/g, '');
-      if (compactPrompt.length < 2 || compactName.length < 2) return false;
-      return compactPrompt.includes(compactName) || compactName.includes(compactPrompt);
-    })
+    .map(entry => ({
+      entry,
+      score: scoreSfxSearchCandidate(normalizedPrompt, entry),
+    }))
+    .filter(item => item.score > 0)
     .sort((a, b) => {
-      if (a.kind !== b.kind) return a.kind === 'directory' ? -1 : 1;
-      return b.name.length - a.name.length;
-    });
+      if (a.entry.kind !== b.entry.kind) return a.entry.kind === 'directory' ? -1 : 1;
+      return b.score - a.score || b.entry.name.length - a.entry.name.length;
+    })
+    .map(item => item.entry);
 };
 
 export const normalizeSfxLibraryText = normalizeIndexText;

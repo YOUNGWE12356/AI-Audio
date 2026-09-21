@@ -13,6 +13,11 @@ import ffmpegStatic from 'ffmpeg-static';
 import { DEFAULT_CATEGORIES, INITIAL_SOUNDS } from './src/data/sfxData';
 import type { SoundEffect } from './src/data/sfxData';
 import { buildSfxLibraryIndex, findSfxLibraryMatches } from './src/services/sfxLibraryIndex';
+import {
+  buildExpandedSfxSearchText,
+  normalizeSfxSearchText,
+  scoreSfxSearchCandidate,
+} from './src/services/sfxSearchLexicon';
 import { planAssistantTask } from './src/services/assistantPlannerService';
 import { createMusicSeparationRouter } from './src/services/musicSeparationServer';
 import multer from 'multer';
@@ -1286,7 +1291,7 @@ async function startServer() {
     }
   };
 
-  const normalizeSearchText = (value: unknown) => String(value || '').trim().toLowerCase();
+  const normalizeSearchText = normalizeSfxSearchText;
 
   const inferAudioAssetSource = (sound: SoundEffect): AudioAssetSource => {
     const tags = (sound.tags || []).map(tag => normalizeSearchText(tag));
@@ -1336,14 +1341,14 @@ async function startServer() {
       ...(sound.tags || []),
       source,
       assetKind,
-    ].map(normalizeSearchText).filter(Boolean).join(' ');
+    ].filter(Boolean);
 
     return {
       ...sound,
       source,
       assetKind,
       downloadUrl: sound.downloadUrl || sound.url || '',
-      searchableText,
+      searchableText: buildExpandedSfxSearchText(searchableText),
     };
   };
 
@@ -1351,25 +1356,7 @@ async function startServer() {
     const normalizedQuery = normalizeSearchText(query);
     if (!normalizedQuery) return 0;
 
-    const tokens = normalizedQuery.split(/[\s,，、/\\|;；]+/).filter(Boolean);
-    const name = normalizeSearchText(asset.name);
-    const fileName = normalizeSearchText(asset.fileName);
-    const category = normalizeSearchText(asset.category);
-    const subcategory = normalizeSearchText(asset.subcategory);
-    const tags = (asset.tags || []).map(normalizeSearchText);
-
-    let score = 0;
-    for (const token of tokens) {
-      if (name === token || fileName === token) score += 120;
-      if (name.includes(token)) score += 60;
-      if (fileName.includes(token)) score += 55;
-      if (tags.some(tag => tag === token)) score += 45;
-      if (tags.some(tag => tag.includes(token))) score += 28;
-      if (category.includes(token)) score += 22;
-      if (subcategory.includes(token)) score += 18;
-      if (asset.searchableText.includes(token)) score += 8;
-    }
-    return score;
+    return scoreSfxSearchCandidate(normalizedQuery, asset);
   };
 
   const getAudioAssetStats = (assets: IndexedAudioAsset[]) => {
