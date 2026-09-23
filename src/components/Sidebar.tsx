@@ -16,10 +16,13 @@ import {
   ClipboardList,
   SlidersHorizontal,
   Film,
-  X
+  X,
+  Coins,
+  ChevronUp,
 } from 'lucide-react';
 import { TabType } from '../types';
 import wpLogoUrl from '../assets/wp-logo.png';
+import { fetchPersonalPointBalance, type PersonalPointBalance } from '../services/usageService';
 
 const SIDEBAR_MIN_WIDTH = 72;
 const SIDEBAR_COMPACT_WIDTH = 160;
@@ -44,7 +47,29 @@ export default function Sidebar({ currentTab, setCurrentTab, isMobileOpen, onMob
       : SIDEBAR_DEFAULT_WIDTH;
   });
   const [isResizingDesktop, setIsResizingDesktop] = React.useState(false);
+  const [pointBalance, setPointBalance] = React.useState<PersonalPointBalance | null>(null);
+  const [isBalanceOpen, setIsBalanceOpen] = React.useState(false);
   const isDesktopCompact = desktopWidth < SIDEBAR_COMPACT_WIDTH;
+
+  const refreshPointBalance = React.useCallback(() => {
+    const controller = new AbortController();
+    fetchPersonalPointBalance(controller.signal).then(setPointBalance).catch(() => undefined);
+    return () => controller.abort();
+  }, []);
+
+  React.useEffect(() => {
+    const cancelInitial = refreshPointBalance();
+    const timer = window.setInterval(refreshPointBalance, 30_000);
+    const refresh = () => refreshPointBalance();
+    window.addEventListener('focus', refresh);
+    window.addEventListener('ai-audio:usage-updated', refresh);
+    return () => {
+      cancelInitial();
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refresh);
+      window.removeEventListener('ai-audio:usage-updated', refresh);
+    };
+  }, [refreshPointBalance]);
 
   const mainFeatures = [
     { id: 'workbench' as const, label: '工作台', icon: LayoutDashboard },
@@ -163,15 +188,59 @@ export default function Sidebar({ currentTab, setCurrentTab, isMobileOpen, onMob
 
       </div>
 
-      {/* Footer User Profile (Light Emerald style) */}
-      <div className={`${variant === 'desktop' && isDesktopCompact ? 'justify-center p-3' : 'p-4'} border-t border-slate-100 bg-slate-50 flex items-center gap-3`}>
+      {/* Personal balance is visible without exposing the password-protected admin settings. */}
+      <div className="relative border-t border-slate-100 bg-slate-50">
+        {isBalanceOpen && !(variant === 'desktop' && isDesktopCompact) ? (
+          <div className="absolute bottom-full left-3 right-3 mb-2 rounded-lg border border-slate-200 bg-white p-3 shadow-xl" role="dialog" aria-label="个人积分详情">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs font-bold text-slate-800">个人积分</p>
+              <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[9px] font-bold text-emerald-700">
+                {pointBalance?.quota.tier === 'professional' ? '专业档' : '基础档'}
+              </span>
+            </div>
+            {pointBalance ? (() => {
+              const quota = pointBalance.quota;
+              const percent = quota.limitCredits > 0 ? Math.min(100, quota.usedCredits / quota.limitCredits * 100) : 100;
+              return (
+                <>
+                  <div className="mt-3 flex items-end justify-between gap-3">
+                    <div><p className="text-[9px] text-slate-400">剩余</p><p className="font-mono text-lg font-bold text-slate-900">{Math.floor(quota.remainingCredits).toLocaleString('zh-CN')}</p></div>
+                    <p className="pb-1 text-[10px] text-slate-400">已用 {Math.ceil(quota.usedCredits).toLocaleString('zh-CN')} / {quota.limitCredits.toLocaleString('zh-CN')}</p>
+                  </div>
+                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                    <div className={`h-full rounded-full ${percent >= 100 ? 'bg-rose-500' : percent >= 90 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${percent}%` }} />
+                  </div>
+                  {percent >= 70 ? (
+                    <p className={`mt-2 text-[9px] font-semibold ${percent >= 100 ? 'text-rose-600' : percent >= 90 ? 'text-amber-600' : 'text-sky-600'}`}>
+                      {percent >= 100 ? '积分已用完，付费生成功能已暂停' : percent >= 90 ? '积分即将用完，请联系管理员' : '本月积分已使用超过 70%'}
+                    </p>
+                  ) : null}
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-[9px] text-slate-500">
+                    <span>临时加额 <b className="block font-mono text-[11px] text-slate-700">{quota.bonusCredits.toLocaleString('zh-CN')}</b></span>
+                    <span>项目池分配 <b className="block font-mono text-[11px] text-slate-700">{quota.projectPoints.toLocaleString('zh-CN')}</b></span>
+                  </div>
+                  <p className="mt-3 border-t border-slate-100 pt-2 text-[9px] text-slate-400">{new Date(quota.periodEnd).toLocaleDateString('zh-CN')} 自动重置</p>
+                </>
+              );
+            })() : <p className="mt-3 text-[10px] text-slate-400">正在读取积分...</p>}
+          </div>
+        ) : null}
+        <button
+          type="button"
+          onClick={() => setIsBalanceOpen(value => !value)}
+          className={`${variant === 'desktop' && isDesktopCompact ? 'justify-center p-3' : 'p-4'} flex w-full items-center gap-3 text-left hover:bg-slate-100`}
+          title={variant === 'desktop' && isDesktopCompact ? '个人积分' : undefined}
+          aria-expanded={isBalanceOpen}
+        >
         <div className="w-8 h-8 rounded-full bg-gradient-to-r from-emerald-500 to-emerald-600 flex items-center justify-center text-xs font-bold text-white shadow-sm">
-          AD
+          {pointBalance?.user.displayName?.slice(0, 1).toUpperCase() || 'A'}
         </div>
         <div className={`flex-1 min-w-0 ${variant === 'desktop' && isDesktopCompact ? 'hidden' : ''}`}>
-          <p className="text-xs font-semibold text-slate-700 truncate">Audio Director</p>
-          <p className="text-[10px] text-slate-500 truncate">Professional Edition</p>
+          <p className="truncate text-xs font-semibold text-slate-700">{pointBalance?.user.displayName || '当前用户'}</p>
+          <p className="mt-0.5 flex items-center gap-1 truncate text-[10px] text-slate-500"><Coins className="h-3 w-3" />剩余 {pointBalance ? Math.floor(pointBalance.quota.remainingCredits).toLocaleString('zh-CN') : '--'} 积分</p>
         </div>
+        <ChevronUp className={`h-3.5 w-3.5 shrink-0 text-slate-400 transition ${variant === 'desktop' && isDesktopCompact ? 'hidden' : ''} ${isBalanceOpen ? '' : 'rotate-180'}`} />
+        </button>
       </div>
     </>
   );

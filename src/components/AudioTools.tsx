@@ -36,9 +36,11 @@ import { isolateAudio } from '../services/elevenLabsService';
 import AudioWorkstation from './AudioWorkstation';
 import AudioToMidiPanel from './AudioToMidiPanel';
 import type { AssistantAudioRequest } from './GlobalAssistant';
+import PointCostHint from './PointCostHint';
 
 const AudioAnalyzer = React.lazy(() => import('./AudioAnalyzer'));
 const MusicStemSeparation = React.lazy(() => import('./MusicStemSeparation'));
+const MusicAnalysisNaming = React.lazy(() => import('./MusicAnalysisNaming'));
 
 interface FactoryConversionResult {
   id: string;
@@ -297,7 +299,7 @@ interface AudioToolsProps {
 }
 
 export default function AudioTools({ assistantAudioRequest = null, onAssistantTaskRunningChange }: AudioToolsProps) {
-  const [activeSubTab, setActiveSubTab] = useState<'workstation' | 'analysis' | 'factory' | 'midi' | 'renamer' | 'isolation' | 'music-separation'>('workstation');
+  const [activeSubTab, setActiveSubTab] = useState<'workstation' | 'analysis' | 'factory' | 'midi' | 'renamer' | 'music-analysis-naming' | 'isolation' | 'music-separation'>('workstation');
   const [subNavWidth, setSubNavWidth] = useState(() => {
     if (typeof window === 'undefined') return AUDIO_TOOLS_SUBNAV_DEFAULT_WIDTH;
     const hasInitializedWidth = window.localStorage.getItem(AUDIO_TOOLS_SUBNAV_WIDTH_READY_KEY) === '1';
@@ -544,6 +546,10 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
         ? '助手已载入文件，请设置命名规则并预览。'
         : '助手已打开批量命名，请导入需要改名的音频。');
       setActiveSubTab('renamer');
+      return;
+    }
+    if (assistantAudioRequest.task === 'music-analysis-naming' || assistantAudioRequest.audioTool === 'music-analysis-naming') {
+      setActiveSubTab('music-analysis-naming');
       return;
     }
     if (assistantAudioRequest.task === 'analyze') {
@@ -1593,6 +1599,22 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
             <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>批量命名</span>
           </button>
 
+          {/* Subtab Button: 音乐分析命名 */}
+          <button
+            onClick={() => setActiveSubTab('music-analysis-naming')}
+            title="音乐分析命名"
+            className={`w-full flex items-center overflow-hidden whitespace-nowrap rounded-xl text-xs font-semibold transition-all duration-200 ${
+              isSubNavCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
+            } ${
+              activeSubTab === 'music-analysis-naming'
+                ? 'bg-emerald-50 text-emerald-700 shadow-sm border border-emerald-100'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+            }`}
+          >
+            <Sparkles className={`w-4 h-4 shrink-0 transition-colors ${activeSubTab === 'music-analysis-naming' ? 'text-emerald-600' : 'text-slate-400'}`} />
+            <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>音乐分析命名</span>
+          </button>
+
           {/* Subtab Button: 拆分分轨 */}
           <button
             onClick={() => setActiveSubTab('music-separation')}
@@ -1699,6 +1721,22 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
               setActiveSubTab('workstation');
             }}
           />
+        </React.Suspense>
+      )}
+
+      {/* ==========================================================
+          SUB-TAB: MUSIC ANALYSIS NAMING
+          ========================================================== */}
+      {activeSubTab === 'music-analysis-naming' && (
+        <React.Suspense
+          fallback={
+            <div className="flex min-h-[360px] items-center justify-center rounded-xl border border-slate-200 bg-white text-sm font-semibold text-slate-500 shadow-sm">
+              <Loader2 className="mr-2 h-4 w-4 animate-spin text-emerald-600" />
+              正在加载音乐分析命名…
+            </div>
+          }
+        >
+          <MusicAnalysisNaming />
         </React.Suspense>
       )}
 
@@ -2817,6 +2855,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
               )}
 
               {/* Action Button */}
+              <div className="flex justify-end"><PointCostHint kind="audio-isolation" file={isolationFile} /></div>
               <button
                 type="button"
                 disabled={!isolationFile || isolationLoading}

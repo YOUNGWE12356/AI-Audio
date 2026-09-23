@@ -56,6 +56,22 @@ export const installClientIdentity = () => {
     const headers = new Headers(input instanceof Request ? input.headers : undefined);
     new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
     headers.set(CLIENT_ID_HEADER, getClientId());
-    return nativeFetch(input, { ...init, headers });
+    return nativeFetch(input, { ...init, headers }).then((response) => {
+      try {
+        const rawUrl = input instanceof Request ? input.url : String(input);
+        const url = new URL(rawUrl, window.location.origin);
+        if (response.ok && init?.method !== 'GET' && (
+          url.pathname.includes('/api/ai/')
+          || url.pathname.includes('/api/video/generate-clip')
+          || url.pathname.includes('/api/video/analyze')
+          || url.pathname.includes('/api/video/match-similar-voices')
+        )) {
+          window.dispatchEvent(new Event('ai-audio:usage-updated'));
+        }
+      } catch {
+        // Usage refresh is best-effort and must never affect the API response.
+      }
+      return response;
+    });
   };
 };

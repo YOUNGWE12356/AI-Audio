@@ -8,6 +8,7 @@ import type { HistoryItem } from '../types';
 import CrossLanguageDubbing from './CrossLanguageDubbing';
 import AdvancedVoiceConversionPanel from './AdvancedVoiceConversionPanel';
 import GeneratedAudioPlayer from './GeneratedAudioPlayer';
+import PointCostHint from './PointCostHint';
 import {
   COMMON_AUDIO_LANGUAGE_CODES,
   isExtendedAudioLanguage,
@@ -450,6 +451,7 @@ export default function VoiceConversion({
           <div className="rounded-2xl border border-emerald-200 bg-emerald-50/50 p-5 shadow-sm">
             <div className="flex items-start justify-between gap-3"><div><p className="text-xs font-black text-emerald-900">第一步：上传素材并选择目标语种</p><p className="mt-1 text-[10px] leading-relaxed text-emerald-800/80">上传后系统会自动提取原始台词、时间码和声音事件，无需再单独点击提取按钮。</p></div><FileAudio className="h-5 w-5 text-emerald-600" /></div>
             <UploadCard title="原始素材（视频 / 音频）" hint="包含原始人物声音和完整对白的素材。上传后会提取逐句时间码、停顿和笑声，并默认用它作为参考音。单个文件不超过 100 MB；暂无单独时长限制，建议使用较短、清晰的素材。" file={originalFile} accept="audio/*,video/*" onFile={updateOriginalFile} />
+            <div className="mt-2 flex justify-end"><PointCostHint kind="speech-to-text" file={originalFile} /></div>
             <div className="mt-3 flex flex-wrap items-center gap-2">{textLoading === 'transcribe' ? <span className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-100 px-3 py-2 text-[10px] font-black text-emerald-800"><Loader2 className="h-3.5 w-3.5 animate-spin" />正在自动提取台词…</span> : null}{originalUrl && <audio controls src={originalUrl} className="h-8 min-w-[180px] flex-1" />}</div>
             {timedSegments.length > 0 ? <p className="mt-3 text-[10px] font-bold text-emerald-800">已建立 {timedSegments.length} 段台词时间槽 · {audioEvents.length} 个笑声/呼吸事件 · 原时长 {formatTime(originalDuration)}</p> : null}
           </div>
@@ -474,7 +476,10 @@ export default function VoiceConversion({
             <p className="mt-2 text-[10px] text-slate-500">{targetText.trim() ? '2A 已完成：请检查下面的目标台词，确认无误后继续 2B。' : sourceText.trim() ? '下一步：选择目标语种并点击“逐句翻译”。' : '请先在第一步上传素材，系统会自动提取原始台词。'}</p>
             <label className="mt-3 block text-[10px] font-black text-slate-700">2B · 目标台词（可修改）</label>
             <textarea value={targetText} onChange={(event) => updateTargetDialogue(event.target.value)} placeholder="完成 2A 翻译后，目标台词会显示在这里；保留空行可保持原始停顿" className="mt-2 min-h-20 w-full resize-y rounded-xl border border-emerald-100 bg-emerald-50/40 p-3 text-xs text-slate-800 outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200" />
-            <button type="button" disabled={!targetText.trim() || displayVoices.length === 0 || Boolean(textLoading)} onClick={handleDraft} className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-2 text-[10px] font-black text-white disabled:cursor-not-allowed disabled:opacity-40">{textLoading === 'draft' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Volume2 className="h-3.5 w-3.5" />}2B · 生成时间线驱动音频{displayVoices.length === 0 ? '（暂无可用 TTS 声线）' : ''}</button>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <button type="button" disabled={!targetText.trim() || displayVoices.length === 0 || Boolean(textLoading)} onClick={handleDraft} className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-2 text-[10px] font-black text-white disabled:cursor-not-allowed disabled:opacity-40">{textLoading === 'draft' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Volume2 className="h-3.5 w-3.5" />}2B · 生成时间线驱动音频{displayVoices.length === 0 ? '（暂无可用 TTS 声线）' : ''}</button>
+              <PointCostHint kind="tts-standard" text={targetText} />
+            </div>
             {driverProgress ? <p className="mt-2 text-[10px] font-bold text-emerald-700">{driverProgress}</p> : null}
           </div>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">

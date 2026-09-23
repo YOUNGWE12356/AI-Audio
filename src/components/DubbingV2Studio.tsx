@@ -33,6 +33,7 @@ import {
   DUBBING_SOURCE_LANGUAGE_OPTIONS,
   DUBBING_TARGET_LANGUAGE_OPTIONS,
 } from '../services/languageRegistry';
+import PointCostHint from './PointCostHint';
 import { downloadAudioHelper } from '../utils/downloadHelper';
 
 interface DubbingV2StudioProps {
@@ -694,15 +695,18 @@ export default function DubbingV2Studio({
                 <h3 className="text-xs font-black text-slate-800">4. 分析 Transcript / Speaker</h3>
                 <p className="mt-1 text-[10px] text-slate-400">先生成可编辑台词草稿和说话人列表；Render 时当前接入会调用 Dubbing v2 自动项目渲染。</p>
               </div>
-              <button
-                type="button"
-                disabled={!sourceFile || isAnalyzing}
-                onClick={analyzeProject}
-                className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-slate-900 px-4 text-xs font-black text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
-              >
-                {isAnalyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Languages className="h-4 w-4" />}
-                {isAnalyzing ? '正在分析项目…' : segments.length > 0 ? '重新分析' : '分析台词与说话人'}
-              </button>
+              <div className="flex flex-col items-end gap-1.5">
+                <PointCostHint kind="speech-to-text" file={sourceFile} />
+                <button
+                  type="button"
+                  disabled={!sourceFile || isAnalyzing}
+                  onClick={analyzeProject}
+                  className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-slate-900 px-4 text-xs font-black text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+                >
+                  {isAnalyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Languages className="h-4 w-4" />}
+                  {isAnalyzing ? '正在分析项目…' : segments.length > 0 ? '重新分析' : '分析台词与说话人'}
+                </button>
+              </div>
             </div>
 
             {speakers.length > 0 ? (
@@ -855,6 +859,8 @@ export default function DubbingV2Studio({
                   当前 Render 使用已接入的 ElevenLabs Dubbing v2 一键渲染链路；Transcript 编辑会保留在项目草稿中，后续接入项目资源接口后可用于精修渲染。
                 </p>
               </div>
+              <div className="flex flex-col items-end gap-1.5">
+              <PointCostHint kind="dubbing-v2" durationSeconds={totalDuration || undefined} file={sourceFile} />
               <button
                 type="button"
                 disabled={!sourceFile || isRendering}
@@ -864,6 +870,7 @@ export default function DubbingV2Studio({
                 {isRendering ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
                 {isRendering ? 'Dubbing v2 Render 中…' : `Render ${renderFormat.toUpperCase()}`}
               </button>
+              </div>
             </div>
 
             {error ? (

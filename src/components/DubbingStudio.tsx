@@ -40,6 +40,7 @@ import GeneratedAudioPlayer, { sanitizeAudioFileName } from './GeneratedAudioPla
 import { enhanceVoicePromptForElevenV3, extractBatchVoiceTextFromImage } from '../services/geminiService';
 import { getElevenLabsQualityMode } from '../utils/elevenLabsQuality';
 import type { AssistantVoiceRequest } from './GlobalAssistant';
+import PointCostHint from './PointCostHint';
 
 interface PendingVoiceOption {
   url: string;
@@ -2144,6 +2145,11 @@ export default function DubbingStudio({
                               </div>
                             </div>
                             <div className="flex shrink-0 flex-row gap-1.5 sm:flex-col">
+                              <PointCostHint
+                                kind="tts-standard"
+                                text={item.text}
+                                className="justify-center"
+                              />
                               <button
                                 type="button"
                                 onClick={() => generateBatchVoiceItem(item.id)}
@@ -2547,6 +2553,10 @@ export default function DubbingStudio({
                     )}
                   </div>
                   <div className="flex shrink-0 flex-wrap items-center gap-2">
+                    <PointCostHint
+                      kind="tts-standard"
+                      text={batchVoiceItems.filter(item => item.enabled && item.text.trim()).map(item => item.text).join('')}
+                    />
                     <button
                       type="button"
                       onClick={handleGenerateBatchVoices}
@@ -2591,6 +2601,8 @@ export default function DubbingStudio({
 
             {/* Dub generation button */}
             {ttsInputMode === 'single' && (
+            <div className="space-y-2">
+            <div className="flex justify-end"><PointCostHint kind="tts-standard" text={standaloneVoicePrompt} outputs={2} /></div>
             <button
               onClick={handleStandaloneVoiceGenerate}
               disabled={standaloneVoiceLoading || !standaloneVoicePrompt.trim() || !standaloneVoiceRole}
@@ -2608,6 +2620,7 @@ export default function DubbingStudio({
                 </>
               )}
             </button>
+            </div>
             )}
 
           </div>

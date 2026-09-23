@@ -23,6 +23,13 @@ const integerFormatter = new Intl.NumberFormat('zh-CN', { maximumFractionDigits:
 const decimalFormatter = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 });
 const formatInteger = (value: number) => integerFormatter.format(value);
 const formatCredits = (value: number) => decimalFormatter.format(value);
+const formatBillingQuantity = (quantity: number, unit?: 'character' | 'second' | 'token' | 'request') => {
+  if (!quantity || !unit) return '-';
+  if (unit === 'second') return `${formatCredits(quantity)} 秒`;
+  if (unit === 'character') return `${formatInteger(quantity)} 字符`;
+  if (unit === 'token') return `${formatInteger(quantity)} Token`;
+  return `${formatInteger(quantity)} 次`;
+};
 const formatDateTime = (value: string) => new Intl.DateTimeFormat('zh-CN', {
   month: 'short',
   day: 'numeric',
@@ -37,58 +44,34 @@ const formatDate = (value: Date) => new Intl.DateTimeFormat('zh-CN', {
 function QuotaManagement({
   summary,
   updatingUserId,
-  accountTotalUpdating,
   feedback,
-  onSetBonus,
-  onSetAccountTotal,
+  onUpdate,
 }: {
   summary: ElevenLabsQuotaSummary;
   updatingUserId: string | null;
-  accountTotalUpdating: boolean;
   feedback: { message: string; error: boolean } | null;
-  onSetBonus: (user: ElevenLabsQuotaUser, bonusCredits: number) => void;
-  onSetAccountTotal: (totalCredits: number) => Promise<boolean>;
+  onUpdate: (user: ElevenLabsQuotaUser, changes: Partial<Pick<ElevenLabsQuotaUser, 'tier' | 'bonusCredits' | 'projectPoints'>>) => void;
 }) {
   const periodLabel = new Intl.DateTimeFormat('zh-CN', {
     year: 'numeric',
     month: 'long',
     timeZone: summary.period.timeZone,
   }).format(new Date(summary.period.start));
-  const accountCycle = summary.accountBillingCycle;
-  const [isEditingAccountTotal, setIsEditingAccountTotal] = useState(false);
-  const [accountTotalInput, setAccountTotalInput] = useState(String(accountCycle.totalCredits));
-  const parsedAccountTotal = Number(accountTotalInput);
-  const accountTotalIsValid = accountTotalInput.trim() !== ''
-    && Number.isFinite(parsedAccountTotal)
-    && parsedAccountTotal >= 0
-    && parsedAccountTotal <= 100_000_000;
-  const accountUsagePercent = accountCycle.totalCredits > 0
-    ? Math.min(100, Math.max(0, accountCycle.usedCredits / accountCycle.totalCredits * 100))
-    : 100;
-
-  useEffect(() => {
-    if (!isEditingAccountTotal) setAccountTotalInput(String(accountCycle.totalCredits));
-  }, [accountCycle.totalCredits, isEditingAccountTotal]);
-
-  const submitAccountTotal = async () => {
-    if (!accountTotalIsValid || accountTotalUpdating) return;
-    const saved = await onSetAccountTotal(Math.round(parsedAccountTotal));
-    if (saved) setIsEditingAccountTotal(false);
-  };
+  const pool = summary.projectPool;
 
   return (
-    <section className="mt-4 overflow-hidden rounded-lg border border-slate-200 bg-white" aria-labelledby="elevenlabs-quota-title">
+    <section className="mt-4 overflow-hidden rounded-lg border border-slate-200 bg-white" aria-labelledby="company-points-title">
       <div className="border-b border-slate-200 px-4 py-3">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <div className="flex flex-wrap items-center gap-2">
-              <h3 id="elevenlabs-quota-title" className="text-xs font-bold text-slate-800">ElevenLabs 成员月度配额</h3>
+              <h3 id="company-points-title" className="text-xs font-bold text-slate-800">成员月度积分</h3>
               <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${summary.enabled ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
                 {summary.enabled ? '限制已启用' : '仅统计，未限制'}
               </span>
             </div>
             <p className="mt-1 text-[10px] text-slate-400">
-              {periodLabel} · 每人基础 {formatInteger(summary.defaultMonthlyCredits)} 积分 · 次月自动恢复基础额度
+              {periodLabel} · 基础档 {formatInteger(summary.tiers.basic)} · 专业档 {formatInteger(summary.tiers.professional)} · 次月自动重置
             </p>
           </div>
           {feedback ? (
@@ -98,111 +81,26 @@ function QuotaManagement({
           ) : null}
         </div>
 
-        <div className="mt-3 grid gap-x-8 gap-y-3 border-t border-slate-100 pt-3 sm:grid-cols-2 lg:grid-cols-[1.4fr_1fr_1fr_1.1fr]">
-          <div>
-            <p className="text-[10px] text-slate-400">本账期总额度</p>
-            {isEditingAccountTotal ? (
-              <form
-                className="mt-1 flex items-center gap-1.5"
-                onSubmit={event => {
-                  event.preventDefault();
-                  void submitAccountTotal();
-                }}
-              >
-                <input
-                  type="number"
-                  min="0"
-                  max="100000000"
-                  step="1000"
-                  value={accountTotalInput}
-                  onChange={event => setAccountTotalInput(event.target.value)}
-                  className="h-8 w-36 rounded-md border border-slate-200 px-2 font-mono text-sm font-semibold text-slate-900 outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100"
-                  aria-label="本账期总额度"
-                  autoFocus
-                />
-                <button
-                  type="submit"
-                  disabled={!accountTotalIsValid || accountTotalUpdating}
-                  className="flex h-8 w-8 items-center justify-center rounded-md bg-slate-900 text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
-                  title="保存总额度"
-                  aria-label="保存本账期总额度"
-                >
-                  {accountTotalUpdating ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIsEditingAccountTotal(false)}
-                  disabled={accountTotalUpdating}
-                  className="flex h-8 w-8 items-center justify-center rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40"
-                  title="取消修改"
-                  aria-label="取消修改本账期总额度"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </form>
-            ) : (
-              <div className="mt-1 flex items-center gap-1.5">
-                <p className="font-mono text-lg font-semibold text-slate-900">{formatInteger(accountCycle.totalCredits)}</p>
-                <button
-                  type="button"
-                  onClick={() => setIsEditingAccountTotal(true)}
-                  className="flex h-7 w-7 items-center justify-center rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-700"
-                  title="修改本账期总额度"
-                  aria-label="修改本账期总额度"
-                >
-                  <Pencil className="h-3.5 w-3.5" />
-                </button>
-                {accountCycle.adjusted ? (
-                  <button
-                    type="button"
-                    onClick={() => void onSetAccountTotal(accountCycle.defaultTotalCredits)}
-                    disabled={accountTotalUpdating}
-                    className="flex h-7 w-7 items-center justify-center rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40"
-                    title={`恢复默认额度 ${formatInteger(accountCycle.defaultTotalCredits)}`}
-                    aria-label="恢复默认本账期总额度"
-                  >
-                    <RotateCcw className="h-3.5 w-3.5" />
-                  </button>
-                ) : null}
-              </div>
-            )}
-          </div>
-          <div>
-            <p className="text-[10px] text-slate-400">本工具已用</p>
-            <p className="mt-1 font-mono text-lg font-semibold text-slate-700">{formatCredits(accountCycle.usedCredits)}</p>
-          </div>
-          <div>
-            <p className="text-[10px] text-slate-400">剩余额度</p>
-            <p className={`mt-1 font-mono text-lg font-semibold ${accountCycle.remainingCredits <= 0 ? 'text-rose-600' : 'text-emerald-700'}`}>
-              {formatCredits(accountCycle.remainingCredits)}
-            </p>
-          </div>
-          <div className="sm:text-right">
-            <p className="text-[10px] text-slate-400">账期</p>
-            <p className="mt-1 text-xs font-semibold text-slate-700">
-              {formatDate(new Date(accountCycle.periodStart))} - {formatDate(new Date(accountCycle.periodEnd))}
-            </p>
-            <p className="mt-0.5 text-[9px] text-slate-400">{accountCycle.adjusted ? '本账期已手动调整' : '每月 11 日恢复默认额度'}</p>
-          </div>
+        <div className="mt-3 grid gap-3 border-t border-slate-100 pt-3 sm:grid-cols-3">
+          <div><p className="text-[10px] text-slate-400">部门项目池</p><p className="mt-1 font-mono text-lg font-semibold text-slate-900">{formatInteger(pool.totalPoints)}</p></div>
+          <div><p className="text-[10px] text-slate-400">已分配</p><p className="mt-1 font-mono text-lg font-semibold text-slate-700">{formatInteger(pool.allocatedPoints)}</p></div>
+          <div><p className="text-[10px] text-slate-400">可用</p><p className="mt-1 font-mono text-lg font-semibold text-emerald-700">{formatInteger(pool.remainingPoints)}</p></div>
         </div>
-        <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-100" aria-label={`本账期已使用 ${accountUsagePercent.toFixed(0)}%`}>
-          <div
-            className={`h-full rounded-full ${accountCycle.remainingCredits <= 0 ? 'bg-rose-500' : accountUsagePercent >= 80 ? 'bg-amber-500' : 'bg-emerald-500'}`}
-            style={{ width: `${accountUsagePercent}%` }}
-          />
-        </div>
+        <p className="mt-2 text-[9px] text-slate-400">项目池按全员基础月额度的 15% 自动计算，用于重点项目临时分配。</p>
       </div>
 
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[940px] text-left text-[11px]">
+        <table className="w-full min-w-[1080px] text-left text-[11px]">
           <thead className="bg-slate-50 text-slate-500">
             <tr>
               <th className="px-4 py-2.5 font-semibold">成员 / 设备</th>
+              <th className="px-3 py-2.5 font-semibold">档位</th>
               <th className="px-3 py-2.5 text-right font-semibold">本月已用</th>
               <th className="px-3 py-2.5 text-right font-semibold">本月额度</th>
               <th className="px-3 py-2.5 text-right font-semibold">剩余</th>
               <th className="w-40 px-3 py-2.5 font-semibold">使用进度</th>
-              <th className="px-4 py-2.5 text-right font-semibold">调整额度</th>
+              <th className="px-3 py-2.5 text-right font-semibold">项目池</th>
+              <th className="px-4 py-2.5 text-right font-semibold">临时加额</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
@@ -224,9 +122,21 @@ function QuotaManagement({
                           {user.identitySource === 'feishu' ? (user.department || '飞书成员') : '设备身份'}
                           {user.bonusCredits > 0 ? ` · 已追加 ${formatInteger(user.bonusCredits)}` : ''}
                           {user.bonusCredits < 0 ? ` · 已减少 ${formatInteger(Math.abs(user.bonusCredits))}` : ''}
+                          {user.recommendTierUpgrade ? ' · 连续两月加额，建议升档' : ''}
                         </p>
                       </div>
                     </div>
+                  </td>
+                  <td className="px-3 py-3">
+                    <select
+                      value={user.tier}
+                      disabled={isUpdating}
+                      onChange={event => onUpdate(user, { tier: event.target.value as ElevenLabsQuotaUser['tier'] })}
+                      className="h-8 rounded-md border border-slate-200 bg-white px-2 text-[10px] font-semibold text-slate-700"
+                      aria-label={`调整 ${user.displayName} 的积分档位`}
+                    >
+                      <option value="basic">基础档</option><option value="professional">专业档</option>
+                    </select>
                   </td>
                   <td className="px-3 py-3 text-right font-mono">{formatCredits(user.usedCredits)}</td>
                   <td className="px-3 py-3 text-right font-mono font-semibold text-slate-800">{formatInteger(user.limitCredits)}</td>
@@ -242,31 +152,25 @@ function QuotaManagement({
                     </div>
                     <p className="mt-1 text-right font-mono text-[9px] text-slate-400">{usagePercent.toFixed(0)}%</p>
                   </td>
+                  <td className="px-3 py-3 text-right">
+                    <button type="button" disabled={isUpdating} onClick={() => {
+                      const value = window.prompt('输入本月从项目池分配的积分', String(user.projectPoints));
+                      if (value !== null && Number.isFinite(Number(value))) onUpdate(user, { projectPoints: Math.max(0, Math.round(Number(value))) });
+                    }} className="h-7 rounded-md border border-slate-200 px-2 font-mono font-semibold text-slate-600 hover:bg-slate-50">
+                      {formatInteger(user.projectPoints)}
+                    </button>
+                  </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center justify-end gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => onSetBonus(user, Math.max(-user.baseCredits, user.bonusCredits - 10_000))}
-                        disabled={isUpdating || user.limitCredits <= 0}
-                        className="inline-flex h-7 items-center gap-1 rounded-md border border-slate-200 px-2 font-semibold text-slate-600 hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-40"
-                        title="本月减少 10,000 积分"
-                        aria-label={`将 ${user.displayName} 的本月额度减少 10,000 积分`}
-                      >
-                        <Minus className="h-3 w-3" />1 万
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onSetBonus(user, user.bonusCredits + 10_000)}
-                        disabled={isUpdating}
-                        className="inline-flex h-7 items-center gap-1 rounded-md border border-slate-200 px-2 font-semibold text-slate-600 hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700 disabled:opacity-50"
-                        title="本月追加 10,000 积分"
-                      >
-                        <Plus className="h-3 w-3" />1 万
-                      </button>
+                      {[500, 1000, 3000].map(amount => <button key={amount} type="button" onClick={() => onUpdate(user, { bonusCredits: user.bonusCredits + amount })} disabled={isUpdating} className="h-7 rounded-md border border-slate-200 px-2 font-semibold text-slate-600 hover:border-emerald-300 hover:bg-emerald-50">+{amount >= 1000 ? `${amount / 1000}k` : amount}</button>)}
+                      <button type="button" disabled={isUpdating} onClick={() => {
+                        const value = window.prompt('输入本月临时加额总数', String(user.bonusCredits));
+                        if (value !== null && Number.isFinite(Number(value))) onUpdate(user, { bonusCredits: Math.round(Number(value)) });
+                      }} className="h-7 rounded-md border border-slate-200 px-2 font-semibold text-slate-600 hover:bg-slate-50">自定义</button>
                       {user.bonusCredits !== 0 ? (
                         <button
                           type="button"
-                          onClick={() => onSetBonus(user, 0)}
+                          onClick={() => onUpdate(user, { bonusCredits: 0 })}
                           disabled={isUpdating}
                           className="flex h-7 w-7 items-center justify-center rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
                           title="恢复本月基础额度"
@@ -281,7 +185,7 @@ function QuotaManagement({
               );
             })}
             {summary.users.length === 0 ? (
-              <tr><td colSpan={6} className="px-4 py-10 text-center text-slate-400">本月还没有可识别的成员或设备。</td></tr>
+              <tr><td colSpan={8} className="px-4 py-10 text-center text-slate-400">本月还没有可识别的成员或设备。</td></tr>
             ) : null}
           </tbody>
         </table>
@@ -336,7 +240,7 @@ function ProviderSummary({
           </div>
         </div>
         <span className={`rounded-full border px-2 py-1 text-[10px] font-semibold ${usage.status === 'tracking' ? 'border-sky-200 bg-sky-50 text-sky-700' : 'border-slate-200 bg-slate-50 text-slate-500'}`}>
-          {usage.status === 'tracking' ? '本工具采集' : '未配置'}
+          {usage.status !== 'tracking' ? '未配置' : usage.pricingConfigured ? '已纳入积分' : 'Token 统计'}
         </span>
       </div>
       <div className="mt-4">
@@ -429,7 +333,7 @@ function MemberUsageTable({
               <th className="px-3 py-2.5 font-semibold">身份来源</th>
               <th className="px-3 py-2.5 font-semibold">IP 地址</th>
               <th className="px-3 py-2.5 text-right font-semibold">调用</th>
-              <th className="px-3 py-2.5 text-right font-semibold">ElevenLabs 积分</th>
+              <th className="px-3 py-2.5 text-right font-semibold">公司积分</th>
               <th className="px-3 py-2.5 text-right font-semibold">Gemini Token</th>
               <th className="px-3 py-2.5 text-right font-semibold">GPT Token</th>
               <th className="px-3 py-2.5 text-right font-semibold">总 Token</th>
@@ -475,7 +379,7 @@ function MemberUsageTable({
                       {user.ipAddresses?.length ? user.ipAddresses.join(', ') : '未记录'}
                     </td>
                     <td className="px-3 py-3 text-right font-mono">{formatInteger(user.requests)}</td>
-                    <td className="px-3 py-3 text-right font-mono">{formatCredits(user.elevenLabsCredits)}</td>
+                    <td className="px-3 py-3 text-right font-mono">{formatCredits(user.companyPoints)}</td>
                     <td className="px-3 py-3 text-right font-mono">{formatInteger(user.geminiTokens)}</td>
                     <td className="px-3 py-3 text-right font-mono">{formatInteger(user.gptTokens)}</td>
                     <td className="px-3 py-3 text-right font-mono font-semibold text-slate-800">{formatInteger(user.totalTokens)}</td>
@@ -523,7 +427,8 @@ function MemberUsageTable({
                                 <th className="pb-2 text-left font-semibold">功能</th>
                                 <th className="pb-2 text-left font-semibold">服务 / 模型</th>
                                 <th className="pb-2 text-right font-semibold">调用</th>
-                                <th className="pb-2 text-right font-semibold">积分</th>
+                                <th className="pb-2 text-right font-semibold">计费量</th>
+                                <th className="pb-2 text-right font-semibold">公司积分</th>
                                 <th className="pb-2 text-right font-semibold">输入</th>
                                 <th className="pb-2 text-right font-semibold">输出</th>
                                 <th className="pb-2 text-right font-semibold">思考</th>
@@ -536,7 +441,8 @@ function MemberUsageTable({
                                   <td className="py-2 pr-3 font-semibold text-slate-700">{detail.feature}</td>
                                   <td className="py-2 pr-3 text-slate-500">{providerLabel(detail.provider)} · {detail.model}</td>
                                   <td className="py-2 text-right font-mono">{formatInteger(detail.requests)}</td>
-                                  <td className="py-2 text-right font-mono">{detail.provider === 'elevenlabs' ? formatCredits(detail.credits) : '-'}</td>
+                                  <td className="py-2 text-right font-mono">{formatBillingQuantity(detail.billingQuantity, detail.billingUnit)}</td>
+                                  <td className="py-2 text-right font-mono">{detail.companyPoints > 0 ? formatCredits(detail.companyPoints) : '-'}</td>
                                   <td className="py-2 text-right font-mono">{detail.provider === 'elevenlabs' ? '-' : formatInteger(detail.inputTokens)}</td>
                                   <td className="py-2 text-right font-mono">{detail.provider === 'elevenlabs' ? '-' : formatInteger(detail.outputTokens)}</td>
                                   <td className="py-2 text-right font-mono">{detail.provider === 'elevenlabs' ? '-' : formatInteger(detail.reasoningTokens)}</td>
@@ -641,7 +547,6 @@ export default function UsageDashboard({
   const [billingCycleSummary, setBillingCycleSummary] = useState<UsageSummary | null>(null);
   const [quotaSummary, setQuotaSummary] = useState<ElevenLabsQuotaSummary | null>(null);
   const [quotaUpdatingUserId, setQuotaUpdatingUserId] = useState<string | null>(null);
-  const [accountQuotaUpdating, setAccountQuotaUpdating] = useState(false);
   const [quotaFeedback, setQuotaFeedback] = useState<{ message: string; error: boolean } | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -708,14 +613,20 @@ export default function UsageDashboard({
   const toggleMember = useCallback((userId: string) => {
     setExpandedUserId(current => current === userId ? null : userId);
   }, []);
-  const updateQuotaBonus = useCallback(async (user: ElevenLabsQuotaUser, bonusCredits: number) => {
+  const updateQuota = useCallback(async (
+    user: ElevenLabsQuotaUser,
+    changes: Partial<Pick<ElevenLabsQuotaUser, 'tier' | 'bonusCredits' | 'projectPoints'>>,
+  ) => {
     setQuotaUpdatingUserId(user.userId);
     setQuotaFeedback(null);
     try {
-      const nextSummary = await setElevenLabsQuotaBonus(user.userId, bonusCredits);
+      const tier = changes.tier ?? user.tier;
+      const bonusCredits = changes.bonusCredits ?? user.bonusCredits;
+      const projectPoints = changes.projectPoints ?? user.projectPoints;
+      const nextSummary = await setElevenLabsQuotaBonus(user.userId, bonusCredits, tier, projectPoints);
       setQuotaSummary(nextSummary);
       setQuotaFeedback({
-        message: `已将 ${user.displayName} 的本月额度调整为 ${formatInteger(user.baseCredits + bonusCredits)}。`,
+        message: `已更新 ${user.displayName} 的本月积分配置。`,
         error: false,
       });
     } catch (reason) {
@@ -725,27 +636,6 @@ export default function UsageDashboard({
       });
     } finally {
       setQuotaUpdatingUserId(null);
-    }
-  }, []);
-  const updateAccountQuotaTotal = useCallback(async (totalCredits: number) => {
-    setAccountQuotaUpdating(true);
-    setQuotaFeedback(null);
-    try {
-      const nextSummary = await setElevenLabsAccountQuotaTotal(totalCredits);
-      setQuotaSummary(nextSummary);
-      setQuotaFeedback({
-        message: `已将本账期总额度调整为 ${formatInteger(totalCredits)}。`,
-        error: false,
-      });
-      return true;
-    } catch (reason) {
-      setQuotaFeedback({
-        message: reason instanceof Error ? reason.message : '更新本账期总额度失败。',
-        error: true,
-      });
-      return false;
-    } finally {
-      setAccountQuotaUpdating(false);
     }
   }, []);
   const elevenLabsBillingCycle = useMemo(() => {
@@ -888,7 +778,9 @@ export default function UsageDashboard({
                     <th className="px-4 py-2.5 font-semibold">功能</th>
                     <th className="px-3 py-2.5 font-semibold">服务 / 模型</th>
                     <th className="px-3 py-2.5 text-right font-semibold">调用</th>
-                    <th className="px-3 py-2.5 text-right font-semibold">积分</th>
+                    <th className="px-3 py-2.5 text-right font-semibold">计费量</th>
+                    <th className="px-3 py-2.5 text-right font-semibold">公司积分</th>
+                    <th className="px-3 py-2.5 text-right font-semibold">供应商 credits</th>
                     <th className="px-3 py-2.5 text-right font-semibold">输入 Token</th>
                     <th className="px-3 py-2.5 text-right font-semibold">输出 Token</th>
                     <th className="px-3 py-2.5 text-right font-semibold">思考 Token</th>
@@ -904,6 +796,8 @@ export default function UsageDashboard({
                         <span className="ml-1 text-slate-400">{feature.models.map(item => item.model).join(', ')}</span>
                       </td>
                       <td className="px-3 py-3 text-right font-mono">{formatInteger(feature.requests)}</td>
+                      <td className="px-3 py-3 text-right font-mono">{formatBillingQuantity(feature.billingQuantity, feature.billingUnit)}</td>
+                      <td className="px-3 py-3 text-right font-mono">{feature.companyPoints > 0 ? formatCredits(feature.companyPoints) : '-'}</td>
                       <td className="px-3 py-3 text-right font-mono">{provider.key === 'elevenLabs' ? formatCredits(feature.credits) : '-'}</td>
                       <td className="px-3 py-3 text-right font-mono">{provider.key === 'elevenLabs' ? '-' : formatInteger(feature.inputTokens)}</td>
                       <td className="px-3 py-3 text-right font-mono">{provider.key === 'elevenLabs' ? '-' : formatInteger(feature.outputTokens)}</td>
@@ -912,7 +806,7 @@ export default function UsageDashboard({
                     </tr>
                   ))}
                   {rows.length === 0 ? (
-                    <tr><td colSpan={8} className="px-4 py-10 text-center text-slate-400">当前周期还没有本工具产生的 AI 用量。</td></tr>
+                    <tr><td colSpan={10} className="px-4 py-10 text-center text-slate-400">当前周期还没有本工具产生的 AI 用量。</td></tr>
                   ) : null}
                 </tbody>
               </table>
@@ -929,10 +823,8 @@ export default function UsageDashboard({
             <QuotaManagement
               summary={quotaSummary}
               updatingUserId={quotaUpdatingUserId}
-              accountTotalUpdating={accountQuotaUpdating}
               feedback={quotaFeedback}
-              onSetBonus={updateQuotaBonus}
-              onSetAccountTotal={updateAccountQuotaTotal}
+              onUpdate={updateQuota}
             />
           ) : null}
         </>

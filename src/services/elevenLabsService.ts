@@ -72,11 +72,34 @@ export const ELEVENLABS_SOUND_EFFECT_CREDITS_PER_GENERATION = 200;
 export const ELEVENLABS_SPEECH_TO_TEXT_CREDITS_PER_MINUTE = 330;
 export const ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE = 1000;
 
+export const COMPANY_POINTS_PRICING_VERSION = 'company-v1';
+export const COMPANY_POINTS = {
+  standardTtsPerThousandCharacters: 100,
+  flashTtsPerThousandCharacters: 50,
+  musicPerSecond: 2.5,
+  soundEffectPerSecond: 2,
+  audioProcessingPerSecond: 2,
+  speechToTextPerSecond: 4 / 60,
+  dubbingV2PerSecond: 2200 / 60,
+} as const;
+
 const countBillableCharacters = (text: string) => Array.from(text.trim()).length;
 
 export const estimateTextGenerationCredits = (text: string) => (
   Math.max(1, countBillableCharacters(text))
 );
+
+export const estimateTtsCompanyPoints = (text: string, model = 'eleven_v3') => {
+  const rate = /flash|turbo/i.test(model)
+    ? COMPANY_POINTS.flashTtsPerThousandCharacters
+    : COMPANY_POINTS.standardTtsPerThousandCharacters;
+  return Math.max(0.1, countBillableCharacters(text) / 1000 * rate);
+};
+
+export const estimateTimedCompanyPoints = (
+  durationSeconds: number | undefined,
+  pointsPerSecond: number,
+) => Math.max(0.1, (durationSeconds && Number.isFinite(durationSeconds) ? durationSeconds : 1) * pointsPerSecond);
 
 export const estimateTimedCredits = (
   durationSeconds: number | undefined,
@@ -344,6 +367,9 @@ export async function generateSoundEffect(text: string, duration?: number, optio
 
     recordElevenLabsResponseUsage(response, ELEVENLABS_SOUND_MODEL, {
       fallbackCredits: ELEVENLABS_SOUND_EFFECT_CREDITS_PER_GENERATION,
+      companyPoints: estimateTimedCompanyPoints(normalizedDuration || 5, COMPANY_POINTS.soundEffectPerSecond),
+      billingQuantity: normalizedDuration || 5,
+      billingUnit: 'second',
     });
     return wrapElevenLabsPcmAsWav(await response.arrayBuffer());
   });
@@ -432,6 +458,9 @@ export async function generateMusic(
         normalizedDurationSeconds,
         ELEVENLABS_MUSIC_CREDITS_PER_MINUTE,
       ),
+      companyPoints: estimateTimedCompanyPoints(normalizedDurationSeconds, COMPANY_POINTS.musicPerSecond),
+      billingQuantity: normalizedDurationSeconds,
+      billingUnit: 'second',
     });
     return await response.blob();
   });
@@ -505,6 +534,9 @@ export async function generateVoice(
           if (response.ok) {
             recordElevenLabsResponseUsage(response, modelId, {
               fallbackCredits: estimateTextGenerationCredits(textForModel),
+              companyPoints: estimateTtsCompanyPoints(textForModel, modelId),
+              billingQuantity: countBillableCharacters(textForModel),
+              billingUnit: 'character',
             });
             return await response.blob();
           }
@@ -565,6 +597,9 @@ export async function generateVoice(
         if (response.ok) {
           recordElevenLabsResponseUsage(response, 'eleven_multilingual_v2', {
             fallbackCredits: estimateTextGenerationCredits(fallbackText),
+            companyPoints: estimateTtsCompanyPoints(fallbackText, 'eleven_multilingual_v2'),
+            billingQuantity: countBillableCharacters(fallbackText),
+            billingUnit: 'character',
           });
           return await response.blob();
         }
@@ -818,6 +853,12 @@ export async function generateSpeechToSpeech(
         estimateAudioDurationSecondsFromBlob(audioFile),
         ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE,
       ),
+      companyPoints: estimateTimedCompanyPoints(
+        estimateAudioDurationSecondsFromBlob(audioFile),
+        COMPANY_POINTS.audioProcessingPerSecond,
+      ),
+      billingQuantity: estimateAudioDurationSecondsFromBlob(audioFile),
+      billingUnit: 'second',
     });
     return await response.blob();
   });
@@ -910,6 +951,12 @@ export async function isolateAudio(audioFile: File | Blob): Promise<Blob> {
         estimateAudioDurationSecondsFromBlob(audioFile),
         ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE,
       ),
+      companyPoints: estimateTimedCompanyPoints(
+        estimateAudioDurationSecondsFromBlob(audioFile),
+        COMPANY_POINTS.audioProcessingPerSecond,
+      ),
+      billingQuantity: estimateAudioDurationSecondsFromBlob(audioFile),
+      billingUnit: 'second',
     });
     return await response.blob();
   });
@@ -1007,6 +1054,12 @@ export async function transcribeSpeech(
         estimateAudioDurationSecondsFromBlob(audioFile),
         ELEVENLABS_SPEECH_TO_TEXT_CREDITS_PER_MINUTE,
       ),
+      companyPoints: estimateTimedCompanyPoints(
+        estimateAudioDurationSecondsFromBlob(audioFile),
+        COMPANY_POINTS.speechToTextPerSecond,
+      ),
+      billingQuantity: estimateAudioDurationSecondsFromBlob(audioFile),
+      billingUnit: 'second',
     });
     return await response.json();
   });

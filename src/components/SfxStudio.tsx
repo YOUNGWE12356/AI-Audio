@@ -7,6 +7,7 @@ import React, { useRef, useState } from 'react';
 import { Loader2, Play, Pause, Download, AlertCircle, Sparkles } from 'lucide-react';
 import { HistoryItem } from '../types';
 import GeneratedAudioPlayer, { sanitizeAudioFileName } from './GeneratedAudioPlayer';
+import PointCostHint from './PointCostHint';
 
 interface PendingSfxOption {
   url: string;
@@ -158,6 +159,13 @@ export default function SfxStudio({
               </div>
             )}
 
+            <div className="flex justify-end">
+              <PointCostHint
+                kind="sound-effect"
+                durationSeconds={standaloneDurationMode === 'fixed' ? standaloneDuration : 5}
+                outputs={2}
+              />
+            </div>
             <button
               onClick={handleStandaloneGenerate}
               disabled={standaloneLoading || !standalonePrompt.trim()}

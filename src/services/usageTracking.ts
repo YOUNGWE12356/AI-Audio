@@ -6,6 +6,10 @@ export type AiUsageEvent = {
   reasoningTokens: number;
   totalTokens: number;
   credits: number;
+  companyPoints?: number;
+  pricingVersion?: string;
+  billingQuantity?: number;
+  billingUnit?: 'character' | 'second' | 'token' | 'request';
 };
 
 type AiUsageRecorder = (event: AiUsageEvent) => void;
@@ -54,7 +58,12 @@ const parseElevenLabsCreditHeader = (response: Response) => {
 export const recordElevenLabsResponseUsage = (
   response: Response,
   model: string,
-  options: { fallbackCredits?: number } = {},
+  options: {
+    fallbackCredits?: number;
+    companyPoints?: number;
+    billingQuantity?: number;
+    billingUnit?: AiUsageEvent['billingUnit'];
+  } = {},
 ) => {
   if (!response.ok) return;
   const headerCredits = parseElevenLabsCreditHeader(response);
@@ -67,5 +76,9 @@ export const recordElevenLabsResponseUsage = (
     reasoningTokens: 0,
     totalTokens: 0,
     credits: headerCredits ?? fallbackCredits,
+    companyPoints: toUsageNumber(options.companyPoints),
+    pricingVersion: 'company-v1',
+    billingQuantity: toUsageNumber(options.billingQuantity),
+    billingUnit: options.billingUnit,
   });
 };

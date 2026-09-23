@@ -7,6 +7,9 @@ export type UsageIdentitySource = 'feishu' | 'device' | 'unknown';
 export type UsageFeature = {
   feature: string;
   credits: number;
+  companyPoints: number;
+  billingQuantity: number;
+  billingUnit?: 'character' | 'second' | 'token' | 'request';
   inputTokens: number;
   outputTokens: number;
   reasoningTokens: number;
@@ -17,7 +20,9 @@ export type UsageFeature = {
 
 export type ProviderUsage = {
   status: 'tracking' | 'not_configured';
+  pricingConfigured: boolean;
   credits: number;
+  companyPoints: number;
   inputTokens: number;
   outputTokens: number;
   reasoningTokens: number;
@@ -36,6 +41,7 @@ export type ProviderUsage = {
   daily: Array<{
     date: string;
     credits: number;
+    companyPoints: number;
     inputTokens: number;
     outputTokens: number;
     reasoningTokens: number;
@@ -68,16 +74,20 @@ export type ElevenLabsQuotaUser = {
   timeZone: 'Asia/Shanghai';
   baseCredits: number;
   bonusCredits: number;
+  projectPoints: number;
+  tier: 'basic' | 'professional';
   limitCredits: number;
   usedCredits: number;
   pendingCredits: number;
   remainingCredits: number;
   blocked: boolean;
+  recommendTierUpgrade: boolean;
 };
 
 export type ElevenLabsQuotaSummary = {
   enabled: boolean;
   defaultMonthlyCredits: number;
+  tiers: { basic: number; professional: number };
   period: {
     key: string;
     start: string;
@@ -95,7 +105,23 @@ export type ElevenLabsQuotaSummary = {
     remainingCredits: number;
     adjusted: boolean;
   };
+  projectPool: {
+    ratio: number;
+    totalPoints: number;
+    allocatedPoints: number;
+    remainingPoints: number;
+  };
   users: ElevenLabsQuotaUser[];
+};
+
+export type PersonalPointBalance = {
+  user: {
+    userId: string;
+    displayName: string;
+    department: string;
+    identitySource: UsageIdentitySource;
+  };
+  quota: ElevenLabsQuotaUser;
 };
 
 export type UsageUserDetail = {
@@ -103,6 +129,9 @@ export type UsageUserDetail = {
   feature: string;
   model: string;
   credits: number;
+  companyPoints: number;
+  billingQuantity: number;
+  billingUnit?: 'character' | 'second' | 'token' | 'request';
   inputTokens: number;
   outputTokens: number;
   reasoningTokens: number;
@@ -118,6 +147,7 @@ export type UsageUser = {
   ipAddresses: string[];
   requests: number;
   elevenLabsCredits: number;
+  companyPoints: number;
   geminiTokens: number;
   gptTokens: number;
   totalTokens: number;
@@ -205,14 +235,23 @@ export async function fetchElevenLabsQuotaSummary(signal?: AbortSignal): Promise
   return body as ElevenLabsQuotaSummary;
 }
 
+export async function fetchPersonalPointBalance(signal?: AbortSignal): Promise<PersonalPointBalance> {
+  const response = await fetch('/api/usage/quota', { signal });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || `无法读取个人积分 (${response.status})`);
+  return body as PersonalPointBalance;
+}
+
 export async function setElevenLabsQuotaBonus(
   userId: string,
   bonusCredits: number,
+  tier?: ElevenLabsQuotaUser['tier'],
+  projectPoints?: number,
 ): Promise<ElevenLabsQuotaSummary> {
   const response = await fetch('/api/usage/quotas', {
     method: 'PUT',
     headers: getSfxLibraryAdminHeaders({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ userId, bonusCredits }),
+    body: JSON.stringify({ userId, bonusCredits, tier, projectPoints }),
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {

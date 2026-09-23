@@ -31,6 +31,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { transcribeSpeech } from '../services/elevenLabsService';
 import { translateTextToLanguage } from '../services/geminiService';
+import PointCostHint from './PointCostHint';
 
 interface TranscriptionHistoryItem {
   id: string;
@@ -503,6 +504,7 @@ export default function SpeechToText({ initialFile, assistantRequestId }: Speech
             </div>
           )}
 
+          <div className="flex justify-end"><PointCostHint kind="speech-to-text" file={file} /></div>
           <button
             onClick={handleTranscribe}
             disabled={loading || !file}

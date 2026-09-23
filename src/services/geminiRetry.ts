@@ -7,6 +7,23 @@ export const GEMINI_FALLBACK_MODEL = 'gemini-3.5-flash-lite';
 type GenerateContentRequest = Parameters<GoogleGenAI['models']['generateContent']>[0];
 type GenerateContentResponse = Awaited<ReturnType<GoogleGenAI['models']['generateContent']>>;
 
+const tokenCompanyPoints = (
+  provider: 'gemini' | 'gpt',
+  inputTokens: number,
+  outputTokens: number,
+  reasoningTokens: number,
+) => {
+  const prefix = provider === 'gemini' ? 'GEMINI' : 'GPT';
+  const inputUsdPerMillion = Math.max(0, Number(process.env[`${prefix}_INPUT_USD_PER_MILLION_TOKENS`]) || 0);
+  const outputUsdPerMillion = Math.max(0, Number(process.env[`${prefix}_OUTPUT_USD_PER_MILLION_TOKENS`]) || 0);
+  const reasoningUsdPerMillion = Math.max(0, Number(process.env[`${prefix}_REASONING_USD_PER_MILLION_TOKENS`]) || outputUsdPerMillion);
+  return (
+    inputTokens * inputUsdPerMillion
+    + outputTokens * outputUsdPerMillion
+    + (provider === 'gemini' ? reasoningTokens * reasoningUsdPerMillion : 0)
+  ) / 1000;
+};
+
 type GptGatewayConfig = {
   apiKey: string;
   baseUrl: string;
@@ -51,6 +68,10 @@ const recordGeminiUsage = (response: GenerateContentResponse, requestedModel: st
     reasoningTokens,
     totalTokens: toUsageNumber(usage.totalTokenCount) || inputTokens + outputTokens + reasoningTokens,
     credits: 0,
+    companyPoints: tokenCompanyPoints('gemini', inputTokens, outputTokens, reasoningTokens),
+    pricingVersion: 'company-v1',
+    billingQuantity: inputTokens + outputTokens + reasoningTokens,
+    billingUnit: 'token',
   });
 };
 
@@ -205,6 +226,10 @@ export const generateGptStructuredJson = async <T>({
       reasoningTokens,
       totalTokens: toUsageNumber(result.usage?.total_tokens) || inputTokens + outputTokens,
       credits: 0,
+      companyPoints: tokenCompanyPoints('gpt', inputTokens, outputTokens, reasoningTokens),
+      pricingVersion: 'company-v1',
+      billingQuantity: inputTokens + outputTokens + reasoningTokens,
+      billingUnit: 'token',
     });
     return {
       value,
@@ -375,6 +400,10 @@ const generateGptText = async (
       reasoningTokens,
       totalTokens: toUsageNumber(result.usage?.total_tokens) || inputTokens + outputTokens,
       credits: 0,
+      companyPoints: tokenCompanyPoints('gpt', inputTokens, outputTokens, reasoningTokens),
+      pricingVersion: 'company-v1',
+      billingQuantity: inputTokens + outputTokens + reasoningTokens,
+      billingUnit: 'token',
     });
     console.info(`[ai-router] ${input.hasImage ? 'Vision' : 'Text'} request completed with ${result.model || gateway.model} via ${gateway.provider}.`);
     return { text, modelVersion: result.model || gateway.model } as GenerateContentResponse;

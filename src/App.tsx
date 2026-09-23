@@ -110,6 +110,7 @@ export default function App() {
   // The HTML5 client only reads service availability from the same-origin API.
   // Secret values remain on the server and are never embedded into the bundle.
   const [hasGeminiKey, setHasGeminiKey] = useState(false);
+  const [hasAiTextModel, setHasAiTextModel] = useState(false);
   const [hasElevenLabsKey, setHasElevenLabsKey] = useState(false);
   const elevenLabsQualityMode = 'pro' as const;
   const isElevenLabsProMode = true;
@@ -118,10 +119,12 @@ export default function App() {
     fetchPlatformHealth()
       .then((health) => {
         setHasGeminiKey(health.services.gemini);
+        setHasAiTextModel(health.services.aiText ?? health.services.gptText ?? health.services.gemini);
         setHasElevenLabsKey(health.services.elevenLabs);
       })
       .catch(() => {
         setHasGeminiKey(false);
+        setHasAiTextModel(false);
         setHasElevenLabsKey(false);
       });
   };
@@ -1526,7 +1529,7 @@ export default function App() {
             {visitedTabs.has('sfx-requirements') && (
               <section hidden={currentTab !== 'sfx-requirements'} className="min-h-full">
                 <SfxRequirements
-                  hasGeminiKey={hasGeminiKey}
+                  hasAiTextModel={hasAiTextModel}
                   assistantRequest={assistantRequirementsRequest}
                 />
               </section>

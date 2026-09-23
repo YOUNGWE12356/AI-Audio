@@ -18,6 +18,9 @@ export type UsageUserDetail = {
   feature: string;
   model: string;
   credits: number;
+  companyPoints: number;
+  billingQuantity: number;
+  billingUnit?: AiUsageEvent['billingUnit'];
   inputTokens: number;
   outputTokens: number;
   reasoningTokens: number;
@@ -33,6 +36,7 @@ export type UsageUserSummary = {
   ipAddresses: string[];
   requests: number;
   elevenLabsCredits: number;
+  companyPoints: number;
   geminiTokens: number;
   gptTokens: number;
   totalTokens: number;
@@ -56,6 +60,7 @@ export const summarizeUsageUsers = (events: StoredAiUsageEvent[]): UsageUserSumm
       ipAddresses: [],
       requests: 0,
       elevenLabsCredits: 0,
+      companyPoints: 0,
       geminiTokens: 0,
       gptTokens: 0,
       totalTokens: 0,
@@ -64,6 +69,7 @@ export const summarizeUsageUsers = (events: StoredAiUsageEvent[]): UsageUserSumm
     };
     member.requests += 1;
     member.elevenLabsCredits += event.provider === 'elevenlabs' ? event.credits : 0;
+    member.companyPoints += event.companyPoints || 0;
     member.geminiTokens += event.provider === 'gemini' ? event.totalTokens : 0;
     member.gptTokens += event.provider === 'gpt' ? event.totalTokens : 0;
     member.totalTokens += event.totalTokens;
@@ -78,6 +84,9 @@ export const summarizeUsageUsers = (events: StoredAiUsageEvent[]): UsageUserSumm
       feature: event.feature,
       model: event.model,
       credits: 0,
+      companyPoints: 0,
+      billingQuantity: 0,
+      billingUnit: event.billingUnit,
       inputTokens: 0,
       outputTokens: 0,
       reasoningTokens: 0,
@@ -85,6 +94,9 @@ export const summarizeUsageUsers = (events: StoredAiUsageEvent[]): UsageUserSumm
       requests: 0,
     };
     detail.credits += event.credits;
+    detail.companyPoints += event.companyPoints || 0;
+    detail.billingQuantity += event.billingQuantity || 0;
+    if (!detail.billingUnit) detail.billingUnit = event.billingUnit;
     detail.inputTokens += event.inputTokens;
     detail.outputTokens += event.outputTokens;
     detail.reasoningTokens += event.reasoningTokens;
@@ -97,7 +109,7 @@ export const summarizeUsageUsers = (events: StoredAiUsageEvent[]): UsageUserSumm
   return Array.from(members.values()).map(member => ({
     ...member,
     details: Array.from(member.details.values()).sort((left, right) => (
-      (right.credits + right.totalTokens) - (left.credits + left.totalTokens)
+      (right.companyPoints + right.credits + right.totalTokens) - (left.companyPoints + left.credits + left.totalTokens)
     )),
   })).sort((left, right) => Date.parse(right.lastUsedAt) - Date.parse(left.lastUsedAt));
 };

@@ -24,6 +24,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { generateSfxRequirements, type ExistingSfxRequirementItem } from '../services/geminiService';
 import type { AssistantRequirementsRequest } from './GlobalAssistant';
+import PointCostHint from './PointCostHint';
 
 type TemplateType = 'game_sfx_general' | 'game_sfx_middleware' | 'voiceover_general' | 'voiceover_multilang';
 type GenerateMode = 'replace' | 'append';
@@ -36,7 +37,7 @@ const PROJECT_OPTIONS: Array<{ id: Exclude<ProjectOption, ''>; name: string }> =
 ];
 
 interface SfxRequirementsProps {
-  hasGeminiKey: boolean;
+  hasAiTextModel: boolean;
   assistantRequest?: AssistantRequirementsRequest | null;
 }
 
@@ -696,7 +697,7 @@ const normalizeAvatarRequirementItems = (items: any[]) => items.map((item) => {
   return normalizedItem;
 });
 
-export default function SfxRequirements({ hasGeminiKey, assistantRequest = null }: SfxRequirementsProps) {
+export default function SfxRequirements({ hasAiTextModel, assistantRequest = null }: SfxRequirementsProps) {
   const [templateType, setTemplateType] = useState<TemplateType>('game_sfx_general');
   const [selectedProject, setSelectedProject] = useState<ProjectOption>('');
   const [columnWidthsByTemplate, setColumnWidthsByTemplate] = useState<Record<TemplateType, number[]>>(DEFAULT_COLUMN_WIDTHS);
@@ -1167,8 +1168,8 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
       return;
     }
 
-    if (!hasGeminiKey) {
-      setError('GEMINI_API_KEY 未配置，请前往设置页面或 Secrets 面板添加。');
+    if (!hasAiTextModel) {
+      setError('AI 文本/视觉模型未配置，请在服务端配置 TOKENHUB_API_KEY、OPENAI_API_KEY、ARK_API_KEY 或 GEMINI_API_KEY 中任意一个。');
       return;
     }
 
@@ -1564,6 +1565,9 @@ export default function SfxRequirements({ hasGeminiKey, assistantRequest = null 
 
             {/* Run Generation Button Action */}
             <div className="pt-2 shrink-0">
+              <div className="mb-2 flex justify-end">
+                <PointCostHint kind="token" />
+              </div>
               <button
                 id="btn-generate-requirements"
                 disabled={loading || !canGenerateRequirements}

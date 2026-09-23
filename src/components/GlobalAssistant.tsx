@@ -22,12 +22,13 @@ import {
   readSfxLibraryIndex,
 } from '../services/sfxLibraryIndex';
 import type { SfxLibraryIndex } from '../services/sfxLibraryIndex';
+import PointCostHint from './PointCostHint';
 
 export interface AssistantAudioRequest {
   id: string;
   file?: File;
-  task: 'analyze' | 'convert' | 'rename' | 'workstation' | 'isolate' | 'midi' | 'music-separation';
-  audioTool?: 'workstation' | 'analysis' | 'factory' | 'renamer' | 'isolation' | 'midi' | 'music-separation';
+  task: 'analyze' | 'convert' | 'rename' | 'music-analysis-naming' | 'workstation' | 'isolate' | 'midi' | 'music-separation';
+  audioTool?: 'workstation' | 'analysis' | 'factory' | 'renamer' | 'music-analysis-naming' | 'isolation' | 'midi' | 'music-separation';
   targetFormat?: 'mp3' | 'wav' | 'ogg' | 'flac' | 'aac' | 'm4a';
   targetSampleRate?: number;
   targetBitrate?: number;
@@ -291,6 +292,10 @@ const detectRenameTask = (prompt: string) => (
   /重命名|批量命名|批量重命名|改文件名|修改文件名|改名|(?:音频)?文件(?:名)?.*(?:前缀|后缀|编号|大小写|查找替换|正则替换|删除字符)|(?:前缀|后缀|自动编号).*文件名/.test(normalize(prompt))
 );
 
+const detectMusicAnalysisNamingTask = (prompt: string) => (
+  /音乐分析命名|音乐自动命名|音乐智能命名|分析音乐.*命名|根据.*(?:bpm|调式|调性|风格|场景).*命名|(?:bpm|调式|调性|风格|场景).*音乐.*命名/.test(normalize(prompt))
+);
+
 const detectBatchVoiceRequest = (prompt: string) => (
   /批量配音|多文本配音|多段配音|多句配音|多角色配音|批量朗读|多段台词|多句台词/.test(normalize(prompt))
 );
@@ -328,6 +333,7 @@ const buildExplicitNavigationPlan = (prompt: string): AssistantPlan | null => {
   if (/^(?:音频转midi|转midi|转成midi|midi转换|扒谱|扒带|audio2midi|audiotomidi)$/.test(destination)) return { ...base, title: '打开音频转 MIDI', tab: 'audio-tools', kind: 'audio', audioTask: 'midi', audioTool: 'midi' };
   if (/^(?:拆分分轨|歌曲分轨|音乐分轨|高质量音乐分轨|乐器分轨|分轨拆分|stemseparation|musicseparation)$/.test(destination)) return { ...base, title: '打开拆分分轨', tab: 'audio-tools', kind: 'audio', audioTask: 'music-separation', audioTool: 'music-separation' };
   if (/^(?:批量命名|批量重命名)$/.test(destination)) return { ...base, title: '打开批量命名', tab: 'audio-tools', kind: 'audio', audioTask: 'rename', audioTool: 'renamer' };
+  if (/^(?:音乐分析命名|音乐自动命名|音乐智能命名)$/.test(destination)) return { ...base, title: '打开音乐分析命名', tab: 'audio-tools', kind: 'audio', audioTask: 'music-analysis-naming', audioTool: 'music-analysis-naming' };
   if (/^(?:人声分离|人声提取)$/.test(destination)) return { ...base, title: '打开人声分离', tab: 'audio-tools', kind: 'audio', audioTask: 'isolate', audioTool: 'isolation' };
   const voiceMode = /语音转语音/.test(destination) ? 'sts'
     : /跨语种转换|跨语言转换/.test(destination) ? 'translate'
@@ -710,6 +716,23 @@ const buildPlan = (
         file ? '载入已提供的音频文件' : '导入多个音频或整个文件夹',
         '设置查找替换、前后缀、编号或命名模板',
         '预览改名结果后导出文件或 ZIP',
+      ],
+    };
+  }
+
+  if (detectMusicAnalysisNamingTask(prompt)) {
+    return {
+      title: '准备音乐分析命名',
+      summary: file ? `已载入 ${file.name}，准备分析音乐并生成新文件名` : '将打开音乐分析命名功能，请导入单个或批量音乐文件',
+      tab: 'audio-tools',
+      kind: 'audio',
+      audioTask: 'music-analysis-naming',
+      audioTool: 'music-analysis-naming',
+      steps: [
+        '打开音频工具 > 音乐分析命名',
+        file ? '载入已提供的音乐文件' : '上传单个音乐、多个音乐或整个文件夹',
+        '分析 BPM、调式、风格、情绪和适合场景',
+        '按相同类别自动编号并生成可导出的命名结果',
       ],
     };
   }
@@ -1621,6 +1644,9 @@ export default function GlobalAssistant({ onNavigate, onAudioRequest, onVoiceReq
               </p>
             )}
 
+            <div className="flex justify-end">
+              <PointCostHint kind="token" />
+            </div>
             <button
               type="button"
               disabled={analyzing || (!prompt.trim() && !file)}

@@ -32,6 +32,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { FileItem } from '../types';
 import { AudioDesignResult, AudioDesignScope } from '../services/geminiService';
 import { generateSoundEffect, generateMusic } from '../services/elevenLabsService';
+import PointCostHint from './PointCostHint';
 
 // Self-contained ElevenLabs Player for Demo Sound Effects inside table
 const ElevenLabsPlayer = ({
@@ -150,6 +151,12 @@ const ElevenLabsPlayer = ({
         )}
         {error && <span className="text-[9px] text-red-400 max-w-[120px] truncate" title={error}>{error}</span>}
       </div>
+      {type !== 'music' || !onSendToMusicStudio ? (
+        <PointCostHint
+          kind={type === 'music' ? 'music' : 'sound-effect'}
+          durationSeconds={extractDuration(text)}
+        />
+      ) : null}
     </div>
   );
 };
@@ -772,6 +779,9 @@ export default function AudioDirector({
             </div>}
 
             {/* Submit Action */}
+            <div className="flex justify-end">
+              <PointCostHint kind="token" />
+            </div>
             <button
               onClick={handleGenerate}
               disabled={loading || hasInvalidProfessionalSelection || (files.length === 0 && !requirements.trim())}

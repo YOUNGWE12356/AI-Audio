@@ -27,6 +27,7 @@ import { HistoryItem } from '../types';
 import { VoiceItem } from '../data/voices';
 import { generateSpeechToSpeech } from '../services/elevenLabsService';
 import { downloadAudioHelper } from '../utils/downloadHelper';
+import PointCostHint from './PointCostHint';
 
 interface SpeechToSpeechProps {
   initialFile?: File;
@@ -876,6 +877,7 @@ export default function SpeechToSpeech({
           )}
 
           {/* Trigger button */}
+          <div className="flex justify-end"><PointCostHint kind="voice-changer" file={stsFile} outputs={2} /></div>
           <button
             onClick={handleStsGenerate}
             disabled={stsLoading || !stsFile || !stsVoiceRole}

@@ -49,6 +49,7 @@ const assistantPlanCache = new Map<string, {
 import {
   GEMINI_PRIMARY_MODEL,
   generateGeminiContent,
+  generateGptStructuredJson,
   isGptTextConfigured,
   isGeminiUnsupportedLocationError,
 } from './src/services/geminiRetry';
@@ -71,7 +72,10 @@ import {
   ELEVENLABS_SOUND_EFFECT_CREDITS_PER_GENERATION,
   ELEVENLABS_SPEECH_TO_TEXT_CREDITS_PER_MINUTE,
   ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE,
+  COMPANY_POINTS,
   estimateAudioDurationSecondsFromBlob,
+  estimateTimedCompanyPoints,
+  estimateTtsCompanyPoints,
   estimateTextGenerationCredits,
   estimateTimedCredits,
   fetchAvailableVoices,
@@ -458,6 +462,12 @@ async function startServer() {
                 reasoningTokens: Number(event.reasoningTokens) || 0,
                 totalTokens: Number(event.totalTokens) || 0,
                 credits: Number(event.credits) || 0,
+                companyPoints: Number(event.companyPoints) || 0,
+                pricingVersion: typeof event.pricingVersion === 'string' ? event.pricingVersion : undefined,
+                billingQuantity: Number(event.billingQuantity) || 0,
+                billingUnit: ['character', 'second', 'token', 'request'].includes(String(event.billingUnit))
+                  ? event.billingUnit as AiUsageEvent['billingUnit']
+                  : undefined,
                 timestamp: String(event.timestamp || ''),
                 feature: String(event.feature || '升级前未分类'),
                 endpoint: String(event.endpoint || ''),
@@ -476,12 +486,40 @@ async function startServer() {
       });
   };
 
+  const getEventCompanyPoints = (event: StoredAiUsageEvent) => {
+    if (event.pricingVersion && Number.isFinite(event.companyPoints)) return Math.max(0, event.companyPoints || 0);
+    if (event.provider !== 'elevenlabs') return 0;
+    if (event.model === ELEVENLABS_MUSIC_MODEL) return Math.max(0, event.credits / 6);
+    if (event.model === 'dubbing_v2') return Math.max(0, event.credits * 2.2);
+    if (event.model === 'scribe_v2') return Math.max(0, event.credits * (4 / 330));
+    if (event.model === 'audio-isolation' || event.model === 'eleven_multilingual_sts_v2') {
+      return Math.max(0, event.credits * 0.12);
+    }
+    if (/flash|turbo/i.test(event.model)) return Math.max(0, event.credits * 0.05);
+    if (/eleven_v3|multilingual_v2/i.test(event.model)) return Math.max(0, event.credits * 0.1);
+    return 0;
+  };
+
+  const readPricedAiUsageEvents = () => readAiUsageEvents().map(event => ({
+    ...event,
+    companyPoints: getEventCompanyPoints(event),
+  }));
+
+  type CompanyPointTier = 'basic' | 'professional';
   type ElevenLabsQuotaAllocation = {
     periodKey: string;
     userId: string;
     displayName: string;
     identitySource: UsageIdentitySource;
     bonusCredits: number;
+    projectPoints: number;
+    updatedAt: string;
+  };
+  type CompanyPointProfile = {
+    userId: string;
+    displayName: string;
+    identitySource: UsageIdentitySource;
+    tier: CompanyPointTier;
     updatedAt: string;
   };
   type ElevenLabsAccountQuotaAllocation = {
@@ -490,9 +528,10 @@ async function startServer() {
     updatedAt: string;
   };
   type ElevenLabsQuotaStore = {
-    version: 1;
+    version: 2;
     allocations: ElevenLabsQuotaAllocation[];
     accountAllocations: ElevenLabsAccountQuotaAllocation[];
+    profiles: CompanyPointProfile[];
   };
   type ElevenLabsQuotaStatus = {
     enabled: boolean;
@@ -502,11 +541,14 @@ async function startServer() {
     timeZone: 'Asia/Shanghai';
     baseCredits: number;
     bonusCredits: number;
+    projectPoints: number;
+    tier: CompanyPointTier;
     limitCredits: number;
     usedCredits: number;
     pendingCredits: number;
     remainingCredits: number;
     blocked: boolean;
+    recommendTierUpgrade: boolean;
   };
   type ElevenLabsAccountQuotaStatus = {
     periodKey: string;
@@ -520,12 +562,10 @@ async function startServer() {
     adjusted: boolean;
   };
 
-  const elevenLabsQuotaPath = path.join(dataDir, 'elevenlabs-quotas.json');
+  const elevenLabsQuotaPath = path.join(dataDir, 'company-points.json');
   const ELEVENLABS_QUOTA_ENABLED = String(process.env.ELEVENLABS_QUOTA_ENABLED || 'true').toLowerCase() !== 'false';
-  const ELEVENLABS_MONTHLY_CREDITS = Math.max(
-    1_000,
-    Number.parseInt(process.env.ELEVENLABS_MONTHLY_CREDITS || '20000', 10) || 20_000,
-  );
+  const COMPANY_POINT_TIERS: Record<CompanyPointTier, number> = { basic: 3_000, professional: 10_000 };
+  const ELEVENLABS_MONTHLY_CREDITS = COMPANY_POINT_TIERS.basic;
   const ELEVENLABS_QUOTA_TIME_ZONE = 'Asia/Shanghai' as const;
   const MAX_ELEVENLABS_BONUS_CREDITS = 1_000_000;
   const ELEVENLABS_ACCOUNT_CYCLE_CREDITS = Math.max(
@@ -556,6 +596,10 @@ async function startServer() {
                 MAX_ELEVENLABS_BONUS_CREDITS,
                 Math.max(-ELEVENLABS_MONTHLY_CREDITS, bonusCredits),
               ),
+              projectPoints: Math.min(
+                MAX_ELEVENLABS_BONUS_CREDITS,
+                Math.max(0, Math.round(Number(allocation.projectPoints)) || 0),
+              ),
               updatedAt: typeof allocation.updatedAt === 'string' && Number.isFinite(Date.parse(allocation.updatedAt))
                 ? allocation.updatedAt
                 : new Date(0).toISOString(),
@@ -580,9 +624,25 @@ async function startServer() {
             } satisfies ElevenLabsAccountQuotaAllocation];
           })
         : [];
-      return { version: 1, allocations, accountAllocations };
+      const profiles = Array.isArray(parsed.profiles)
+        ? parsed.profiles.flatMap((entry) => {
+            const profile = entry as Partial<CompanyPointProfile>;
+            const userId = normalizeIdentityText(profile.userId, 160);
+            if (!userId) return [];
+            return [{
+              userId,
+              displayName: normalizeIdentityText(profile.displayName, 80) || userId,
+              identitySource: ['feishu', 'device'].includes(String(profile.identitySource))
+                ? profile.identitySource as UsageIdentitySource
+                : 'unknown',
+              tier: profile.tier === 'professional' ? 'professional' : 'basic',
+              updatedAt: typeof profile.updatedAt === 'string' ? profile.updatedAt : new Date(0).toISOString(),
+            } satisfies CompanyPointProfile];
+          })
+        : [];
+      return { version: 2, allocations, accountAllocations, profiles };
     } catch {
-      return { version: 1, allocations: [], accountAllocations: [] };
+      return { version: 2, allocations: [], accountAllocations: [], profiles: [] };
     }
   };
   let elevenLabsQuotaStore = readElevenLabsQuotaStore();
@@ -648,11 +708,27 @@ async function startServer() {
     elevenLabsQuotaStore.allocations.find(entry => entry.periodKey === periodKey && entry.userId === userId)
   );
 
+  const ensureCompanyPointProfile = (actor: Pick<UsageActor, 'userId' | 'displayName' | 'identitySource'>) => {
+    let profile = elevenLabsQuotaStore.profiles.find(entry => entry.userId === actor.userId);
+    if (!profile) {
+      profile = {
+        userId: actor.userId,
+        displayName: actor.displayName,
+        identitySource: actor.identitySource,
+        tier: 'basic',
+        updatedAt: new Date().toISOString(),
+      };
+      elevenLabsQuotaStore.profiles.push(profile);
+      persistElevenLabsQuotaStore();
+    }
+    return profile;
+  };
+
   const getElevenLabsQuotaUsage = (userId: string, startTime: number, endTime: number) => (
     readAiUsageEvents().reduce((total, event) => {
-      if (event.provider !== 'elevenlabs' || event.userId !== userId) return total;
+      if (event.userId !== userId) return total;
       const timestamp = Date.parse(event.timestamp);
-      return timestamp >= startTime && timestamp < endTime ? total + event.credits : total;
+      return timestamp >= startTime && timestamp < endTime ? total + getEventCompanyPoints(event) : total;
     }, 0)
   );
 
@@ -662,23 +738,34 @@ async function startServer() {
     usedCredits = getElevenLabsQuotaUsage(userId, period.startTime, period.endTime),
   ): ElevenLabsQuotaStatus => {
     const allocation = getCurrentElevenLabsQuotaAllocation(userId, period.key);
+    const profile = elevenLabsQuotaStore.profiles.find(entry => entry.userId === userId);
+    const tier = profile?.tier || 'basic';
+    const baseCredits = COMPANY_POINT_TIERS[tier];
     const bonusCredits = allocation?.bonusCredits || 0;
-    const limitCredits = ELEVENLABS_MONTHLY_CREDITS + bonusCredits;
+    const projectPoints = allocation?.projectPoints || 0;
+    const limitCredits = baseCredits + bonusCredits + projectPoints;
     const pendingCredits = activeElevenLabsQuotaReservations.get(userId) || 0;
     const remainingCredits = Math.max(0, limitCredits - usedCredits - pendingCredits);
+    const previousPeriodKey = getElevenLabsQuotaPeriod(new Date(period.startTime - 1)).key;
+    const previousAllocation = getCurrentElevenLabsQuotaAllocation(userId, previousPeriodKey);
     return {
       enabled: ELEVENLABS_QUOTA_ENABLED,
       periodKey: period.key,
       periodStart: period.start,
       periodEnd: period.end,
       timeZone: ELEVENLABS_QUOTA_TIME_ZONE,
-      baseCredits: ELEVENLABS_MONTHLY_CREDITS,
+      baseCredits,
       bonusCredits,
+      projectPoints,
+      tier,
       limitCredits,
       usedCredits,
       pendingCredits,
       remainingCredits,
       blocked: ELEVENLABS_QUOTA_ENABLED && remainingCredits <= 0,
+      recommendTierUpgrade: tier === 'basic'
+        && bonusCredits > 0
+        && (previousAllocation?.bonusCredits || 0) > 0,
     };
   };
 
@@ -707,7 +794,8 @@ async function startServer() {
   };
 
   const reserveElevenLabsQuota = (actor: UsageActor, requestedCredits: number) => {
-    const normalizedRequestedCredits = Math.max(1, Math.ceil(Number(requestedCredits) || 1));
+    ensureCompanyPointProfile(actor);
+    const normalizedRequestedCredits = Math.max(0.1, Number(requestedCredits) || 0.1);
     const quota = buildElevenLabsQuotaStatus(actor.userId);
     if (ELEVENLABS_QUOTA_ENABLED && normalizedRequestedCredits > quota.remainingCredits) {
       return { quota, release: null };
@@ -749,8 +837,8 @@ async function startServer() {
     const reservation = reserveElevenLabsQuota(actor, estimateCredits(req));
     if (!reservation.release) {
       return res.status(429).json({
-        code: 'ELEVENLABS_USER_QUOTA_EXCEEDED',
-        error: `本月 ElevenLabs 个人积分不足。已用 ${Math.ceil(reservation.quota.usedCredits)} / ${reservation.quota.limitCredits}，请联系管理员追加额度。`,
+        code: 'COMPANY_POINTS_EXCEEDED',
+        error: `本月个人积分不足。已用 ${Math.ceil(reservation.quota.usedCredits)} / ${reservation.quota.limitCredits}，请联系管理员追加额度或项目池积分。`,
         quota: reservation.quota,
       });
     }
@@ -764,6 +852,13 @@ async function startServer() {
     res.once('close', release);
     return next();
   };
+
+  // Text/vision model costs are settled from recorded token usage. Reserve a
+  // small amount up front so users at zero balance cannot start paid requests.
+  app.use(
+    ['/api/ai/assistant', '/api/ai/gemini', '/api/video/match-similar-voices', '/api/video/analyze'],
+    requireElevenLabsQuota(() => 0.1),
+  );
 
   const getDateKey = (timestamp: string, timeZone: string) => {
     const parts = new Intl.DateTimeFormat('en-CA', {
@@ -1727,6 +1822,7 @@ async function startServer() {
       runtime: 'server',
       services: {
         gemini: Boolean(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY),
+        aiText: isGptTextConfigured() || Boolean(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY),
         gptText: isGptTextConfigured(),
         elevenLabs: getElevenLabsApiKeys().length > 0,
         ffmpeg: Boolean(FFMPEG_BINARY),
@@ -1739,27 +1835,41 @@ async function startServer() {
 
   const buildElevenLabsQuotaAdminSummary = () => {
     const period = getElevenLabsQuotaPeriod();
-    const allEvents = readAiUsageEvents();
+    const allEvents = readPricedAiUsageEvents();
     const periodEvents = allEvents.filter(event => {
       const timestamp = Date.parse(event.timestamp);
       return timestamp >= period.startTime && timestamp < period.endTime;
     });
     const usageUsers = summarizeUsageUsers(periodEvents);
+    let addedProfile = false;
+    for (const user of usageUsers) {
+      if (elevenLabsQuotaStore.profiles.some(profile => profile.userId === user.userId)) continue;
+      elevenLabsQuotaStore.profiles.push({
+        userId: user.userId,
+        displayName: user.displayName,
+        identitySource: user.identitySource,
+        tier: 'basic',
+        updatedAt: user.lastUsedAt,
+      });
+      addedProfile = true;
+    }
+    if (addedProfile) persistElevenLabsQuotaStore();
     const usersById = new Map(usageUsers.map(user => [user.userId, user]));
-    for (const allocation of elevenLabsQuotaStore.allocations) {
-      if (allocation.periodKey !== period.key || usersById.has(allocation.userId)) continue;
-      usersById.set(allocation.userId, {
-        userId: allocation.userId,
-        displayName: allocation.displayName,
+    for (const profile of elevenLabsQuotaStore.profiles) {
+      if (usersById.has(profile.userId)) continue;
+      usersById.set(profile.userId, {
+        userId: profile.userId,
+        displayName: profile.displayName,
         department: '',
-        identitySource: allocation.identitySource,
+        identitySource: profile.identitySource,
         ipAddresses: [],
         requests: 0,
         elevenLabsCredits: 0,
+        companyPoints: 0,
         geminiTokens: 0,
         gptTokens: 0,
         totalTokens: 0,
-        lastUsedAt: allocation.updatedAt,
+        lastUsedAt: profile.updatedAt,
         details: [],
       });
     }
@@ -1771,15 +1881,23 @@ async function startServer() {
       identitySource: user.identitySource,
       ipAddresses: user.ipAddresses,
       lastUsedAt: user.lastUsedAt,
-      ...buildElevenLabsQuotaStatus(user.userId, period, user.elevenLabsCredits),
+      ...buildElevenLabsQuotaStatus(user.userId, period, user.companyPoints),
     })).sort((left, right) => {
       if (left.blocked !== right.blocked) return left.blocked ? -1 : 1;
       return right.usedCredits - left.usedCredits || Date.parse(right.lastUsedAt) - Date.parse(left.lastUsedAt);
     });
 
+    const projectPoolTotal = Math.floor(elevenLabsQuotaStore.profiles.reduce(
+      (total, profile) => total + COMPANY_POINT_TIERS[profile.tier],
+      0,
+    ) * 0.15);
+    const projectPoolAllocated = elevenLabsQuotaStore.allocations.reduce((total, allocation) => (
+      allocation.periodKey === period.key ? total + (allocation.projectPoints || 0) : total
+    ), 0);
     return {
       enabled: ELEVENLABS_QUOTA_ENABLED,
       defaultMonthlyCredits: ELEVENLABS_MONTHLY_CREDITS,
+      tiers: COMPANY_POINT_TIERS,
       period: {
         key: period.key,
         start: period.start,
@@ -1787,12 +1905,19 @@ async function startServer() {
         timeZone: ELEVENLABS_QUOTA_TIME_ZONE,
       },
       accountBillingCycle: buildElevenLabsAccountQuotaStatus(allEvents),
+      projectPool: {
+        ratio: 0.15,
+        totalPoints: projectPoolTotal,
+        allocatedPoints: projectPoolAllocated,
+        remainingPoints: Math.max(0, projectPoolTotal - projectPoolAllocated),
+      },
       users,
     };
   };
 
   app.get('/api/usage/quota', (req, res) => {
     const actor = resolveUsageActor(req, res);
+    ensureCompanyPointProfile(actor);
     res.setHeader('Cache-Control', 'no-store');
     return res.json({
       user: actor,
@@ -1833,36 +1958,55 @@ async function startServer() {
   app.put('/api/usage/quotas', requireSfxLibraryAdmin, (req, res) => {
     const userId = normalizeIdentityText(req.body?.userId, 160);
     const bonusCredits = Math.round(Number(req.body?.bonusCredits));
+    const projectPoints = Math.round(Number(req.body?.projectPoints || 0));
+    const tier: CompanyPointTier = req.body?.tier === 'professional' ? 'professional' : 'basic';
+    const profile = elevenLabsQuotaStore.profiles.find(entry => entry.userId === userId);
     if (
       !userId
+      || !profile
       || !Number.isFinite(bonusCredits)
-      || bonusCredits < -ELEVENLABS_MONTHLY_CREDITS
+      || !Number.isFinite(projectPoints)
+      || bonusCredits < -COMPANY_POINT_TIERS[tier]
       || bonusCredits > MAX_ELEVENLABS_BONUS_CREDITS
+      || projectPoints < 0
+      || projectPoints > MAX_ELEVENLABS_BONUS_CREDITS
     ) {
       return res.status(400).json({ error: '成员或额度调整值无效。' });
     }
 
     const period = getElevenLabsQuotaPeriod();
-    const periodUsers = summarizeUsageUsers(readAiUsageEvents().filter(event => {
+    const periodUsers = summarizeUsageUsers(readPricedAiUsageEvents().filter(event => {
       const timestamp = Date.parse(event.timestamp);
       return timestamp >= period.startTime && timestamp < period.endTime;
     }));
     const user = periodUsers.find(item => item.userId === userId);
     const existing = getCurrentElevenLabsQuotaAllocation(userId, period.key);
-    if (!user && !existing) {
-      return res.status(404).json({ error: '当前月份没有找到该成员或设备。' });
+    const projectPoolTotal = Math.floor(elevenLabsQuotaStore.profiles.reduce(
+      (total, item) => total + COMPANY_POINT_TIERS[item.userId === userId ? tier : item.tier],
+      0,
+    ) * 0.15);
+    const otherProjectAllocations = elevenLabsQuotaStore.allocations.reduce((total, item) => (
+      item.periodKey === period.key && item.userId !== userId ? total + (item.projectPoints || 0) : total
+    ), 0);
+    if (otherProjectAllocations + projectPoints > projectPoolTotal) {
+      return res.status(400).json({ error: '项目池剩余积分不足。' });
     }
+
+    profile.tier = tier;
+    profile.displayName = user?.displayName || profile.displayName;
+    profile.updatedAt = new Date().toISOString();
 
     elevenLabsQuotaStore.allocations = elevenLabsQuotaStore.allocations.filter(
       entry => !(entry.periodKey === period.key && entry.userId === userId),
     );
-    if (bonusCredits !== 0) {
+    if (bonusCredits !== 0 || projectPoints !== 0) {
       elevenLabsQuotaStore.allocations.push({
         periodKey: period.key,
         userId,
         displayName: user?.displayName || existing?.displayName || userId,
         identitySource: user?.identitySource || existing?.identitySource || 'unknown',
         bonusCredits,
+        projectPoints,
         updatedAt: new Date().toISOString(),
       });
     }
@@ -1889,15 +2033,20 @@ async function startServer() {
       // Keep the stable application default when the browser sends an invalid zone.
     }
 
-    const events = readAiUsageEvents().filter((event) => {
+    const events = readPricedAiUsageEvents().filter((event) => {
       const timestamp = Date.parse(event.timestamp);
       return timestamp >= startTime && timestamp <= endTime;
     });
-    const summarizeLocalProvider = (provider: AiUsageEvent['provider'], configured: boolean) => {
+    const summarizeLocalProvider = (
+      provider: AiUsageEvent['provider'],
+      configured: boolean,
+      pricingConfigured: boolean,
+    ) => {
       const providerEvents = events.filter(event => event.provider === provider);
       const daily = new Map<string, {
         date: string;
         credits: number;
+        companyPoints: number;
         inputTokens: number;
         outputTokens: number;
         reasoningTokens: number;
@@ -1908,6 +2057,9 @@ async function startServer() {
       const features = new Map<string, {
         feature: string;
         credits: number;
+        companyPoints: number;
+        billingQuantity: number;
+        billingUnit?: AiUsageEvent['billingUnit'];
         inputTokens: number;
         outputTokens: number;
         reasoningTokens: number;
@@ -1917,6 +2069,7 @@ async function startServer() {
       }>();
       const totals = {
         credits: 0,
+        companyPoints: 0,
         inputTokens: 0,
         outputTokens: 0,
         reasoningTokens: 0,
@@ -1934,6 +2087,7 @@ async function startServer() {
 
       for (const event of providerEvents) {
         totals.credits += event.credits;
+        totals.companyPoints += event.companyPoints || 0;
         totals.inputTokens += event.inputTokens;
         totals.outputTokens += event.outputTokens;
         totals.reasoningTokens += event.reasoningTokens;
@@ -1955,6 +2109,9 @@ async function startServer() {
         const feature = features.get(event.feature) || {
           feature: event.feature,
           credits: 0,
+          companyPoints: 0,
+          billingQuantity: 0,
+          billingUnit: event.billingUnit,
           inputTokens: 0,
           outputTokens: 0,
           reasoningTokens: 0,
@@ -1963,6 +2120,9 @@ async function startServer() {
           models: new Map<string, number>(),
         };
         feature.credits += event.credits;
+        feature.companyPoints += event.companyPoints || 0;
+        feature.billingQuantity += event.billingQuantity || 0;
+        if (!feature.billingUnit) feature.billingUnit = event.billingUnit;
         feature.inputTokens += event.inputTokens;
         feature.outputTokens += event.outputTokens;
         feature.reasoningTokens += event.reasoningTokens;
@@ -1975,6 +2135,7 @@ async function startServer() {
         const bucket = daily.get(date) || {
           date,
           credits: 0,
+          companyPoints: 0,
           inputTokens: 0,
           outputTokens: 0,
           reasoningTokens: 0,
@@ -1982,6 +2143,7 @@ async function startServer() {
           requests: 0,
         };
         bucket.credits += event.credits;
+        bucket.companyPoints += event.companyPoints || 0;
         bucket.inputTokens += event.inputTokens;
         bucket.outputTokens += event.outputTokens;
         bucket.reasoningTokens += event.reasoningTokens;
@@ -1992,6 +2154,7 @@ async function startServer() {
 
       return {
         status: configured ? 'tracking' as const : 'not_configured' as const,
+        pricingConfigured,
         ...totals,
         unmeteredEvents: totals.unmeteredEvents
           .sort((left, right) => Date.parse(right.timestamp) - Date.parse(left.timestamp))
@@ -2028,12 +2191,18 @@ async function startServer() {
         elevenLabs: summarizeLocalProvider(
           'elevenlabs',
           getElevenLabsApiKeys().length > 0,
+          true,
         ),
         gemini: summarizeLocalProvider(
           'gemini',
           Boolean(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY),
+          Boolean(Number(process.env.GEMINI_INPUT_USD_PER_MILLION_TOKENS) || Number(process.env.GEMINI_OUTPUT_USD_PER_MILLION_TOKENS)),
         ),
-        gpt: summarizeLocalProvider('gpt', isGptTextConfigured()),
+        gpt: summarizeLocalProvider(
+          'gpt',
+          isGptTextConfigured(),
+          Boolean(Number(process.env.GPT_INPUT_USD_PER_MILLION_TOKENS) || Number(process.env.GPT_OUTPUT_USD_PER_MILLION_TOKENS)),
+        ),
       },
     });
   }));
@@ -4136,6 +4305,97 @@ async function startServer() {
     return res.json(result);
   }));
 
+  app.post('/api/ai/music-analysis-naming', asyncRoute(async (req, res) => {
+    const rawItems = Array.isArray(req.body?.items) ? req.body.items.slice(0, 60) : [];
+    if (rawItems.length === 0) {
+      return res.status(400).json({ error: '请先上传并分析至少一个音乐文件。' });
+    }
+    if (!isGptTextConfigured()) {
+      return res.status(503).json({ error: '音乐风格/场景语义分析 API 尚未配置。请配置 OPENAI_API_KEY、ARK_API_KEY 或 TOKENHUB_API_KEY。' });
+    }
+
+    const items = rawItems.map((item: any, index: number) => ({
+      index,
+      sourceName: normalizeIdentityText(item?.sourceName, 240) || `music_${index + 1}`,
+      duration: Math.max(0, Math.min(Number(item?.duration) || 0, 60 * 60)),
+      bpm: Math.max(0, Math.min(Number(item?.bpm) || 0, 300)),
+      keyName: normalizeIdentityText(item?.keyName, 80) || 'Unknown',
+      keyConfidence: normalizeIdentityText(item?.keyConfidence, 12) || '低',
+      energy: normalizeIdentityText(item?.energy, 40) || 'Unknown',
+      mood: normalizeIdentityText(item?.mood, 80) || 'Unknown',
+      bassPercent: Math.max(0, Math.min(Number(item?.bassPercent) || 0, 100)),
+      midPercent: Math.max(0, Math.min(Number(item?.midPercent) || 0, 100)),
+      highPercent: Math.max(0, Math.min(Number(item?.highPercent) || 0, 100)),
+      rms: Math.max(0, Math.min(Number(item?.rms) || 0, 1)),
+    }));
+
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        items: {
+          type: 'array',
+          minItems: items.length,
+          maxItems: items.length,
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              index: { type: 'integer', minimum: 0 },
+              style: {
+                type: 'string',
+                enum: ['Epic', 'Battle', 'Casual', 'Healing', 'Mystery', 'Ambient', 'Electronic', 'Chinese', 'Cinematic', 'Orchestral', 'Rock', 'Piano', 'LoFi', 'Review'],
+              },
+              scene: {
+                type: 'string',
+                enum: ['Battle', 'Home', 'Lobby', 'Event', 'Gift', 'Puzzle', 'Victory', 'Suspense', 'Explore', 'Menu', 'Cutscene', 'Reward', 'Store', 'Manual'],
+              },
+              mood: { type: 'string' },
+              namingCategory: { type: 'string' },
+              confidence: { type: 'string', enum: ['高', '中', '低'] },
+              reason: { type: 'string' },
+            },
+            required: ['index', 'style', 'scene', 'mood', 'namingCategory', 'confidence', 'reason'],
+          },
+        },
+      },
+      required: ['items'],
+    };
+
+    const result = await generateGptStructuredJson<{
+      items: Array<{
+        index: number;
+        style: string;
+        scene: string;
+        mood: string;
+        namingCategory: string;
+        confidence: '高' | '中' | '低';
+        reason: string;
+      }>;
+    }>({
+      schemaName: 'music_analysis_naming',
+      schema,
+      reasoningEffort: 'low',
+      maxOutputTokens: Math.min(6000, 800 + items.length * 180),
+      instructions: `你是游戏与互动音频资产命名专家。你需要根据文件名和客观音频指标，为每个音乐素材判断最适合的音乐风格、使用场景和命名类别。
+
+重要要求：
+1. 文件名、文件夹名中的业务语义优先级最高，例如 battle、victory、home、lobby、event、gift、board game、tabletop、Chinese、piano 等。
+2. BPM、调性和频段只能作为辅助证据，不要只因为慢速就判断 Ambient，不要只因为低频多就判断 Battle。
+3. 如果证据不足，style 必须返回 Review，scene 必须返回 Manual，confidence 返回 低；不要假装确定。
+4. namingCategory 用英文短标签，适合进入文件名，格式示例 Casual_Lobby、Battle_Battle、Chinese_Explore、Review_Manual。
+5. reason 用中文，简短说明为什么这么判断，最多 40 字。
+6. 必须为每个输入 index 返回一条结果，不要丢项，不要新增项。`,
+      input: JSON.stringify({ items }),
+    });
+
+    return res.json({
+      provider: result.provider,
+      model: result.model,
+      items: result.value.items,
+    });
+  }));
+
   app.post('/api/ai/gemini/audio-design', asyncRoute(async (req, res) => {
     const { files, requirements = '', target = {}, isInstrumental = true, scope } = req.body || {};
     if (!Array.isArray(files)) {
@@ -4821,7 +5081,10 @@ ${JSON.stringify(normalizedVoices)}
 
   app.post(
     '/api/ai/elevenlabs/sound-effect',
-    requireElevenLabsQuota(() => ELEVENLABS_SOUND_EFFECT_CREDITS_PER_GENERATION),
+    requireElevenLabsQuota(req => estimateTimedCompanyPoints(
+      parseNumber(req.body?.duration, 5, 0.5, 30),
+      COMPANY_POINTS.soundEffectPerSecond,
+    )),
     asyncRoute(async (req, res) => {
     const text = String(req.body?.text || '').trim();
     if (!text) return res.status(400).json({ error: 'text is required' });
@@ -4839,9 +5102,9 @@ ${JSON.stringify(normalizedVoices)}
 
   app.post(
     '/api/ai/elevenlabs/music',
-    requireElevenLabsQuota(req => estimateTimedCredits(
+    requireElevenLabsQuota(req => estimateTimedCompanyPoints(
       parseNumber(req.body?.duration, 30, 1, 60),
-      ELEVENLABS_MUSIC_CREDITS_PER_MINUTE,
+      COMPANY_POINTS.musicPerSecond,
     )),
     asyncRoute(async (req, res) => {
     const text = String(req.body?.text || '').trim();
@@ -6087,7 +6350,7 @@ ${JSON.stringify(normalizedVoices)}
 
   app.post(
     '/api/ai/elevenlabs/voice',
-    requireElevenLabsQuota(req => estimateTextGenerationCredits(String(req.body?.text || ''))),
+    requireElevenLabsQuota(req => estimateTtsCompanyPoints(String(req.body?.text || ''))),
     asyncRoute(async (req, res) => {
     const text = String(req.body?.text || '').trim();
     if (!text) return res.status(400).json({ error: 'text is required' });
@@ -6125,9 +6388,9 @@ ${JSON.stringify(normalizedVoices)}
   app.post(
     '/api/ai/elevenlabs/speech-to-speech',
     aiUpload.single('audio'),
-    requireElevenLabsQuota(req => estimateTimedCredits(
+    requireElevenLabsQuota(req => estimateTimedCompanyPoints(
       estimateUploadedMediaDuration(req),
-      ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE,
+      COMPANY_POINTS.audioProcessingPerSecond,
     )),
     asyncRoute(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'audio is required' });
@@ -6155,9 +6418,9 @@ ${JSON.stringify(normalizedVoices)}
   app.post(
     '/api/ai/elevenlabs/audio-isolation',
     aiUpload.single('audio'),
-    requireElevenLabsQuota(req => estimateTimedCredits(
+    requireElevenLabsQuota(req => estimateTimedCompanyPoints(
       estimateUploadedMediaDuration(req),
-      ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE,
+      COMPANY_POINTS.audioProcessingPerSecond,
     )),
     asyncRoute(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'audio is required' });
@@ -6169,9 +6432,9 @@ ${JSON.stringify(normalizedVoices)}
   app.post(
     '/api/ai/elevenlabs/speech-to-text',
     aiUpload.single('audio'),
-    requireElevenLabsQuota(req => estimateTimedCredits(
+    requireElevenLabsQuota(req => estimateTimedCompanyPoints(
       estimateUploadedMediaDuration(req),
-      ELEVENLABS_SPEECH_TO_TEXT_CREDITS_PER_MINUTE,
+      COMPANY_POINTS.speechToTextPerSecond,
     )),
     asyncRoute(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'audio is required' });
@@ -6231,8 +6494,8 @@ ${JSON.stringify(normalizedVoices)}
     aiUpload.single('audio'),
     requireElevenLabsQuota(req => {
       const duration = estimateUploadedMediaDuration(req);
-      return estimateTimedCredits(duration, ELEVENLABS_SPEECH_TO_TEXT_CREDITS_PER_MINUTE)
-        + estimateTimedCredits(duration, 900);
+      return estimateTimedCompanyPoints(duration, COMPANY_POINTS.speechToTextPerSecond)
+        + estimateTimedCompanyPoints(duration, COMPANY_POINTS.standardTtsPerThousandCharacters / 60);
     }),
     asyncRoute(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'audio is required' });
@@ -6326,8 +6589,7 @@ ${JSON.stringify(normalizedVoices)}
     aiUpload.single('audio'),
     requireElevenLabsQuota(req => {
       const duration = estimateUploadedMediaDuration(req);
-      return estimateTimedCredits(duration, ELEVENLABS_SPEECH_TO_TEXT_CREDITS_PER_MINUTE)
-        + estimateTimedCredits(duration, ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE);
+      return estimateTimedCompanyPoints(duration, COMPANY_POINTS.dubbingV2PerSecond);
     }),
     asyncRoute(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'audio is required' });
@@ -6471,6 +6733,13 @@ ${JSON.stringify(normalizedVoices)}
           sourceDuration || estimateAudioDurationSecondsFromBlob(sourceAudio),
           ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE,
         ),
+        companyPoints: estimateTimedCompanyPoints(
+          sourceDuration || estimateAudioDurationSecondsFromBlob(sourceAudio),
+          COMPANY_POINTS.dubbingV2PerSecond,
+        ),
+        pricingVersion: 'company-v1',
+        billingQuantity: sourceDuration || estimateAudioDurationSecondsFromBlob(sourceAudio),
+        billingUnit: 'second',
       });
       const sourceText = String(transcription.text || '').trim();
       let translatedText = '';
@@ -7436,15 +7705,18 @@ CRITICAL SUBTITLE OCR PASS:
     const resolvedType = req.body?.trackType
       || (req.body?.trackId === 'dubbing' ? 'dubbing' : req.body?.trackId === 'bgm' ? 'bgm' : 'sfx');
     if (resolvedType === 'dubbing') {
-      return estimateTextGenerationCredits(String(req.body?.text || ''));
+      return estimateTtsCompanyPoints(String(req.body?.text || ''));
     }
     if (resolvedType === 'bgm') {
-      return estimateTimedCredits(
+      return estimateTimedCompanyPoints(
         parseNumber(req.body?.duration, 30, 3, 600),
-        ELEVENLABS_MUSIC_CREDITS_PER_MINUTE,
+        COMPANY_POINTS.musicPerSecond,
       );
     }
-    return ELEVENLABS_SOUND_EFFECT_CREDITS_PER_GENERATION;
+    return estimateTimedCompanyPoints(
+      parseNumber(req.body?.duration, 5, 0.5, 30),
+      COMPANY_POINTS.soundEffectPerSecond,
+    );
   }), async (req, res) => {
     try {
       const { prompt, trackId, trackType, text, voiceId, duration } = req.body;
@@ -8278,7 +8550,15 @@ CRITICAL SUBTITLE OCR PASS:
         middlewareMode: true,
         hmr: process.env.DISABLE_HMR !== 'true',
         watch: {
-          ignored: ['**/uploads/**', '**/data/**']
+          ignored: [
+            '**/uploads/**',
+            '**/data/**',
+            '**/dist/**',
+            '**/.git/**',
+            '**/.codex-tmp/**',
+            '**/tools/music-separation/**',
+            '**/tools/demucs/**',
+          ]
         }
       },
       appType: "spa",

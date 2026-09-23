@@ -45,6 +45,7 @@ import {
   getAudioLanguage,
   LOCAL_CLONE_LANGUAGE_OPTIONS,
 } from '../services/languageRegistry';
+import PointCostHint from './PointCostHint';
 
 interface CrossLanguageDubbingProps {
   initialFile?: File;
@@ -1900,6 +1901,12 @@ export default function CrossLanguageDubbing({
                       ? localDialogueMode === 'multi' ? '正在识别角色…' : '正在提取台词…'
                       : localDialogueMode === 'multi' ? '识别说话人与台词' : '提取目标语种台词'}
                   </button>
+                  <div className="flex justify-end">
+                    <PointCostHint
+                      kind="speech-to-text"
+                      file={localInputMode === 'speech_to_speech' ? speechInputFile : sourceFile}
+                    />
+                  </div>
                 </label>
 
                 {localDialogueMode === 'single' ? (
@@ -2251,13 +2258,8 @@ export default function CrossLanguageDubbing({
           )}
 
           {dubbingMode === 'dubbing_v2' && (
-            <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50/70 px-3 py-2.5 text-[10px] leading-relaxed text-amber-800">
-              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
-              <span>
-                {estimatedDubbingCredits
-                  ? <>本次预计消耗 <strong>{estimatedDubbingCredits.low.toLocaleString()}–{estimatedDubbingCredits.high.toLocaleString()} credits</strong>（1 种目标语言，按音频时长估算）。实际金额以 ElevenLabs 提交前报价为准。</>
-                  : '上传音频后会读取时长，并在这里显示预计 credits 消耗。'}
-              </span>
+            <div className="flex justify-end rounded-xl border border-amber-200 bg-amber-50/70 px-3 py-2.5">
+              <PointCostHint kind="dubbing-v2" durationSeconds={sourceDuration || undefined} file={sourceFile} />
             </div>
           )}
 

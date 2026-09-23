@@ -52,6 +52,7 @@ import { ELEVENLABS_VOICES, VoiceItem } from '../data/voices';
 import { fetchAvailableVoices, generateSpeechToSpeech, transcribeSpeech } from '../services/elevenLabsService';
 import { extractVideoKeyframes } from '../utils/mediaPreparation';
 import { getElevenLabsQualityMode } from '../utils/elevenLabsQuality';
+import PointCostHint from './PointCostHint';
 import {
   distributeOverlappingSfxClips,
   isAutoSfxTrackId,
@@ -8008,6 +8009,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
             </div>
 
             <div className="flex shrink-0 flex-nowrap items-center justify-end gap-2">
+              {!isAnalyzing && <PointCostHint kind="token" className="text-amber-300" />}
               <button
                 id="btn-ai-analyze"
                 onClick={() => {
@@ -8739,6 +8741,9 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
 
                     {selectedTrack.type === 'bgm' && (
                       <div className="space-y-2 rounded-xl border border-emerald-500/25 bg-emerald-950/15 p-3">
+                        <div className="flex justify-end">
+                          <PointCostHint kind="token" className="text-amber-300" />
+                        </div>
                         <button
                           type="button"
                           onClick={() => void handleAnalyzeTrack('bgm')}
@@ -8767,6 +8772,9 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
 
                     {selectedTrack.type === 'sfx' && (
                       <div className="space-y-2 rounded-xl border border-sky-500/25 bg-sky-950/15 p-3">
+                        <div className="flex justify-end">
+                          <PointCostHint kind="token" className="text-amber-300" />
+                        </div>
                         <div className="flex items-center justify-between gap-3">
                           <div>
                             <p className="text-[10px] font-bold uppercase tracking-wider text-sky-300">音效轨分析</p>
@@ -8840,6 +8848,18 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                             </div>
                           )}
 
+                          <div className="grid grid-cols-2 gap-2 text-center">
+                            <PointCostHint
+                              kind="tts-standard"
+                              text={selectedDubbingTrackPendingClips.map(clip => clip.text || clip.prompt || '').join('')}
+                              className="justify-center"
+                            />
+                            <PointCostHint
+                              kind="tts-standard"
+                              text={selectedDubbingTrackClips.map(clip => clip.text || clip.prompt || '').join('')}
+                              className="justify-center"
+                            />
+                          </div>
                           <div className="grid grid-cols-2 gap-2">
                             <button
                               type="button"
@@ -8914,6 +8934,9 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                               <p className="mt-1 text-[10px] leading-relaxed text-slate-500">只重新识别字幕、对白与口型，保留配乐和音效轨。</p>
                             </div>
                             <RotateCcw className="h-5 w-5 shrink-0 text-purple-400" />
+                          </div>
+                          <div className="mt-2 flex justify-end">
+                            <PointCostHint kind="token" className="text-amber-300" />
                           </div>
                           <button
                             type="button"
@@ -9698,6 +9721,21 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
 
                     {/* 单轨道合成状态 */}
                     <div className="pt-2 border-t border-slate-800">
+                      {!selectedClipIsOriginalAudio && selectedClipTrack?.type === 'dubbing' && (
+                        <div className="mb-2 flex justify-end">
+                          <PointCostHint kind="tts-standard" text={selectedClip.text || selectedClip.prompt || ''} />
+                        </div>
+                      )}
+                      {!selectedClipIsOriginalAudio && selectedClipTrack?.type === 'bgm' && (
+                        <div className="mb-2 flex justify-end">
+                          <PointCostHint kind="music" durationSeconds={selectedClip.duration} />
+                        </div>
+                      )}
+                      {!selectedClipIsOriginalAudio && selectedClipTrack?.type === 'sfx' && (
+                        <div className="mb-2 flex justify-end">
+                          <PointCostHint kind="sound-effect" durationSeconds={selectedClip.duration} />
+                        </div>
+                      )}
                       {selectedClip.audioUrl ? (
                         <div className="flex flex-col gap-2">
                           <div className={`flex items-center justify-center gap-2 rounded-lg border p-2 text-xs font-semibold ${

@@ -19,6 +19,7 @@ import { HistoryItem } from '../types';
 import { generateLyricsFromMusicStyle, translateToEnglish } from '../services/geminiService';
 import type { PendingMusicOption } from '../App';
 import GeneratedAudioPlayer from './GeneratedAudioPlayer';
+import PointCostHint from './PointCostHint';
 
 const formatMusicTime = (seconds: number) => {
   if (!Number.isFinite(seconds) || seconds <= 0) return '0:00';
@@ -589,6 +590,9 @@ export default function MusicStudio({
               直接输入中文也可以。点击生成时会自动改写成英文音乐提示词，尽量避开平台误判；上方“翻译为英文”只用于提前预览和手动微调。
             </div>
 
+            <div className="flex justify-end">
+              <PointCostHint kind="music" durationSeconds={standaloneMusicDuration} outputs={2} />
+            </div>
             <button
               onClick={handleStandaloneMusicGenerate}
               disabled={standaloneMusicLoading || !standaloneMusicPrompt.trim()}

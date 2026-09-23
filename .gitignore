@@ -4,6 +4,7 @@ build/
 dist/
 coverage/
 data/
+.codex-tmp/
 uploads/*
 !uploads/.gitkeep
 /test.txt
