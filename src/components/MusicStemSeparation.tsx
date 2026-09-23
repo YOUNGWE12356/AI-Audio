@@ -13,11 +13,11 @@ import {
   RefreshCw,
   RotateCcw,
   Square,
+  Trash2,
   Upload,
   Volume2,
   VolumeX,
   Workflow,
-  X,
 } from 'lucide-react';
 
 type EngineStatus = {
@@ -542,9 +542,23 @@ export default function MusicStemSeparation({ onSendToWorkstation }: MusicStemSe
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(280px,0.8fr)_minmax(0,1.4fr)]">
         <section className="space-y-4 rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-          <div>
-            <h3 className="text-sm font-bold text-slate-800">源素材</h3>
-            <p className="mt-1 text-[11px] text-slate-500">音频或视频，最大 100MB</p>
+          <div className="flex min-h-9 items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-bold text-slate-800">源素材</h3>
+              <p className="mt-1 text-[11px] text-slate-500">音频或视频，最大 100MB</p>
+            </div>
+            {(file || job) && (
+              <button
+                type="button"
+                onClick={reset}
+                disabled={isJobActive}
+                title={isJobActive ? '请先停止当前分轨任务' : '清空当前素材和分轨结果'}
+                className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-[11px] font-bold text-slate-600 hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                清空
+              </button>
+            )}
           </div>
 
           <div
@@ -633,11 +647,6 @@ export default function MusicStemSeparation({ onSendToWorkstation }: MusicStemSe
               >
                 {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Workflow className="h-4 w-4" />}
                 开始高质量分轨
-              </button>
-            )}
-            {file && !isJobActive && job?.status !== 'completed' && (
-              <button type="button" onClick={reset} title="清除素材" aria-label="清除素材" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-500 hover:text-rose-600">
-                <X className="h-4 w-4" />
               </button>
             )}
           </div>

@@ -208,6 +208,7 @@ async function startServer() {
   const resolveUsageFeature = (req: express.Request) => {
     const endpoint = req.path;
     if (endpoint.includes('/assistant/plan')) return '智能助手 · GPT 任务规划';
+    if (endpoint.includes('/music-analysis-naming')) return '音频工具 · 音乐分析命名';
     if (endpoint.includes('/audio-design')) return 'AI 音频设计';
     if (endpoint.includes('/regenerate-lyrics') || endpoint.includes('/generate-lyrics')) return 'AI 音乐 · 歌词生成';
     if (endpoint.includes('/music-prompt')) return 'AI 音乐 · 提示词优化';
@@ -564,7 +565,7 @@ async function startServer() {
 
   const elevenLabsQuotaPath = path.join(dataDir, 'company-points.json');
   const ELEVENLABS_QUOTA_ENABLED = String(process.env.ELEVENLABS_QUOTA_ENABLED || 'true').toLowerCase() !== 'false';
-  const COMPANY_POINT_TIERS: Record<CompanyPointTier, number> = { basic: 3_000, professional: 10_000 };
+  const COMPANY_POINT_TIERS: Record<CompanyPointTier, number> = { basic: 5_000, professional: 20_000 };
   const ELEVENLABS_MONTHLY_CREDITS = COMPANY_POINT_TIERS.basic;
   const ELEVENLABS_QUOTA_TIME_ZONE = 'Asia/Shanghai' as const;
   const MAX_ELEVENLABS_BONUS_CREDITS = 1_000_000;
@@ -856,7 +857,13 @@ async function startServer() {
   // Text/vision model costs are settled from recorded token usage. Reserve a
   // small amount up front so users at zero balance cannot start paid requests.
   app.use(
-    ['/api/ai/assistant', '/api/ai/gemini', '/api/video/match-similar-voices', '/api/video/analyze'],
+    [
+      '/api/ai/assistant',
+      '/api/ai/gemini',
+      '/api/ai/music-analysis-naming',
+      '/api/video/match-similar-voices',
+      '/api/video/analyze',
+    ],
     requireElevenLabsQuota(() => 0.1),
   );
 
@@ -4394,6 +4401,116 @@ async function startServer() {
       model: result.model,
       items: result.value.items,
     });
+  }));
+
+  app.post('/api/ai/music-analysis-naming/audio', aiUpload.array('audio', 20), asyncRoute(async (req, res) => {
+    const uploadedFiles = (req.files || []) as Express.Multer.File[];
+    if (uploadedFiles.length === 0) {
+      return res.status(400).json({ error: '请上传需要分析命名的音乐音频。' });
+    }
+    const rawMetadata = typeof req.body?.metadata === 'string'
+      ? JSON.parse(req.body.metadata || '[]')
+      : [];
+    const metadata = Array.isArray(rawMetadata) ? rawMetadata : [];
+    const totalBytes = uploadedFiles.reduce((total, file) => total + file.size, 0);
+    if (totalBytes > MAX_INLINE_MEDIA_BYTES) {
+      return res.status(413).json({ error: '音乐分析素材总量过大，请减少批量数量或使用更短的分析片段。' });
+    }
+
+    const parts: any[] = [];
+    uploadedFiles.forEach((file, index) => {
+      const item = metadata[index] || {};
+      parts.push({
+        text: `\n[音乐 ${index + 1}]
+文件名：${normalizeIdentityText(item.sourceName, 240) || file.originalname}
+时长：${Math.round(Number(item.duration) || 0)} 秒
+本地估算 BPM：${Math.round(Number(item.bpm) || 0)}
+本地估算调性：${normalizeIdentityText(item.keyName, 80) || 'Unknown'}
+本地估算能量：${normalizeIdentityText(item.energy, 40) || 'Unknown'}
+本地估算情绪：${normalizeIdentityText(item.mood, 80) || 'Unknown'}
+`,
+      });
+      parts.push({
+        inlineData: {
+          data: file.buffer.toString('base64'),
+          mimeType: file.mimetype || 'audio/mpeg',
+        },
+      });
+    });
+
+    parts.push({
+      text: `你是专业游戏音乐资产管理与音乐监督。请逐个聆听以上音乐音频，结合文件名和本地客观估算，判断每条音乐最适合的资产命名信息。
+
+分析重点：
+1. 必须真的根据音频听感判断，不要只照抄文件名或 BPM。
+2. 判断维度包括：音乐风格、情绪、编曲/主要乐器、能量、适合游戏场景、是否适合循环。
+3. 文件名里的业务语义可以作为辅助，例如 battle、victory、home、lobby、event、gift、board game、tabletop、Chinese、piano 等，但如果音频听感明显不符，要以音频为准。
+4. 如果无法可靠判断，style 返回 Review，scene 返回 Manual，confidence 返回 低，并在 reason 说明原因。
+5. namingCategory 必须是英文短标签，适合进入文件名，例如 Casual_Lobby、Battle_Battle、Chinese_Explore、Mystery_Suspense、SwingJazz_BoardGame。
+6. style 必须尽量使用这些标准标签之一：Epic、Battle、Casual、Healing、Mystery、Ambient、Electronic、Chinese、Cinematic、Orchestral、Rock、Piano、LoFi、SwingJazz、GypsyJazz、AcousticJazz、AcousticLounge、Jazz、Review。
+7. scene 必须尽量使用这些标准标签之一：Battle、Home、Lobby、Event、Gift、Puzzle、Victory、Suspense、Explore、Menu、UI、Cutscene、Reward、Store、BoardGame、Tabletop、CasualLounge、MiniGame、Manual。
+8. 每个输入都必须返回一条结果，index 从 0 开始，对应上传顺序。
+
+只返回 JSON，不要 Markdown。`,
+    });
+
+    try {
+      const ai = getGoogleAI();
+      const response = await generateGeminiContent(ai, {
+        model: GEMINI_PRIMARY_MODEL,
+        contents: [{ parts }],
+        config: {
+          responseMimeType: 'application/json',
+          maxOutputTokens: Math.min(8000, 900 + uploadedFiles.length * 260),
+          responseSchema: {
+            type: Type.OBJECT,
+            required: ['items'],
+            properties: {
+              items: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  required: ['index', 'style', 'scene', 'mood', 'namingCategory', 'confidence', 'reason'],
+                  properties: {
+                    index: { type: Type.INTEGER },
+                    style: { type: Type.STRING },
+                    scene: { type: Type.STRING },
+                    mood: { type: Type.STRING },
+                    namingCategory: { type: Type.STRING },
+                    confidence: { type: Type.STRING },
+                    reason: { type: Type.STRING },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+      const text = String(response.text || '').trim();
+      const parsed = JSON.parse(text) as {
+        items?: Array<{
+          index: number;
+          style: string;
+          scene: string;
+          mood: string;
+          namingCategory: string;
+          confidence: '高' | '中' | '低';
+          reason: string;
+        }>;
+      };
+      return res.json({
+        provider: 'gemini-audio',
+        model: response.modelVersion || GEMINI_PRIMARY_MODEL,
+        items: parsed.items || [],
+      });
+    } catch (error) {
+      if (isGeminiUnsupportedLocationError(error)) {
+        return res.status(400).json({
+          error: '当前 Gemini 音频理解 API 所在地区不支持此请求。音乐风格/场景需要真正听音频，请切换到支持 Gemini API 的网络/地区后重试。',
+        });
+      }
+      throw error;
+    }
   }));
 
   app.post('/api/ai/gemini/audio-design', asyncRoute(async (req, res) => {

@@ -36,6 +36,7 @@ interface MusicNamingItem {
   sceneCandidates?: string[];
   semanticReason?: string;
   semanticModel?: string;
+  analysisClip?: Blob;
   energy?: string;
   mood?: string;
   bassPercent?: number;
@@ -44,6 +45,7 @@ interface MusicNamingItem {
   rms?: number;
   categoryKey?: string;
   outputName?: string;
+  manualOutputName?: string;
   error?: string;
 }
 
@@ -52,8 +54,105 @@ const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 const MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
 const MINOR_PROFILE = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
 
-const STYLE_OPTIONS = ['Review', 'Epic', 'Battle', 'Casual', 'Healing', 'Mystery', 'Ambient', 'Electronic', 'Chinese', 'Cinematic', 'Orchestral', 'Rock', 'Piano', 'LoFi'];
-const SCENE_OPTIONS = ['Manual', 'Battle', 'Home', 'Lobby', 'Event', 'Gift', 'Puzzle', 'Victory', 'Suspense', 'Explore', 'Menu', 'Cutscene', 'Reward', 'Store'];
+const STYLE_OPTIONS = [
+  'Review',
+  'Epic',
+  'Battle',
+  'Casual',
+  'Healing',
+  'Mystery',
+  'Ambient',
+  'Electronic',
+  'Chinese',
+  'Cinematic',
+  'Orchestral',
+  'Rock',
+  'Piano',
+  'LoFi',
+  'SwingJazz',
+  'GypsyJazz',
+  'AcousticJazz',
+  'AcousticLounge',
+  'Jazz',
+];
+const SCENE_OPTIONS = [
+  'Manual',
+  'Battle',
+  'Home',
+  'Lobby',
+  'Event',
+  'Gift',
+  'Puzzle',
+  'Victory',
+  'Suspense',
+  'Explore',
+  'Menu',
+  'UI',
+  'Cutscene',
+  'Reward',
+  'Store',
+  'BoardGame',
+  'Tabletop',
+  'CasualLounge',
+  'MiniGame',
+];
+
+const normalizeTagToken = (value: string) => value.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '');
+
+const STYLE_ALIASES: Record<string, string> = {
+  swingjazz: 'SwingJazz',
+  swing: 'SwingJazz',
+  gypsyjazz: 'GypsyJazz',
+  acousticjazz: 'AcousticJazz',
+  acousticlounge: 'AcousticLounge',
+  casuallounge: 'AcousticLounge',
+  lounge: 'AcousticLounge',
+  jazz: 'Jazz',
+  boardgamejazz: 'SwingJazz',
+  tabletopjazz: 'SwingJazz',
+  chinese: 'Chinese',
+  oriental: 'Chinese',
+  guofeng: 'Chinese',
+  cinematic: 'Cinematic',
+  orchestral: 'Orchestral',
+  ambient: 'Ambient',
+  electronic: 'Electronic',
+  piano: 'Piano',
+  lofi: 'LoFi',
+};
+
+const SCENE_ALIASES: Record<string, string> = {
+  boardgame: 'BoardGame',
+  tabletop: 'Tabletop',
+  tablegame: 'BoardGame',
+  casualboardgame: 'BoardGame',
+  casuallobby: 'Lobby',
+  casuallounge: 'CasualLounge',
+  lounge: 'CasualLounge',
+  minigame: 'MiniGame',
+  gameui: 'UI',
+  ui: 'UI',
+  lobby: 'Lobby',
+  home: 'Home',
+  menu: 'Menu',
+  event: 'Event',
+  gift: 'Gift',
+  reward: 'Reward',
+  victory: 'Victory',
+  battle: 'Battle',
+  suspense: 'Suspense',
+  explore: 'Explore',
+};
+
+const normalizeStyleLabel = (value: string) => {
+  if (STYLE_OPTIONS.includes(value)) return value;
+  return STYLE_ALIASES[normalizeTagToken(value)] || '';
+};
+
+const normalizeSceneLabel = (value: string) => {
+  if (SCENE_OPTIONS.includes(value)) return value;
+  return SCENE_ALIASES[normalizeTagToken(value)] || '';
+};
 
 const formatBytes = (bytes: number) => {
   if (!bytes) return '0 B';
@@ -71,11 +170,22 @@ const formatDuration = (seconds = 0) => {
 const sanitizeFileNamePart = (value: string) => (
   value
     .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
-    .replace(/\s+/g, '_')
+    .replace(/[,，、\s]+/g, '_')
     .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '')
     .slice(0, 80) || 'Music'
 );
+
+const sanitizeOutputFileName = (value: string, fallbackExtension: string) => {
+  const clean = value
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 180);
+  if (!clean) return '';
+  return /\.[A-Za-z0-9]{2,5}$/.test(clean) ? clean : `${clean}.${fallbackExtension}`;
+};
 
 const getFilePath = (file: File) => ((file as any).webkitRelativePath || file.name).replace(/\\/g, '/');
 const isAudioFile = (file: File) => file.type.startsWith('audio/') || AUDIO_FILE_EXTENSION_REGEX.test(file.name);
@@ -250,6 +360,51 @@ const analyzeSpectrum = (mono: Float32Array, sampleRate: number) => {
   };
 };
 
+const createMusicAnalysisClip = (buffer: AudioBuffer, maxSeconds = 36, targetSampleRate = 16000) => {
+  const segmentCount = buffer.duration > maxSeconds ? 3 : 1;
+  const segmentDuration = Math.min(buffer.duration, maxSeconds) / segmentCount;
+  const segmentStarts = segmentCount === 1
+    ? [0]
+    : [
+        0,
+        Math.max(0, (buffer.duration - segmentDuration) / 2),
+        Math.max(0, buffer.duration - segmentDuration),
+      ];
+  const frameCount = Math.max(1, Math.floor(segmentDuration * segmentStarts.length * targetSampleRate));
+  const wavBuffer = new ArrayBuffer(44 + frameCount * 2);
+  const view = new DataView(wavBuffer);
+  const writeString = (offset: number, value: string) => {
+    for (let i = 0; i < value.length; i += 1) view.setUint8(offset + i, value.charCodeAt(i));
+  };
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + frameCount * 2, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, targetSampleRate, true);
+  view.setUint32(28, targetSampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, frameCount * 2, true);
+
+  const channels = Array.from({ length: Math.min(buffer.numberOfChannels, 2) }, (_, index) => buffer.getChannelData(index));
+  for (let i = 0; i < frameCount; i += 1) {
+    const outputSeconds = i / targetSampleRate;
+    const segmentIndex = Math.min(segmentStarts.length - 1, Math.floor(outputSeconds / segmentDuration));
+    const segmentOffsetSeconds = outputSeconds - segmentIndex * segmentDuration;
+    const sourceSeconds = segmentStarts[segmentIndex] + segmentOffsetSeconds;
+    const sourceIndex = Math.min(buffer.length - 1, Math.floor(sourceSeconds * buffer.sampleRate));
+    const sample = channels.reduce((sum, channel) => sum + (channel[sourceIndex] || 0), 0) / Math.max(channels.length, 1);
+    const clamped = Math.max(-1, Math.min(1, sample));
+    view.setInt16(44 + i * 2, clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF, true);
+  }
+
+  return new Blob([view], { type: 'audio/wav' });
+};
+
 const addScore = (scores: Map<string, number>, key: string, amount: number) => {
   scores.set(key, (scores.get(key) || 0) + amount);
 };
@@ -381,40 +536,40 @@ const analyzeMusicFile = async (file: File) => {
     midPercent: profile.midPercent,
     highPercent: profile.highPercent,
     rms: profile.rms,
+    analysisClip: createMusicAnalysisClip(buffer),
     ...tags,
   };
 };
 
-const requestSemanticMusicNaming = async (items: MusicNamingItem[]) => {
-  const response = await fetch('/api/ai/music-analysis-naming', {
+const requestAudioSemanticMusicNaming = async (items: MusicNamingItem[]) => {
+  const formData = new FormData();
+  formData.append('metadata', JSON.stringify(items.map((item, index) => ({
+    index,
+    sourceName: item.sourcePath || item.file.name,
+    duration: item.duration,
+    bpm: item.bpm,
+    keyName: item.keyName,
+    keyConfidence: item.keyConfidence,
+    energy: item.energy,
+    mood: item.mood,
+  }))));
+  items.forEach((item, index) => {
+    if (!item.analysisClip) throw new Error('缺少音乐分析片段，请重新分析音频。');
+    formData.append('audio', item.analysisClip, `${index + 1}-${item.file.name.replace(/\.[^/.]+$/, '') || 'music'}-analysis.wav`);
+  });
+
+  const response = await fetch('/api/ai/music-analysis-naming/audio', {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
       Accept: 'application/json',
     },
-    body: JSON.stringify({
-      items: items.map((item, index) => ({
-        index,
-        sourceName: item.sourcePath || item.file.name,
-        duration: item.duration,
-        bpm: item.bpm,
-        keyName: item.keyName,
-        keyConfidence: item.keyConfidence,
-        energy: item.energy,
-        mood: item.mood,
-        bassPercent: item.bassPercent,
-        midPercent: item.midPercent,
-        highPercent: item.highPercent,
-        rms: item.rms,
-      })),
-    }),
+    body: formData,
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
     throw new Error(payload?.error || `音乐语义分析失败（${response.status}）。`);
   }
   return payload as {
-    provider?: string;
     model?: string;
     items?: Array<{
       index: number;
@@ -467,8 +622,7 @@ export default function MusicAnalysisNaming() {
   const [exporting, setExporting] = useState(false);
   const [status, setStatus] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [numberStart, setNumberStart] = useState(1);
-  const [numberPadding, setNumberPadding] = useState(3);
+  const [startCode, setStartCode] = useState('001');
   const [numberSeparator, setNumberSeparator] = useState('_');
   const inputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
@@ -497,10 +651,33 @@ export default function MusicAnalysisNaming() {
     })));
   };
 
+  const clearGeneratedNaming = (item: MusicNamingItem): MusicNamingItem => ({
+    ...item,
+    style: undefined,
+    scene: undefined,
+    styleConfidence: undefined,
+    sceneConfidence: undefined,
+    styleCandidates: undefined,
+    sceneCandidates: undefined,
+    semanticReason: undefined,
+    semanticModel: undefined,
+    categoryKey: undefined,
+    outputName: undefined,
+  });
+
   const buildOutputNames = (sourceItems: MusicNamingItem[]) => {
     const counters = new Map<string, number>();
+    const cleanStartCode = startCode.replace(/\D/g, '') || '001';
+    const numberStart = Math.max(1, Number(cleanStartCode) || 1);
+    const numberPadding = Math.min(6, Math.max(1, cleanStartCode.length));
     return sourceItems.map((item) => {
-      if (item.status !== 'done') return item;
+      if (item.status !== 'done') {
+        return {
+          ...item,
+          categoryKey: undefined,
+          outputName: undefined,
+        };
+      }
       const style = sanitizeFileNamePart(item.style || 'Music');
       const scene = sanitizeFileNamePart(item.scene || 'Scene');
       const key = sanitizeFileNamePart((item.keyName || 'UnknownKey').replace(/\s+/g, ''));
@@ -509,15 +686,17 @@ export default function MusicAnalysisNaming() {
       const nextNumber = counters.get(categoryKey) ?? numberStart;
       counters.set(categoryKey, nextNumber + 1);
       const prefix = String(nextNumber).padStart(numberPadding, '0');
+      const automaticOutputName = `${prefix}${numberSeparator}${style}_${scene}_${key}_${bpm}BPM.${getExtension(item.file.name)}`;
+      const manualOutputName = sanitizeOutputFileName(item.manualOutputName || '', getExtension(item.file.name));
       return {
         ...item,
         categoryKey,
-        outputName: `${prefix}${numberSeparator}${style}_${scene}_${key}_${bpm}BPM.${getExtension(item.file.name)}`,
+        outputName: manualOutputName || automaticOutputName,
       };
     });
   };
 
-  const previewItems = useMemo(() => buildOutputNames(items), [items, numberPadding, numberSeparator, numberStart]);
+  const previewItems = useMemo(() => buildOutputNames(items), [items, numberSeparator, startCode]);
   const doneCount = previewItems.filter(item => item.status === 'done').length;
 
   const analyzeAll = async () => {
@@ -525,7 +704,12 @@ export default function MusicAnalysisNaming() {
     setAnalyzing(true);
     setError(null);
     setStatus(`正在分析 1/${items.length}...`);
-    let nextItems = items.map(item => ({ ...item, status: 'pending' as const, progress: 0, error: undefined }));
+    let nextItems = items.map(item => ({
+      ...clearGeneratedNaming(item),
+      status: 'pending' as const,
+      progress: 0,
+      error: undefined,
+    }));
     setItems(nextItems);
 
     for (let index = 0; index < nextItems.length; index += 1) {
@@ -538,8 +722,8 @@ export default function MusicAnalysisNaming() {
         nextItems = nextItems.map(item => item.id === target.id ? {
           ...item,
           ...result,
-          status: 'done',
-          progress: 100,
+          status: 'analyzing',
+          progress: 70,
         } : item);
       } catch (reason: any) {
         nextItems = nextItems.map(item => item.id === target.id ? {
@@ -554,35 +738,58 @@ export default function MusicAnalysisNaming() {
     }
 
     setItems(buildOutputNames(nextItems));
-    const doneItems = buildOutputNames(nextItems).filter(item => item.status === 'done');
-    if (doneItems.length > 0) {
+    const locallyAnalyzedItems = nextItems.filter(item => item.status === 'analyzing' && item.analysisClip);
+    if (locallyAnalyzedItems.length > 0) {
       try {
-        setStatus(`本地参数分析完成，正在调用 API 判断风格和适合场景...`);
-        const semanticResult = await requestSemanticMusicNaming(doneItems);
+        setStatus(`本地参数分析完成，正在上传音频片段给 API 听音分析...`);
+        const semanticResult = await requestAudioSemanticMusicNaming(locallyAnalyzedItems);
         const semanticByOriginalIndex = new Map<number, NonNullable<typeof semanticResult.items>[number]>();
         (semanticResult.items || []).forEach(item => semanticByOriginalIndex.set(item.index, item));
         let doneIndex = 0;
         nextItems = nextItems.map((item) => {
-          if (item.status !== 'done') return item;
+          if (item.status !== 'analyzing' || !item.analysisClip) return item;
           const semantic = semanticByOriginalIndex.get(doneIndex);
           doneIndex += 1;
-          if (!semantic) return item;
+          if (!semantic) {
+            return {
+              ...item,
+              status: 'error',
+              progress: 0,
+              error: 'API 未返回该音乐的风格/场景分析结果。',
+            };
+          }
+          const normalizedStyle = normalizeStyleLabel(semantic.style);
+          const normalizedScene = normalizeSceneLabel(semantic.scene);
+          const categoryParts = String(semantic.namingCategory || '')
+            .split(/[_\s/-]+/)
+            .filter(Boolean);
+          const categoryStyle = normalizedStyle || normalizeStyleLabel(categoryParts[0] || '');
+          const categoryScene = normalizedScene || normalizeSceneLabel(categoryParts.slice(1).join(' ') || categoryParts[1] || '');
           return {
             ...item,
-            style: semantic.style || item.style,
-            scene: semantic.scene || item.scene,
+            status: 'done',
+            progress: 100,
+            style: categoryStyle || 'Review',
+            scene: categoryScene || 'Manual',
             mood: semantic.mood || item.mood,
             styleConfidence: semantic.confidence,
             sceneConfidence: semantic.confidence,
-            styleCandidates: [semantic.style].filter(Boolean),
-            sceneCandidates: [semantic.scene].filter(Boolean),
+            styleCandidates: [semantic.style, categoryStyle].filter(Boolean),
+            sceneCandidates: [semantic.scene, categoryScene].filter(Boolean),
             semanticReason: semantic.reason,
             semanticModel: semanticResult.model,
           };
         });
         setItems(buildOutputNames(nextItems));
-        setStatus(`API 分析完成：${doneItems.length}/${nextItems.length} 个文件已生成语义命名。`);
+        const semanticDoneCount = nextItems.filter(item => item.status === 'done').length;
+        setStatus(`API 分析完成：${semanticDoneCount}/${nextItems.length} 个文件已生成语义命名。`);
       } catch (reason: any) {
+        nextItems = nextItems.map(item => item.status === 'analyzing' ? {
+          ...item,
+          status: 'error',
+          progress: 0,
+          error: reason?.message || 'API 风格/场景分析失败。',
+        } : item);
         setItems(buildOutputNames(nextItems));
         setError(reason?.message || 'API 风格/场景分析失败。');
         setStatus('本地 BPM/调式已完成，但风格/场景 API 分析失败；请配置 API 后重新分析。');
@@ -656,28 +863,19 @@ export default function MusicAnalysisNaming() {
           <div>
             <h2 className="text-lg font-black text-slate-900">音乐分析命名</h2>
             <p className="mt-1 max-w-2xl text-xs leading-relaxed text-slate-500">
-              批量或单个上传音乐后，本地分析 BPM、调式、风格与适合场景，并把分析结果作为新文件名。相同类别会自动在前方加序号，序号起始区间可手动设置。
+              批量或单个上传音乐后，本地分析 BPM、调式、风格与适合场景，并把分析结果作为新文件名。相同类别会自动在前方加序号，默认从 001 开始。
             </p>
           </div>
-          <div className="grid grid-cols-3 gap-2 rounded-2xl border border-slate-100 bg-slate-50 p-2 text-[10px] font-bold text-slate-500">
+          <div className="grid grid-cols-2 gap-2 rounded-2xl border border-slate-100 bg-slate-50 p-2 text-[10px] font-bold text-slate-500">
             <label className="space-y-1">
-              <span>起始序号</span>
+              <span>起始编号</span>
               <input
-                type="number"
-                min={1}
-                value={numberStart}
-                onChange={(event) => setNumberStart(Math.max(1, Number(event.target.value) || 1))}
-                className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-800 outline-none focus:border-emerald-400"
-              />
-            </label>
-            <label className="space-y-1">
-              <span>位数</span>
-              <input
-                type="number"
-                min={1}
-                max={6}
-                value={numberPadding}
-                onChange={(event) => setNumberPadding(Math.max(1, Math.min(6, Number(event.target.value) || 3)))}
+                inputMode="numeric"
+                value={startCode}
+                onChange={(event) => {
+                  const nextCode = event.target.value.replace(/\D/g, '').slice(0, 6);
+                  setStartCode(nextCode || '001');
+                }}
                 className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-800 outline-none focus:border-emerald-400"
               />
             </label>
@@ -768,7 +966,6 @@ export default function MusicAnalysisNaming() {
         <div className="mt-5 flex flex-col gap-3 rounded-2xl border border-slate-100 bg-slate-50 p-4 md:flex-row md:items-center md:justify-between">
           <div className="text-xs text-slate-500">
             <span className="font-black text-slate-800">{items.length}</span> 个文件 · 已生成 <span className="font-black text-emerald-700">{doneCount}</span> 个命名
-            {status && <p className="mt-1 text-[11px] font-semibold text-slate-500">{status}</p>}
             {error && <p className="mt-1 flex items-center gap-1 text-[11px] font-bold text-rose-600"><AlertCircle className="h-3.5 w-3.5" />{error}</p>}
           </div>
           <div className="flex flex-wrap gap-2">
@@ -807,7 +1004,7 @@ export default function MusicAnalysisNaming() {
           <div>
             <h3 className="text-sm font-black text-slate-900">分析命名预览</h3>
             <p className="mt-1 text-[11px] text-slate-500">
-              风格和适合场景会显示候选与置信度；低置信度时默认标为 Review / Manual，建议人工确认后再导出。
+              AI 会先给建议；风格、场景和新文件名都可以手动改。风格/场景支持填写多个标签，用逗号或空格分隔。
             </p>
           </div>
         </div>
@@ -819,18 +1016,24 @@ export default function MusicAnalysisNaming() {
             <p className="mt-1 text-xs text-slate-400">上传后会在这里显示 BPM、调式、风格、场景和新文件名。</p>
           </div>
         ) : (
-          <div className="overflow-hidden rounded-2xl border border-slate-100">
-            <div className="grid grid-cols-[1.3fr_0.7fr_0.7fr_0.8fr_0.8fr_1.8fr] gap-3 bg-slate-50 px-4 py-3 text-[10px] font-black uppercase tracking-wide text-slate-400">
-              <span>原文件</span>
+          <div className="overflow-x-auto rounded-2xl border border-slate-100">
+            <datalist id="music-style-suggestions">
+              {STYLE_OPTIONS.map(option => <option key={option} value={option} />)}
+            </datalist>
+            <datalist id="music-scene-suggestions">
+              {SCENE_OPTIONS.map(option => <option key={option} value={option} />)}
+            </datalist>
+            <div className="grid min-w-[820px] grid-cols-[minmax(190px,1fr)_82px_82px_120px_120px_180px] gap-3 bg-slate-50 px-4 py-3 text-[10px] font-black uppercase tracking-wide text-slate-400">
+              <span className="pl-6">原文件</span>
               <span>BPM / 调式</span>
               <span>能量情绪</span>
-              <span>风格</span>
-              <span>场景</span>
-              <span>新文件名</span>
+              <span className="px-2">风格</span>
+              <span className="px-2">场景</span>
+              <span className="px-3">新文件名</span>
             </div>
             <div className="divide-y divide-slate-100">
               {previewItems.map((item) => (
-                <div key={item.id} className="grid grid-cols-[1.3fr_0.7fr_0.7fr_0.8fr_0.8fr_1.8fr] gap-3 px-4 py-3 text-xs">
+                <div key={item.id} className="grid min-w-[820px] grid-cols-[minmax(190px,1fr)_82px_82px_120px_120px_180px] gap-3 px-4 py-3 text-xs">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <FileAudio className="h-4 w-4 shrink-0 text-emerald-600" />
@@ -850,36 +1053,54 @@ export default function MusicAnalysisNaming() {
                     )}
                   </div>
                   <div className="text-slate-600">
-                    <p className="font-bold">{item.energy || '-'}</p>
-                    <p className="text-[10px] text-slate-400">{item.mood || '-'}</p>
+                    {item.status === 'done' ? (
+                      <>
+                        <p className="font-bold">{item.energy || '-'}</p>
+                        <p className="text-[10px] text-slate-400">{item.mood || '-'}</p>
+                      </>
+                    ) : (
+                      <span className="text-slate-300">—</span>
+                    )}
                   </div>
-                  <select
-                    value={item.style || ''}
+                  <input
+                    value={item.status === 'done' ? (item.style || '') : ''}
                     disabled={item.status !== 'done'}
                     onChange={(event) => updateItem(item.id, { style: event.target.value })}
-                    className="h-9 rounded-xl border border-slate-200 bg-white px-2 text-xs font-bold text-slate-700 outline-none disabled:bg-slate-50 disabled:text-slate-300"
-                  >
-                    <option value="">-</option>
-                    {STYLE_OPTIONS.map(option => <option key={option} value={option}>{option}</option>)}
-                  </select>
-                  <select
-                    value={item.scene || ''}
+                    list="music-style-suggestions"
+                    placeholder={item.status === 'done' ? '可填多个风格' : ''}
+                    className="h-9 w-full rounded-xl border border-slate-200 bg-white px-2 text-xs font-bold text-slate-700 outline-none focus:border-emerald-400 disabled:bg-slate-50 disabled:text-slate-300"
+                  />
+                  <input
+                    value={item.status === 'done' ? (item.scene || '') : ''}
                     disabled={item.status !== 'done'}
                     onChange={(event) => updateItem(item.id, { scene: event.target.value })}
-                    className="h-9 rounded-xl border border-slate-200 bg-white px-2 text-xs font-bold text-slate-700 outline-none disabled:bg-slate-50 disabled:text-slate-300"
-                  >
-                    <option value="">-</option>
-                    {SCENE_OPTIONS.map(option => <option key={option} value={option}>{option}</option>)}
-                  </select>
+                    list="music-scene-suggestions"
+                    placeholder={item.status === 'done' ? '可填多个场景' : ''}
+                    className="h-9 w-full rounded-xl border border-slate-200 bg-white px-2 text-xs font-bold text-slate-700 outline-none focus:border-emerald-400 disabled:bg-slate-50 disabled:text-slate-300"
+                  />
                   <div className="min-w-0">
                     {item.status === 'done' && (
-                      <p className="mb-1 truncate text-[10px] font-bold text-slate-400" title={`风格候选：${item.styleCandidates?.join(' / ') || '-'}；场景候选：${item.sceneCandidates?.join(' / ') || '-'}`}>
-                        {item.semanticModel ? 'API' : '本地'} · 风格{item.styleConfidence}置信 · 场景{item.sceneConfidence}置信
+                      <p className="mb-1 truncate px-3 text-[10px] font-bold text-slate-400" title={`风格候选：${item.styleCandidates?.join(' / ') || '-'}；场景候选：${item.sceneCandidates?.join(' / ') || '-'}`}>
+                        风格{item.styleConfidence}置信 · 场景{item.sceneConfidence}置信
                       </p>
                     )}
-                    <p className="truncate rounded-xl bg-slate-50 px-3 py-2 font-mono text-[11px] font-bold text-slate-700" title={item.outputName}>
-                      {item.outputName || '分析后生成'}
-                    </p>
+                    <input
+                      value={item.status === 'done' ? (item.manualOutputName ?? item.outputName ?? '') : ''}
+                      disabled={item.status !== 'done'}
+                      onChange={(event) => updateItem(item.id, { manualOutputName: event.target.value })}
+                      placeholder={item.status === 'done' ? '分析后生成，可手动修改' : ''}
+                      className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-[11px] font-bold text-slate-700 outline-none focus:border-emerald-400 focus:bg-white disabled:text-slate-400"
+                      title={item.outputName}
+                    />
+                    {item.manualOutputName && (
+                      <button
+                        type="button"
+                        onClick={() => updateItem(item.id, { manualOutputName: '' })}
+                        className="mt-1 text-[10px] font-bold text-slate-400 hover:text-emerald-700"
+                      >
+                        恢复自动命名
+                      </button>
+                    )}
                     {item.status === 'done' && (
                       <p className="mt-1 flex items-center gap-1 truncate text-[10px] font-bold text-emerald-600" title={item.semanticReason || `类别：${item.categoryKey}`}>
                         <CheckCircle2 className="h-3 w-3 shrink-0" />{item.semanticReason || `类别：${item.categoryKey}`}

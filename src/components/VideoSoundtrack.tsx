@@ -167,6 +167,12 @@ type DubbingTrackGenerationJob = {
   completed: number;
   failed: number;
 };
+type SfxTrackGenerationJob = {
+  trackId: string;
+  total: number;
+  completed: number;
+  failed: number;
+};
 type OriginalAudioSplitSegmentRequest = {
   id: string;
   startTime: number;
@@ -1104,8 +1110,10 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
   // AI analysis and mixing status
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
   const [analyzingTrackId, setAnalyzingTrackId] = useState<'bgm' | 'sfx' | 'dubbing' | null>(null);
+  const [sfxTrackGenerationJob, setSfxTrackGenerationJob] = useState<SfxTrackGenerationJob | null>(null);
   const [dubbingTrackGenerationJob, setDubbingTrackGenerationJob] = useState<DubbingTrackGenerationJob | null>(null);
   const [dubbingTrackRegenerationConfirmId, setDubbingTrackRegenerationConfirmId] = useState<string | null>(null);
+  const sfxTrackGenerationLockRef = useRef(false);
   const dubbingTrackGenerationLockRef = useRef(false);
   const dubbingTrackRegenerationConfirmTimeoutRef = useRef<number | null>(null);
   const [analysisStage, setAnalysisStage] = useState<string>('准备解析画面...');
@@ -3578,6 +3586,16 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
   const selectedTrackIsSplitAudioTrack = selectedTrack?.id === SPLIT_VOCAL_TRACK_ID;
   const selectedTrackShowsVoiceLibrary = selectedTrack?.type === 'dubbing'
     && !selectedTrackIsSplitAudioTrack;
+  const selectedSfxTrackClips = selectedTrack?.type === 'sfx'
+    ? clips.filter(clip => clip.trackId === selectedTrack.id && !isOriginalAudioClip(clip))
+    : [];
+  const selectedSfxTrackPendingClips = selectedSfxTrackClips.filter(clip => (
+    !clip.audioUrl || Boolean(clip.error)
+  ));
+  const selectedSfxTrackJob = selectedTrack?.type === 'sfx'
+    && sfxTrackGenerationJob?.trackId === selectedTrack.id
+    ? sfxTrackGenerationJob
+    : null;
   const selectedDubbingTrackClips = selectedTrackShowsVoiceLibrary
     ? clips.filter(clip => clip.trackId === selectedTrack.id && !isOriginalAudioClip(clip))
     : [];
@@ -3589,7 +3607,10 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
     ? dubbingTrackGenerationJob
     : null;
   const selectedClipTrackGenerationRunning = Boolean(
-    selectedClip && dubbingTrackGenerationJob?.trackId === selectedClip.trackId,
+    selectedClip && (
+      dubbingTrackGenerationJob?.trackId === selectedClip.trackId
+      || sfxTrackGenerationJob?.trackId === selectedClip.trackId
+    ),
   );
   const hasOriginalAudioClip = clips.some(clip => (
     clip.trackId === ORIGINAL_AUDIO_TRACK_ID && Boolean(clip.audioUrl)
@@ -5730,6 +5751,75 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
         }, 4500);
       }
       return false;
+    }
+  };
+
+  const handleGenerateSfxTrack = async (trackId: string) => {
+    if (sfxTrackGenerationLockRef.current) return;
+
+    const track = tracksRef.current.find(item => item.id === trackId);
+    if (!track || track.type !== 'sfx') return;
+
+    const trackClips = clipsRef.current
+      .filter(clip => clip.trackId === trackId && !isOriginalAudioClip(clip))
+      .sort((a, b) => a.startTime - b.startTime);
+
+    if (trackClips.length === 0) {
+      setToast({ message: `“${track.name}”还没有可生成的音效片段。`, type: 'info' });
+      window.setTimeout(() => setToast(null), 3_000);
+      return;
+    }
+
+    if (trackClips.some(clip => clip.isGenerating)) {
+      setToast({ message: `“${track.name}”已有片段正在生成，请完成后再执行整轨操作。`, type: 'info' });
+      window.setTimeout(() => setToast(null), 3_000);
+      return;
+    }
+
+    const candidates = trackClips.filter(clip => !clip.audioUrl || Boolean(clip.error));
+    if (candidates.length === 0) {
+      setToast({ message: `“${track.name}”的全部音效片段均已生成，无需重复扣分。`, type: 'success' });
+      window.setTimeout(() => setToast(null), 3_000);
+      return;
+    }
+
+    sfxTrackGenerationLockRef.current = true;
+    setSfxTrackGenerationJob({
+      trackId,
+      total: candidates.length,
+      completed: 0,
+      failed: 0,
+    });
+
+    let completed = 0;
+    let failed = 0;
+    try {
+      setToast({
+        message: `正在生成“${track.name}”的 ${candidates.length} 个音效片段...`,
+        type: 'info',
+      });
+
+      for (const clip of candidates) {
+        const succeeded = await handleGenerateAudioClip(clip.id, { suppressToast: true });
+        if (succeeded) completed += 1;
+        else failed += 1;
+        setSfxTrackGenerationJob(current => current?.trackId === trackId
+          ? { ...current, completed, failed }
+          : current);
+      }
+
+      setToast({
+        message: failed > 0
+          ? `“${track.name}”批量生成完成：成功 ${completed} 个，失败 ${failed} 个。可再次点击重试失败片段。`
+          : `“${track.name}”的 ${completed} 个音效片段已全部生成完成。`,
+        type: failed > 0 ? 'info' : 'success',
+      });
+      window.setTimeout(() => {
+        setToast(current => current?.message.includes(track.name) ? null : current);
+      }, 5_000);
+    } finally {
+      sfxTrackGenerationLockRef.current = false;
+      setSfxTrackGenerationJob(null);
     }
   };
 
@@ -8771,7 +8861,89 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                     )}
 
                     {selectedTrack.type === 'sfx' && (
-                      <div className="space-y-2 rounded-xl border border-sky-500/25 bg-sky-950/15 p-3">
+                      <div className="space-y-3">
+                        <div
+                          data-testid={`sfx-track-batch-controls-${selectedTrack.id}`}
+                          className="space-y-3 rounded-xl border border-sky-500/30 bg-sky-950/25 p-3"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="text-[10px] font-bold uppercase tracking-wider text-sky-300">整轨音效生成</p>
+                              <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
+                                按时间顺序逐个生成当前轨道中尚未完成或失败的音效片段。
+                              </p>
+                            </div>
+                            <Waves className="h-5 w-5 shrink-0 text-sky-400" />
+                          </div>
+
+                          <div className="flex items-center justify-between rounded-lg border border-sky-500/15 bg-slate-950/50 px-2.5 py-2 text-[9px] font-bold">
+                            <span className="text-slate-500">片段总数 {selectedSfxTrackClips.length}</span>
+                            <span className={selectedSfxTrackPendingClips.length > 0 ? 'text-amber-300' : 'text-emerald-300'}>
+                              {selectedSfxTrackPendingClips.length > 0
+                                ? `待生成 ${selectedSfxTrackPendingClips.length}`
+                                : selectedSfxTrackClips.length > 0 ? '全部已完成' : '暂无片段'}
+                            </span>
+                          </div>
+
+                          {selectedSfxTrackJob && (
+                            <div data-testid={`sfx-track-generation-progress-${selectedTrack.id}`} className="space-y-1.5">
+                              <div className="flex items-center justify-between text-[9px] font-bold text-sky-200">
+                                <span>正在批量生成音效</span>
+                                <span>{selectedSfxTrackJob.completed + selectedSfxTrackJob.failed}/{selectedSfxTrackJob.total}</span>
+                              </div>
+                              <div className="h-1.5 overflow-hidden rounded-full bg-slate-900">
+                                <div
+                                  className="h-full rounded-full bg-sky-500 transition-[width] duration-300"
+                                  style={{
+                                    width: `${Math.round(
+                                      ((selectedSfxTrackJob.completed + selectedSfxTrackJob.failed)
+                                        / Math.max(1, selectedSfxTrackJob.total)) * 100,
+                                    )}%`,
+                                  }}
+                                />
+                              </div>
+                              {selectedSfxTrackJob.failed > 0 && (
+                                <p className="text-[9px] text-amber-300">已有 {selectedSfxTrackJob.failed} 个片段失败，队列会继续处理其余片段。</p>
+                              )}
+                            </div>
+                          )}
+
+                          {selectedSfxTrackPendingClips.length > 0 && (
+                            <div className="flex justify-end">
+                              <PointCostHint
+                                kind="sound-effect"
+                                durationSeconds={selectedSfxTrackPendingClips.reduce((total, clip) => total + clip.duration, 0)}
+                                className="text-amber-300"
+                              />
+                            </div>
+                          )}
+
+                          <button
+                            type="button"
+                            data-testid={`generate-sfx-track-${selectedTrack.id}`}
+                            onClick={() => void handleGenerateSfxTrack(selectedTrack.id)}
+                            disabled={
+                              Boolean(sfxTrackGenerationJob)
+                              || selectedSfxTrackClips.length === 0
+                              || selectedSfxTrackPendingClips.length === 0
+                              || selectedSfxTrackClips.some(clip => clip.isGenerating)
+                            }
+                            aria-label={`一键生成${selectedTrack.name}所有音效片段`}
+                            title={selectedSfxTrackPendingClips.length > 0
+                              ? `生成 ${selectedSfxTrackPendingClips.length} 个尚未完成或失败的音效片段`
+                              : '本轨全部音效片段均已完成'}
+                            className="flex h-9 w-full items-center justify-center gap-1.5 rounded-lg bg-sky-600 px-3 text-[10px] font-bold text-white shadow-sm shadow-sky-950/40 transition-colors hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-45"
+                          >
+                            {selectedSfxTrackJob ? (
+                              <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                            ) : (
+                              <Sparkles className="h-3.5 w-3.5 shrink-0" />
+                            )}
+                            <span>{selectedSfxTrackJob ? '正在生成音效片段...' : '一键生成所有音效片段'}</span>
+                          </button>
+                        </div>
+
+                        <div className="space-y-2 rounded-xl border border-sky-500/25 bg-sky-950/15 p-3">
                         <div className="flex justify-end">
                           <PointCostHint kind="token" className="text-amber-300" />
                         </div>
@@ -8793,6 +8965,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                           {analyzingTrackId === 'sfx' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
                           <span>{analyzingTrackId === 'sfx' ? '正在重新分析音效轨...' : '重新分析音效轨'}</span>
                         </button>
+                        </div>
                       </div>
                     )}
 
