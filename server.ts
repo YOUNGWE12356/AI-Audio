@@ -208,6 +208,7 @@ async function startServer() {
   const resolveUsageFeature = (req: express.Request) => {
     const endpoint = req.path;
     if (endpoint.includes('/assistant/plan')) return '智能助手 · GPT 任务规划';
+    if (endpoint.includes('/audio-analysis/semantic')) return '音频工具 · 音频分析';
     if (endpoint.includes('/music-analysis-naming')) return '音频工具 · 音乐分析命名';
     if (endpoint.includes('/audio-design')) return 'AI 音频设计';
     if (endpoint.includes('/regenerate-lyrics') || endpoint.includes('/generate-lyrics')) return 'AI 音乐 · 歌词生成';
@@ -237,11 +238,15 @@ async function startServer() {
 
   app.use((req, res, next) => {
     const endpoint = req.path;
-    usageRequestContext.run({
+    const context: UsageRequestContext = {
       feature: resolveUsageFeature(req),
       endpoint,
       ...resolveUsageActor(req, res),
-    }, next);
+    };
+    // Multipart parsers may resume callbacks outside the original async context.
+    // Keep the verified request context on the response so routes can re-enter it.
+    res.locals.aiUsageContext = context;
+    usageRequestContext.run(context, next);
   });
 
   // Directories paths
@@ -860,6 +865,7 @@ async function startServer() {
     [
       '/api/ai/assistant',
       '/api/ai/gemini',
+      '/api/ai/audio-analysis',
       '/api/ai/music-analysis-naming',
       '/api/video/match-similar-voices',
       '/api/video/analyze',
@@ -4456,7 +4462,8 @@ async function startServer() {
 
     try {
       const ai = getGoogleAI();
-      const response = await generateGeminiContent(ai, {
+      const requestUsageContext = res.locals.aiUsageContext as UsageRequestContext;
+      const response = await usageRequestContext.run(requestUsageContext, () => generateGeminiContent(ai, {
         model: GEMINI_PRIMARY_MODEL,
         contents: [{ parts }],
         config: {
@@ -4485,7 +4492,7 @@ async function startServer() {
             },
           },
         },
-      });
+      }));
       const text = String(response.text || '').trim();
       const parsed = JSON.parse(text) as {
         items?: Array<{
@@ -4507,6 +4514,137 @@ async function startServer() {
       if (isGeminiUnsupportedLocationError(error)) {
         return res.status(400).json({
           error: '当前 Gemini 音频理解 API 所在地区不支持此请求。音乐风格/场景需要真正听音频，请切换到支持 Gemini API 的网络/地区后重试。',
+        });
+      }
+      throw error;
+    }
+  }));
+
+  app.post('/api/ai/audio-analysis/semantic', aiUpload.single('audio'), asyncRoute(async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ error: '请上传需要进行全球风格与调式分析的音频片段。' });
+    }
+    if (req.file.size > MAX_INLINE_MEDIA_BYTES) {
+      return res.status(413).json({ error: '音频分析片段过大，请缩短后重试。' });
+    }
+
+    let metadata: Record<string, unknown> = {};
+    if (typeof req.body?.metadata === 'string') {
+      try {
+        const parsed = JSON.parse(req.body.metadata);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) metadata = parsed;
+      } catch {
+        return res.status(400).json({ error: '音频分析元数据格式无效。' });
+      }
+    }
+
+    const localSummary = {
+      sourceName: normalizeIdentityText(metadata.sourceName, 240) || req.file.originalname,
+      duration: Math.max(0, Number(metadata.duration) || 0),
+      bpm: Math.max(0, Number(metadata.bpm) || 0),
+      keyName: normalizeIdentityText(metadata.keyName, 80) || 'Unknown',
+      localMode: normalizeIdentityText(metadata.localMode, 120) || 'Unknown',
+      localModeConfidence: normalizeIdentityText(metadata.localModeConfidence, 20) || 'Unknown',
+    };
+
+    const parts = [
+      {
+        text: `你是世界音乐学、民族音乐学、调式理论与音乐信息检索专家。请真正聆听随后提供的音频片段，并结合本地 DSP 数据进行开放词汇分析。\n\n本地客观估算（只作辅助，不可盲从）：\n${JSON.stringify(localSummary, null, 2)}`,
+      },
+      {
+        inlineData: {
+          data: req.file.buffer.toString('base64'),
+          mimeType: req.file.mimetype || 'audio/wav',
+        },
+      },
+      {
+        text: `分析要求：
+1. 不使用封闭标签表。primaryStyle、subStyles 可以返回世界上任何音乐风格、子风格、融合风格或当地称谓，例如但不限于各地区传统、古典体系、流行分支、电子子类型、游戏与影视配乐语言。
+2. 必须严格区分“风格/子风格”“地域或文化传统”“调式/音阶体系”“具体调式名称”“主音”和“律制”。不要把乐器名、场景或情绪误当风格。
+3. 调式允许返回任意全球体系，例如西方教会调式与旋律/和声小调体系、印度 Raga、阿拉伯/土耳其/波斯 Maqam/Dastgah/Makam、中国民族调式、日本调式、东南亚音阶、非洲与其他民族音阶，以及微分音体系。不得强行映射为 Major/Minor。
+4. 仅凭短片无法区分具体 Raga、Maqam、转调或微分音时，相关字段写“不确定”，confidence 返回“低”，alternatives 给出最多 4 个合理候选并说明区分所需证据。
+5. 若音频存在多种风格或调式，请 primaryStyle 写最主要者，subStyles 和 alternatives 保留其他可信候选。
+6. reason 用中文，简明说明听觉证据（节奏、配器、旋律进行、特征音、终止式、律制或微分音），不得只复述文件名或本地估算。
+7. microtonal 只能返回“是”“否”或“不确定”。confidence 只能返回“高”“中”或“低”。
+8. 所有命名优先使用中文通用名；必要时在同一字段附原文/英文名。证据不足时宁可返回“不确定”，不要猜测。
+
+只返回符合 Schema 的 JSON，不要 Markdown。`,
+      },
+    ];
+
+    try {
+      const ai = getGoogleAI();
+      const requestUsageContext = res.locals.aiUsageContext as UsageRequestContext;
+      const response = await usageRequestContext.run(requestUsageContext, () => generateGeminiContent(ai, {
+        model: GEMINI_PRIMARY_MODEL,
+        contents: [{ parts }],
+        config: {
+          responseMimeType: 'application/json',
+          maxOutputTokens: 2400,
+          responseSchema: {
+            type: Type.OBJECT,
+            required: [
+              'primaryStyle',
+              'subStyles',
+              'regionalTradition',
+              'modeSystem',
+              'modeName',
+              'tonic',
+              'tuningSystem',
+              'microtonal',
+              'confidence',
+              'alternatives',
+              'reason',
+            ],
+            properties: {
+              primaryStyle: { type: Type.STRING },
+              subStyles: { type: Type.ARRAY, items: { type: Type.STRING } },
+              regionalTradition: { type: Type.STRING },
+              modeSystem: { type: Type.STRING },
+              modeName: { type: Type.STRING },
+              tonic: { type: Type.STRING },
+              tuningSystem: { type: Type.STRING },
+              microtonal: { type: Type.STRING },
+              confidence: { type: Type.STRING },
+              alternatives: { type: Type.ARRAY, items: { type: Type.STRING } },
+              reason: { type: Type.STRING },
+            },
+          },
+        },
+      }));
+      const parsed = JSON.parse(String(response.text || '').trim()) as Record<string, unknown>;
+      const cleanList = (value: unknown, limit: number) => (
+        Array.isArray(value)
+          ? value.map(item => normalizeIdentityText(item, 160)).filter(Boolean).slice(0, limit)
+          : []
+      );
+      const confidence = ['高', '中', '低'].includes(String(parsed.confidence))
+        ? String(parsed.confidence)
+        : '低';
+      const microtonal = ['是', '否', '不确定'].includes(String(parsed.microtonal))
+        ? String(parsed.microtonal)
+        : '不确定';
+      return res.json({
+        provider: 'gemini-audio',
+        model: response.modelVersion || GEMINI_PRIMARY_MODEL,
+        analysis: {
+          primaryStyle: normalizeIdentityText(parsed.primaryStyle, 160) || '不确定',
+          subStyles: cleanList(parsed.subStyles, 8),
+          regionalTradition: normalizeIdentityText(parsed.regionalTradition, 160) || '不确定',
+          modeSystem: normalizeIdentityText(parsed.modeSystem, 160) || '不确定',
+          modeName: normalizeIdentityText(parsed.modeName, 160) || '不确定',
+          tonic: normalizeIdentityText(parsed.tonic, 80) || '不确定',
+          tuningSystem: normalizeIdentityText(parsed.tuningSystem, 160) || '不确定',
+          microtonal,
+          confidence,
+          alternatives: cleanList(parsed.alternatives, 4),
+          reason: normalizeIdentityText(parsed.reason, 600) || '音频证据不足，无法可靠判断。',
+        },
+      });
+    } catch (error) {
+      if (isGeminiUnsupportedLocationError(error)) {
+        return res.status(400).json({
+          error: '当前 Gemini 音频理解 API 所在地区不支持此请求。全球风格与调式需要真实听音分析，请切换到支持 Gemini API 的服务网络后重试。',
         });
       }
       throw error;

@@ -10,6 +10,7 @@ import {
   CheckCircle2,
   FileAudio,
   Gauge,
+  Globe2,
   Guitar,
   Loader2,
   Music2,
@@ -35,6 +36,28 @@ interface AnalyzerResult {
     mode: 'Major' | 'Minor';
     confidence: Confidence;
   };
+  musicalMode: {
+    name: string;
+    englishName: string;
+    confidence: Confidence;
+    alternatives: string[];
+    evidence: string;
+  };
+  globalAnalysis?: {
+    primaryStyle: string;
+    subStyles: string[];
+    regionalTradition: string;
+    modeSystem: string;
+    modeName: string;
+    tonic: string;
+    tuningSystem: string;
+    microtonal: '是' | '否' | '不确定';
+    confidence: Confidence;
+    alternatives: string[];
+    reason: string;
+    model?: string;
+  };
+  semanticError?: string;
   chords: Array<{
     section: string;
     chord: string;
@@ -75,6 +98,17 @@ interface AnalysisQueueItem {
 const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 const MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
 const MINOR_PROFILE = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+const MODE_DEFINITIONS = [
+  { englishName: 'Ionian', chineseName: '伊奥尼亚（自然大调）', family: 'Major' as const, intervals: [0, 2, 4, 5, 7, 9, 11], characteristic: [4, 11] },
+  { englishName: 'Dorian', chineseName: '多利亚', family: 'Minor' as const, intervals: [0, 2, 3, 5, 7, 9, 10], characteristic: [3, 9] },
+  { englishName: 'Phrygian', chineseName: '弗里几亚', family: 'Minor' as const, intervals: [0, 1, 3, 5, 7, 8, 10], characteristic: [1, 8] },
+  { englishName: 'Lydian', chineseName: '利底亚', family: 'Major' as const, intervals: [0, 2, 4, 6, 7, 9, 11], characteristic: [4, 6] },
+  { englishName: 'Mixolydian', chineseName: '混合利底亚', family: 'Major' as const, intervals: [0, 2, 4, 5, 7, 9, 10], characteristic: [4, 10] },
+  { englishName: 'Aeolian', chineseName: '艾奥利亚（自然小调）', family: 'Minor' as const, intervals: [0, 2, 3, 5, 7, 8, 10], characteristic: [3, 8] },
+  { englishName: 'Locrian', chineseName: '洛克里亚', family: 'Minor' as const, intervals: [0, 1, 3, 5, 6, 8, 10], characteristic: [1, 6] },
+  { englishName: 'Harmonic Minor', chineseName: '和声小调', family: 'Minor' as const, intervals: [0, 2, 3, 5, 7, 8, 11], characteristic: [8, 11] },
+  { englishName: 'Melodic Minor', chineseName: '旋律小调', family: 'Minor' as const, intervals: [0, 2, 3, 5, 7, 9, 11], characteristic: [9, 11] },
+];
 
 const AUDIO_FILE_EXTENSION_REGEX = /\.(mp3|wav|m4a|aac|ogg|oga|flac|webm|opus|aif|aiff|caf)$/i;
 
@@ -227,7 +261,7 @@ const correlation = (a: number[], b: number[]) => {
   return top / Math.sqrt(Math.max(bottomA * bottomB, 1e-9));
 };
 
-const estimateKey = (chroma: number[]) => {
+export const estimateKey = (chroma: number[]) => {
   const scores: Array<{ root: number; mode: 'Major' | 'Minor'; score: number }> = [];
   for (let root = 0; root < 12; root += 1) {
     scores.push({ root, mode: 'Major', score: correlation(chroma, rotateProfile(MAJOR_PROFILE, root)) });
@@ -242,6 +276,91 @@ const estimateKey = (chroma: number[]) => {
     mode: best.mode,
     confidence: margin > 0.08 ? '中' : '低' as Confidence,
     root: best.root,
+  };
+};
+
+const buildModeProfile = (definition: typeof MODE_DEFINITIONS[number]) => {
+  const profile = new Array(12).fill(0.12) as number[];
+  definition.intervals.forEach(interval => { profile[interval] = 0.78; });
+  profile[0] = 1.55;
+  profile[7] = Math.max(profile[7], 1.08);
+  profile[definition.family === 'Major' ? 4 : 3] = 1.02;
+  definition.characteristic.forEach(interval => { profile[interval] += 0.28; });
+  return profile;
+};
+
+const averageChroma = (left: number[], right: number[]) => (
+  left.map((value, index) => (value + (right[index] || 0)) / 2)
+);
+
+export const estimateMusicalMode = (
+  chroma: number[],
+  introChroma: number[],
+  outroChroma: number[],
+  estimatedKey: ReturnType<typeof estimateKey>,
+) => {
+  const edgeChroma = averageChroma(introChroma, outroChroma);
+  const candidates = MODE_DEFINITIONS.flatMap(definition => (
+    NOTES.map((_, root) => {
+      const modeProfile = rotateProfile(buildModeProfile(definition), root);
+      const familyProfile = rotateProfile(definition.family === 'Major' ? MAJOR_PROFILE : MINOR_PROFILE, root);
+      const tonicEvidence = edgeChroma[root] + edgeChroma[(root + 7) % 12] * 0.42;
+      const keyAgreement = root === estimatedKey.root
+        ? definition.family === estimatedKey.mode ? 0.055 : 0.018
+        : 0;
+      return {
+        definition,
+        root,
+        score: correlation(chroma, modeProfile) * 0.58
+          + correlation(chroma, familyProfile) * 0.17
+          + correlation(edgeChroma, modeProfile) * 0.17
+          + tonicEvidence * 0.42
+          + keyAgreement,
+      };
+    })
+  ));
+  candidates.sort((left, right) => right.score - left.score);
+
+  const best = candidates[0];
+  const second = candidates[1];
+  const rawMargin = best.score - second.score;
+  const rawConfidence: Confidence = rawMargin > 0.09 && best.score > 0.42
+    ? '高'
+    : rawMargin > 0.035 && best.score > 0.28
+      ? '中'
+      : '低';
+  const selected = rawConfidence === '低'
+    ? candidates.find(candidate => (
+        candidate.root === estimatedKey.root && candidate.definition.family === estimatedKey.mode
+      )) || best
+    : best;
+  const selectedIndex = candidates.indexOf(selected);
+  const selectedRunnerUp = candidates.find((candidate, index) => (
+    index !== selectedIndex
+    && (candidate.root !== selected.root || candidate.definition.englishName !== selected.definition.englishName)
+  ));
+  const selectedMargin = selectedRunnerUp ? Math.max(0, selected.score - selectedRunnerUp.score) : rawMargin;
+  const confidence: Confidence = selected === best ? rawConfidence : '低';
+  const characteristicNotes = selected.definition.characteristic
+    .map(interval => NOTES[(selected.root + interval) % 12])
+    .join(' / ');
+  const formatCandidate = (candidate: typeof selected) => (
+    `${NOTES[candidate.root]} ${candidate.definition.chineseName}`
+  );
+  const alternatives = candidates
+    .filter(candidate => candidate !== selected)
+    .filter(candidate => candidate.score >= selected.score - 0.12)
+    .slice(0, 3)
+    .map(formatCandidate);
+
+  return {
+    name: `${NOTES[selected.root]} ${selected.definition.chineseName}`,
+    englishName: selected.definition.englishName,
+    family: selected.definition.family,
+    root: selected.root,
+    confidence,
+    alternatives,
+    evidence: `特征音 ${characteristicNotes} · 候选差值 ${Math.round(selectedMargin * 100)}%`,
   };
 };
 
@@ -310,7 +429,25 @@ const analyzeSpectrumProfile = (mono: Float32Array, sampleRate: number) => {
   const noiseFloorRmsDb = dbFromPower(noiseFloorRms);
   const snrDb = Math.max(0, Math.min(96, dbFromPower(rms) - noiseFloorRmsDb));
   const chroma = computeChroma(mono, sampleRate);
-  const key = estimateKey(chroma);
+  const estimatedKey = estimateKey(chroma);
+  const edgeSampleCount = Math.min(
+    Math.floor(mono.length / 3),
+    Math.max(
+      Math.floor(sampleRate * 8),
+      Math.min(Math.floor(mono.length * 0.18), Math.floor(sampleRate * 18)),
+    ),
+  );
+  const introChroma = computeChroma(mono, sampleRate, 0, edgeSampleCount);
+  const outroChroma = computeChroma(mono, sampleRate, Math.max(0, mono.length - edgeSampleCount), mono.length);
+  const musicalMode = estimateMusicalMode(chroma, introChroma, outroChroma, estimatedKey);
+  const key = musicalMode.confidence === '低'
+    ? estimatedKey
+    : {
+        name: `${NOTES[musicalMode.root]} ${musicalMode.family}`,
+        mode: musicalMode.family,
+        confidence: musicalMode.confidence,
+        root: musicalMode.root,
+      };
 
   const bandEnergy = { bass: 0, mid: 0, high: 0 };
   let centroidTop = 0;
@@ -344,6 +481,7 @@ const analyzeSpectrumProfile = (mono: Float32Array, sampleRate: number) => {
     zeroCrossingRate: zeroCrossings / Math.max(inspected, 1),
     chroma,
     key,
+    musicalMode,
   };
 };
 
@@ -412,6 +550,7 @@ const buildProductionNotes = (result: Omit<AnalyzerResult, 'productionNotes'>) =
   const notes: string[] = [];
   notes.push(`建议工程 Tempo 先设为 ${result.bpm.value} BPM，再根据鼓点或小节网格微调。`);
   notes.push(`调性可先按 ${result.key.name} 建工程，写旋律/和声时优先围绕该调内音。`);
+  notes.push(`调式倾向为 ${result.musicalMode.name}（${result.musicalMode.englishName}），编曲时可重点核对 ${result.musicalMode.evidence.split(' · ')[0].replace('特征音 ', '')}。`);
   if (result.audioProfile.peakDb > -1) notes.push('峰值接近 0 dBFS，后续混音建议预留 3-6 dB headroom。');
   if (result.audioProfile.bassPercent > 32) notes.push('低频占比较高，替换音乐时注意不要让贝斯和低鼓抢对白/音效空间。');
   if (result.audioProfile.highPercent > 28) notes.push('高频存在感明显，做游戏或视频配乐时可适当降低镲片/噪声层避免疲劳。');
@@ -432,6 +571,94 @@ async function decodeAudioFile(file: File) {
     await audioCtx.close();
   }
 }
+
+const createSemanticAnalysisClip = (buffer: AudioBuffer, maxSeconds = 36, targetSampleRate = 16000) => {
+  const segmentCount = buffer.duration > maxSeconds ? 3 : 1;
+  const totalDuration = Math.min(buffer.duration, maxSeconds);
+  const segmentDuration = Math.max(totalDuration / segmentCount, 1 / targetSampleRate);
+  const segmentStarts = segmentCount === 1
+    ? [0]
+    : [
+        0,
+        Math.max(0, (buffer.duration - segmentDuration) / 2),
+        Math.max(0, buffer.duration - segmentDuration),
+      ];
+  const frameCount = Math.max(1, Math.floor(totalDuration * targetSampleRate));
+  const wavBuffer = new ArrayBuffer(44 + frameCount * 2);
+  const view = new DataView(wavBuffer);
+  const writeString = (offset: number, value: string) => {
+    for (let index = 0; index < value.length; index += 1) {
+      view.setUint8(offset + index, value.charCodeAt(index));
+    }
+  };
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + frameCount * 2, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, targetSampleRate, true);
+  view.setUint32(28, targetSampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, frameCount * 2, true);
+
+  const channels = Array.from(
+    { length: Math.min(buffer.numberOfChannels, 2) },
+    (_, index) => buffer.getChannelData(index),
+  );
+  for (let index = 0; index < frameCount; index += 1) {
+    const outputSeconds = index / targetSampleRate;
+    const segmentIndex = Math.min(segmentStarts.length - 1, Math.floor(outputSeconds / segmentDuration));
+    const segmentOffsetSeconds = outputSeconds - segmentIndex * segmentDuration;
+    const sourceSeconds = segmentStarts[segmentIndex] + segmentOffsetSeconds;
+    const sourceIndex = Math.min(buffer.length - 1, Math.floor(sourceSeconds * buffer.sampleRate));
+    const sample = channels.reduce((sum, channel) => sum + (channel[sourceIndex] || 0), 0)
+      / Math.max(channels.length, 1);
+    const clamped = Math.max(-1, Math.min(1, sample));
+    view.setInt16(44 + index * 2, clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF, true);
+  }
+
+  return new Blob([view], { type: 'audio/wav' });
+};
+
+const requestGlobalMusicAnalysis = async (
+  file: File,
+  buffer: AudioBuffer,
+  localResult: Pick<AnalyzerResult, 'duration' | 'bpm' | 'key' | 'musicalMode'>,
+) => {
+  const formData = new FormData();
+  formData.append('metadata', JSON.stringify({
+    sourceName: file.name,
+    duration: localResult.duration,
+    bpm: localResult.bpm.value,
+    keyName: localResult.key.name,
+    localMode: localResult.musicalMode.name,
+    localModeConfidence: localResult.musicalMode.confidence,
+  }));
+  formData.append(
+    'audio',
+    createSemanticAnalysisClip(buffer),
+    `${file.name.replace(/\.[^/.]+$/, '') || 'music'}-semantic-analysis.wav`,
+  );
+
+  const response = await fetch('/api/ai/audio-analysis/semantic', {
+    method: 'POST',
+    headers: { Accept: 'application/json' },
+    body: formData,
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(payload?.error || `全球风格与调式分析失败（${response.status}）。`);
+  }
+  if (!payload?.analysis) throw new Error('全球风格与调式分析未返回有效结果。');
+  return {
+    ...payload.analysis,
+    model: payload.model,
+  } as NonNullable<AnalyzerResult['globalAnalysis']>;
+};
 
 async function analyzeAudioFile(file: File): Promise<AnalyzerResult> {
   const buffer = await decodeAudioFile(file);
@@ -462,15 +689,33 @@ async function analyzeAudioFile(file: File): Promise<AnalyzerResult> {
       mode: spectrum.key.mode,
       confidence: spectrum.key.confidence,
     },
+    musicalMode: {
+      name: spectrum.musicalMode.name,
+      englishName: spectrum.musicalMode.englishName,
+      confidence: spectrum.musicalMode.confidence,
+      alternatives: spectrum.musicalMode.alternatives,
+      evidence: spectrum.musicalMode.evidence,
+    },
     chords: buildChordSections(mono, buffer.sampleRate, buffer.duration),
     instruments: estimateInstruments(audioProfile, tempo.value),
     audioProfile,
   };
 
-  return {
+  const localResult: AnalyzerResult = {
     ...baseResult,
     productionNotes: buildProductionNotes(baseResult),
   };
+  try {
+    return {
+      ...localResult,
+      globalAnalysis: await requestGlobalMusicAnalysis(file, buffer, localResult),
+    };
+  } catch (error: any) {
+    return {
+      ...localResult,
+      semanticError: error?.message || '全球风格与调式分析失败，请稍后重试。',
+    };
+  }
 }
 
 const MetricCard = ({ label, value, hint }: { label: string; value: string; hint?: string }) => (
@@ -639,7 +884,7 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
           <div>
             <h2 className="text-2xl font-black tracking-tight text-slate-900">音频测速 / 测调 / 乐器和弦分析</h2>
             <p className="mt-2 max-w-2xl text-sm leading-relaxed text-slate-500">
-              上传一首或多首音乐后，本地逐个解析音频并估算 BPM、调性、主要和弦、乐器/音色倾向、响度、动态范围、底噪 RMS、SNR 信噪比、频段分布和立体声宽度。
+              上传一首或多首音乐后，分析 BPM、调性、全球音乐风格与调式体系、主要和弦、乐器/音色倾向、响度、动态范围、底噪 RMS、SNR 信噪比、频段分布和立体声宽度。
             </p>
           </div>
           <button
@@ -806,7 +1051,7 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
                         )}
                       </div>
 
-                      <div className="grid grid-cols-2 gap-2 text-[10px] sm:grid-cols-5 lg:min-w-[520px]">
+                      <div className="grid grid-cols-2 gap-2 text-[10px] sm:grid-cols-6 lg:min-w-[650px]">
                         <div className={`flex items-center justify-center rounded-xl border px-2 py-1.5 font-black ${statusClass}`}>
                           {item.status === 'analyzing' && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
                           {statusText}
@@ -818,6 +1063,12 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
                         <div className="rounded-xl border border-slate-100 bg-slate-50 px-2 py-1.5 text-center">
                           <p className="font-bold text-slate-400">Key</p>
                           <p className="truncate font-black text-slate-800">{item.result?.key.name || '-'}</p>
+                        </div>
+                        <div className="rounded-xl border border-slate-100 bg-slate-50 px-2 py-1.5 text-center">
+                          <p className="font-bold text-slate-400">Mode</p>
+                          <p className="truncate font-black text-slate-800" title={item.result?.musicalMode?.name}>
+                            {item.result?.musicalMode?.englishName || '-'}
+                          </p>
                         </div>
                         <div className="rounded-xl border border-slate-100 bg-slate-50 px-2 py-1.5 text-center">
                           <p className="font-bold text-slate-400">时长</p>
@@ -857,11 +1108,70 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <MetricCard label="速度 BPM" value={`${result.bpm.value}`} hint={`备选：${result.bpm.alternatives.join(' / ') || '-'} · ${result.bpm.confidence}置信`} />
             <MetricCard label="调性 Key" value={result.key.name} hint={`${result.key.mode === 'Major' ? '大调' : '小调'}倾向 · ${result.key.confidence}置信`} />
+            {result.musicalMode ? (
+              <MetricCard
+                label="调式 Mode"
+                value={result.musicalMode.name}
+                hint={`${result.musicalMode.englishName} · ${result.musicalMode.confidence}置信 · ${result.musicalMode.evidence}${result.musicalMode.alternatives.length ? ` · 备选：${result.musicalMode.alternatives.join(' / ')}` : ''}`}
+              />
+            ) : (
+              <MetricCard label="调式 Mode" value="重新分析后生成" hint="旧分析结果未包含调式，请重新点击开始分析。" />
+            )}
             <MetricCard label="时长 / 规格" value={formatTime(result.duration)} hint={`${result.sampleRate.toLocaleString()} Hz · ${result.channels} 声道`} />
             <MetricCard label="响度 / 峰值" value={`${result.audioProfile.rmsDb.toFixed(1)} dB`} hint={`Peak ${result.audioProfile.peakDb.toFixed(1)} dBFS · DR ${result.audioProfile.dynamicRangeDb.toFixed(1)} dB`} />
             <MetricCard label="底噪 RMS" value={`${result.audioProfile.noiseFloorRmsDb.toFixed(1)} dBFS`} hint="按最低 10% 能量帧估算，越低越干净。" />
             <MetricCard label="信噪比 SNR" value={`${result.audioProfile.snrDb.toFixed(1)} dB`} hint={result.audioProfile.snrDb >= 36 ? '较干净，适合二次制作。' : '偏低时建议先做降噪或修复。'} />
           </div>
+
+          <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Globe2 className="h-5 w-5 text-emerald-600" />
+                <h3 className="text-sm font-black text-slate-900">全球风格与调式</h3>
+              </div>
+              {result.globalAnalysis ? <ConfidencePill value={result.globalAnalysis.confidence} /> : null}
+            </div>
+
+            {result.globalAnalysis ? (
+              <div className="mt-4">
+                <div className="grid grid-cols-1 border-y border-slate-100 sm:grid-cols-2 xl:grid-cols-4">
+                  {[
+                    ['主要风格', result.globalAnalysis.primaryStyle],
+                    ['地域 / 文化传统', result.globalAnalysis.regionalTradition],
+                    ['调式体系', result.globalAnalysis.modeSystem],
+                    ['具体调式', result.globalAnalysis.modeName],
+                    ['主音', result.globalAnalysis.tonic],
+                    ['律制', result.globalAnalysis.tuningSystem],
+                    ['微分音', result.globalAnalysis.microtonal],
+                    ['子风格 / 融合风格', result.globalAnalysis.subStyles.join(' / ') || '未识别'],
+                  ].map(([label, value], index) => (
+                    <div
+                      key={label}
+                      className={`min-w-0 px-3 py-3 ${index % 4 ? 'xl:border-l xl:border-slate-100' : ''} ${index % 2 ? 'sm:border-l sm:border-slate-100 xl:border-l' : ''}`}
+                    >
+                      <p className="text-[10px] font-bold text-slate-400">{label}</p>
+                      <p className="mt-1 break-words text-sm font-black text-slate-800">{value}</p>
+                    </div>
+                  ))}
+                </div>
+                <p className="mt-4 text-xs leading-relaxed text-slate-600">
+                  <span className="font-black text-slate-800">判断依据：</span>
+                  {result.globalAnalysis.reason}
+                </p>
+                {result.globalAnalysis.alternatives.length ? (
+                  <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+                    <span className="font-bold text-slate-700">候选：</span>
+                    {result.globalAnalysis.alternatives.join(' / ')}
+                  </p>
+                ) : null}
+              </div>
+            ) : (
+              <div className="mt-4 rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-xs leading-relaxed text-red-700">
+                <span className="font-black">开放语义分析失败：</span>
+                {result.semanticError || '未返回全球风格与调式结果，请重新分析。'}
+              </div>
+            )}
+          </section>
 
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
             <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm xl:col-span-2">
@@ -948,7 +1258,7 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
           </div>
 
           <div className="rounded-2xl border border-amber-100 bg-amber-50 p-4 text-[11px] leading-relaxed text-amber-800">
-            <strong>说明：</strong>当前版本使用浏览器本地 DSP 估算，适合快速判断素材方向。复杂歌曲的转调、借用和弦、密集打击乐或强混响会降低调性/和弦/乐器识别准确度；后续如果接入专业 MIR 模型，可以把这里升级成更准确的服务器分析。
+            <strong>说明：</strong>BPM、Key、和弦和基础 Mode 由浏览器本地 DSP 估算；全球风格、地域传统、Raga、Maqam、民族音阶与微分音体系由音频理解模型开放识别。复杂转调、调式互换或短片段证据不足时会返回低置信度与候选，请结合判断依据人工确认。
           </div>
         </div>
       )}

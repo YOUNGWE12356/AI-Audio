@@ -19,7 +19,7 @@ const RATE = {
   'sound-effect': { unit: 'second', value: 2, label: '2 分 / 秒 / 版本' },
   'voice-changer': { unit: 'second', value: 2, label: '120 分 / 分钟 / 版本' },
   'audio-isolation': { unit: 'second', value: 2, label: '120 分 / 分钟' },
-  'speech-to-text': { unit: 'second', value: 4 / 60, label: '约 4 分 / 分钟' },
+  'speech-to-text': { unit: 'second', value: 36 / 60, label: '36 分 / 分钟' },
   'dubbing-v2': { unit: 'second', value: 2204 / 60, label: '约 2,204 分 / 源分钟' },
   token: { unit: 'token', value: 0, label: '按实际 Token 结算' },
 } as const;

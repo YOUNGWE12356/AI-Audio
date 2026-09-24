@@ -79,7 +79,7 @@ export const COMPANY_POINTS = {
   musicPerSecond: 2.5,
   soundEffectPerSecond: 2,
   audioProcessingPerSecond: 2,
-  speechToTextPerSecond: 4 / 60,
+  speechToTextPerSecond: 36 / 60,
   dubbingV2PerSecond: 2200 / 60,
 } as const;
 
