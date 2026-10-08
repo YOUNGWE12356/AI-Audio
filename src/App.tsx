@@ -25,6 +25,7 @@ import { ELEVENLABS_VOICES, VoiceItem } from './data/voices';
 import { fetchPlatformHealth } from './services/platformService';
 import { prepareFilesForGemini } from './utils/mediaPreparation';
 import { loadPersistentHistory, persistHistory } from './services/historyStorage';
+import { readRecentVoiceIds } from './utils/recentVoices';
 
 export interface PendingMusicOption {
   id: 'A' | 'B';
@@ -239,7 +240,7 @@ export default function App() {
   // Standalone Voiceover Generator States
   const [standaloneVoiceText, setStandaloneVoiceText] = useState('');
   const [standaloneVoiceGender, setStandaloneVoiceGender] = useState<'male' | 'female'>('male');
-  const [standaloneVoiceRole, setStandaloneVoiceRole] = useState(''); 
+  const [standaloneVoiceRole, setStandaloneVoiceRole] = useState(() => readRecentVoiceIds()[0] || '');
   const [selectedStandaloneVoice, setSelectedStandaloneVoice] = useState<VoiceItem | null>(null);
   const [standaloneVoiceEmotion, setStandaloneVoiceEmotion] = useState('');
   const [standaloneVoiceLang, setStandaloneVoiceLang] = useState('zh');
@@ -570,9 +571,9 @@ export default function App() {
         }
       }
 
-      // Eleven v3 understands bracketed performance directions such as [excited] / [whispering].
-      // Keep the bracketed text for v3, but provide a clean fallback text for older models so tags are not spoken aloud.
-      const elevenV3Text = processedText;
+      // Eleven v4 and the v3 fallback understand bracketed performance directions such as [excited] / [whispering].
+      // Keep the tagged text for expressive models, but provide clean fallback text so older models do not speak tags aloud.
+      const expressiveTtsText = processedText;
       const finalSpokenText = processedText
         .replace(bracketRegex, ' ')
         .replace(/\s+/g, ' ')
@@ -664,7 +665,7 @@ export default function App() {
       // parallel requests for the same voice may collide and return
       // "Multiple voice additions/deletions for the same voice were called at the same time".
       const blobA = await generateVoice(
-        elevenV3Text,
+        expressiveTtsText,
         voiceId,
         stability,
         similarity,
@@ -677,7 +678,7 @@ export default function App() {
         },
       );
       const blobB = await generateVoice(
-        elevenV3Text,
+        expressiveTtsText,
         voiceId,
         stability,
         similarity,

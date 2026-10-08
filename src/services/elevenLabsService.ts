@@ -66,6 +66,12 @@ export const ELEVENLABS_MUSIC_OUTPUT_FORMAT = 'mp3_48000_192';
 // uncompressed format and wrap the raw PCM response as WAV for playback.
 export const ELEVENLABS_SOUND_MODEL = 'eleven_text_to_sound_v2';
 export const ELEVENLABS_SOUND_OUTPUT_FORMAT = 'pcm_48000';
+export const ELEVENLABS_TTS_MODELS = [
+  'eleven_v4',
+  'eleven_v3',
+  'eleven_multilingual_v2',
+  'eleven_flash_v2_5',
+] as const;
 
 export const ELEVENLABS_MUSIC_CREDITS_PER_MINUTE = 900;
 export const ELEVENLABS_SOUND_EFFECT_CREDITS_PER_GENERATION = 200;
@@ -89,12 +95,29 @@ export const estimateTextGenerationCredits = (text: string) => (
   Math.max(1, countBillableCharacters(text))
 );
 
-export const estimateTtsCompanyPoints = (text: string, model = 'eleven_v3') => {
+export const estimateTtsCompanyPoints = (text: string, model: string = ELEVENLABS_TTS_MODELS[0]) => {
   const rate = /flash|turbo/i.test(model)
     ? COMPANY_POINTS.flashTtsPerThousandCharacters
     : COMPANY_POINTS.standardTtsPerThousandCharacters;
   return Math.max(0.1, countBillableCharacters(text) / 1000 * rate);
 };
+
+export const buildElevenLabsTtsVoiceSettings = (
+  modelId: string,
+  stability: number,
+  similarity: number,
+  style: number,
+) => modelId === 'eleven_v4'
+  ? {
+      stability,
+      similarity_boost: similarity,
+    }
+  : {
+      stability,
+      similarity_boost: similarity,
+      style,
+      use_speaker_boost: true,
+    };
 
 export const estimateTimedCompanyPoints = (
   durationSeconds: number | undefined,
@@ -498,8 +521,8 @@ export async function generateVoice(
 
   console.log(`Generating TTS Voice with ID ${voiceId} for text:`, text.substring(0, 30));
 
-  // Prefer Eleven v3 for the most expressive voice quality, then fall back to stable multilingual models.
-  const modelsToTry = ["eleven_v3", "eleven_multilingual_v2", "eleven_flash_v2_5"];
+  // Prefer Eleven v4 for quality, while keeping the established models as automatic fallbacks.
+  const modelsToTry = ELEVENLABS_TTS_MODELS;
   let lastError: any = null;
 
   try {
@@ -511,7 +534,9 @@ export async function generateVoice(
       for (const modelId of modelsToTry) {
         try {
           console.log(`Attempting voice generation using model: ${modelId}`);
-          const textForModel = modelId === "eleven_v3" ? text : fallbackText;
+          const supportsAudioTags = modelId === 'eleven_v4' || modelId === 'eleven_v3';
+          const textForModel = supportsAudioTags ? text : fallbackText;
+          const voiceSettings = buildElevenLabsTtsVoiceSettings(modelId, stability, similarity, style);
           const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
             method: "POST",
             headers: {
@@ -522,12 +547,7 @@ export async function generateVoice(
               text: textForModel,
               model_id: modelId,
               ...(typeof options?.seed === 'number' ? { seed: options.seed } : {}),
-              voice_settings: {
-                stability: stability,
-                similarity_boost: similarity,
-                style: style,
-                use_speaker_boost: true,
-              },
+              voice_settings: voiceSettings,
             }),
           });
 

@@ -1287,7 +1287,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
           const tags = [
             ...Object.values(av.labels || {}).filter(Boolean),
             av.source === 'voice_library' ? 'Voice Library' : '',
-            'v3',
+            'v4',
           ].filter(Boolean) as string[];
 
           return {
@@ -1297,7 +1297,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
             gender: isMale ? 'male' as const : 'female' as const,
             category: category,
             tags,
-            description: av.labels?.description || `ElevenLabs ${category} · 已适配 eleven_v3`,
+            description: av.labels?.description || `ElevenLabs ${category} · 已适配 eleven_v4`,
             previewUrl: av.preview_url || '',
             source: av.source,
             publicOwnerId: av.public_owner_id,

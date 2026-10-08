@@ -26,7 +26,9 @@ import {
   Languages,
   UploadCloud,
   FileAudio,
-  RefreshCw
+  RefreshCw,
+  CopyCheck,
+  Eraser,
 } from 'lucide-react';
 import { HistoryItem } from '../types';
 import { ELEVENLABS_VOICES, VoiceItem } from '../data/voices';
@@ -37,10 +39,11 @@ import CrossLanguageDubbing from './CrossLanguageDubbing';
 import VoiceConversion from './VoiceConversion';
 import { downloadAudioHelper } from '../utils/downloadHelper';
 import GeneratedAudioPlayer, { sanitizeAudioFileName } from './GeneratedAudioPlayer';
-import { enhanceVoicePromptForElevenV3, extractBatchVoiceTextFromImage } from '../services/geminiService';
+import { enhanceVoicePromptForElevenV4, extractBatchVoiceTextFromImage } from '../services/geminiService';
 import { getElevenLabsQualityMode } from '../utils/elevenLabsQuality';
 import type { AssistantVoiceRequest } from './GlobalAssistant';
 import PointCostHint from './PointCostHint';
+import { clearRecentVoiceIds, readRecentVoiceIds, rememberVoiceId } from '../utils/recentVoices';
 
 interface PendingVoiceOption {
   url: string;
@@ -61,6 +64,7 @@ interface BatchVoiceRequirement {
   enabled: boolean;
   name: string;
   nameSource?: BatchVoiceNameSource;
+  sourceNumber?: string;
   text: string;
   emotionTags: string;
   note: string;
@@ -249,14 +253,26 @@ const stripBatchVoiceNameIndexPrefix = (value: string) => (
     .trim()
 );
 
-const shouldPrefixBatchVoiceFileName = (item: BatchVoiceRequirement) => (
-  item.nameSource === 'fallback'
-  || (!item.nameSource && item.note.includes('未检测到命名'))
-);
+const extractBatchVoiceNumber = (value: string) => {
+  const match = value.match(/^(?:[#＃]\s*)?(?:第\s*)?([0-9０-９]{1,6})\s*[.．、)）:：_-]\s*(.+)$/u);
+  return match ? {
+    number: match[1].replace(/[０-９]/g, digit => String(digit.charCodeAt(0) - 65296)),
+    remainder: match[2].trim(),
+  } : null;
+};
 
-const formatBatchVoiceFileName = (item: BatchVoiceRequirement, index: number) => {
-  const baseName = sanitizeBatchVoiceFileName(stripBatchVoiceNameIndexPrefix(item.name) || getBatchVoiceFallbackName(item.text, index));
-  return shouldPrefixBatchVoiceFileName(item) ? `${index + 1}.${baseName}` : baseName;
+const formatBatchVoiceFileName = (
+  item: BatchVoiceRequirement,
+  index: number,
+  items: BatchVoiceRequirement[],
+  autoNumberStart: number,
+) => {
+  const name = item.nameSource === 'manual' ? item.name : stripBatchVoiceNameIndexPrefix(item.name);
+  const baseName = sanitizeBatchVoiceFileName(name || getBatchVoiceFallbackName(item.text, index));
+  if (item.nameSource === 'manual') return baseName;
+  if (item.sourceNumber) return `${item.sourceNumber}.${baseName}`;
+  const precedingAutomaticItems = items.slice(0, index).filter(previous => !previous.sourceNumber).length;
+  return `${autoNumberStart + precedingAutomaticItems}.${baseName}`;
 };
 
 const stripBatchVoiceTags = (text: string) => text
@@ -356,38 +372,54 @@ const splitDelimitedBatchLine = (line: string) => {
   const csvParts = line.match(/("([^"]|"")*"|[^,，]+)(?=,|，|$)/g)?.map(part => (
     part.replace(/^"|"$/g, '').replace(/""/g, '"').trim()
   )).filter(Boolean) || [];
-  return csvParts.length >= 2 && isLikelyBatchVoiceNameCell(csvParts[0]) ? csvParts : [];
+  return csvParts.length >= 2 && (isLikelyBatchVoiceNameCell(csvParts[0]) || /^[0-9０-９]{1,6}$/.test(csvParts[0]))
+    ? csvParts
+    : [];
 };
 
 const parseBatchVoiceLine = (line: string, index: number): BatchVoiceRequirement | null => {
   const cleanedLine = line.replace(/^\s*[-*•]\s+/, '').trim();
   if (!cleanedLine || /^#+\s/.test(cleanedLine)) return null;
 
+  const numberedLine = extractBatchVoiceNumber(cleanedLine);
+  const contentLine = numberedLine?.remainder || cleanedLine;
+  let sourceNumber = numberedLine?.number;
   let name = '';
-  let text = cleanedLine;
+  let text = contentLine;
   let note = '';
 
-  const labelledMatch = cleanedLine.match(/(?:文件名|命名|名称|name|filename)\s*[:：]\s*([^|｜\n]+?)(?:\s*[|｜,，]\s*)?(?:台词|文案|内容|text|line|script)\s*[:：]\s*(.+)$/i);
+  const labelledMatch = contentLine.match(/(?:文件名|命名|名称|name|filename)\s*[:：]\s*([^|｜\n]+?)(?:\s*[|｜,，]\s*)?(?:台词|文案|内容|text|line|script)\s*[:：]\s*(.+)$/i);
   if (labelledMatch) {
     name = labelledMatch[1].trim();
     text = labelledMatch[2].trim();
     note = '按“文件名/台词”标签识别';
   } else {
-    const delimited = splitDelimitedBatchLine(cleanedLine);
+    const delimited = splitDelimitedBatchLine(contentLine);
     if (delimited.length >= 2 && delimited[0].length <= 48) {
-      name = delimited[0];
-      text = delimited.slice(1).join(' ').trim();
+      if (/^[0-9０-９]{1,6}$/.test(delimited[0])) {
+        sourceNumber ||= delimited[0].replace(/[０-９]/g, digit => String(digit.charCodeAt(0) - 65296));
+        text = delimited.slice(1).join(' ').trim();
+      } else {
+        name = delimited[0];
+        text = delimited.slice(1).join(' ').trim();
+      }
       note = '按表格列识别';
     } else {
-      const colonMatch = cleanedLine.match(/^(.{1,48}?)[：:]\s*(.+)$/);
+      const colonMatch = contentLine.match(/^(.{1,48}?)[：:]\s*(.+)$/);
       if (colonMatch && colonMatch[2].trim().length >= 2) {
-        name = colonMatch[1].replace(/^(第?\d+[\.、\)]?\s*)/, '').trim();
+        name = colonMatch[1].trim();
         text = colonMatch[2].trim();
         note = '按冒号前后识别';
       }
     }
   }
 
+  const numberedName = extractBatchVoiceNumber(name);
+  if (numberedName) {
+    sourceNumber ||= numberedName.number;
+    name = numberedName.remainder;
+  }
+  sourceNumber ||= extractBatchVoiceNumber(text)?.number;
   const textBeforeIndexStrip = text.trim();
   text = stripBatchVoiceLeadingIndex(textBeforeIndexStrip);
   if (text !== textBeforeIndexStrip) {
@@ -403,6 +435,7 @@ const parseBatchVoiceLine = (line: string, index: number): BatchVoiceRequirement
     enabled: true,
     name: sanitizeBatchVoiceFileName(name || fallbackName),
     nameSource: name ? 'detected' : 'fallback',
+    sourceNumber,
     text,
     emotionTags,
     note: note || (name ? '已识别命名' : '未检测到命名，使用台词前几字'),
@@ -433,8 +466,9 @@ const parseBatchVoiceRequirementsFromText = (rawText: string) => {
   const seenNames = new Map<string, number>();
   return parsed.map((item, index) => {
     const baseName = stripBatchVoiceNameIndexPrefix(item.name || getBatchVoiceFallbackName(item.text, index));
-    const count = seenNames.get(baseName) || 0;
-    seenNames.set(baseName, count + 1);
+    const key = `${item.sourceNumber || ''}:${baseName}`;
+    const count = seenNames.get(key) || 0;
+    seenNames.set(key, count + 1);
     return {
       ...item,
       name: count > 0 ? `${baseName}_${count + 1}` : baseName,
@@ -559,17 +593,11 @@ const readBatchVoiceFileText = async (file: File) => {
 const getBatchVoiceClipboardImageFiles = (clipboardData: DataTransfer | null) => {
   if (!clipboardData) return [];
   const files = Array.from(clipboardData.files || []).filter(file => file.type.startsWith('image/'));
-  const itemFiles = Array.from(clipboardData.items || [])
+  const itemFiles = files.length > 0 ? [] : Array.from(clipboardData.items || [])
     .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
     .map(item => item.getAsFile())
     .filter(Boolean) as File[];
-  const seen = new Set<string>();
-  const allFiles = [...files, ...itemFiles].filter(file => {
-    const key = `${file.name || 'clipboard-image'}:${file.type}:${file.size}:${file.lastModified || 0}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  const allFiles = files.length > 0 ? files : itemFiles;
   return allFiles.map((file, index) => {
     if (file.name && file.name !== 'image.png') return file;
     const extension = file.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png';
@@ -628,15 +656,16 @@ export default function DubbingStudio({
   const [editingTitle, setEditingTitle] = useState('');
   const [fetchedVoices, setFetchedVoices] = useState<VoiceItem[]>([]);
   const [isLoadingVoices, setIsLoadingVoices] = useState(false);
+  const [voiceLibraryLoaded, setVoiceLibraryLoaded] = useState(false);
   const [activeGeneratedVoiceId, setActiveGeneratedVoiceId] = useState<string | null>(null);
-  const [v3Enhancement, setV3Enhancement] = useState<{
+  const [voiceEnhancement, setVoiceEnhancement] = useState<{
     originalText: string;
     enhancedText: string;
     addedTags: string[];
     notes: string;
   } | null>(null);
-  const [v3EnhancementLoading, setV3EnhancementLoading] = useState(false);
-  const [v3EnhancementError, setV3EnhancementError] = useState<string | null>(null);
+  const [voiceEnhancementLoading, setVoiceEnhancementLoading] = useState(false);
+  const [voiceEnhancementError, setVoiceEnhancementError] = useState<string | null>(null);
 
   type DubbingSubTab = 'tts' | 'sts' | 'convert' | 'translate' | 'stt';
   // Active sub-tab state ('tts' = Text-to-Speech, 'sts' = Speech-to-Speech, 'convert' = Voice Conversion, 'stt' = Speech-to-Text)
@@ -846,14 +875,22 @@ export default function DubbingStudio({
   const [voiceGenderFilter, setVoiceGenderFilter] = useState<'all' | 'male' | 'female'>('all');
   const [playingVoiceId, setPlayingVoiceId] = useState<string | null>(null);
   const [showVoiceDropdown, setShowVoiceDropdown] = useState(false);
+  const [recentVoiceIds, setRecentVoiceIds] = useState(readRecentVoiceIds);
   const [batchVoiceRawText, setBatchVoiceRawText] = useState('');
   const [batchVoiceItems, setBatchVoiceItems] = useState<BatchVoiceRequirement[]>([]);
+  const [batchVoiceSharedTags, setBatchVoiceSharedTags] = useState('');
+  const [batchVoiceAutoNumberStart, setBatchVoiceAutoNumberStart] = useState('1');
   const [batchVoiceFileName, setBatchVoiceFileName] = useState('');
   const [batchVoiceStatus, setBatchVoiceStatus] = useState('');
   const [batchVoiceError, setBatchVoiceError] = useState<string | null>(null);
   const [batchVoiceLoading, setBatchVoiceLoading] = useState(false);
   const [batchVoiceToneLoading, setBatchVoiceToneLoading] = useState(false);
   const [batchVoiceDragActive, setBatchVoiceDragActive] = useState(false);
+  const batchVoiceImportIdRef = useRef(0);
+  const parsedAutoNumberStart = Number(batchVoiceAutoNumberStart);
+  const autoNumberStart = Number.isSafeInteger(parsedAutoNumberStart) && parsedAutoNumberStart >= 1
+    ? parsedAutoNumberStart
+    : 1;
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // Highlighting and scroll-sync refs
@@ -944,7 +981,7 @@ export default function DubbingStudio({
           const tags = [
             ...Object.values(av.labels || {}).filter(Boolean),
             av.source === 'voice_library' ? 'Voice Library' : '',
-            'v3',
+            'v4',
           ].filter(Boolean) as string[];
           
           return {
@@ -954,7 +991,7 @@ export default function DubbingStudio({
             gender: isMale ? 'male' as const : 'female' as const,
             category: category,
             tags,
-            description: av.labels?.description || `ElevenLabs ${category} · 已适配 eleven_v3`,
+            description: av.labels?.description || `ElevenLabs ${category} · 已适配 eleven_v4`,
             previewUrl: av.preview_url || '',
             source: av.source,
             publicOwnerId: av.public_owner_id,
@@ -964,6 +1001,7 @@ export default function DubbingStudio({
       } else {
         setFetchedVoices([]);
       }
+      setVoiceLibraryLoaded(true);
     } catch (err) {
       console.error("Failed to load voices from ElevenLabs:", err);
     } finally {
@@ -989,6 +1027,9 @@ export default function DubbingStudio({
       ? [...ELEVENLABS_VOICES, ...fetchedVoices.filter(fv => !ELEVENLABS_VOICES.some(ev => ev.id === fv.id))]
       : ELEVENLABS_VOICES
   ).filter(voice => !shouldHideDubbingVoice(voice));
+  const recentVoices = recentVoiceIds
+    .map(id => displayVoices.find(voice => voice.id === id))
+    .filter((voice): voice is VoiceItem => Boolean(voice));
   const voiceCategories = ['全部', ...Array.from(new Set(displayVoices.map(voice => voice.category).filter(Boolean)))];
   const normalizedVoiceSearchQuery = normalizeVoiceSearchText(voiceSearchQuery);
   const convertedSmartVoiceSearchQuery = buildSmartVoiceSearchQuery(voiceSmartSearchInput);
@@ -1009,6 +1050,7 @@ export default function DubbingStudio({
 
   // Ensure standaloneVoiceRole is always set to a valid premium voice ID
   useEffect(() => {
+    if (!voiceLibraryLoaded) return;
     if (standaloneVoiceRole && !displayVoices.some(v => v.id === standaloneVoiceRole)) {
       if (displayVoices.length > 0) {
         setStandaloneVoiceRole(displayVoices[0].id);
@@ -1020,7 +1062,7 @@ export default function DubbingStudio({
         setStandaloneVoiceGender('male');
       }
     }
-  }, [standaloneVoiceRole, displayVoices]);
+  }, [standaloneVoiceRole, displayVoices, voiceLibraryLoaded]);
 
   // Sync / Stop preview audio on unmount or tab change
   useEffect(() => {
@@ -1171,6 +1213,7 @@ export default function DubbingStudio({
     setStandaloneVoiceRole(voice.id);
     setSelectedStandaloneVoice?.(voice);
     setStandaloneVoiceGender(voice.gender);
+    setRecentVoiceIds(rememberVoiceId(voice.id));
     setShowVoiceDropdown(false);
   };
   
@@ -1270,9 +1313,9 @@ export default function DubbingStudio({
 
   const handleTextChange = (val: string) => {
     setStandaloneVoicePrompt(val);
-    if (v3Enhancement && val !== v3Enhancement.enhancedText) {
-      setV3Enhancement(null);
-      setV3EnhancementError(null);
+    if (voiceEnhancement && val !== voiceEnhancement.enhancedText) {
+      setVoiceEnhancement(null);
+      setVoiceEnhancementError(null);
     }
     const detected = detectLanguage(val);
     if (detected) {
@@ -1285,7 +1328,7 @@ export default function DubbingStudio({
 
   const voiceHistory = historyList.filter(item => item.type === 'voice');
   const selectedVoiceObj = displayVoices.find(v => v.id === standaloneVoiceRole);
-  const canRestoreV3Original = Boolean(v3Enhancement?.originalText && standaloneVoicePrompt === v3Enhancement.enhancedText);
+  const canRestoreVoiceOriginal = Boolean(voiceEnhancement?.originalText && standaloneVoicePrompt === voiceEnhancement.enhancedText);
   const generatedVoiceOptions = [
     pendingVoiceOptions.optionA ? { id: 'A' as const, label: '版本 A', option: pendingVoiceOptions.optionA } : null,
     pendingVoiceOptions.optionB ? { id: 'B' as const, label: '版本 B', option: pendingVoiceOptions.optionB } : null,
@@ -1330,6 +1373,25 @@ export default function DubbingStudio({
     )));
   };
 
+  const syncBatchVoiceTags = () => {
+    const tags = normalizeBatchVoiceTagList(batchVoiceSharedTags.split(/[,，、/\s]+/));
+    if (tags.length === 0) {
+      setBatchVoiceError('请先输入至少一个语气标签。');
+      return;
+    }
+
+    const sharedTags = tags.join(', ');
+    setBatchVoiceSharedTags(sharedTags);
+    setBatchVoiceItems(prev => prev.map(item => ({
+      ...item,
+      emotionTags: sharedTags,
+      status: item.audioUrl ? 'pending' : item.status,
+      error: undefined,
+    })));
+    setBatchVoiceError(null);
+    setBatchVoiceStatus(`已将 ${tags.length} 个语气标签同步到 ${batchVoiceItems.length} 条文本，可继续逐条调整。`);
+  };
+
   const handleParseBatchVoiceText = (text = batchVoiceRawText) => {
     const items = parseBatchVoiceRequirementsFromText(text);
     const isTruncated = text.length > BATCH_VOICE_MAX_TEXT_CHARS || text.split(/\r\n|\r|\n/).length > BATCH_VOICE_MAX_ITEMS;
@@ -1349,14 +1411,14 @@ export default function DubbingStudio({
 
     setBatchVoiceToneLoading(true);
     setBatchVoiceError(null);
-    setBatchVoiceStatus(`正在用 V3 方式重析 ${analyzableItems.length} 条语气标签...`);
+    setBatchVoiceStatus(`正在用 V4 方式重析 ${analyzableItems.length} 条语气标签...`);
     const updates: Array<{ id: string; emotionTags: string; note: string }> = [];
 
     try {
       for (let index = 0; index < analyzableItems.length; index += 1) {
         const item = analyzableItems[index];
         setBatchVoiceStatus(`正在重析语气 ${index + 1}/${analyzableItems.length}：${item.name || `第 ${index + 1} 条`}`);
-        const result = await enhanceVoicePromptForElevenV3(stripBatchVoiceTags(item.text), {
+        const result = await enhanceVoicePromptForElevenV4(stripBatchVoiceTags(item.text), {
           voiceName: selectedVoiceObj?.name || '',
           voiceDescription: selectedVoiceObj?.description || '',
           language: standaloneVoiceLang,
@@ -1368,7 +1430,7 @@ export default function DubbingStudio({
         updates.push({
           id: item.id,
           emotionTags: (tags.length > 0 ? tags : ['natural']).join(', '),
-          note: item.note.includes('V3语气') ? item.note : `${item.note} · V3语气`,
+          note: item.note.includes('V4语气') ? item.note : `${item.note} · V4语气`,
         });
       }
 
@@ -1377,9 +1439,9 @@ export default function DubbingStudio({
           ? { ...item, ...updates.find(update => update.id === item.id)!, status: item.audioUrl ? 'pending' : item.status }
           : item
       )));
-      setBatchVoiceStatus(`已按 V3 方式重析 ${updates.length} 条语气标签，可继续手动微调。`);
+      setBatchVoiceStatus(`已按 V4 方式重析 ${updates.length} 条语气标签，可继续手动微调。`);
     } catch (error: any) {
-      setBatchVoiceError(error?.message || 'V3 语气重析失败，请先手动调整语气标签。');
+      setBatchVoiceError(error?.message || 'V4 语气重析失败，请先手动调整语气标签。');
     } finally {
       setBatchVoiceToneLoading(false);
     }
@@ -1388,10 +1450,11 @@ export default function DubbingStudio({
   const handleBatchVoiceFiles = async (files: File[]) => {
     const pickedFiles = files.filter(Boolean);
     if (pickedFiles.length === 0) return;
+    const importId = ++batchVoiceImportIdRef.current;
     const containsImage = pickedFiles.some(file => file.type.startsWith('image/'));
     setBatchVoiceError(null);
     setBatchVoiceStatus(containsImage
-      ? `正在用 GPT 5.6 识别${pickedFiles.length === 1 ? '截图内容' : `${pickedFiles.length} 个文件中的截图内容`}...`
+      ? '分析生成台词'
       : pickedFiles.length === 1 ? '正在读取文档内容...' : `正在读取 ${pickedFiles.length} 个文档/表格...`);
     try {
       const totalSize = pickedFiles.reduce((sum, file) => sum + file.size, 0);
@@ -1407,6 +1470,7 @@ export default function DubbingStudio({
         file,
         text: await readBatchVoiceFileText(file),
       })));
+      if (importId !== batchVoiceImportIdRef.current) return;
       const readableTexts = results
         .filter((result): result is PromiseFulfilledResult<{ file: File; text: string }> => result.status === 'fulfilled')
         .map(result => result.value.text.trim())
@@ -1434,9 +1498,22 @@ export default function DubbingStudio({
         setBatchVoiceError(`${failedMessages.length} 个文件未读取：${failedMessages.join('；')}`);
       }
     } catch (error: any) {
+      if (importId !== batchVoiceImportIdRef.current) return;
       setBatchVoiceError(error?.message || '读取文档失败，请换成 txt/csv/xlsx/docx 或粘贴文本。');
       setBatchVoiceStatus('');
     }
+  };
+
+  const clearBatchVoiceWorkspace = () => {
+    batchVoiceImportIdRef.current += 1;
+    setBatchVoiceRawText('');
+    setBatchVoiceItems([]);
+    setBatchVoiceSharedTags('');
+    setBatchVoiceAutoNumberStart('1');
+    setBatchVoiceFileName('');
+    setBatchVoiceStatus('');
+    setBatchVoiceError(null);
+    setBatchVoiceDragActive(false);
   };
 
   const handleBatchVoiceDrop = (event: React.DragEvent<HTMLDivElement>) => {
@@ -1446,17 +1523,10 @@ export default function DubbingStudio({
     handleBatchVoiceFiles(Array.from(event.dataTransfer.files));
   };
 
-  const handleBatchVoicePaste = (event: React.ClipboardEvent<HTMLDivElement> | ClipboardEvent) => {
-    const imageFiles = getBatchVoiceClipboardImageFiles(event.clipboardData);
-    if (imageFiles.length === 0) return;
-    event.preventDefault();
-    event.stopPropagation();
-    void handleBatchVoiceFiles(imageFiles);
-  };
-
   useEffect(() => {
     if (ttsInputMode !== 'batch') return;
     const handleWindowPaste = (event: ClipboardEvent) => {
+      if (event.defaultPrevented) return;
       const activeElement = document.activeElement;
       const isTextInput = activeElement instanceof HTMLTextAreaElement
         || activeElement instanceof HTMLInputElement
@@ -1510,7 +1580,7 @@ export default function DubbingStudio({
       const blob = await response.blob();
       const itemIndex = items.findIndex(entry => entry.id === item.id);
       const itemOrderIndex = itemIndex >= 0 ? itemIndex : 0;
-      const baseName = formatBatchVoiceFileName(item, itemOrderIndex);
+      const baseName = formatBatchVoiceFileName(item, itemOrderIndex, items, autoNumberStart);
       const count = usedNames.get(baseName) || 0;
       usedNames.set(baseName, count + 1);
       const finalName = `${baseName}${count > 0 ? `_${count + 1}` : ''}.mp3`;
@@ -1570,7 +1640,7 @@ export default function DubbingStudio({
       const url = URL.createObjectURL(blob);
       updateBatchVoiceItem(id, { status: 'done', audioUrl: url, error: undefined });
       const itemIndex = batchVoiceItems.findIndex(entry => entry.id === id);
-      const indexedName = formatBatchVoiceFileName(item, itemIndex >= 0 ? itemIndex : 0);
+      const indexedName = formatBatchVoiceFileName(item, itemIndex >= 0 ? itemIndex : 0, batchVoiceItems, autoNumberStart);
       setHistoryList(prev => [{
         id: `batch-voice-${Date.now()}-${id}`,
         type: 'voice',
@@ -1608,7 +1678,7 @@ export default function DubbingStudio({
       for (let index = 0; index < enabledItems.length; index += 1) {
         const item = enabledItems[index];
         const itemOrderIndex = batchVoiceItems.findIndex(entry => entry.id === item.id);
-        setBatchVoiceStatus(`正在生成 ${index + 1}/${enabledItems.length}：${formatBatchVoiceFileName(item, itemOrderIndex >= 0 ? itemOrderIndex : index)}`);
+        setBatchVoiceStatus(`正在生成 ${index + 1}/${enabledItems.length}：${formatBatchVoiceFileName(item, itemOrderIndex >= 0 ? itemOrderIndex : index, batchVoiceItems, autoNumberStart)}`);
         const generated = await generateBatchVoiceItem(item.id);
         if (generated?.status === 'done') {
           generatedItems.push(generated);
@@ -1628,40 +1698,40 @@ export default function DubbingStudio({
     }
   };
 
-  const handleV3EnhancePrompt = async () => {
+  const handleV4EnhancePrompt = async () => {
     const originalText = standaloneVoicePrompt.trim();
     if (!originalText) {
-      setV3EnhancementError('请先输入要增强的配音台词。');
+      setVoiceEnhancementError('请先输入要增强的配音台词。');
       return;
     }
 
-    setV3EnhancementLoading(true);
-    setV3EnhancementError(null);
+    setVoiceEnhancementLoading(true);
+    setVoiceEnhancementError(null);
     try {
-      const result = await enhanceVoicePromptForElevenV3(originalText, {
+      const result = await enhanceVoicePromptForElevenV4(originalText, {
         voiceName: selectedVoiceObj?.name || '',
         voiceDescription: selectedVoiceObj?.description || '',
         language: standaloneVoiceLang,
       });
-      setV3Enhancement({
+      setVoiceEnhancement({
         originalText,
         enhancedText: result.enhancedText,
         addedTags: result.addedTags || [],
-        notes: result.notes || '已生成 v3 语气增强文本。',
+        notes: result.notes || '已生成 v4 语气增强文本。',
       });
       setStandaloneVoicePrompt(result.enhancedText);
     } catch (error: any) {
-      setV3EnhancementError(error?.message || 'V3 增强失败，请稍后重试。');
+      setVoiceEnhancementError(error?.message || 'V4 增强失败，请稍后重试。');
     } finally {
-      setV3EnhancementLoading(false);
+      setVoiceEnhancementLoading(false);
     }
   };
 
-  const handleRestoreV3Original = () => {
-    if (!v3Enhancement?.originalText) return;
-    setStandaloneVoicePrompt(v3Enhancement.originalText);
-    setV3Enhancement(null);
-    setV3EnhancementError(null);
+  const handleRestoreVoiceOriginal = () => {
+    if (!voiceEnhancement?.originalText) return;
+    setStandaloneVoicePrompt(voiceEnhancement.originalText);
+    setVoiceEnhancement(null);
+    setVoiceEnhancementError(null);
   };
 
   const updateGeneratedVoiceName = (id: 'A' | 'B', name: string) => {
@@ -1921,21 +1991,21 @@ export default function DubbingStudio({
                   <div className="flex flex-wrap justify-end gap-2">
                     <button
                       type="button"
-                      onClick={handleV3EnhancePrompt}
-                      disabled={v3EnhancementLoading || !standaloneVoicePrompt.trim()}
+                      onClick={handleV4EnhancePrompt}
+                      disabled={voiceEnhancementLoading || !standaloneVoicePrompt.trim()}
                       className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-2 text-[10px] font-bold text-white shadow-sm transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      {v3EnhancementLoading ? (
+                      {voiceEnhancementLoading ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       ) : (
                         <Sparkles className="h-3.5 w-3.5" />
                       )}
-                      <span>{v3EnhancementLoading ? '增强中...' : '自动语气'}</span>
+                      <span>{voiceEnhancementLoading ? '增强中...' : '自动语气'}</span>
                     </button>
-                    {canRestoreV3Original && (
+                    {canRestoreVoiceOriginal && (
                       <button
                         type="button"
-                        onClick={handleRestoreV3Original}
+                        onClick={handleRestoreVoiceOriginal}
                         className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-[10px] font-bold text-emerald-700 transition-colors hover:border-emerald-300 hover:bg-emerald-50"
                       >
                         <Pencil className="h-3.5 w-3.5" />
@@ -1945,12 +2015,12 @@ export default function DubbingStudio({
                   </div>
                 </div>
 
-                {v3Enhancement && (
+                {voiceEnhancement && (
                   <div className="mt-2 rounded-lg border border-emerald-100 bg-white/70 px-2.5 py-2 text-[10px] leading-relaxed text-slate-600">
                     <div className="flex flex-wrap items-center gap-1.5">
                       <span className="font-bold text-emerald-800">已增强</span>
-                      {v3Enhancement.addedTags.length > 0 ? (
-                        v3Enhancement.addedTags.map(tag => (
+                      {voiceEnhancement.addedTags.length > 0 ? (
+                        voiceEnhancement.addedTags.map(tag => (
                           <span key={tag} className="rounded-full bg-emerald-100 px-1.5 py-0.5 font-mono font-bold text-emerald-700">
                             [{tag}]
                           </span>
@@ -1959,14 +2029,14 @@ export default function DubbingStudio({
                         <span className="text-slate-500">未额外添加标签</span>
                       )}
                     </div>
-                    <p className="mt-1 text-slate-500">{v3Enhancement.notes}</p>
+                    <p className="mt-1 text-slate-500">{voiceEnhancement.notes}</p>
                   </div>
                 )}
 
-                {v3EnhancementError && (
+                {voiceEnhancementError && (
                   <div className="mt-2 flex items-start gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10px] leading-relaxed text-amber-700">
                     <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                    <span>{v3EnhancementError}</span>
+                    <span>{voiceEnhancementError}</span>
                   </div>
                 )}
               </div>
@@ -1975,7 +2045,6 @@ export default function DubbingStudio({
 
             {ttsInputMode === 'batch' && (
             <div
-              onPaste={handleBatchVoicePaste}
               onDragEnter={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
@@ -2054,7 +2123,7 @@ export default function DubbingStudio({
                   className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-[10px] font-bold text-emerald-700 transition-colors hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {batchVoiceToneLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-                  <span>{batchVoiceToneLoading ? '重析中...' : 'V3 重析语气'}</span>
+                  <span>{batchVoiceToneLoading ? '重析中...' : 'V4 重析语气'}</span>
                 </button>
                 <button
                   type="button"
@@ -2064,7 +2133,29 @@ export default function DubbingStudio({
                 >
                   <span>+ 新增一句</span>
                 </button>
+                <button
+                  type="button"
+                  onClick={clearBatchVoiceWorkspace}
+                  disabled={batchVoiceLoading || batchVoiceToneLoading || (!batchVoiceRawText && batchVoiceItems.length === 0 && !batchVoiceFileName && !batchVoiceSharedTags && !batchVoiceStatus && !batchVoiceError)}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[10px] font-bold text-slate-600 transition-colors hover:border-red-200 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Eraser className="h-3.5 w-3.5" />
+                  <span>清空当前内容</span>
+                </button>
               </div>
+
+              <label className="flex items-center gap-2 text-[10px] font-bold text-slate-600">
+                <span>自动序号起始</span>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={batchVoiceAutoNumberStart}
+                  onChange={(event) => setBatchVoiceAutoNumberStart(event.target.value)}
+                  onBlur={() => setBatchVoiceAutoNumberStart(String(autoNumberStart))}
+                  className="w-20 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-[11px] text-slate-800 outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-300"
+                />
+              </label>
 
               {batchVoiceStatus && (
                 <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-2.5 py-2 text-[10px] font-semibold text-emerald-800">
@@ -2084,6 +2175,27 @@ export default function DubbingStudio({
                     <span>分析预览 · {batchVoiceItems.length} 条</span>
                     <span>{batchVoiceItems.filter(item => item.enabled).length} 条将生成</span>
                   </div>
+                  <div className="flex flex-col gap-2 rounded-xl border border-emerald-100 bg-emerald-50/50 p-2.5 sm:flex-row sm:items-end">
+                    <label className="min-w-0 flex-1 space-y-1">
+                      <span className="block text-[10px] font-bold text-slate-700">统一语气标签</span>
+                      <input
+                        value={batchVoiceSharedTags}
+                        onChange={(event) => setBatchVoiceSharedTags(event.target.value)}
+                        placeholder="例如：warm, calm"
+                        aria-label="统一语气标签"
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-[11px] text-slate-800 outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-300"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      onClick={syncBatchVoiceTags}
+                      disabled={!batchVoiceSharedTags.trim() || batchVoiceLoading || batchVoiceToneLoading}
+                      className="inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-emerald-200 bg-white px-3 text-[10px] font-bold text-emerald-700 transition-colors hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <CopyCheck className="h-3.5 w-3.5" />
+                      <span>同步到全部文本</span>
+                    </button>
+                  </div>
                   <div className="max-h-[34rem] space-y-3 overflow-y-auto pr-1 custom-scrollbar">
                     {batchVoiceItems.map((item, index) => {
                       const isGeneratingItem = item.status === 'generating';
@@ -2102,9 +2214,9 @@ export default function DubbingStudio({
                                   <label className="space-y-1">
                                     <span className="text-[9px] font-black uppercase tracking-wider text-slate-400">文件名</span>
                                     <input
-                                      value={formatBatchVoiceFileName(item, index)}
+                                      value={item.nameSource === 'manual' ? item.name : formatBatchVoiceFileName(item, index, batchVoiceItems, autoNumberStart)}
                                       onChange={(event) => updateBatchVoiceItem(item.id, {
-                                        name: sanitizeBatchVoiceFileName(stripBatchVoiceNameIndexPrefix(event.target.value)),
+                                        name: event.target.value,
                                         nameSource: 'manual',
                                       })}
                                       className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-[11px] font-bold text-slate-800 outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-300"
@@ -2119,7 +2231,7 @@ export default function DubbingStudio({
                                       className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-[11px] text-slate-800 outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-300"
                                     />
                                     <span className="block text-[9px] leading-relaxed text-slate-400">
-                                      可填多个，生成时会转成 [tag][tag] 的 V3 风格提示。
+                                      可填多个，生成时会转成 [tag][tag] 的 V4 风格提示。
                                     </span>
                                   </label>
                                 </div>
@@ -2137,7 +2249,6 @@ export default function DubbingStudio({
                                   />
                                 </label>
                                 <div className="flex flex-wrap items-center gap-1.5 text-[9px] text-slate-400">
-                                  <span>#{index + 1}</span>
                                   <span>{item.note}</span>
                                   {item.status === 'done' && <span className="font-bold text-emerald-600">已生成</span>}
                                   {item.status === 'error' && <span className="font-bold text-red-500">{item.error}</span>}
@@ -2175,18 +2286,18 @@ export default function DubbingStudio({
                               <GeneratedAudioPlayer
                                 id={`batch-voice-${item.id}`}
                                 url={item.audioUrl}
-                                title={formatBatchVoiceFileName(item, index)}
+                                title={formatBatchVoiceFileName(item, index, batchVoiceItems, autoNumberStart)}
                                 titleBadge="批量配音"
                                 prompt={buildBatchVoiceGenerationText(item)}
-                                meta={`文件名：${formatBatchVoiceFileName(item, index)}.mp3 · ${selectedVoiceObj?.name || standaloneVoiceRole}`}
+                                meta={`文件名：${formatBatchVoiceFileName(item, index, batchVoiceItems, autoNumberStart)}.mp3 · ${selectedVoiceObj?.name || standaloneVoiceRole}`}
                                 playbackRate={standaloneVoiceSpeed}
                                 activeId={activeGeneratedVoiceId}
                                 setActiveId={setActiveGeneratedVoiceId}
                                 editableTitle
-                                downloadFileName={`${formatBatchVoiceFileName(item, index)}.mp3`}
+                                downloadFileName={`${formatBatchVoiceFileName(item, index, batchVoiceItems, autoNumberStart)}.mp3`}
                                 downloadLabel="下载此条 MP3"
                                 onRename={(title) => updateBatchVoiceItem(item.id, {
-                                  name: sanitizeBatchVoiceFileName(stripBatchVoiceNameIndexPrefix(title)),
+                                  name: title,
                                   nameSource: 'manual',
                                 })}
                               />
@@ -2305,6 +2416,37 @@ export default function DubbingStudio({
                       ))}
                     </div>
                   </div>
+
+                  {recentVoices.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[10px] font-bold text-slate-500">最近使用</span>
+                      {recentVoices.map(voice => (
+                        <button
+                          key={voice.id}
+                          type="button"
+                          onClick={() => handleSelectVoice(voice)}
+                          title={`选择 ${voice.name}`}
+                          className={`rounded-md border px-2 py-1 text-[10px] font-semibold transition-colors ${
+                            standaloneVoiceRole === voice.id
+                              ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                              : 'border-slate-200 bg-white text-slate-600 hover:border-emerald-300 hover:text-emerald-700'
+                          }`}
+                        >
+                          {voice.name}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          clearRecentVoiceIds();
+                          setRecentVoiceIds([]);
+                        }}
+                        className="ml-auto text-[10px] text-slate-400 hover:text-slate-600"
+                      >
+                        清除记录
+                      </button>
+                    </div>
+                  )}
 
                   {/* Selected Voice Display & Trigger Button */}
                         <button

@@ -1954,7 +1954,7 @@ export async function translateToEnglish(text: string): Promise<string> {
   }
 }
 
-export interface VoiceV3PromptEnhancement {
+export interface VoiceExpressionPromptEnhancement {
   enhancedText: string;
   addedTags: string[];
   notes: string;
@@ -1984,7 +1984,7 @@ const splitVoicePromptIntoSpeakableChunks = (text: string) => {
   return chunks.length > 0 ? chunks : [text];
 };
 
-const collectVoiceV3TagsForSegment = (segment: string) => {
+const collectVoiceExpressionTagsForSegment = (segment: string) => {
   const content = stripVoicePerformanceTags(segment);
   const lowerText = content.toLowerCase();
   const tags: string[] = [];
@@ -2026,7 +2026,7 @@ const collectVoiceV3TagsForSegment = (segment: string) => {
   return tags.slice(0, 3);
 };
 
-const mergeVoiceV3TagsIntoSegment = (segment: string, tags: string[]) => {
+const mergeVoiceExpressionTagsIntoSegment = (segment: string, tags: string[]) => {
   if (!segment.trim() || tags.length === 0) return segment;
   const leadingWhitespace = segment.match(/^\s*/)?.[0] || '';
   const rest = segment.slice(leadingWhitespace.length);
@@ -2044,19 +2044,19 @@ const collapseDuplicateAdjacentVoiceTags = (text: string) => text.replace(
   '$1',
 );
 
-const createLocalVoiceV3EnhancementFallback = (text: string): VoiceV3PromptEnhancement => {
+const createLocalVoiceExpressionEnhancementFallback = (text: string): VoiceExpressionPromptEnhancement => {
   const normalizedText = text.trim();
   const chunks = splitVoicePromptIntoSpeakableChunks(normalizedText);
   const addedTagsInOrder: string[] = [];
   let taggedChunkCount = 0;
 
   const enhancedText = collapseDuplicateAdjacentVoiceTags(chunks.map(chunk => {
-    const tags = collectVoiceV3TagsForSegment(chunk);
+    const tags = collectVoiceExpressionTagsForSegment(chunk);
     if (tags.length > 0) {
       taggedChunkCount += 1;
       addedTagsInOrder.push(...tags);
     }
-    return mergeVoiceV3TagsIntoSegment(chunk, tags);
+    return mergeVoiceExpressionTagsIntoSegment(chunk, tags);
   }).join(''));
 
   const addedTags = Array.from(new Set(addedTagsInOrder));
@@ -2065,12 +2065,12 @@ const createLocalVoiceV3EnhancementFallback = (text: string): VoiceV3PromptEnhan
     enhancedText,
     addedTags,
     notes: addedTags.length > 0
-      ? `已按 ${taggedChunkCount} 个句段添加分段 v3 语气标签；每个句段最多 3 个。`
+      ? `已按 ${taggedChunkCount} 个句段添加分段 v4 语气标签；每个句段最多 3 个。`
       : '未检测到明确情绪关键词，保留原文。',
   };
 };
 
-const parseVoiceV3EnhancementResponse = (rawText: string, originalText: string): VoiceV3PromptEnhancement => {
+const parseVoiceExpressionEnhancementResponse = (rawText: string, originalText: string): VoiceExpressionPromptEnhancement => {
   const cleaned = rawText
     .trim()
     .replace(/^```(?:json)?/i, '')
@@ -2104,14 +2104,14 @@ const parseVoiceV3EnhancementResponse = (rawText: string, originalText: string):
   return {
     enhancedText,
     addedTags,
-    notes: String(parsed?.notes || '已按 ElevenLabs v3 audio tags 方式增强文本。').trim(),
+    notes: String(parsed?.notes || '已按 ElevenLabs v4 audio tags 方式增强文本。').trim(),
   };
 };
 
-export async function enhanceVoicePromptForElevenV3(
+export async function enhanceVoicePromptForElevenV4(
   text: string,
   options: { voiceName?: string; voiceDescription?: string; language?: string } = {},
-): Promise<VoiceV3PromptEnhancement> {
+): Promise<VoiceExpressionPromptEnhancement> {
   const normalizedText = text.trim();
   if (!normalizedText) {
     throw new Error('请先输入要增强的配音台词。');
@@ -2119,22 +2119,22 @@ export async function enhanceVoicePromptForElevenV3(
 
   if (isBrowser) {
     try {
-      return await postJson<VoiceV3PromptEnhancement>('/api/ai/gemini/voice-v3-enhance', {
+      return await postJson<VoiceExpressionPromptEnhancement>('/api/ai/gemini/voice-v4-enhance', {
         text: normalizedText,
         voiceName: options.voiceName || '',
         voiceDescription: options.voiceDescription || '',
         language: options.language || '',
       }, { timeoutMs: 20_000 });
     } catch (error) {
-      console.info('Voice v3 enhancement API failed, using local fallback:', error);
-      return createLocalVoiceV3EnhancementFallback(normalizedText);
+      console.info('Voice v4 enhancement API failed, using local fallback:', error);
+      return createLocalVoiceExpressionEnhancementFallback(normalizedText);
     }
   }
 
   try {
     const { ai, Type, ThinkingLevel } = await getAI();
-    const prompt = `You are preparing text for ElevenLabs eleven_v3 text-to-speech.
-Enhance the script by adding sparse, audible performance tags in square brackets, similar to ElevenLabs v3 audio tags.
+    const prompt = `You are preparing text for ElevenLabs eleven_v4 text-to-speech.
+Enhance the script by adding sparse, audible performance tags in square brackets supported by ElevenLabs v4 audio prompting.
 
 Rules:
 1. Preserve the spoken dialogue exactly. Do not translate, rewrite, delete, reorder, or add spoken words.
@@ -2171,12 +2171,15 @@ ${normalizedText}`;
       },
     });
 
-    return parseVoiceV3EnhancementResponse(String(response.text || ''), normalizedText);
+    return parseVoiceExpressionEnhancementResponse(String(response.text || ''), normalizedText);
   } catch (error) {
-    console.error('Voice v3 prompt enhancement failed:', error);
-    return createLocalVoiceV3EnhancementFallback(normalizedText);
+    console.error('Voice v4 prompt enhancement failed:', error);
+    return createLocalVoiceExpressionEnhancementFallback(normalizedText);
   }
 }
+
+// Keep the old export available for callers compiled against the previous helper name.
+export const enhanceVoicePromptForElevenV3 = enhanceVoicePromptForElevenV4;
 
 const sanitizeMusicPolicyTerms = (text: string) => text
   .replace(/\bterrifying\b/gi, 'dark intense')

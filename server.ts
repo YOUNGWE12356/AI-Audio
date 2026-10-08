@@ -27,7 +27,7 @@ import {
   generateSfxRequirements,
   generateLyricsFromMusicStyle,
   createEnglishMusicPromptForElevenLabs,
-  enhanceVoicePromptForElevenV3,
+  enhanceVoicePromptForElevenV4,
   extractBatchVoiceTextFromImage,
   matchBestVoice,
   optimizeImportMetadata,
@@ -216,7 +216,7 @@ async function startServer() {
     if (endpoint.includes('/sfx-requirements')) return '音效需求表';
     if (endpoint.includes('/optimize-metadata')) return '音效库 · 元数据优化';
     if (endpoint.includes('/match-voice') || endpoint.includes('/match-similar-voices')) return 'AI 配音 · 声音匹配';
-    if (endpoint.includes('/voice-v3-enhance')) return 'AI 配音 · 台词增强';
+    if (/\/voice-v[34]-enhance/.test(endpoint)) return 'AI 配音 · 台词增强';
     if (endpoint.includes('/translate-dubbing')) return '翻译配音';
     if (endpoint.includes('/translate-language') || endpoint.endsWith('/translate')) return '文本翻译';
     if (endpoint.includes('/speech-to-speech')) return '音频工具 · 语音转换';
@@ -502,7 +502,7 @@ async function startServer() {
       return Math.max(0, event.credits * 0.12);
     }
     if (/flash|turbo/i.test(event.model)) return Math.max(0, event.credits * 0.05);
-    if (/eleven_v3|multilingual_v2/i.test(event.model)) return Math.max(0, event.credits * 0.1);
+    if (/eleven_v4|eleven_v3|multilingual_v2/i.test(event.model)) return Math.max(0, event.credits * 0.1);
     return 0;
   };
 
@@ -5031,11 +5031,11 @@ async function startServer() {
     return res.json({ text });
   }));
 
-  app.post('/api/ai/gemini/voice-v3-enhance', asyncRoute(async (req, res) => {
+  app.post(['/api/ai/gemini/voice-v4-enhance', '/api/ai/gemini/voice-v3-enhance'], asyncRoute(async (req, res) => {
     const text = String(req.body?.text || '').trim();
     if (!text) return res.status(400).json({ error: '请先输入要增强的配音台词。' });
-    if (text.length > 5000) return res.status(400).json({ error: '配音台词过长，请精简后再使用 V3 增强。' });
-    const result = await enhanceVoicePromptForElevenV3(text, {
+    if (text.length > 10_000) return res.status(400).json({ error: '配音台词过长，请控制在 10,000 字符以内。' });
+    const result = await enhanceVoicePromptForElevenV4(text, {
       voiceName: String(req.body?.voiceName || ''),
       voiceDescription: String(req.body?.voiceDescription || ''),
       language: String(req.body?.language || ''),
