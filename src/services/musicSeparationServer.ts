@@ -9,14 +9,43 @@ import multer from 'multer';
 const MODEL_SLUG = 'roformer-model-bs-roformer-sw-by-jarredou';
 const RUNNER_EVENT_PREFIX = '__MUSIC_SEPARATION__';
 const EXPECTED_STEMS = ['vocals', 'drums', 'bass', 'guitar', 'piano', 'other'] as const;
-const STEM_LABELS: Record<(typeof EXPECTED_STEMS)[number], string> = {
+const DELIVERABLE_STEMS = [...EXPECTED_STEMS, 'instrumental'];
+const STEM_LABELS: Record<(typeof DELIVERABLE_STEMS)[number], string> = {
   vocals: '人声',
+  instrumental: '伴奏',
   drums: '鼓',
   bass: '贝斯',
   guitar: '吉他',
   piano: '钢琴',
   other: '其他乐器',
 };
+const VOCAL_DOWNLOAD_LABELS = {
+  vocals: '纯人声',
+  instrumental: '无人声伴奏',
+} as const;
+
+const decodeMultipartFileName = (name: string) => {
+  if (Array.from(name).some(character => character.codePointAt(0)! > 0xff)) return name;
+  const decoded = Buffer.from(name, 'latin1').toString('utf8');
+  return decoded.includes('\uFFFD') ? name : decoded;
+};
+
+const normalizeSourceName = (name: string) => (
+  path.win32.basename(name)
+    .normalize('NFC')
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+    .trim()
+    .slice(0, 180) || 'audio'
+);
+
+const getDownloadBaseName = (sourceName: string) => {
+  const name = normalizeSourceName(sourceName);
+  return path.basename(name, path.extname(name)).slice(0, 80) || 'audio';
+};
+
+const getVocalDownloadName = (sourceName: string, stemId: keyof typeof VOCAL_DOWNLOAD_LABELS) => (
+  `${getDownloadBaseName(sourceName)}_${VOCAL_DOWNLOAD_LABELS[stemId]}.wav`
+);
 const JOB_MANIFEST_FILE = 'job.json';
 const JOB_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const WAVEFORM_POINTS = 96;
@@ -48,6 +77,7 @@ type MusicStem = {
 
 type MusicSeparationJob = {
   id: string;
+  mode?: 'stems' | 'vocals';
   status: MusicSeparationStatus;
   stage: string;
   progress: number;
@@ -297,6 +327,7 @@ export function createMusicSeparationRouter({
 }: MusicSeparationRouterOptions) {
   const router = express.Router();
   const jobs = new Map<string, MusicSeparationJob>();
+  const vocalRecoveries = new Map<string, Promise<MusicSeparationJob>>();
   const queue: string[] = [];
   let activeJobId: string | null = null;
   let cachedProbe: { value: EngineProbe; expiresAt: number } | null = null;
@@ -363,7 +394,7 @@ export function createMusicSeparationRouter({
       const status = raw.status as MusicSeparationStatus;
       if (raw.version !== 1 || raw.id !== id || !validStatuses.has(status)) return null;
       const outputDir = path.resolve(directoryPath, 'stems');
-      const validIds = new Set<string>(EXPECTED_STEMS);
+      const validIds = new Set<string>(DELIVERABLE_STEMS);
       const stems = Array.isArray(raw.stems) ? raw.stems.flatMap((stem): MusicStem[] => {
         if (!stem || typeof stem !== 'object') return [];
         const idValue = typeof stem.id === 'string' ? stem.id : '';
@@ -404,11 +435,14 @@ export function createMusicSeparationRouter({
       const directoryStat = fs.statSync(directoryPath);
       const job: MusicSeparationJob = {
         id,
+        mode: raw.mode === 'vocals' ? 'vocals' : 'stems',
         status,
         stage: typeof raw.stage === 'string' ? raw.stage : status,
         progress: clampProgress(raw.progress, status === 'completed' ? 100 : 0),
         message: typeof raw.message === 'string' ? raw.message : '已恢复分轨任务。',
-        sourceName: typeof raw.sourceName === 'string' ? raw.sourceName : '已恢复的音乐素材',
+        sourceName: typeof raw.sourceName === 'string'
+          ? normalizeSourceName(decodeMultipartFileName(raw.sourceName))
+          : '已恢复的音乐素材',
         createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : directoryStat.birthtime.toISOString(),
         updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : directoryStat.mtime.toISOString(),
         directoryPath,
@@ -503,6 +537,7 @@ export function createMusicSeparationRouter({
 
   const publicJob = (job: MusicSeparationJob) => ({
     id: job.id,
+    mode: job.mode || 'stems',
     status: job.status,
     stage: job.stage,
     progress: job.progress,
@@ -593,12 +628,20 @@ export function createMusicSeparationRouter({
     );
   });
 
-  const generateZip = async (job: MusicSeparationJob, zipPath: string) => {
+  const createZip = (job: MusicSeparationJob) => {
     const zip = new JSZip();
     job.stems.forEach((stem, index) => {
       const filePath = path.resolve(job.directoryPath, 'stems', stem.fileName);
-      zip.file(`${String(index + 1).padStart(2, '0')}_${stem.id}.wav`, fs.createReadStream(filePath));
+      const fileName = job.mode === 'vocals' && stem.id in VOCAL_DOWNLOAD_LABELS
+        ? getVocalDownloadName(job.sourceName, stem.id as keyof typeof VOCAL_DOWNLOAD_LABELS)
+        : `${String(index + 1).padStart(2, '0')}_${stem.id}.wav`;
+      zip.file(fileName, fs.createReadStream(filePath));
     });
+    return zip;
+  };
+
+  const generateZip = async (job: MusicSeparationJob, zipPath: string) => {
+    const zip = createZip(job);
     await new Promise<void>((resolve, reject) => {
       const output = fs.createWriteStream(zipPath);
       const zipStream = zip.generateNodeStream({
@@ -611,6 +654,51 @@ export function createMusicSeparationRouter({
       output.on('finish', resolve);
       zipStream.pipe(output);
     });
+  };
+
+  const completeVocalResult = async (job: MusicSeparationJob) => {
+    const vocal = job.stems.find(stem => stem.id === 'vocals');
+    const instrumental = job.stems.find(stem => stem.id === 'instrumental');
+    if (!vocal) throw new Error('任务中没有可用的人声轨。');
+    if (job.mode === 'vocals' && instrumental) return job;
+
+    const backingStems = job.stems.filter(stem => stem.id !== 'vocals' && stem.id !== 'instrumental');
+    if (backingStems.length === 0) throw new Error('任务中没有可用于合成伴奏的轨道，请重新上传原素材。');
+    const outputDir = path.resolve(job.directoryPath, 'stems');
+    const instrumentalPath = path.resolve(outputDir, 'mixture_instrumental.wav');
+    const backingPaths = backingStems.map(stem => path.resolve(outputDir, stem.fileName));
+    if (backingPaths.some(filePath => !isPathInside(outputDir, filePath) || !fs.existsSync(filePath))) {
+      throw new Error('伴奏轨道文件已失效，请重新上传原素材。');
+    }
+    const filters = backingStems.map((_, index) => `[${index}:a]`).join('');
+    await runFfmpeg([
+      '-y', '-hide_banner', '-loglevel', 'error',
+      ...backingPaths.flatMap(filePath => ['-i', filePath]),
+      '-filter_complex', `${filters}amix=inputs=${backingStems.length}:duration=longest:normalize=0[out]`,
+      '-map', '[out]', '-c:a', 'pcm_f32le', instrumentalPath,
+    ]);
+    const waveInfo = readWaveInfo(instrumentalPath);
+    if (!waveInfo || Math.abs(waveInfo.duration - vocal.duration) > 0.05) {
+      throw new Error('伴奏轨生成后无法验证时长，请重新处理原素材。');
+    }
+    const completedStem: MusicStem = {
+      id: 'instrumental',
+      name: '伴奏',
+      fileName: path.basename(instrumentalPath),
+      audioUrl: `/uploads/${encodeURIComponent(path.basename(job.directoryPath))}/stems/${encodeURIComponent(path.basename(instrumentalPath))}`,
+      size: fs.statSync(instrumentalPath).size,
+      duration: waveInfo.duration,
+      sampleRate: waveInfo.sampleRate,
+      rmsDb: null,
+      peakDb: null,
+      waveform: readWaveformPeaks(instrumentalPath, waveInfo),
+    };
+    updateJob(job, {
+      mode: 'vocals',
+      message: job.status === 'completed' ? '本地人声分离完成' : '正在整理人声与伴奏',
+      stems: [vocal, completedStem],
+    });
+    return job;
   };
 
   const runModel = (
@@ -739,7 +827,7 @@ export function createMusicSeparationRouter({
       const result = await runModel(job, normalizedInputPath, outputDir);
       if (job.cancelRequested) throw Object.assign(new Error('任务已取消。'), { code: 'JOB_CANCELLED' });
       const runnerStems = Array.isArray(result.stems) ? result.stems as RunnerStem[] : [];
-      const validIds = new Set<string>(EXPECTED_STEMS);
+      const validIds = new Set<string>(DELIVERABLE_STEMS);
       const stems = runnerStems.flatMap((stem): MusicStem[] => {
         const id = typeof stem.id === 'string' ? stem.id : '';
         const filePath = typeof stem.filePath === 'string' ? path.resolve(stem.filePath) : '';
@@ -764,6 +852,17 @@ export function createMusicSeparationRouter({
       });
       if (stems.length === 0) throw new Error('模型没有返回可用的独立轨道。');
 
+      let deliveredStems = stems;
+      if (job.mode === 'vocals') {
+        updateJob(job, { status: 'analyzing', stage: 'analyzing', progress: 92, message: '正在合成无人声伴奏', stems });
+        await completeVocalResult(job);
+        if (job.cancelRequested) throw Object.assign(new Error('任务已取消。'), { code: 'JOB_CANCELLED' });
+        deliveredStems = job.stems;
+        await Promise.all(stems.filter(stem => stem.id !== 'vocals').map(stem =>
+          fs.promises.unlink(path.resolve(outputDir, stem.fileName)).catch(() => undefined),
+        ));
+      }
+
       updateJob(job, {
         status: 'packaging',
         stage: 'packaging',
@@ -771,15 +870,16 @@ export function createMusicSeparationRouter({
         message: '正在整理 WAV 轨道与 ZIP',
         duration: asFiniteNumber(result.duration),
         sampleRate: asFiniteNumber(result.sampleRate, 44_100),
-        stems,
+        stems: deliveredStems,
       });
       await generateZip(job, zipPath);
+      if (job.cancelRequested) throw Object.assign(new Error('任务已取消。'), { code: 'JOB_CANCELLED' });
       await fs.promises.unlink(normalizedInputPath).catch(() => undefined);
       updateJob(job, {
         status: 'completed',
         stage: 'completed',
         progress: 100,
-        message: `高质量分轨完成，共生成 ${stems.length} 条有效轨道`,
+        message: job.mode === 'vocals' ? '本地人声分离完成' : `高质量分轨完成，共生成 ${stems.length} 条有效轨道`,
         zipUrl: `/api/audio/music-separation/jobs/${job.id}/download`,
       });
     } catch (error) {
@@ -843,7 +943,7 @@ export function createMusicSeparationRouter({
     }
   });
 
-  router.post('/jobs', upload.single('media'), async (req, res, next) => {
+  router.post(['/jobs', '/vocal-jobs'], upload.single('media'), async (req, res, next) => {
     const uploadedPath = req.file?.path;
     try {
       if (!req.file) return res.status(400).json({ error: '请选择需要分轨的音频或视频。' });
@@ -851,6 +951,10 @@ export function createMusicSeparationRouter({
         await fs.promises.unlink(req.file.path).catch(() => undefined);
         return res.status(415).json({ error: '文件不是受支持的音频或视频格式。' });
       }
+      const mode = req.path.endsWith('/vocal-jobs') || req.body?.mode === 'vocals' ? 'vocals' : 'stems';
+      const submittedName = typeof req.body?.originalName === 'string' && req.body.originalName.trim()
+        ? req.body.originalName
+        : decodeMultipartFileName(req.file.originalname);
       const probe = await runProbe();
       if (!probe.ready) {
         await fs.promises.unlink(req.file.path).catch(() => undefined);
@@ -871,11 +975,12 @@ export function createMusicSeparationRouter({
       const now = new Date().toISOString();
       const job: MusicSeparationJob = {
         id,
+        mode,
         status: 'queued',
         stage: 'queued',
         progress: 0,
         message: activeJobId ? '任务已进入 GPU 串行队列' : '任务已创建，等待本地 GPU',
-        sourceName: req.file.originalname,
+        sourceName: normalizeSourceName(submittedName),
         createdAt: now,
         updatedAt: now,
         directoryPath,
@@ -899,6 +1004,25 @@ export function createMusicSeparationRouter({
     return res.json(publicJob(job));
   });
 
+  router.post('/jobs/:id/complete-vocals', async (req, res) => {
+    const job = getJob(req.params.id);
+    if (!job || job.status !== 'completed') {
+      return res.status(404).json({ error: '已完成的分离任务不存在。' });
+    }
+    let recovery = vocalRecoveries.get(job.id);
+    if (!recovery) {
+      recovery = completeVocalResult(job);
+      vocalRecoveries.set(job.id, recovery);
+    }
+    try {
+      return res.json(publicJob(await recovery));
+    } catch (error) {
+      return res.status(422).json({ error: error instanceof Error ? error.message : '伴奏补全失败。' });
+    } finally {
+      if (vocalRecoveries.get(job.id) === recovery) vocalRecoveries.delete(job.id);
+    }
+  });
+
   router.delete('/jobs/:id', async (req, res, next) => {
     try {
       const job = getJob(req.params.id);
@@ -920,16 +1044,39 @@ export function createMusicSeparationRouter({
     }
   });
 
-  router.get('/jobs/:id/download', (req, res) => {
+  router.get('/jobs/:id/stems/:stemId/download', (req, res) => {
+    const job = getJob(req.params.id);
+    const stemId = req.params.stemId;
+    if (!job || job.mode !== 'vocals' || job.status !== 'completed' || !(stemId in VOCAL_DOWNLOAD_LABELS)) {
+      return res.status(404).json({ error: '人声分离音轨不存在。' });
+    }
+    const stem = job.stems.find(item => item.id === stemId);
+    if (!stem) return res.status(404).json({ error: '人声分离音轨不存在。' });
+    const filePath = path.resolve(job.directoryPath, 'stems', stem.fileName);
+    if (!isPathInside(job.directoryPath, filePath) || !fs.existsSync(filePath)) {
+      return res.status(404).json({ error: '音轨文件已失效，请重新处理。' });
+    }
+    return res.download(filePath, getVocalDownloadName(job.sourceName, stemId as keyof typeof VOCAL_DOWNLOAD_LABELS));
+  });
+
+  router.get('/jobs/:id/download', (req, res, next) => {
     const job = getJob(req.params.id);
     if (!job || job.status !== 'completed') return res.status(404).json({ error: '分轨压缩包尚未生成。' });
     const zipPath = path.resolve(job.directoryPath, `music-stems-${job.id}.zip`);
     if (!isPathInside(job.directoryPath, zipPath) || !fs.existsSync(zipPath)) {
       return res.status(404).json({ error: '分轨压缩包已失效，请重新处理。' });
     }
-    const baseName = path.basename(job.sourceName, path.extname(job.sourceName))
-      .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
-      .slice(0, 80) || 'music';
+    const baseName = getDownloadBaseName(job.sourceName);
+    if (job.mode === 'vocals') {
+      res.attachment(`${baseName}_人声分离.zip`);
+      const zipStream = createZip(job).generateNodeStream({
+        type: 'nodebuffer',
+        streamFiles: true,
+        compression: 'STORE',
+      });
+      zipStream.on('error', next);
+      return zipStream.pipe(res);
+    }
     return res.download(zipPath, `${baseName}_stems.zip`);
   });
 

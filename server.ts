@@ -2507,6 +2507,7 @@ async function startServer() {
     const format = normalizeAudioExportFormat(req.body?.format);
     const sampleRate = normalizeSampleRate(req.body?.sampleRate);
     const bitrate = normalizeAudioBitrate(req.body?.bitrate);
+    const channelMode = normalizeAudioChannelMode(req.body?.channelMode);
     const outputExtension = format === 'wav' ? '.wav' : format === 'ogg' ? '.ogg' : format === 'aac' ? '.aac' : '.mp3';
     const outputMimeType = format === 'wav'
       ? 'audio/wav'
@@ -2528,7 +2529,7 @@ async function startServer() {
         '-map', '0:a:0',
         '-vn',
         '-map_metadata', '-1',
-        ...getAudioOutputArgs(format, sampleRate, bitrate, 24, 'stereo'),
+        ...getAudioOutputArgs(format, sampleRate, bitrate, 24, channelMode),
         outputPath,
       ], 180_000);
 

@@ -40,6 +40,7 @@ import PointCostHint from './PointCostHint';
 
 const AudioAnalyzer = React.lazy(() => import('./AudioAnalyzer'));
 const MusicStemSeparation = React.lazy(() => import('./MusicStemSeparation'));
+const LocalVocalSeparation = React.lazy(() => import('./LocalVocalSeparation'));
 const MusicAnalysisNaming = React.lazy(() => import('./MusicAnalysisNaming'));
 
 interface FactoryConversionResult {
@@ -49,6 +50,7 @@ interface FactoryConversionResult {
   sourceSize: number;
   sourceType: string;
   duration?: number;
+  channels?: 1 | 2;
   blob?: Blob;
   url?: string;
   error?: string;
@@ -66,6 +68,7 @@ interface FactoryLoudnessInfo {
 }
 
 type FactoryAudioFormat = 'mp3' | 'wav' | 'ogg' | 'flac' | 'aac' | 'm4a';
+type FactoryChannelMode = 'mono' | 'stereo';
 
 type RenameRuleType = 'remove' | 'replace' | 'prefix' | 'suffix' | 'number' | 'case' | 'removeRange' | 'regexReplace';
 type RenameCaseMode = 'lower' | 'upper' | 'title';
@@ -170,6 +173,7 @@ async function encodeFactoryAudioOnServer(
     format: FactoryAudioFormat;
     sampleRate: number;
     bitrate: number;
+    channelMode: FactoryChannelMode;
   },
 ): Promise<Blob> {
   const wavBlob = encodeWav(sourceBuffer);
@@ -178,6 +182,7 @@ async function encodeFactoryAudioOnServer(
   formData.append('format', options.format);
   formData.append('sampleRate', String(options.sampleRate));
   formData.append('bitrate', `${options.bitrate}k`);
+  formData.append('channelMode', options.channelMode);
 
   const response = await fetch('/api/audio/convert', {
     method: 'POST',
@@ -293,6 +298,29 @@ function normalizeAudioBuffer(
   };
 }
 
+function convertFactoryChannels(source: AudioBuffer, mode: FactoryChannelMode): AudioBuffer {
+  const channels = mode === 'mono' ? 1 : 2;
+  if (source.numberOfChannels === channels) return source;
+
+  const output = new AudioBuffer({
+    length: source.length,
+    numberOfChannels: channels,
+    sampleRate: source.sampleRate,
+  });
+  const left = source.getChannelData(0);
+  const right = source.numberOfChannels > 1 ? source.getChannelData(1) : left;
+  const outputLeft = output.getChannelData(0);
+  if (channels === 1) {
+    for (let index = 0; index < source.length; index += 1) {
+      outputLeft[index] = (left[index] + right[index]) * 0.5;
+    }
+  } else {
+    outputLeft.set(left);
+    output.getChannelData(1).set(right);
+  }
+  return output;
+}
+
 interface AudioToolsProps {
   assistantAudioRequest?: AssistantAudioRequest | null;
   onAssistantTaskRunningChange?: (requestId: string, running: boolean) => void;
@@ -300,6 +328,8 @@ interface AudioToolsProps {
 
 export default function AudioTools({ assistantAudioRequest = null, onAssistantTaskRunningChange }: AudioToolsProps) {
   const [activeSubTab, setActiveSubTab] = useState<'workstation' | 'analysis' | 'factory' | 'midi' | 'renamer' | 'music-analysis-naming' | 'isolation' | 'music-separation'>('workstation');
+  const [isolationMode, setIsolationMode] = useState<'cloud' | 'local'>('cloud');
+  const [localIsolationVisited, setLocalIsolationVisited] = useState(false);
   const [subNavWidth, setSubNavWidth] = useState(() => {
     if (typeof window === 'undefined') return AUDIO_TOOLS_SUBNAV_DEFAULT_WIDTH;
     const hasInitializedWidth = window.localStorage.getItem(AUDIO_TOOLS_SUBNAV_WIDTH_READY_KEY) === '1';
@@ -494,6 +524,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
   const [factoryFiles, setFactoryFiles] = useState<File[]>([]);
   const [factoryFormat, setFactoryFormat] = useState<FactoryAudioFormat>('mp3');
   const [factorySampleRate, setFactorySampleRate] = useState<number>(44100);
+  const [factoryChannelMode, setFactoryChannelMode] = useState<FactoryChannelMode>('stereo');
   const [factoryBitrate, setFactoryBitrate] = useState<number>(128); // for MP3
   const [factoryNormalizeEnabled, setFactoryNormalizeEnabled] = useState<boolean>(false);
   const [factoryTargetLufs, setFactoryTargetLufs] = useState<number>(-16);
@@ -528,6 +559,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
       return;
     }
     if (assistantAudioRequest.task === 'isolate' || assistantAudioRequest.audioTool === 'isolation') {
+      setIsolationMode('cloud');
       if (assistantAudioRequest.file) {
         setIsolationFile(assistantAudioRequest.file);
         setIsolationError(null);
@@ -772,17 +804,19 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
 
     onStepProgress(0.68, `正在重采样至 ${factorySampleRate.toLocaleString()} Hz：${file.name}`);
     const resampledBuffer = await resampleAudioBuffer(processingBuffer, factorySampleRate);
+    const outputBuffer = convertFactoryChannels(resampledBuffer, factoryChannelMode);
 
     onStepProgress(0.85, `正在封装为 ${factoryFormat.toUpperCase()}：${file.name}`);
     const finalBlob = factoryFormat === 'wav'
-      ? encodeWav(resampledBuffer)
+      ? encodeWav(outputBuffer)
       : factoryFormat === 'ogg'
-        ? await encodeFactoryAudioOnServer(resampledBuffer, file.name, {
+        ? await encodeFactoryAudioOnServer(outputBuffer, file.name, {
           format: factoryFormat,
           sampleRate: factorySampleRate,
           bitrate: factoryBitrate,
+          channelMode: factoryChannelMode,
         })
-        : encodeMp3(resampledBuffer, factoryBitrate);
+        : encodeMp3(outputBuffer, factoryBitrate);
 
     return {
       id: `${file.name}-${file.size}-${file.lastModified}`,
@@ -791,6 +825,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
       sourceSize: file.size,
       sourceType: file.type || 'unknown',
       duration: decodedBuffer.duration,
+      channels: outputBuffer.numberOfChannels as 1 | 2,
       blob: finalBlob,
       url: URL.createObjectURL(finalBlob),
       loudness,
@@ -914,21 +949,23 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
 
       // Resample to user selected Sample Rate
       const resampledBuffer = await resampleAudioBuffer(decodedBuffer, factorySampleRate);
+      const outputBuffer = convertFactoryChannels(resampledBuffer, factoryChannelMode);
 
       setFactoryProgress(75);
       setFactoryStatus(`正在封装成指定格式: [${factoryFormat.toUpperCase()}] ...`);
 
       let finalBlob: Blob;
       if (factoryFormat === 'wav') {
-        finalBlob = encodeWav(resampledBuffer);
+        finalBlob = encodeWav(outputBuffer);
       } else if (factoryFormat === 'mp3') {
         // MP3
-        finalBlob = encodeMp3(resampledBuffer, factoryBitrate);
+        finalBlob = encodeMp3(outputBuffer, factoryBitrate);
       } else if (factoryFormat === 'ogg') {
-        finalBlob = await encodeFactoryAudioOnServer(resampledBuffer, factoryFile.name, {
+        finalBlob = await encodeFactoryAudioOnServer(outputBuffer, factoryFile.name, {
           format: factoryFormat,
           sampleRate: factorySampleRate,
           bitrate: factoryBitrate,
+          channelMode: factoryChannelMode,
         });
       } else {
         throw new Error(`${factoryFormat.toUpperCase()} 格式编码暂未接入，请先选择 MP3、WAV 或 OGG。`);
@@ -1634,7 +1671,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
           {/* Subtab Button 2: 人声分离 */}
           <button
             onClick={() => setActiveSubTab('isolation')}
-            title="人声分离 (AI)"
+            title="人声分离"
             className={`w-full flex items-center overflow-hidden whitespace-nowrap rounded-xl text-xs font-semibold transition-all duration-200 ${
               isSubNavCompact ? 'justify-center gap-0 px-0 py-3' : 'gap-3 px-3 py-2.5'
             } ${
@@ -1644,7 +1681,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
             }`}
           >
             <Sparkles className={`w-4 h-4 shrink-0 transition-colors ${activeSubTab === 'isolation' ? 'text-emerald-600' : 'text-slate-400'}`} />
-            <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>人声分离 (AI)</span>
+            <span className={`shrink-0 whitespace-nowrap ${isSubNavCompact ? 'hidden' : ''}`}>人声分离</span>
           </button>
         </div>
         <button
@@ -1723,7 +1760,6 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
           />
         </React.Suspense>
       )}
-
       {/* ==========================================================
           SUB-TAB: MUSIC ANALYSIS NAMING
           ========================================================== */}
@@ -2380,6 +2416,23 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                     </select>
                   </div>
 
+                  <div className="space-y-1.5 md:col-span-2">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">输出声道</span>
+                    <div className="inline-flex w-full max-w-xs rounded-lg border border-slate-200 bg-slate-100 p-1" role="group" aria-label="输出声道">
+                      {(['stereo', 'mono'] as const).map(mode => (
+                        <button
+                          key={mode}
+                          type="button"
+                          aria-pressed={factoryChannelMode === mode}
+                          onClick={() => setFactoryChannelMode(mode)}
+                          className={`h-8 flex-1 rounded-md text-xs font-semibold transition-colors ${factoryChannelMode === mode ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
+                        >
+                          {mode === 'stereo' ? '立体声' : '单声道'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
                   {/* Bitrate Selector (Compressed formats) */}
                   {(factoryFormat === 'mp3' || factoryFormat === 'ogg') && (
                     <div className="space-y-1.5 md:col-span-2">
@@ -2604,6 +2657,12 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                         <span>封装格式</span>
                         <span className="font-bold text-slate-800 bg-emerald-50 border border-emerald-200 px-1 rounded uppercase scale-95">{factoryFormat}</span>
                       </div>
+                      {primaryFactoryResult?.channels && (
+                        <div className="flex justify-between border-t border-slate-100/50 pt-1.5">
+                          <span>输出声道</span>
+                          <span className="font-bold text-slate-800">{primaryFactoryResult.channels === 1 ? '单声道' : '立体声'}</span>
+                        </div>
+                      )}
                       {(factoryFormat === 'mp3' || factoryFormat === 'ogg') && (
                         <div className="flex justify-between border-t border-slate-100/50 pt-1.5">
                           <span>恒定比特率 (CBR)</span>
@@ -2742,7 +2801,29 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
           SUB-TAB 3: VOCAL ISOLATION
           ========================================================== */}
       {activeSubTab === 'isolation' && (
-        <div className="max-w-4xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="mx-auto w-full max-w-6xl space-y-6">
+          <nav aria-label="人声分离模式" className="grid grid-cols-2 rounded-xl border border-emerald-200 bg-emerald-50/60 p-1">
+            <button
+              type="button"
+              aria-pressed={isolationMode === 'cloud'}
+              onClick={() => setIsolationMode('cloud')}
+              className={`min-w-0 rounded-lg px-3 py-2 text-left transition-all ${isolationMode === 'cloud' ? 'bg-white text-emerald-800 shadow-sm' : 'text-slate-500 hover:bg-white/60 hover:text-slate-800'}`}
+            >
+              <span className="block text-xs font-black">云端人声分离</span>
+              <span className="mt-0.5 block text-[9px] font-semibold leading-tight">ElevenLabs · 提取纯人声</span>
+            </button>
+            <button
+              type="button"
+              aria-pressed={isolationMode === 'local'}
+              onClick={() => { setLocalIsolationVisited(true); setIsolationMode('local'); }}
+              className={`min-w-0 rounded-lg px-3 py-2 text-left transition-all ${isolationMode === 'local' ? 'bg-white text-emerald-800 shadow-sm' : 'text-slate-500 hover:bg-white/60 hover:text-slate-800'}`}
+            >
+              <span className="block text-xs font-black">本地人声分离</span>
+              <span className="mt-0.5 block text-[9px] font-semibold leading-tight">本地模型 · 人声与伴奏 · 不消耗 API 积分</span>
+            </button>
+          </nav>
+          {isolationMode === 'cloud' && (
+          <div className="mx-auto grid max-w-4xl grid-cols-1 gap-6 lg:grid-cols-3">
           
           {/* Form Options Side */}
           <div className="lg:col-span-2 space-y-5">
@@ -2951,6 +3032,15 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
 
             </div>
           </div>
+          </div>
+          )}
+          {localIsolationVisited && (
+            <div className={isolationMode === 'local' ? '' : 'hidden'}>
+              <React.Suspense fallback={<div className="flex min-h-72 items-center justify-center text-sm text-slate-500"><Loader2 className="mr-2 h-4 w-4 animate-spin" />正在加载本地人声分离…</div>}>
+                <LocalVocalSeparation visible={isolationMode === 'local'} />
+              </React.Suspense>
+            </div>
+          )}
         </div>
       )}
       </div>
