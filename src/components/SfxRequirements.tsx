@@ -47,7 +47,7 @@ const DEMO_ROWS: Record<TemplateType, any[]> = {
     {
       index: 1,
       audio_type: "SFX",
-      filename: "sfx_ui_common_button_click",
+      filename: "UIClick_CommonButtonClick",
       duration_logic: "1s, 单次播放",
       scene: "通用与主界面&游戏内的ui点击按键",
       description: "清脆的交互点击声，带有轻微的拟物触感与中高频数字质感",
@@ -71,7 +71,7 @@ const DEMO_ROWS: Record<TemplateType, any[]> = {
     {
       index: 3,
       audio_type: "SFX",
-      filename: "sfx_player_dash",
+      filename: "DSGNWhsh_PlayerDash",
       duration_logic: "0.8s, 单次播放",
       scene: "主角执行前冲闪避、瞬移的一瞬间",
       description: "带有疾风气流撕裂声，高频气流破空音色叠合电声粒子回馈",
@@ -83,7 +83,7 @@ const DEMO_ROWS: Record<TemplateType, any[]> = {
     {
       index: 4,
       audio_type: "SFX",
-      filename: "sfx_item_pickup_gold",
+      filename: "METLTonl_GoldPickup",
       duration_logic: "1.2s, 随机多样本",
       scene: "玩家拾取金币或重要战利品时",
       description: "清脆悦耳的高频金属撞击声，带有闪闪发光的粒子声尾音",
@@ -96,7 +96,7 @@ const DEMO_ROWS: Record<TemplateType, any[]> = {
   game_sfx_middleware: [
     {
       index: 1,
-      filename: "sfx_footstep_grass",
+      filename: "FOLYFeet_FootstepGrass",
       event_name: "event:/SFX/Player/Footstep_Grass",
       duration: "0.5s",
       scene: "角色在草地上行走或奔跑时",
@@ -109,7 +109,7 @@ const DEMO_ROWS: Record<TemplateType, any[]> = {
     },
     {
       index: 2,
-      filename: "sfx_magic_fireball_launch",
+      filename: "MAGElem_FireballLaunch",
       event_name: "event:/SFX/Magic/Fireball_Launch",
       duration: "1.2s",
       scene: "法师角色咏唱结束发射火球一瞬间",
@@ -517,8 +517,8 @@ const normalizeRequirementFilenames = (items: any[]) => items.map((item) => {
   };
 });
 
-const simplifySingletonFilenameSuffixes = (items: any[]) => {
-  const normalizedItems = normalizeRequirementFilenames(items);
+const simplifySingletonFilenameSuffixes = (items: any[], preserveUcs = false) => {
+  const normalizedItems = preserveUcs ? items : normalizeRequirementFilenames(items);
   const baseNameCounts = new Map<string, number>();
   normalizedItems.forEach((item) => {
     const filename = typeof item?.filename === 'string' ? item.filename.trim() : '';
@@ -559,7 +559,8 @@ const normalizeGeneralEngineeringName = (value: unknown) => {
   return capitalizeEngineeringNameSegments(normalized);
 };
 
-const normalizeGeneralRequirementItems = (items: any[]) => items.map((item) => {
+const normalizeGeneralRequirementItems = (items: any[], preserveUcs = false) => items.map((item) => {
+  if (preserveUcs && inferGeneralAudioType(item) === 'SFX') return item;
   const filename = normalizeGeneralEngineeringName(item?.filename);
   const normalizedItem = {
     ...item,
@@ -867,7 +868,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
         ? normalizeAvatarRequirementItems(defaultRows)
         : selectedProject === 'sunny_island'
           ? normalizeSunnyIslandRequirementItems(defaultRows)
-        : normalizeGeneralRequirementItems(defaultRows);
+        : normalizeGeneralRequirementItems(defaultRows, !selectedProject && templateType.startsWith('game_sfx_'));
     setCurrentRows(normalizedRows, false);
     setSuccess(false);
     setSuccessMessage('已恢复当前模板的示例内容。');
@@ -991,7 +992,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
         if (key === 'audio_type') {
           newRow[key] = "SFX";
         } else if (key === 'filename') {
-          newRow[key] = templateType.startsWith('voiceover') ? `Vo_Character_New_${newIndex}` : `Sfx_Module_New_${newIndex}`;
+          newRow[key] = templateType.startsWith('voiceover') ? `Vo_Character_New_${newIndex}` : selectedProject ? `Sfx_Module_New_${newIndex}` : '';
         } else if (key === 'event_name') {
           newRow[key] = `event:/SFX/Module/new_${newIndex}`;
         } else if (key === 'duration' || key === 'duration_logic') {
@@ -1179,6 +1180,8 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
     setActiveGenerateMode(mode);
     setLoadingStep(0);
     const requestTemplateType = templateType;
+    const requestProject = selectedProject;
+    const requestProjectName = selectedProjectName;
     const requestReferenceFile = screenshot;
     const requestReferenceBase64 = screenshotBase64;
     const requestExistingRows = mode === 'append'
@@ -1222,7 +1225,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
           requestInputText,
           imageObj,
           requestTemplateType,
-          selectedProjectName,
+          requestProjectName,
           requestExistingItems,
         ),
         detectedVoRowsPromise,
@@ -1232,12 +1235,13 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
         setSuccessMessage('没有追加新需求：本次没有识别到区别于当前表格的新条目。请补充新的文字描述或上传新的参考文件后再继续添加。');
         setSuccess(true);
       } else if (response && Array.isArray(response.items) && response.items.length > 0) {
-        const normalizedItems = simplifySingletonFilenameSuffixes(response.items);
-        const projectAwareItems = selectedProject === 'jinn'
+        const preserveUcs = !requestProject && requestTemplateType.startsWith('game_sfx_');
+        const normalizedItems = simplifySingletonFilenameSuffixes(response.items, preserveUcs);
+        const projectAwareItems = requestProject === 'jinn'
           ? normalizeJinnRequirementItems(response.items)
-          : selectedProject === 'avatar'
+          : requestProject === 'avatar'
             ? normalizeAvatarRequirementItems(normalizedItems)
-            : selectedProject === 'sunny_island'
+            : requestProject === 'sunny_island'
               ? normalizeSunnyIslandRequirementItems(normalizedItems)
             : normalizedItems;
         const sourceItemCount = Number(response.sourceItemCount);
@@ -1254,13 +1258,13 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
           countLockedItems,
           detectedVoRows,
         );
-        const generatedItems = selectedProject === 'jinn'
+        const generatedItems = requestProject === 'jinn'
           ? normalizeJinnRequirementItems(mergedItems)
-          : selectedProject === 'avatar'
+          : requestProject === 'avatar'
             ? normalizeAvatarRequirementItems(mergedItems)
-            : selectedProject === 'sunny_island'
+            : requestProject === 'sunny_island'
               ? normalizeSunnyIslandRequirementItems(mergedItems)
-            : normalizeGeneralRequirementItems(mergedItems);
+            : normalizeGeneralRequirementItems(mergedItems, preserveUcs);
         if (mode === 'append') {
           const uniqueGeneratedItems = filterNewRequirementItems(generatedItems, requestExistingRows, requestTemplateType);
           const duplicateCount = Math.max(0, generatedItems.length - uniqueGeneratedItems.length);

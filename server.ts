@@ -9,6 +9,7 @@ import { exec, execFile } from 'child_process';
 import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import JSZip from 'jszip';
+import { createSfxArchiveStream, downloadContentDisposition, safeDownloadFileName } from './src/services/sfxLibraryDownload';
 import ffmpegStatic from 'ffmpeg-static';
 import { DEFAULT_CATEGORIES, INITIAL_SOUNDS } from './src/data/sfxData';
 import type { SoundEffect } from './src/data/sfxData';
@@ -1799,14 +1800,99 @@ async function startServer() {
     }
   }));
 
+  const archiveSelections = new Map<string, { ids: string[]; fileName: string; expiresAt: number }>();
+  const resolveArchiveFiles = (ids: string[]) => {
+    const byId = new Map(readSfxSounds().map(sound => [sound.id, sound]));
+    return ids.map(id => {
+      const sound = byId.get(id);
+      const filePath = resolveLibraryPath(sound?.storageKey);
+      return sound && filePath && fs.existsSync(filePath)
+        ? { fileName: safeDownloadFileName(sound.fileName, path.basename(filePath)), filePath }
+        : null;
+    });
+  };
+
+  const prepareSfxArchive = (ids: string[], requestedFileName: unknown, res: express.Response) => {
+    if (resolveArchiveFiles(ids).some(file => !file)) {
+      return res.status(404).json({ error: '部分音效文件已失效或尚未存储在服务器，请刷新音效库后重试。' });
+    }
+    const requestedName = safeDownloadFileName(requestedFileName, '音效打包.zip').slice(0, 180);
+    const fileName = /\.zip$/i.test(requestedName) ? requestedName : `${requestedName}.zip`;
+    const now = Date.now();
+    for (const [key, value] of archiveSelections) {
+      if (value.expiresAt <= now) archiveSelections.delete(key);
+    }
+    if (archiveSelections.size >= 50) archiveSelections.delete(archiveSelections.keys().next().value!);
+    const token = randomUUID();
+    archiveSelections.set(token, { ids, fileName, expiresAt: now + 10 * 60_000 });
+    return res.json({ downloadUrl: `/api/sfx/library/archive/${token}` });
+  };
+
+  app.post('/api/sfx/library/archive', (req, res) => {
+    const ids = req.body?.ids;
+    if (!Array.isArray(ids) || ids.length < 1 || ids.length > 2000
+      || ids.some(id => typeof id !== 'string' || !id || id.length > 128)
+      || new Set(ids).size !== ids.length) {
+      return res.status(400).json({ error: '打包列表无效或超出 2000 个文件上限。' });
+    }
+    return prepareSfxArchive(ids, req.body?.fileName, res);
+  });
+
+  app.get('/api/sfx/library/archive/prepare', (req, res) => {
+    const revisionText = req.query.revision;
+    const selection = req.query.selection;
+    if (typeof revisionText !== 'string' || !/^\d+$/.test(revisionText)
+      || Number(revisionText) !== sfxLibraryRevision) {
+      return res.status(409).json({ error: '音效库已更新，请刷新页面后重新打包。' });
+    }
+    const sounds = readSfxSounds();
+    if (typeof selection !== 'string' || !/^[0-9a-f]+$/i.test(selection)
+      || selection.length !== Math.ceil(sounds.length / 8) * 2) {
+      return res.status(400).json({ error: '打包列表无效，请刷新音效库后重试。' });
+    }
+    const selectedBits = Buffer.from(selection, 'hex');
+    const ids = sounds.filter((_, index) => (selectedBits[index >> 3] & (1 << (index & 7))) !== 0)
+      .map(sound => sound.id);
+    if (ids.length < 1 || ids.length > 2000) {
+      return res.status(400).json({ error: '打包列表无效或超出 2000 个文件上限。' });
+    }
+    return prepareSfxArchive(ids, req.query.fileName, res);
+  });
+
+  const sendPreparedSfxArchive = (req: express.Request, res: express.Response) => {
+    const selection = archiveSelections.get(req.params.token);
+    if (!selection || selection.expiresAt <= Date.now()) {
+      archiveSelections.delete(req.params.token);
+      return res.status(404).json({ error: '打包链接已过期，请重新点击打包下载。' });
+    }
+    const files = resolveArchiveFiles(selection.ids);
+    if (files.some(file => !file)) {
+      return res.status(404).json({ error: '部分音效文件已失效，请刷新音效库后重试。' });
+    }
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', downloadContentDisposition(selection.fileName));
+    res.setHeader('Cache-Control', 'no-store');
+    const stream = createSfxArchiveStream(files as NonNullable<(typeof files)[number]>[]);
+    stream.on('error', error => {
+      console.error('SFX archive stream failed:', error);
+      res.destroy(error);
+    });
+    res.on('close', () => stream.destroy());
+    return stream.pipe(res);
+  };
+  app.get('/api/sfx/library/archive/:token', sendPreparedSfxArchive);
+  app.post('/api/sfx/library/archive/:token/download', sendPreparedSfxArchive);
+
   app.get('/api/sfx/library/stream', (req, res) => {
     const filePath = resolveLibraryPath(req.query.key);
     if (!filePath || !fs.existsSync(filePath)) {
       return res.status(404).json({ error: '音效文件不存在。' });
     }
     const download = String(req.query.download || '') === '1';
-    const disposition = download ? 'attachment' : 'inline';
-    res.setHeader('Content-Disposition', `${disposition}; filename="${encodeURIComponent(path.basename(filePath))}"`);
+    const storageKey = String(req.query.key || '');
+    const sound = download ? readSfxSounds().find(item => item.storageKey === storageKey) : undefined;
+    const fileName = safeDownloadFileName(sound?.fileName, path.basename(filePath));
+    res.setHeader('Content-Disposition', downloadContentDisposition(fileName, download ? 'attachment' : 'inline'));
     return res.sendFile(filePath, {
       acceptRanges: true,
       cacheControl: true,

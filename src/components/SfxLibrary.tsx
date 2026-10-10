@@ -4,7 +4,6 @@
  */
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import JSZip from 'jszip';
 import { 
   Database, 
   Search, 
@@ -48,6 +47,7 @@ import {
 } from 'lucide-react';
 import { HistoryItem } from '../types';
 import { optimizeImportMetadata } from '../services/geminiService';
+import { isBgmImportFileName, isUcsImportFileName } from '../services/ucsNaming';
 import {
   getSfxLibraryAdminHeaders,
   loginSfxLibraryAdmin,
@@ -62,6 +62,8 @@ import {
   publishSfxLibraryIndex,
 } from '../services/sfxLibraryIndex';
 import { scoreSfxSearchCandidate } from '../services/sfxSearchLexicon';
+import { prepareSfxLibraryArchive } from '../services/sfxLibraryArchiveClient';
+import { displaySfxLibraryFileName } from '../utils/sfxLibraryFileName';
 
 interface ImportItem {
   id: string;
@@ -1234,6 +1236,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   }, []);
 
   const isLoadedFromServer = useRef(false);
+  const [isServerLibraryReady, setIsServerLibraryReady] = useState(false);
   const serverRevisionRef = useRef(0);
   const serverSnapshotRef = useRef({ categories: '', sounds: '' });
   const [serverAssetStats, setServerAssetStats] = useState<AudioAssetLibraryStats | null>(null);
@@ -1345,6 +1348,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
         serverSnapshotRef.current = { categories: categoriesJson, sounds: soundsJson };
         setCategories(libraryState.categories);
         setSounds(libraryState.sounds);
+        setIsServerLibraryReady(true);
         localStorage.setItem(SFX_LIBRARY_CATEGORIES_KEY, categoriesJson);
         localStorage.setItem(SFX_LIBRARY_SOUNDS_KEY, soundsJson);
         publishSfxLibraryIndex(libraryState.categories, libraryState.sounds);
@@ -1562,15 +1566,62 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
       });
   }, []);
 
-  const handleDownloadSingleSound = (sound: SoundEffect) => {
-    if (!sound) return;
-    const url = getAudioDownloadUrl(sound);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = sound.fileName || `${sound.name}.${sound.format.toLowerCase()}`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+  const handleDownloadSingleSound = async (sound: SoundEffect): Promise<boolean> => {
+    if (!sound) return false;
+    const fileName = sound.fileName || `${sound.name}.${sound.format.toLowerCase()}`;
+    const sourceUrl = getAudioDownloadUrl(sound);
+    let downloadUrl = sourceUrl;
+    try {
+      if (sound.storageKey) {
+        const response = await fetch(sourceUrl);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        downloadUrl = URL.createObjectURL(await response.blob());
+      }
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      if (downloadUrl !== sourceUrl) window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 30_000);
+      return true;
+    } catch (error: any) {
+      showCustomAlert('下载失败', `无法下载 ${fileName}：${error?.message || '请稍后重试。'}`);
+      return false;
+    }
+  };
+
+  const downloadSoundsAsZip = async (selectedSounds: SoundEffect[], fileName: string) => {
+    if (!isServerLibraryReady) {
+      showCustomAlert('音效库同步中', '请等待服务端音效库加载完成后再打包下载。');
+      return;
+    }
+    setCustomDialog({
+      isOpen: true,
+      title: '正在准备下载...',
+      message: `正在打包 ${selectedSounds.length} 个音效文件，请稍候...`,
+      isConfirm: false,
+    });
+    try {
+      const downloadUrl = await prepareSfxLibraryArchive(
+        selectedSounds.map(sound => sound.id),
+        fileName,
+        { libraryIds: sounds.map(sound => sound.id), revision: serverRevisionRef.current },
+      );
+
+      // Browser download integrations can hijack GET downloads; a form POST keeps the native file save path.
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = `${downloadUrl}/download`;
+      document.body.appendChild(form);
+      form.submit();
+      form.remove();
+      setCustomDialog(null);
+      showCustomAlert('打包下载已开始', `浏览器正在保存 ${selectedSounds.length} 个音效文件的压缩包，请在下载列表确认完成。`);
+    } catch (error: any) {
+      setCustomDialog(null);
+      showCustomAlert('打包失败', error?.message || '无法准备打包下载。');
+    }
   };
 
   const downloadFolderAsZip = async (
@@ -1615,76 +1666,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
       return;
     }
 
-    setCustomDialog({
-      isOpen: true,
-      title: "正在打包...",
-      message: `正在准备打包下载 "${folderName}" 目录下的 ${folderSounds.length} 个音效文件，请稍候...`,
-      isConfirm: false
-    });
-
-    try {
-      const zip = new JSZip();
-      const nameCounts: { [key: string]: number } = {};
-
-      await Promise.all(
-        folderSounds.map(async (sound) => {
-          try {
-            let fileBlob: Blob;
-            const resolvedUrl = getAudioDownloadUrl(sound);
-
-            if (resolvedUrl.startsWith('blob:')) {
-              const localFile = uploadedFilesRef.current[sound.fileName] || uploadedFilesRef.current[sound.name];
-              if (localFile) {
-                fileBlob = localFile;
-              } else {
-                const res = await fetch(resolvedUrl);
-                fileBlob = await res.blob();
-              }
-            } else {
-              const res = await fetch(resolvedUrl);
-              fileBlob = await res.blob();
-            }
-
-            let zipFileName = sound.fileName || `${sound.name}.${sound.format.toLowerCase()}`;
-            if (nameCounts[zipFileName] !== undefined) {
-              nameCounts[zipFileName]++;
-              const parts = zipFileName.split('.');
-              const ext = parts.pop();
-              const base = parts.join('.');
-              zipFileName = `${base}_(${nameCounts[zipFileName]}).${ext}`;
-            } else {
-              nameCounts[zipFileName] = 0;
-            }
-
-            zip.file(zipFileName, fileBlob);
-          } catch (err) {
-            console.error(`Failed to pack sound ${sound.name}:`, err);
-          }
-        })
-      );
-
-      const zipContent = await zip.generateAsync({ type: 'blob' });
-      
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(zipContent);
-      link.download = `${folderName}_音效打包_${new Date().toISOString().slice(0, 10)}.zip`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(link.href);
-
-      setCustomDialog(null);
-      // Wait a moment before showing success to allow state update
-      setTimeout(() => {
-        showCustomAlert("打包成功", `成功打包并下载 "${folderName}" 目录下的 ${folderSounds.length} 个音效文件！`);
-      }, 100);
-    } catch (error: any) {
-      console.error("ZIP packaging error:", error);
-      setCustomDialog(null);
-      setTimeout(() => {
-        showCustomAlert("打包失败", `打包过程中出现错误: ${error.message || '未知错误'}`);
-      }, 100);
-    }
+    await downloadSoundsAsZip(folderSounds, `${folderName}_音效打包_${new Date().toISOString().slice(0, 10)}.zip`);
   };
 
   const downloadFilteredSoundsAsZip = async () => {
@@ -1697,75 +1679,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
       ? `${selectedCategory}_音效检索包` 
       : `游戏音效资产检索包`;
 
-    setCustomDialog({
-      isOpen: true,
-      title: "正在打包全部检索音效...",
-      message: `正在准备打包下载当前检索结果下的 ${filteredSounds.length} 个音效文件，请稍候...`,
-      isConfirm: false
-    });
-
-    try {
-      const zip = new JSZip();
-      const nameCounts: { [key: string]: number } = {};
-
-      await Promise.all(
-        filteredSounds.map(async (sound) => {
-          try {
-            let fileBlob: Blob;
-            const resolvedUrl = getAudioDownloadUrl(sound);
-
-            if (resolvedUrl.startsWith('blob:')) {
-              const localFile = uploadedFilesRef.current[sound.fileName] || uploadedFilesRef.current[sound.name];
-              if (localFile) {
-                fileBlob = localFile;
-              } else {
-                const res = await fetch(resolvedUrl);
-                fileBlob = await res.blob();
-              }
-            } else {
-              const res = await fetch(resolvedUrl);
-              fileBlob = await res.blob();
-            }
-
-            let zipFileName = sound.fileName || `${sound.name}.${sound.format.toLowerCase()}`;
-            if (nameCounts[zipFileName] !== undefined) {
-              nameCounts[zipFileName]++;
-              const parts = zipFileName.split('.');
-              const ext = parts.pop();
-              const base = parts.join('.');
-              zipFileName = `${base}_(${nameCounts[zipFileName]}).${ext}`;
-            } else {
-              nameCounts[zipFileName] = 0;
-            }
-
-            zip.file(zipFileName, fileBlob);
-          } catch (err) {
-            console.error(`Failed to pack sound ${sound.name}:`, err);
-          }
-        })
-      );
-
-      const zipContent = await zip.generateAsync({ type: 'blob' });
-      
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(zipContent);
-      link.download = `${zipName}_${new Date().toISOString().slice(0, 10)}.zip`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(link.href);
-
-      setCustomDialog(null);
-      setTimeout(() => {
-        showCustomAlert("打包成功", `已成功打包并下载当前检索结果下的 ${filteredSounds.length} 个音效文件！`);
-      }, 100);
-    } catch (error: any) {
-      console.error("ZIP packaging error:", error);
-      setCustomDialog(null);
-      setTimeout(() => {
-        showCustomAlert("打包失败", `打包过程中出现错误: ${error.message || '未知错误'}`);
-      }, 100);
-    }
+    await downloadSoundsAsZip(filteredSounds, `${zipName}_${new Date().toISOString().slice(0, 10)}.zip`);
   };
 
   // Custom Confirmation Dialog state
@@ -2361,6 +2275,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
   const [isAiBatchOptimizing, setIsAiBatchOptimizing] = useState<boolean>(false);
+  const importNamingRequestRef = useRef(0);
   const [importItems, setImportItems] = useState<ImportItem[]>([]);
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [duplicateImportDialog, setDuplicateImportDialog] = useState<{
@@ -2392,6 +2307,12 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
 
   // Batch upload naming and category states
   const [namingStrategy, setNamingStrategy] = useState<'smart' | 'original' | 'standard'>('smart');
+  useEffect(() => {
+    if (!isImportModalOpen) {
+      importNamingRequestRef.current += 1;
+      setIsAiBatchOptimizing(false);
+    }
+  }, [isImportModalOpen]);
   const [batchMainCategory, setBatchMainCategory] = useState<string>('');
   const [batchSubCategory, setBatchSubCategory] = useState<string>('');
   const [batchChildCategory, setBatchChildCategory] = useState<string>('');
@@ -2504,155 +2425,40 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     applyImportTarget({ category: batchMainCategory, subcategory: batchSubCategory, childCategory });
   };
 
-  const isRegularNaming = (filename: string): boolean => {
-    const nameWithoutExt = filename.replace(/\.[^/.]+$/, "");
-    const standardPrefixes = ['sfx_', 'bgm_', 'ui_', 'mus_', 'vox_'];
-    const hasStandardPrefix = standardPrefixes.some(prefix => nameWithoutExt.toLowerCase().startsWith(prefix));
-    const underscoreCount = (nameWithoutExt.match(/_/g) || []).length;
-    
-    const containsChinese = /[\u4e00-\u9fa5]/.test(nameWithoutExt);
-    const isGeneric = /^(recording|voice|audio|track|sound|music|new_sound|file|test|unnamed)\d*$/i.test(nameWithoutExt);
-    
-    if (containsChinese) return false;
-    if (isGeneric) return false;
-    
-    return (hasStandardPrefix && underscoreCount >= 2) || underscoreCount >= 3;
-  };
-
   const handleNamingStrategyChange = (strategy: 'smart' | 'original' | 'standard') => {
     if (!checkOwnerPermission()) return;
+    importNamingRequestRef.current += 1;
+    setIsAiBatchOptimizing(false);
     setNamingStrategy(strategy);
-    setImportItems(prev => prev.map(item => {
+    const updatedItems = importItems.map(item => {
       const file = item.originalFile;
-      const cleanBaseName = file.name.replace(/\.[^/.]+$/, "");
-      const ext = file.name.split('.').pop() || 'wav';
-      
-      let catSlug = 'char';
-      if (item.category === '武器与战斗') catSlug = 'weapon';
-      else if (item.category === '魔法与奇幻') catSlug = 'magic';
-      else if (item.category === '怪兽与生物') catSlug = 'creature';
-      else if (item.category === '环境与声景') catSlug = 'ambient';
-      else if (item.category === '系统与界面') catSlug = 'ui';
-      else if (item.category === '全部音乐') catSlug = 'music';
-      
-      let subSlug = 'foley';
-      if (item.subcategory === '脚步材质') subSlug = 'footstep';
-      else if (item.subcategory === '肢体装束') subSlug = 'foley';
-      else if (item.subcategory === '人声拟音') subSlug = 'vocal';
-      else if (item.subcategory === '冷兵器砍击') subSlug = 'melee';
-      else if (item.subcategory === '物理碰撞') subSlug = 'impact';
-      else if (item.subcategory === '枪械火器' || item.subcategory === '枪械与射击') subSlug = 'firearms';
-      else if (item.subcategory === '爆炸轰鸣' || item.subcategory === '爆炸与重低音') subSlug = 'explosion';
-      else if (item.subcategory === '元素魔法') subSlug = 'spell';
-      else if (item.subcategory === '奇幻护盾') subSlug = 'shield';
-      else if (item.subcategory === '怪兽咆哮') subSlug = 'growl';
-      else if (item.subcategory === '自然环境') subSlug = 'nature';
-      else if (item.subcategory === '空间背景') subSlug = 'space';
-      else if (item.subcategory === 'UI 反馈') subSlug = 'uiclick';
-      else if (item.subcategory === '胜利奖励') subSlug = 'win';
-      else if (item.subcategory === '警报失败') subSlug = 'alert';
-      else if (item.subcategory === '史诗交响') subSlug = 'epic';
-      else if (item.subcategory === '赛博电子') subSlug = 'cyber';
-      else if (item.subcategory === '国风仙侠') subSlug = 'chinese';
-      else if (item.subcategory === '日常休闲') subSlug = 'casual';
-      else if (item.subcategory === '战斗热血') subSlug = 'combat';
-      else if (item.subcategory === '惊悚悬疑') subSlug = 'suspense';
-
-      let descSlug = cleanBaseName
-        .replace(/[\u4e00-\u9fa5]/g, '')
-        .replace(/[^a-zA-Z0-9]/g, '_')
-        .toLowerCase()
-        .split('_')
-        .filter(Boolean)
-        .join('_');
-         
-      if (!descSlug) {
-        descSlug = 'asset';
-      }
-      
-      const suggestedFileName = item.category === '全部音乐' 
-        ? `bgm_music_${subSlug}_${descSlug}_01.${ext}`
-        : `sfx_${catSlug}_${subSlug}_${descSlug}_01.${ext}`;
-
-      let finalFileName = suggestedFileName;
-      if (strategy === 'smart') {
-        finalFileName = isRegularNaming(file.name) ? file.name : suggestedFileName;
-      } else if (strategy === 'original') {
-        finalFileName = file.name;
-      } else {
-        finalFileName = suggestedFileName;
-      }
+      const finalFileName = strategy === 'original'
+        ? file.name
+        : item.category === '全部音乐'
+          ? (isBgmImportFileName(item.fileName, file.name) ? item.fileName : file.name)
+          : (isUcsImportFileName(item.fileName, file.name) ? item.fileName : file.name);
 
       return {
         ...item,
         fileName: finalFileName
       };
-    }));
+    });
+    setImportItems(updatedItems);
+    if (strategy !== 'original') void handleAiBatchOptimize(updatedItems, strategy === 'smart');
   };
 
   const handleApplyBatchCategory = () => {
     if (!checkOwnerPermission()) return;
     if (!batchMainCategory) return;
-    setImportItems(prev => prev.map(item => {
+    importNamingRequestRef.current += 1;
+    setIsAiBatchOptimizing(false);
+    const updatedItems = importItems.map(item => {
       const file = item.originalFile;
-      const cleanBaseName = file.name.replace(/\.[^/.]+$/, "");
-      const ext = file.name.split('.').pop() || 'wav';
-      
-      let catSlug = 'char';
-      if (batchMainCategory === '武器与战斗') catSlug = 'weapon';
-      else if (batchMainCategory === '魔法与奇幻') catSlug = 'magic';
-      else if (batchMainCategory === '怪兽与生物') catSlug = 'creature';
-      else if (batchMainCategory === '环境与声景') catSlug = 'ambient';
-      else if (batchMainCategory === '系统与界面') catSlug = 'ui';
-      else if (batchMainCategory === '全部音乐') catSlug = 'music';
-      
-      let subSlug = 'foley';
-      if (batchSubCategory === '脚步材质') subSlug = 'footstep';
-      else if (batchSubCategory === '肢体装束') subSlug = 'foley';
-      else if (batchSubCategory === '人声拟音') subSlug = 'vocal';
-      else if (batchSubCategory === '冷兵器砍击') subSlug = 'melee';
-      else if (batchSubCategory === '物理碰撞') subSlug = 'impact';
-      else if (batchSubCategory === '枪械火器' || batchSubCategory === '枪械与射击') subSlug = 'firearms';
-      else if (batchSubCategory === '爆炸轰鸣' || batchSubCategory === '爆炸与重低音') subSlug = 'explosion';
-      else if (batchSubCategory === '元素魔法') subSlug = 'spell';
-      else if (batchSubCategory === '奇幻护盾') subSlug = 'shield';
-      else if (batchSubCategory === '怪兽咆哮') subSlug = 'growl';
-      else if (batchSubCategory === '自然环境') subSlug = 'nature';
-      else if (batchSubCategory === '空间背景') subSlug = 'space';
-      else if (batchSubCategory === 'UI 反馈') subSlug = 'uiclick';
-      else if (batchSubCategory === '胜利奖励') subSlug = 'win';
-      else if (batchSubCategory === '警报失败') subSlug = 'alert';
-      else if (batchSubCategory === '史诗交响') subSlug = 'epic';
-      else if (batchSubCategory === '赛博电子') subSlug = 'cyber';
-      else if (batchSubCategory === '国风仙侠') subSlug = 'chinese';
-      else if (batchSubCategory === '日常休闲') subSlug = 'casual';
-      else if (batchSubCategory === '战斗热血') subSlug = 'combat';
-      else if (batchSubCategory === '惊悚悬疑') subSlug = 'suspense';
-
-      let descSlug = cleanBaseName
-        .replace(/[\u4e00-\u9fa5]/g, '')
-        .replace(/[^a-zA-Z0-9]/g, '_')
-        .toLowerCase()
-        .split('_')
-        .filter(Boolean)
-        .join('_');
-         
-      if (!descSlug) {
-        descSlug = 'asset';
-      }
-      
-      const suggestedFileName = batchMainCategory === '全部音乐' 
-        ? `bgm_music_${subSlug}_${descSlug}_01.${ext}`
-        : `sfx_${catSlug}_${subSlug}_${descSlug}_01.${ext}`;
-
-      let finalFileName = item.fileName;
-      if (namingStrategy === 'smart') {
-        finalFileName = isRegularNaming(file.name) ? file.name : suggestedFileName;
-      } else if (namingStrategy === 'original') {
-        finalFileName = file.name;
-      } else if (namingStrategy === 'standard') {
-        finalFileName = suggestedFileName;
-      }
+      const finalFileName = namingStrategy === 'original'
+        ? file.name
+        : batchMainCategory === '全部音乐'
+          ? (isBgmImportFileName(item.fileName, file.name) ? item.fileName : file.name)
+          : (isUcsImportFileName(item.fileName, file.name) ? item.fileName : file.name);
 
       return {
         ...item,
@@ -2661,7 +2467,9 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
         childCategory: batchChildCategory,
         fileName: finalFileName
       };
-    }));
+    });
+    setImportItems(updatedItems);
+    if (namingStrategy !== 'original') void handleAiBatchOptimize(updatedItems, true);
     
     showCustomAlert("批量应用成功", `已将待入库的所有音效分类一键批量调整为: "${batchMainCategory} -> ${batchSubCategory || '无'}${batchChildCategory ? ` -> ${batchChildCategory}` : ''}"。`);
   };
@@ -3315,69 +3123,13 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
 
     const cleanBaseName = file.name.replace(/\.[^/.]+$/, "");
     const ext = file.name.split('.').pop() || 'wav';
-    
-    let catSlug = 'char';
-    if (category === '武器与战斗') catSlug = 'weapon';
-    else if (category === '魔法与奇幻') catSlug = 'magic';
-    else if (category === '怪兽与生物') catSlug = 'creature';
-    else if (category === '环境与声景') catSlug = 'ambient';
-    else if (category === '系统与界面') catSlug = 'ui';
-    else if (category === '全部音乐') catSlug = 'music';
-    
-    let subSlug = 'foley';
-    if (subcategory === '脚步材质') subSlug = 'footstep';
-    else if (subcategory === '肢体装束') subSlug = 'foley';
-    else if (subcategory === '人声拟音') subSlug = 'vocal';
-    else if (subcategory === '冷兵器砍击') subSlug = 'melee';
-    else if (subcategory === '物理碰撞') subSlug = 'impact';
-    else if (subcategory === '枪械火器' || subcategory === '枪械与射击') subSlug = 'firearms';
-    else if (subcategory === '爆炸轰鸣' || subcategory === '爆炸与重低音') subSlug = 'explosion';
-    else if (subcategory === '元素魔法') subSlug = 'spell';
-    else if (subcategory === '奇幻护盾') subSlug = 'shield';
-    else if (subcategory === '怪兽咆哮') subSlug = 'growl';
-    else if (subcategory === '自然环境') subSlug = 'nature';
-    else if (subcategory === '空间背景') subSlug = 'space';
-    else if (subcategory === 'UI 反馈') subSlug = 'uiclick';
-    else if (subcategory === '胜利奖励') subSlug = 'win';
-    else if (subcategory === '警报失败') subSlug = 'alert';
-    else if (subcategory === '史诗交响') subSlug = 'epic';
-    else if (subcategory === '赛博电子') subSlug = 'cyber';
-    else if (subcategory === '国风仙侠') subSlug = 'chinese';
-    else if (subcategory === '日常休闲') subSlug = 'casual';
-    else if (subcategory === '战斗热血') subSlug = 'combat';
-    else if (subcategory === '惊悚悬疑') subSlug = 'suspense';
-
-    let descSlug = cleanBaseName
-      .replace(/[\u4e00-\u9fa5]/g, '') // remove Chinese
-      .replace(/[^a-zA-Z0-9]/g, '_')
-      .toLowerCase()
-      .split('_')
-      .filter(Boolean)
-      .join('_');
-       
-    if (!descSlug) {
-      descSlug = 'asset';
-    }
-    
-    // For music, the naming prefix is "bgm_music_"
-    const suggestedFileName = category === '全部音乐' 
-      ? `bgm_music_${subSlug}_${descSlug}_01.${ext}`
-      : `sfx_${catSlug}_${subSlug}_${descSlug}_01.${ext}`;
-      
     let suggestedDisplayName = cleanBaseName
       .replace(/[_-]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
     suggestedDisplayName = suggestedDisplayName.charAt(0).toUpperCase() + suggestedDisplayName.slice(1);
 
-    let finalFileName = suggestedFileName;
-    if (namingStrategy === 'smart') {
-      finalFileName = isRegularNaming(file.name) ? file.name : suggestedFileName;
-    } else if (namingStrategy === 'original') {
-      finalFileName = file.name;
-    } else {
-      finalFileName = suggestedFileName;
-    }
+    const finalFileName = file.name;
 
     return {
       id: `import-${Math.random().toString(36).substr(2, 9)}`,
@@ -3452,6 +3204,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
         })
       );
       setImportItems(items);
+      if (namingStrategy !== 'original') await handleAiBatchOptimize(items, true);
     } catch (err) {
       console.error("Error processing import files:", err);
       const items = audioFiles.map(file => {
@@ -3466,6 +3219,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
           : analyzed;
       });
       setImportItems(items);
+      if (namingStrategy !== 'original') await handleAiBatchOptimize(items, true);
     } finally {
       setIsAnalyzing(false);
     }
@@ -3474,6 +3228,17 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   const handleConfirmImport = async () => {
     if (!checkOwnerPermission()) return;
     if (importItems.length === 0) return;
+    if (isAiBatchOptimizing) return;
+
+    const unnamedSfx = namingStrategy === 'original' ? [] : importItems.filter(item => (
+      item.category === '全部音乐'
+        ? !isBgmImportFileName(item.fileName, item.originalFile.name)
+        : !isUcsImportFileName(item.fileName, item.originalFile.name)
+    ));
+    if (unnamedSfx.length) {
+      showCustomAlert('需要规范命名', `${unnamedSfx.length} 个音频尚未获得有效的 UCS 音效名或 BGM 音乐名。请点击“AI 智能优化”重试、手动修改文件名，或明确选择“保留原名”后入库。`);
+      return;
+    }
 
     const damagedNames = importItems
       .map(item => item.fileName.trim())
@@ -3741,29 +3506,46 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     }
   };
 
-  const handleAiBatchOptimize = async () => {
+  const handleAiBatchOptimize = async (sourceItems: ImportItem[] = importItems, onlyInvalid = false) => {
     if (!checkOwnerPermission()) return;
-    if (importItems.length === 0) return;
+    const targetItems = onlyInvalid
+      ? sourceItems.filter(item => item.category === '全部音乐'
+        ? !isBgmImportFileName(item.fileName, item.originalFile.name)
+        : !isUcsImportFileName(item.fileName, item.originalFile.name))
+      : sourceItems;
+    if (targetItems.length === 0) return;
+    const requestId = ++importNamingRequestRef.current;
     setIsAiBatchOptimizing(true);
     try {
-      const mappedForAi = importItems.map(item => ({
+      const mappedForAi = targetItems.map(item => ({
         id: item.id,
         originalName: item.originalFile.name,
         path: item.relativePath || item.originalFile.name,
         size: item.size,
         type: item.type
       }));
-      const optimized = await optimizeImportMetadata(mappedForAi);
-      
+      const optimized = [];
+      for (let start = 0; start < mappedForAi.length; start += 20) {
+        optimized.push(...await optimizeImportMetadata(mappedForAi.slice(start, start + 20)));
+        if (requestId !== importNamingRequestRef.current) return;
+      }
+      const optimizedById = new Map(optimized.map(item => [item.id, item]));
       setImportItems(prev => {
+        if (requestId !== importNamingRequestRef.current) return prev;
         return prev.map(item => {
-          const opt = optimized.find(o => o.id === item.id);
+          const opt = optimizedById.get(item.id);
           if (opt) {
+            const group = categories.find(category => category.name === opt.category);
+            const subcategory = group?.subCategories.find(sub => sub.name === opt.subcategory)
+              ? opt.subcategory
+              : group?.subCategories[0]?.name || item.subcategory;
             return {
               ...item,
               name: opt.name,
               fileName: opt.fileName,
               category: opt.category,
+              subcategory,
+              childCategory: group?.subCategories.find(sub => sub.name === subcategory)?.childCategories?.[0]?.name || '',
               tags: opt.tags
             };
           }
@@ -3772,17 +3554,19 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
       });
     } catch (err: any) {
       console.error("AI batch optimize error:", err);
-      showCustomAlert("AI 优化失败", `请检查网络或 GEMINI_API_KEY 配置。详情: ${err.message || '未知错误'}`);
+      if (requestId === importNamingRequestRef.current) {
+        showCustomAlert("UCS 命名失败", `未修改原文件名，请检查名称线索或模型状态后重试。详情: ${err.message || '未知错误'}`);
+      }
     } finally {
-      setIsAiBatchOptimizing(false);
+      if (requestId === importNamingRequestRef.current) setIsAiBatchOptimizing(false);
     }
   };
 
-  const handleExportSelected = () => {
-    handleDownloadSingleSound(selectedSound);
+  const handleExportSelected = async () => {
+    if (!await handleDownloadSingleSound(selectedSound)) return;
     showCustomAlert(
-      "音效导出并下载成功",
-      `已成功为您打包导出并物理下载音频文件: ${selectedSound.fileName}\n路径: ${selectedSound.path}\n格式: ${selectedSound.format} | 大小: ${selectedSound.size}\n\n[提示] 该音效文件已同时推送至引擎共享资产缓存，可在 Unity/Unreal 资产同步器中直接读取！`
+      "音效下载已开始",
+      `正在下载音频文件: ${selectedSound.fileName}\n路径: ${selectedSound.path}\n格式: ${selectedSound.format} | 大小: ${selectedSound.size}`
     );
   };
 
@@ -4780,8 +4564,9 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                 {filteredSounds.length > 0 && (
                   <button
                     onClick={downloadFilteredSoundsAsZip}
-                    className="flex items-center gap-1 bg-emerald-50 hover:bg-emerald-600 text-emerald-700 hover:text-white px-2 py-0.5 rounded-md border border-emerald-100 hover:border-emerald-600 transition-all font-sans cursor-pointer shrink-0 shadow-sm"
-                    title="一键打包下载当前列表下的全部音效"
+                    disabled={!isServerLibraryReady}
+                    className="flex items-center gap-1 bg-emerald-50 hover:bg-emerald-600 text-emerald-700 hover:text-white px-2 py-0.5 rounded-md border border-emerald-100 hover:border-emerald-600 transition-all font-sans cursor-pointer shrink-0 shadow-sm disabled:cursor-wait disabled:opacity-50"
+                    title={isServerLibraryReady ? '一键打包下载当前列表下的全部音效' : '正在同步音效库'}
                   >
                     <Download className="w-3 h-3" />
                     <span>一键打包下载当前结果</span>
@@ -4859,8 +4644,8 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                           title="双击打开/关闭资源详情"
                         >
                           <div className="flex items-center gap-2 min-w-0">
-                            <span className={`text-[11px] font-black truncate ${isSelected ? 'text-emerald-700' : 'text-slate-700 group-hover:text-slate-900'}`} title={sound.name}>
-                              {sound.name}
+                            <span className={`text-[11px] font-black truncate ${isSelected ? 'text-emerald-700' : 'text-slate-700 group-hover:text-slate-900'}`} title={displaySfxLibraryFileName(sound.fileName || sound.name)}>
+                              {displaySfxLibraryFileName(sound.fileName || sound.name).replace(/\.[^.]+$/, '')}
                             </span>
                             <span className="text-[8px] bg-slate-100 text-slate-500 border border-slate-200 px-1 rounded-sm uppercase font-mono font-bold shrink-0">
                               {sound.format}
@@ -4869,7 +4654,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                           <div className="text-[10px] text-slate-400 font-mono flex items-center gap-1.5 mt-0.5 min-w-0">
                             <span className="text-slate-500 whitespace-nowrap shrink-0">{sound.category}</span>
                             <span className="text-slate-300 shrink-0">·</span>
-                            <span className="truncate min-w-0" title={sound.fileName}>{sound.fileName}</span>
+                            <span className="truncate min-w-0" title={displaySfxLibraryFileName(sound.fileName)}>{displaySfxLibraryFileName(sound.fileName)}</span>
                           </div>
                         </div>
                       </div>
@@ -4898,7 +4683,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                           aria-label={`下载${sound.name}`}
                           onClick={(event) => {
                             event.stopPropagation();
-                            handleDownloadSingleSound(sound);
+                            void handleDownloadSingleSound(sound);
                           }}
                           className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-slate-300 transition-colors hover:bg-emerald-50 hover:text-emerald-600"
                           title={`下载原文件：${sound.fileName || sound.name}`}
@@ -5219,9 +5004,9 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                     <Sparkles className="absolute inset-0 m-auto w-5 h-5 text-emerald-400 animate-bounce" />
                   </div>
                   <div>
-                    <h4 className="text-sm font-bold text-white">AI 正在读取目录并解析声音特征...</h4>
+                    <h4 className="text-sm font-bold text-white">正在识别文件名并整理入库信息...</h4>
                     <p className="text-xs text-gray-500 mt-1.5 max-w-sm leading-relaxed">
-                      正在根据音频 file 相对路径和名称，提取音频工程规范下的标准小写下划线文件名、智能中文显示名称，并计算其分类与声学标签特征
+                      根据文件名和相对路径为音效生成 UCS 命名；此步骤不分析音频内容。
                     </p>
                   </div>
                 </div>
@@ -5235,13 +5020,13 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                         <span className="text-[9px] bg-emerald-150 text-emerald-700 px-1.5 py-0.5 rounded font-bold border border-emerald-200">Gemini 3.5 Flash 驱动</span>
                       </div>
                       <p className="text-[10px] text-slate-500">
-                        点击右侧按钮，让大模型针对所有入库项的文件名和文件夹相对路径进行深度的物理声学理解、翻译和超标准音标重命名。
+                        根据原文件名与目录重新生成 UCS 8.2.1 音效名称；音乐沿用 BGM 命名。请在入库前核对分类。
                       </p>
                     </div>
                     <button
                       type="button"
                       disabled={isAiBatchOptimizing || importItems.length === 0}
-                      onClick={handleAiBatchOptimize}
+                      onClick={() => void handleAiBatchOptimize()}
                       className="px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-700 hover:from-emerald-500 hover:to-teal-600 text-white font-extrabold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow-lg shadow-emerald-500/10 transition-all shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       {isAiBatchOptimizing ? (
@@ -5339,7 +5124,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                                 ? 'bg-emerald-600 text-white shadow-sm'
                                 : 'text-slate-500 hover:bg-slate-100'
                             }`}
-                            title="有规范命名（如 sfx_xxx）保留原文件名；不规范的（如中文或临时记录）自动生成规范命名"
+                            title="保留已有 UCS 音效名称；中文或旧格式音效用 AI 转为 UCS 命名"
                           >
                             自动检测 (有规范保留，无则生成)
                           </button>
@@ -5363,7 +5148,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                                 ? 'bg-emerald-600 text-white shadow-sm'
                                 : 'text-slate-500 hover:bg-slate-100'
                             }`}
-                            title="对所有文件强制生成格式化的规范文件名"
+                            title="所有音效重新按 UCS 分类命名；音乐使用 BGM 命名"
                           >
                             全量生成命名
                           </button>
@@ -5465,7 +5250,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                                   updated[index].name = e.target.value;
                                   setImportItems(updated);
                                 }}
-                                disabled={isUploading || item.status === 'success'}
+                                disabled={isUploading || isAiBatchOptimizing || item.status === 'success'}
                                 className="w-full bg-slate-50 border border-slate-200 hover:border-slate-300 focus:border-emerald-500 disabled:bg-slate-100 disabled:text-slate-400 rounded-lg px-2.5 py-1.5 text-xs text-slate-850 outline-none transition-all"
                                 placeholder="输入中文描述"
                               />
@@ -5481,9 +5266,9 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                                   updated[index].fileName = e.target.value;
                                   setImportItems(updated);
                                 }}
-                                disabled={isUploading || item.status === 'success'}
+                                disabled={isUploading || isAiBatchOptimizing || item.status === 'success'}
                                 className="w-full bg-slate-50 border border-slate-200 hover:border-slate-300 focus:border-emerald-500 disabled:bg-slate-100 disabled:text-slate-400 rounded-lg px-2.5 py-1.5 font-mono text-[11px] text-emerald-700 outline-none transition-all"
-                                placeholder="sfx_name_01.wav"
+                                placeholder="UIClick_ConfirmButton.wav"
                               />
                             </td>
 
@@ -5623,7 +5408,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                 <button
                   type="button"
                   onClick={handleConfirmImport}
-                  disabled={isAnalyzing || isUploading || importItems.length === 0}
+                  disabled={isAnalyzing || isAiBatchOptimizing || isUploading || importItems.length === 0}
                   className="bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold text-xs px-5 py-2.5 rounded-xl transition-all shadow-md shadow-emerald-600/10 flex items-center gap-1.5"
                 >
                   {isUploading ? (

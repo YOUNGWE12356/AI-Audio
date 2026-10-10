@@ -4,6 +4,9 @@ build/
 dist/
 coverage/
 data/
+!src/data/
+src/data/*
+!src/data/ucs-v8.2.1.json
 .codex-tmp/
 uploads/*
 !uploads/.gitkeep

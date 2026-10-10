@@ -1,0 +1,3767 @@
+[
+    {
+        "catId":  "AIRBlow",
+        "category":  "AIR",
+        "subcategory":  "BLOW"
+    },
+    {
+        "catId":  "AIRBrst",
+        "category":  "AIR",
+        "subcategory":  "BURST"
+    },
+    {
+        "catId":  "AIRHiss",
+        "category":  "AIR",
+        "subcategory":  "HISS"
+    },
+    {
+        "catId":  "AIRMisc",
+        "category":  "AIR",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "AIRSuck",
+        "category":  "AIR",
+        "subcategory":  "SUCTION"
+    },
+    {
+        "catId":  "AERODoor",
+        "category":  "AIRCRAFT",
+        "subcategory":  "DOOR"
+    },
+    {
+        "catId":  "AEROHeli",
+        "category":  "AIRCRAFT",
+        "subcategory":  "HELICOPTER"
+    },
+    {
+        "catId":  "AEROInt",
+        "category":  "AIRCRAFT",
+        "subcategory":  "INTERIOR"
+    },
+    {
+        "catId":  "AEROJet",
+        "category":  "AIRCRAFT",
+        "subcategory":  "JET"
+    },
+    {
+        "catId":  "AEROMech",
+        "category":  "AIRCRAFT",
+        "subcategory":  "MECHANISM"
+    },
+    {
+        "catId":  "AEROMil",
+        "category":  "AIRCRAFT",
+        "subcategory":  "MILITARY"
+    },
+    {
+        "catId":  "AEROMisc",
+        "category":  "AIRCRAFT",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "AEROProp",
+        "category":  "AIRCRAFT",
+        "subcategory":  "PROP"
+    },
+    {
+        "catId":  "AERORadio",
+        "category":  "AIRCRAFT",
+        "subcategory":  "RADIO CONTROLLED"
+    },
+    {
+        "catId":  "AERORckt",
+        "category":  "AIRCRAFT",
+        "subcategory":  "ROCKET"
+    },
+    {
+        "catId":  "ALRMBell",
+        "category":  "ALARMS",
+        "subcategory":  "BELL"
+    },
+    {
+        "catId":  "ALRMBuzr",
+        "category":  "ALARMS",
+        "subcategory":  "BUZZER"
+    },
+    {
+        "catId":  "ALRMClok",
+        "category":  "ALARMS",
+        "subcategory":  "CLOCK"
+    },
+    {
+        "catId":  "ALRMElec",
+        "category":  "ALARMS",
+        "subcategory":  "ELECTRONIC"
+    },
+    {
+        "catId":  "ALRMMisc",
+        "category":  "ALARMS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "ALRMSirn",
+        "category":  "ALARMS",
+        "subcategory":  "SIREN"
+    },
+    {
+        "catId":  "AMBAir",
+        "category":  "AMBIENCE",
+        "subcategory":  "AIR"
+    },
+    {
+        "catId":  "AMBAlpn",
+        "category":  "AMBIENCE",
+        "subcategory":  "ALPINE"
+    },
+    {
+        "catId":  "AMBAmus",
+        "category":  "AMBIENCE",
+        "subcategory":  "AMUSEMENT"
+    },
+    {
+        "catId":  "AMBBird",
+        "category":  "AMBIENCE",
+        "subcategory":  "BIRDSONG"
+    },
+    {
+        "catId":  "AMBCele",
+        "category":  "AMBIENCE",
+        "subcategory":  "CELEBRATION"
+    },
+    {
+        "catId":  "AMBCnst",
+        "category":  "AMBIENCE",
+        "subcategory":  "CONSTRUCTION"
+    },
+    {
+        "catId":  "AMBDsrt",
+        "category":  "AMBIENCE",
+        "subcategory":  "DESERT"
+    },
+    {
+        "catId":  "AMBDsgn",
+        "category":  "AMBIENCE",
+        "subcategory":  "DESIGNED"
+    },
+    {
+        "catId":  "AMBEmrg",
+        "category":  "AMBIENCE",
+        "subcategory":  "EMERGENCY"
+    },
+    {
+        "catId":  "AMBFant",
+        "category":  "AMBIENCE",
+        "subcategory":  "FANTASY"
+    },
+    {
+        "catId":  "AMBFarm",
+        "category":  "AMBIENCE",
+        "subcategory":  "FARM"
+    },
+    {
+        "catId":  "AMBForst",
+        "category":  "AMBIENCE",
+        "subcategory":  "FOREST"
+    },
+    {
+        "catId":  "AMBGras",
+        "category":  "AMBIENCE",
+        "subcategory":  "GRASSLAND"
+    },
+    {
+        "catId":  "AMBHist",
+        "category":  "AMBIENCE",
+        "subcategory":  "HISTORICAL"
+    },
+    {
+        "catId":  "AMBTech",
+        "category":  "AMBIENCE",
+        "subcategory":  "HITECH"
+    },
+    {
+        "catId":  "AMBHosp",
+        "category":  "AMBIENCE",
+        "subcategory":  "HOSPITAL"
+    },
+    {
+        "catId":  "AMBInd",
+        "category":  "AMBIENCE",
+        "subcategory":  "INDUSTRIAL"
+    },
+    {
+        "catId":  "AMBInsc",
+        "category":  "AMBIENCE",
+        "subcategory":  "INSECT"
+    },
+    {
+        "catId":  "AMBLake",
+        "category":  "AMBIENCE",
+        "subcategory":  "LAKESIDE"
+    },
+    {
+        "catId":  "AMBMrkt",
+        "category":  "AMBIENCE",
+        "subcategory":  "MARKET"
+    },
+    {
+        "catId":  "AMBMisc",
+        "category":  "AMBIENCE",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "AMBNaut",
+        "category":  "AMBIENCE",
+        "subcategory":  "NAUTICAL"
+    },
+    {
+        "catId":  "AMBOffc",
+        "category":  "AMBIENCE",
+        "subcategory":  "OFFICE"
+    },
+    {
+        "catId":  "AMBPark",
+        "category":  "AMBIENCE",
+        "subcategory":  "PARK"
+    },
+    {
+        "catId":  "AMBPrisn",
+        "category":  "AMBIENCE",
+        "subcategory":  "PRISON"
+    },
+    {
+        "catId":  "AMBPrtst",
+        "category":  "AMBIENCE",
+        "subcategory":  "PROTEST"
+    },
+    {
+        "catId":  "AMBPubl",
+        "category":  "AMBIENCE",
+        "subcategory":  "PUBLIC PLACE"
+    },
+    {
+        "catId":  "AMBRlgn",
+        "category":  "AMBIENCE",
+        "subcategory":  "RELIGIOUS"
+    },
+    {
+        "catId":  "AMBHome",
+        "category":  "AMBIENCE",
+        "subcategory":  "RESIDENTIAL"
+    },
+    {
+        "catId":  "AMBRest",
+        "category":  "AMBIENCE",
+        "subcategory":  "RESTAURANT \u0026 BAR"
+    },
+    {
+        "catId":  "AMBRoom",
+        "category":  "AMBIENCE",
+        "subcategory":  "ROOM TONE"
+    },
+    {
+        "catId":  "AMBRurl",
+        "category":  "AMBIENCE",
+        "subcategory":  "RURAL"
+    },
+    {
+        "catId":  "AMBSchl",
+        "category":  "AMBIENCE",
+        "subcategory":  "SCHOOL"
+    },
+    {
+        "catId":  "AMBSci",
+        "category":  "AMBIENCE",
+        "subcategory":  "SCIFI"
+    },
+    {
+        "catId":  "AMBSea",
+        "category":  "AMBIENCE",
+        "subcategory":  "SEASIDE"
+    },
+    {
+        "catId":  "AMBSprt",
+        "category":  "AMBIENCE",
+        "subcategory":  "SPORT"
+    },
+    {
+        "catId":  "AMBSubn",
+        "category":  "AMBIENCE",
+        "subcategory":  "SUBURBAN"
+    },
+    {
+        "catId":  "AMBSwmp",
+        "category":  "AMBIENCE",
+        "subcategory":  "SWAMP"
+    },
+    {
+        "catId":  "AMBTown",
+        "category":  "AMBIENCE",
+        "subcategory":  "TOWN"
+    },
+    {
+        "catId":  "AMBTraf",
+        "category":  "AMBIENCE",
+        "subcategory":  "TRAFFIC"
+    },
+    {
+        "catId":  "AMBTran",
+        "category":  "AMBIENCE",
+        "subcategory":  "TRANSPORTATION"
+    },
+    {
+        "catId":  "AMBTrop",
+        "category":  "AMBIENCE",
+        "subcategory":  "TROPICAL"
+    },
+    {
+        "catId":  "AMBTndra",
+        "category":  "AMBIENCE",
+        "subcategory":  "TUNDRA"
+    },
+    {
+        "catId":  "AMBUndr",
+        "category":  "AMBIENCE",
+        "subcategory":  "UNDERGROUND"
+    },
+    {
+        "catId":  "AMBUndwtr",
+        "category":  "AMBIENCE",
+        "subcategory":  "UNDERWATER"
+    },
+    {
+        "catId":  "AMBUrbn",
+        "category":  "AMBIENCE",
+        "subcategory":  "URBAN"
+    },
+    {
+        "catId":  "AMBWar",
+        "category":  "AMBIENCE",
+        "subcategory":  "WARFARE"
+    },
+    {
+        "catId":  "ANMLAmph",
+        "category":  "ANIMALS",
+        "subcategory":  "AMPHIBIAN"
+    },
+    {
+        "catId":  "ANMLAqua",
+        "category":  "ANIMALS",
+        "subcategory":  "AQUATIC"
+    },
+    {
+        "catId":  "ANMLBat",
+        "category":  "ANIMALS",
+        "subcategory":  "BAT"
+    },
+    {
+        "catId":  "ANMLCat",
+        "category":  "ANIMALS",
+        "subcategory":  "CAT DOMESTIC"
+    },
+    {
+        "catId":  "ANMLWcat",
+        "category":  "ANIMALS",
+        "subcategory":  "CAT WILD"
+    },
+    {
+        "catId":  "ANMLDog",
+        "category":  "ANIMALS",
+        "subcategory":  "DOG"
+    },
+    {
+        "catId":  "ANMLWdog",
+        "category":  "ANIMALS",
+        "subcategory":  "DOG WILD"
+    },
+    {
+        "catId":  "ANMLFarm",
+        "category":  "ANIMALS",
+        "subcategory":  "FARM"
+    },
+    {
+        "catId":  "ANMLHors",
+        "category":  "ANIMALS",
+        "subcategory":  "HORSE"
+    },
+    {
+        "catId":  "ANMLInsc",
+        "category":  "ANIMALS",
+        "subcategory":  "INSECT"
+    },
+    {
+        "catId":  "ANMLMisc",
+        "category":  "ANIMALS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "ANMLPrim",
+        "category":  "ANIMALS",
+        "subcategory":  "PRIMATE"
+    },
+    {
+        "catId":  "ANMLRept",
+        "category":  "ANIMALS",
+        "subcategory":  "REPTILE"
+    },
+    {
+        "catId":  "ANMLRdnt",
+        "category":  "ANIMALS",
+        "subcategory":  "RODENT"
+    },
+    {
+        "catId":  "ANMLWild",
+        "category":  "ANIMALS",
+        "subcategory":  "WILD"
+    },
+    {
+        "catId":  "ADR",
+        "category":  "ARCHIVED",
+        "subcategory":  "ADR"
+    },
+    {
+        "catId":  "ASSET",
+        "category":  "ARCHIVED",
+        "subcategory":  "ASSET"
+    },
+    {
+        "catId":  "BNCE",
+        "category":  "ARCHIVED",
+        "subcategory":  "BOUNCE"
+    },
+    {
+        "catId":  "IR",
+        "category":  "ARCHIVED",
+        "subcategory":  "IMPULSE RESPONSE"
+    },
+    {
+        "catId":  "LPGRP",
+        "category":  "ARCHIVED",
+        "subcategory":  "LOOP GROUP"
+    },
+    {
+        "catId":  "MIX",
+        "category":  "ARCHIVED",
+        "subcategory":  "MIX"
+    },
+    {
+        "catId":  "PFX",
+        "category":  "ARCHIVED",
+        "subcategory":  "PFX"
+    },
+    {
+        "catId":  "PROD",
+        "category":  "ARCHIVED",
+        "subcategory":  "PRODUCTION"
+    },
+    {
+        "catId":  "RAW",
+        "category":  "ARCHIVED",
+        "subcategory":  "RAW"
+    },
+    {
+        "catId":  "REF",
+        "category":  "ARCHIVED",
+        "subcategory":  "REFERENCE"
+    },
+    {
+        "catId":  "SCNE",
+        "category":  "ARCHIVED",
+        "subcategory":  "SCENE"
+    },
+    {
+        "catId":  "TEST",
+        "category":  "ARCHIVED",
+        "subcategory":  "TEST TONE"
+    },
+    {
+        "catId":  "TMARK",
+        "category":  "ARCHIVED",
+        "subcategory":  "TRADEMARKED"
+    },
+    {
+        "catId":  "WIP",
+        "category":  "ARCHIVED",
+        "subcategory":  "WORK IN PROGRESS"
+    },
+    {
+        "catId":  "WTF",
+        "category":  "ARCHIVED",
+        "subcategory":  "WTF"
+    },
+    {
+        "catId":  "BEEPAppl",
+        "category":  "BEEPS",
+        "subcategory":  "APPLIANCE"
+    },
+    {
+        "catId":  "BEEP",
+        "category":  "BEEPS",
+        "subcategory":  "GENERAL"
+    },
+    {
+        "catId":  "BEEPLofi",
+        "category":  "BEEPS",
+        "subcategory":  "LOFI"
+    },
+    {
+        "catId":  "BEEPMed",
+        "category":  "BEEPS",
+        "subcategory":  "MEDICAL"
+    },
+    {
+        "catId":  "BEEPTimer",
+        "category":  "BEEPS",
+        "subcategory":  "TIMER"
+    },
+    {
+        "catId":  "BEEPVeh",
+        "category":  "BEEPS",
+        "subcategory":  "VEHICLE"
+    },
+    {
+        "catId":  "BELLAnml",
+        "category":  "BELLS",
+        "subcategory":  "ANIMAL"
+    },
+    {
+        "catId":  "BELLDoor",
+        "category":  "BELLS",
+        "subcategory":  "DOORBELL"
+    },
+    {
+        "catId":  "BELLGong",
+        "category":  "BELLS",
+        "subcategory":  "GONG"
+    },
+    {
+        "catId":  "BELLHand",
+        "category":  "BELLS",
+        "subcategory":  "HANDBELL"
+    },
+    {
+        "catId":  "BELLLrg",
+        "category":  "BELLS",
+        "subcategory":  "LARGE"
+    },
+    {
+        "catId":  "BELLMisc",
+        "category":  "BELLS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "BIRDPrey",
+        "category":  "BIRDS",
+        "subcategory":  "BIRD OF PREY"
+    },
+    {
+        "catId":  "BIRDCrow",
+        "category":  "BIRDS",
+        "subcategory":  "CROW"
+    },
+    {
+        "catId":  "BIRDFowl",
+        "category":  "BIRDS",
+        "subcategory":  "FOWL"
+    },
+    {
+        "catId":  "BIRDMisc",
+        "category":  "BIRDS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "BIRDSea",
+        "category":  "BIRDS",
+        "subcategory":  "SEA"
+    },
+    {
+        "catId":  "BIRDSong",
+        "category":  "BIRDS",
+        "subcategory":  "SONGBIRD"
+    },
+    {
+        "catId":  "BIRDTrop",
+        "category":  "BIRDS",
+        "subcategory":  "TROPICAL"
+    },
+    {
+        "catId":  "BIRDWade",
+        "category":  "BIRDS",
+        "subcategory":  "WADING"
+    },
+    {
+        "catId":  "BOATAir",
+        "category":  "BOATS",
+        "subcategory":  "AIR BOAT"
+    },
+    {
+        "catId":  "BOATWash",
+        "category":  "BOATS",
+        "subcategory":  "BOW WASH"
+    },
+    {
+        "catId":  "BOATDoor",
+        "category":  "BOATS",
+        "subcategory":  "DOOR"
+    },
+    {
+        "catId":  "BOATElec",
+        "category":  "BOATS",
+        "subcategory":  "ELECTRIC"
+    },
+    {
+        "catId":  "BOATFish",
+        "category":  "BOATS",
+        "subcategory":  "FISHING"
+    },
+    {
+        "catId":  "BOATHorn",
+        "category":  "BOATS",
+        "subcategory":  "HORN"
+    },
+    {
+        "catId":  "BOATInt",
+        "category":  "BOATS",
+        "subcategory":  "INTERIOR"
+    },
+    {
+        "catId":  "BOATMech",
+        "category":  "BOATS",
+        "subcategory":  "MECHANISM"
+    },
+    {
+        "catId":  "BOATMil",
+        "category":  "BOATS",
+        "subcategory":  "MILITARY"
+    },
+    {
+        "catId":  "BOATMisc",
+        "category":  "BOATS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "BOATMotr",
+        "category":  "BOATS",
+        "subcategory":  "MOTORBOAT"
+    },
+    {
+        "catId":  "BOATRace",
+        "category":  "BOATS",
+        "subcategory":  "RACING"
+    },
+    {
+        "catId":  "BOATRow",
+        "category":  "BOATS",
+        "subcategory":  "ROWBOAT"
+    },
+    {
+        "catId":  "BOATSail",
+        "category":  "BOATS",
+        "subcategory":  "SAILBOAT"
+    },
+    {
+        "catId":  "BOATShip",
+        "category":  "BOATS",
+        "subcategory":  "SHIP"
+    },
+    {
+        "catId":  "BOATStm",
+        "category":  "BOATS",
+        "subcategory":  "STEAM"
+    },
+    {
+        "catId":  "BOATSub",
+        "category":  "BOATS",
+        "subcategory":  "SUBMARINE"
+    },
+    {
+        "catId":  "BOATUndwtr",
+        "category":  "BOATS",
+        "subcategory":  "UNDERWATER"
+    },
+    {
+        "catId":  "BLLTBy",
+        "category":  "BULLETS",
+        "subcategory":  "BY"
+    },
+    {
+        "catId":  "BLLTImpt",
+        "category":  "BULLETS",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "BLLTMisc",
+        "category":  "BULLETS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "BLLTRico",
+        "category":  "BULLETS",
+        "subcategory":  "RICOCHET"
+    },
+    {
+        "catId":  "BLLTShel",
+        "category":  "BULLETS",
+        "subcategory":  "SHELL"
+    },
+    {
+        "catId":  "TOONAnml",
+        "category":  "CARTOON",
+        "subcategory":  "ANIMAL"
+    },
+    {
+        "catId":  "TOONBoing",
+        "category":  "CARTOON",
+        "subcategory":  "BOING"
+    },
+    {
+        "catId":  "TOONClang",
+        "category":  "CARTOON",
+        "subcategory":  "CLANG"
+    },
+    {
+        "catId":  "TOONCreak",
+        "category":  "CARTOON",
+        "subcategory":  "CREAK"
+    },
+    {
+        "catId":  "TOONHorn",
+        "category":  "CARTOON",
+        "subcategory":  "HORN"
+    },
+    {
+        "catId":  "TOONImpt",
+        "category":  "CARTOON",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "TOONMach",
+        "category":  "CARTOON",
+        "subcategory":  "MACHINE"
+    },
+    {
+        "catId":  "TOONMisc",
+        "category":  "CARTOON",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "TOONMx",
+        "category":  "CARTOON",
+        "subcategory":  "MUSICAL"
+    },
+    {
+        "catId":  "TOONPluk",
+        "category":  "CARTOON",
+        "subcategory":  "PLUCK"
+    },
+    {
+        "catId":  "TOONPop",
+        "category":  "CARTOON",
+        "subcategory":  "POP"
+    },
+    {
+        "catId":  "TOONShake",
+        "category":  "CARTOON",
+        "subcategory":  "SHAKE"
+    },
+    {
+        "catId":  "TOONSplt",
+        "category":  "CARTOON",
+        "subcategory":  "SPLAT"
+    },
+    {
+        "catId":  "TOONSqk",
+        "category":  "CARTOON",
+        "subcategory":  "SQUEAK"
+    },
+    {
+        "catId":  "TOONStrch",
+        "category":  "CARTOON",
+        "subcategory":  "STRETCH"
+    },
+    {
+        "catId":  "TOONSwsh",
+        "category":  "CARTOON",
+        "subcategory":  "SWISH"
+    },
+    {
+        "catId":  "TOONTwang",
+        "category":  "CARTOON",
+        "subcategory":  "TWANG"
+    },
+    {
+        "catId":  "TOONVeh",
+        "category":  "CARTOON",
+        "subcategory":  "VEHICLE"
+    },
+    {
+        "catId":  "TOONVox",
+        "category":  "CARTOON",
+        "subcategory":  "VOCAL"
+    },
+    {
+        "catId":  "TOONWarb",
+        "category":  "CARTOON",
+        "subcategory":  "WARBLE"
+    },
+    {
+        "catId":  "TOONWhis",
+        "category":  "CARTOON",
+        "subcategory":  "WHISTLE"
+    },
+    {
+        "catId":  "TOONZip",
+        "category":  "CARTOON",
+        "subcategory":  "ZIP"
+    },
+    {
+        "catId":  "CERMBrk",
+        "category":  "CERAMICS",
+        "subcategory":  "BREAK"
+    },
+    {
+        "catId":  "CERMCrsh",
+        "category":  "CERAMICS",
+        "subcategory":  "CRASH \u0026 DEBRIS"
+    },
+    {
+        "catId":  "CERMFric",
+        "category":  "CERAMICS",
+        "subcategory":  "FRICTION"
+    },
+    {
+        "catId":  "CERMHndl",
+        "category":  "CERAMICS",
+        "subcategory":  "HANDLE"
+    },
+    {
+        "catId":  "CERMImpt",
+        "category":  "CERAMICS",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "CERMMisc",
+        "category":  "CERAMICS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "CERMMvmt",
+        "category":  "CERAMICS",
+        "subcategory":  "MOVEMENT"
+    },
+    {
+        "catId":  "CERMTonl",
+        "category":  "CERAMICS",
+        "subcategory":  "TONAL"
+    },
+    {
+        "catId":  "CHAINBrk",
+        "category":  "CHAINS",
+        "subcategory":  "BREAK"
+    },
+    {
+        "catId":  "CHAINHndl",
+        "category":  "CHAINS",
+        "subcategory":  "HANDLE"
+    },
+    {
+        "catId":  "CHAINImpt",
+        "category":  "CHAINS",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "CHAINMisc",
+        "category":  "CHAINS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "CHAINMvmt",
+        "category":  "CHAINS",
+        "subcategory":  "MOVEMENT"
+    },
+    {
+        "catId":  "CHEMAcid",
+        "category":  "CHEMICALS",
+        "subcategory":  "ACID"
+    },
+    {
+        "catId":  "CHEMMisc",
+        "category":  "CHEMICALS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "CHEMReac",
+        "category":  "CHEMICALS",
+        "subcategory":  "REACTION"
+    },
+    {
+        "catId":  "CLOCKChim",
+        "category":  "CLOCKS",
+        "subcategory":  "CHIME"
+    },
+    {
+        "catId":  "CLOCKMech",
+        "category":  "CLOCKS",
+        "subcategory":  "MECHANICS"
+    },
+    {
+        "catId":  "CLOCKMisc",
+        "category":  "CLOCKS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "CLOCKTick",
+        "category":  "CLOCKS",
+        "subcategory":  "TICK"
+    },
+    {
+        "catId":  "CLOTHFlp",
+        "category":  "CLOTH",
+        "subcategory":  "FLAP"
+    },
+    {
+        "catId":  "CLOTHHndl",
+        "category":  "CLOTH",
+        "subcategory":  "HANDLE"
+    },
+    {
+        "catId":  "CLOTHImpt",
+        "category":  "CLOTH",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "CLOTHMisc",
+        "category":  "CLOTH",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "CLOTHMvmt",
+        "category":  "CLOTH",
+        "subcategory":  "MOVEMENT"
+    },
+    {
+        "catId":  "CLOTHRip",
+        "category":  "CLOTH",
+        "subcategory":  "RIP"
+    },
+    {
+        "catId":  "COMAv",
+        "category":  "COMMUNICATIONS",
+        "subcategory":  "AUDIO VISUAL"
+    },
+    {
+        "catId":  "COMCam",
+        "category":  "COMMUNICATIONS",
+        "subcategory":  "CAMERA"
+    },
+    {
+        "catId":  "COMCell",
+        "category":  "COMMUNICATIONS",
+        "subcategory":  "CELLPHONE"
+    },
+    {
+        "catId":  "COMMic",
+        "category":  "COMMUNICATIONS",
+        "subcategory":  "MICROPHONE"
+    },
+    {
+        "catId":  "COMMisc",
+        "category":  "COMMUNICATIONS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "COMPhono",
+        "category":  "COMMUNICATIONS",
+        "subcategory":  "PHONOGRAPH"
+    },
+    {
+        "catId":  "COMRadio",
+        "category":  "COMMUNICATIONS",
+        "subcategory":  "RADIO"
+    },
+    {
+        "catId":  "COMStatic",
+        "category":  "COMMUNICATIONS",
+        "subcategory":  "STATIC"
+    },
+    {
+        "catId":  "COMTelm",
+        "category":  "COMMUNICATIONS",
+        "subcategory":  "TELEMETRY"
+    },
+    {
+        "catId":  "COMTelph",
+        "category":  "COMMUNICATIONS",
+        "subcategory":  "TELEPHONE"
+    },
+    {
+        "catId":  "COMTv",
+        "category":  "COMMUNICATIONS",
+        "subcategory":  "TELEVISION"
+    },
+    {
+        "catId":  "COMTran",
+        "category":  "COMMUNICATIONS",
+        "subcategory":  "TRANSCEIVER"
+    },
+    {
+        "catId":  "COMType",
+        "category":  "COMMUNICATIONS",
+        "subcategory":  "TYPEWRITER"
+    },
+    {
+        "catId":  "CMPTDriv",
+        "category":  "COMPUTERS",
+        "subcategory":  "HARD DRIVE"
+    },
+    {
+        "catId":  "CMPTKey",
+        "category":  "COMPUTERS",
+        "subcategory":  "KEYBOARD \u0026 MOUSE"
+    },
+    {
+        "catId":  "CMPTMisc",
+        "category":  "COMPUTERS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "CREAAqua",
+        "category":  "CREATURES",
+        "subcategory":  "AQUATIC"
+    },
+    {
+        "catId":  "CREAAvian",
+        "category":  "CREATURES",
+        "subcategory":  "AVIAN"
+    },
+    {
+        "catId":  "CREABeast",
+        "category":  "CREATURES",
+        "subcategory":  "BEAST"
+    },
+    {
+        "catId":  "CREABlob",
+        "category":  "CREATURES",
+        "subcategory":  "BLOB"
+    },
+    {
+        "catId":  "CREADino",
+        "category":  "CREATURES",
+        "subcategory":  "DINOSAUR"
+    },
+    {
+        "catId":  "CREADrgn",
+        "category":  "CREATURES",
+        "subcategory":  "DRAGON"
+    },
+    {
+        "catId":  "CREAElem",
+        "category":  "CREATURES",
+        "subcategory":  "ELEMENTAL"
+    },
+    {
+        "catId":  "CREAEthr",
+        "category":  "CREATURES",
+        "subcategory":  "ETHEREAL"
+    },
+    {
+        "catId":  "CREAHmn",
+        "category":  "CREATURES",
+        "subcategory":  "HUMANOID"
+    },
+    {
+        "catId":  "CREAInsc",
+        "category":  "CREATURES",
+        "subcategory":  "INSECTOID"
+    },
+    {
+        "catId":  "CREAMisc",
+        "category":  "CREATURES",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "CREAMnstr",
+        "category":  "CREATURES",
+        "subcategory":  "MONSTER"
+    },
+    {
+        "catId":  "CREARept",
+        "category":  "CREATURES",
+        "subcategory":  "REPTILIAN"
+    },
+    {
+        "catId":  "CREASmall",
+        "category":  "CREATURES",
+        "subcategory":  "SMALL"
+    },
+    {
+        "catId":  "CREASrce",
+        "category":  "CREATURES",
+        "subcategory":  "SOURCE"
+    },
+    {
+        "catId":  "CRWDAngr",
+        "category":  "CROWDS",
+        "subcategory":  "ANGRY"
+    },
+    {
+        "catId":  "CRWDApls",
+        "category":  "CROWDS",
+        "subcategory":  "APPLAUSE"
+    },
+    {
+        "catId":  "CRWDBatl",
+        "category":  "CROWDS",
+        "subcategory":  "BATTLE"
+    },
+    {
+        "catId":  "CRWDCele",
+        "category":  "CROWDS",
+        "subcategory":  "CELEBRATION"
+    },
+    {
+        "catId":  "CRWDCheer",
+        "category":  "CROWDS",
+        "subcategory":  "CHEERING"
+    },
+    {
+        "catId":  "CRWDChld",
+        "category":  "CROWDS",
+        "subcategory":  "CHILDREN"
+    },
+    {
+        "catId":  "CRWDConv",
+        "category":  "CROWDS",
+        "subcategory":  "CONVERSATION"
+    },
+    {
+        "catId":  "CRWDLaff",
+        "category":  "CROWDS",
+        "subcategory":  "LAUGHTER"
+    },
+    {
+        "catId":  "CRWDLoop",
+        "category":  "CROWDS",
+        "subcategory":  "LOOP GROUP"
+    },
+    {
+        "catId":  "CRWDMisc",
+        "category":  "CROWDS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "CRWDPanic",
+        "category":  "CROWDS",
+        "subcategory":  "PANIC"
+    },
+    {
+        "catId":  "CRWDQuiet",
+        "category":  "CROWDS",
+        "subcategory":  "QUIET"
+    },
+    {
+        "catId":  "CRWDReac",
+        "category":  "CROWDS",
+        "subcategory":  "REACTION"
+    },
+    {
+        "catId":  "CRWDSing",
+        "category":  "CROWDS",
+        "subcategory":  "SINGING"
+    },
+    {
+        "catId":  "CRWDSprt",
+        "category":  "CROWDS",
+        "subcategory":  "SPORT"
+    },
+    {
+        "catId":  "CRWDWalla",
+        "category":  "CROWDS",
+        "subcategory":  "WALLA"
+    },
+    {
+        "catId":  "DSGNBass",
+        "category":  "DESIGNED",
+        "subcategory":  "BASS DIVE"
+    },
+    {
+        "catId":  "DSGNBoom",
+        "category":  "DESIGNED",
+        "subcategory":  "BOOM"
+    },
+    {
+        "catId":  "DSGNBram",
+        "category":  "DESIGNED",
+        "subcategory":  "BRAAM"
+    },
+    {
+        "catId":  "DSGNDist",
+        "category":  "DESIGNED",
+        "subcategory":  "DISTORTION"
+    },
+    {
+        "catId":  "DSGNDron",
+        "category":  "DESIGNED",
+        "subcategory":  "DRONE"
+    },
+    {
+        "catId":  "DSGNErie",
+        "category":  "DESIGNED",
+        "subcategory":  "EERIE"
+    },
+    {
+        "catId":  "DSGNEthr",
+        "category":  "DESIGNED",
+        "subcategory":  "ETHEREAL"
+    },
+    {
+        "catId":  "DSGNGran",
+        "category":  "DESIGNED",
+        "subcategory":  "GRANULAR"
+    },
+    {
+        "catId":  "DSGNImpt",
+        "category":  "DESIGNED",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "DSGNMisc",
+        "category":  "DESIGNED",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "DSGNMorph",
+        "category":  "DESIGNED",
+        "subcategory":  "MORPH"
+    },
+    {
+        "catId":  "DSGNRise",
+        "category":  "DESIGNED",
+        "subcategory":  "RISER"
+    },
+    {
+        "catId":  "DSGNRmbl",
+        "category":  "DESIGNED",
+        "subcategory":  "RUMBLE"
+    },
+    {
+        "catId":  "DSGNRythm",
+        "category":  "DESIGNED",
+        "subcategory":  "RHYTHMIC"
+    },
+    {
+        "catId":  "DSGNSrce",
+        "category":  "DESIGNED",
+        "subcategory":  "SOURCE"
+    },
+    {
+        "catId":  "DSGNStngr",
+        "category":  "DESIGNED",
+        "subcategory":  "STINGER"
+    },
+    {
+        "catId":  "DSGNSynth",
+        "category":  "DESIGNED",
+        "subcategory":  "SYNTHETIC"
+    },
+    {
+        "catId":  "DSGNTonl",
+        "category":  "DESIGNED",
+        "subcategory":  "TONAL"
+    },
+    {
+        "catId":  "DSGNVocl",
+        "category":  "DESIGNED",
+        "subcategory":  "VOCAL"
+    },
+    {
+        "catId":  "DSGNWhsh",
+        "category":  "DESIGNED",
+        "subcategory":  "WHOOSH"
+    },
+    {
+        "catId":  "DESTRClpse",
+        "category":  "DESTRUCTION",
+        "subcategory":  "COLLAPSE"
+    },
+    {
+        "catId":  "DESTRCrsh",
+        "category":  "DESTRUCTION",
+        "subcategory":  "CRASH \u0026 DEBRIS"
+    },
+    {
+        "catId":  "DESTRMisc",
+        "category":  "DESTRUCTION",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "DIRTCrsh",
+        "category":  "DIRT \u0026 SAND",
+        "subcategory":  "CRASH \u0026 DEBRIS"
+    },
+    {
+        "catId":  "DIRTDust",
+        "category":  "DIRT \u0026 SAND",
+        "subcategory":  "DUST"
+    },
+    {
+        "catId":  "DIRTHndl",
+        "category":  "DIRT \u0026 SAND",
+        "subcategory":  "HANDLE"
+    },
+    {
+        "catId":  "DIRTImpt",
+        "category":  "DIRT \u0026 SAND",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "DIRTMisc",
+        "category":  "DIRT \u0026 SAND",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "DIRTMvmt",
+        "category":  "DIRT \u0026 SAND",
+        "subcategory":  "MOVEMENT"
+    },
+    {
+        "catId":  "DIRTTonl",
+        "category":  "DIRT \u0026 SAND",
+        "subcategory":  "TONAL"
+    },
+    {
+        "catId":  "DOORAntq",
+        "category":  "DOORS",
+        "subcategory":  "ANTIQUE"
+    },
+    {
+        "catId":  "DOORAppl",
+        "category":  "DOORS",
+        "subcategory":  "APPLIANCE"
+    },
+    {
+        "catId":  "DOORCab",
+        "category":  "DOORS",
+        "subcategory":  "CABINET"
+    },
+    {
+        "catId":  "DOORComp",
+        "category":  "DOORS",
+        "subcategory":  "COMPOSITE"
+    },
+    {
+        "catId":  "DOORCreak",
+        "category":  "DOORS",
+        "subcategory":  "CREAK"
+    },
+    {
+        "catId":  "DOORDungn",
+        "category":  "DOORS",
+        "subcategory":  "DUNGEON"
+    },
+    {
+        "catId":  "DOORElec",
+        "category":  "DOORS",
+        "subcategory":  "ELECTRIC"
+    },
+    {
+        "catId":  "DOORGate",
+        "category":  "DOORS",
+        "subcategory":  "GATE"
+    },
+    {
+        "catId":  "DOORGlas",
+        "category":  "DOORS",
+        "subcategory":  "GLASS"
+    },
+    {
+        "catId":  "DOORHdwr",
+        "category":  "DOORS",
+        "subcategory":  "HARDWARE"
+    },
+    {
+        "catId":  "DOORTech",
+        "category":  "DOORS",
+        "subcategory":  "HITECH"
+    },
+    {
+        "catId":  "DOORHydr",
+        "category":  "DOORS",
+        "subcategory":  "HYDRAULIC \u0026 PNEUMATIC"
+    },
+    {
+        "catId":  "DOORKnck",
+        "category":  "DOORS",
+        "subcategory":  "KNOCK"
+    },
+    {
+        "catId":  "DOORMetl",
+        "category":  "DOORS",
+        "subcategory":  "METAL"
+    },
+    {
+        "catId":  "DOORMisc",
+        "category":  "DOORS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "DOORPlas",
+        "category":  "DOORS",
+        "subcategory":  "PLASTIC"
+    },
+    {
+        "catId":  "DOORPrisn",
+        "category":  "DOORS",
+        "subcategory":  "PRISON"
+    },
+    {
+        "catId":  "DOORRevl",
+        "category":  "DOORS",
+        "subcategory":  "REVOLVING"
+    },
+    {
+        "catId":  "DOORSlid",
+        "category":  "DOORS",
+        "subcategory":  "SLIDING"
+    },
+    {
+        "catId":  "DOORSton",
+        "category":  "DOORS",
+        "subcategory":  "STONE"
+    },
+    {
+        "catId":  "DOORSwng",
+        "category":  "DOORS",
+        "subcategory":  "SWINGING"
+    },
+    {
+        "catId":  "DOORWood",
+        "category":  "DOORS",
+        "subcategory":  "WOOD"
+    },
+    {
+        "catId":  "DRWRMetl",
+        "category":  "DRAWERS",
+        "subcategory":  "METAL"
+    },
+    {
+        "catId":  "DRWRMisc",
+        "category":  "DRAWERS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "DRWRPlas",
+        "category":  "DRAWERS",
+        "subcategory":  "PLASTIC"
+    },
+    {
+        "catId":  "DRWRWood",
+        "category":  "DRAWERS",
+        "subcategory":  "WOOD"
+    },
+    {
+        "catId":  "ELECArc",
+        "category":  "ELECTRICITY",
+        "subcategory":  "ARC"
+    },
+    {
+        "catId":  "ELECBuzz",
+        "category":  "ELECTRICITY",
+        "subcategory":  "BUZZ \u0026 HUM"
+    },
+    {
+        "catId":  "ELECEmf",
+        "category":  "ELECTRICITY",
+        "subcategory":  "ELECTROMAGNETIC"
+    },
+    {
+        "catId":  "ELECMisc",
+        "category":  "ELECTRICITY",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "ELECSprk",
+        "category":  "ELECTRICITY",
+        "subcategory":  "SPARKS"
+    },
+    {
+        "catId":  "ELECZap",
+        "category":  "ELECTRICITY",
+        "subcategory":  "ZAP"
+    },
+    {
+        "catId":  "EQUIPBridle",
+        "category":  "EQUIPMENT",
+        "subcategory":  "BRIDLE \u0026 TACK"
+    },
+    {
+        "catId":  "EQUIPTech",
+        "category":  "EQUIPMENT",
+        "subcategory":  "HITECH"
+    },
+    {
+        "catId":  "EQUIPMisc",
+        "category":  "EQUIPMENT",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "EQUIPRec",
+        "category":  "EQUIPMENT",
+        "subcategory":  "RECREATIONAL"
+    },
+    {
+        "catId":  "EQUIPSprt",
+        "category":  "EQUIPMENT",
+        "subcategory":  "SPORT"
+    },
+    {
+        "catId":  "EQUIPTact",
+        "category":  "EQUIPMENT",
+        "subcategory":  "TACTICAL"
+    },
+    {
+        "catId":  "EXPLDsgn",
+        "category":  "EXPLOSIONS",
+        "subcategory":  "DESIGNED"
+    },
+    {
+        "catId":  "EXPLMisc",
+        "category":  "EXPLOSIONS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "EXPLReal",
+        "category":  "EXPLOSIONS",
+        "subcategory":  "REAL"
+    },
+    {
+        "catId":  "FARTDsgn",
+        "category":  "FARTS",
+        "subcategory":  "DESIGNED"
+    },
+    {
+        "catId":  "FARTMisc",
+        "category":  "FARTS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "FARTReal",
+        "category":  "FARTS",
+        "subcategory":  "REAL"
+    },
+    {
+        "catId":  "FGHTBf",
+        "category":  "FIGHT",
+        "subcategory":  "BODYFALL"
+    },
+    {
+        "catId":  "FGHTClth",
+        "category":  "FIGHT",
+        "subcategory":  "CLOTH"
+    },
+    {
+        "catId":  "FGHTGrab",
+        "category":  "FIGHT",
+        "subcategory":  "GRAB"
+    },
+    {
+        "catId":  "FGHTImpt",
+        "category":  "FIGHT",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "FGHTMisc",
+        "category":  "FIGHT",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "FIREBurn",
+        "category":  "FIRE",
+        "subcategory":  "BURNING"
+    },
+    {
+        "catId":  "FIREBrst",
+        "category":  "FIRE",
+        "subcategory":  "BURST"
+    },
+    {
+        "catId":  "FIRECrkl",
+        "category":  "FIRE",
+        "subcategory":  "CRACKLE"
+    },
+    {
+        "catId":  "FIREGas",
+        "category":  "FIRE",
+        "subcategory":  "GAS"
+    },
+    {
+        "catId":  "FIREIgn",
+        "category":  "FIRE",
+        "subcategory":  "IGNITE"
+    },
+    {
+        "catId":  "FIREMisc",
+        "category":  "FIRE",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "FIRESizz",
+        "category":  "FIRE",
+        "subcategory":  "SIZZLE"
+    },
+    {
+        "catId":  "FIRETrch",
+        "category":  "FIRE",
+        "subcategory":  "TORCH"
+    },
+    {
+        "catId":  "FIRETurb",
+        "category":  "FIRE",
+        "subcategory":  "TURBULENT"
+    },
+    {
+        "catId":  "FIREWhsh",
+        "category":  "FIRE",
+        "subcategory":  "WHOOSH"
+    },
+    {
+        "catId":  "FRWKComr",
+        "category":  "FIREWORKS",
+        "subcategory":  "COMMERCIAL"
+    },
+    {
+        "catId":  "FRWKMisc",
+        "category":  "FIREWORKS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "FRWKRec",
+        "category":  "FIREWORKS",
+        "subcategory":  "RECREATIONAL"
+    },
+    {
+        "catId":  "FOLYClth",
+        "category":  "FOLEY",
+        "subcategory":  "CLOTH"
+    },
+    {
+        "catId":  "FOLYFeet",
+        "category":  "FOLEY",
+        "subcategory":  "FEET"
+    },
+    {
+        "catId":  "FOLYHand",
+        "category":  "FOLEY",
+        "subcategory":  "HANDS"
+    },
+    {
+        "catId":  "FOLYMisc",
+        "category":  "FOLEY",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "FOLYProp",
+        "category":  "FOLEY",
+        "subcategory":  "PROP"
+    },
+    {
+        "catId":  "FOODCook",
+        "category":  "FOOD \u0026 DRINK",
+        "subcategory":  "COOKING"
+    },
+    {
+        "catId":  "FOODDrnk",
+        "category":  "FOOD \u0026 DRINK",
+        "subcategory":  "DRINKING"
+    },
+    {
+        "catId":  "FOODEat",
+        "category":  "FOOD \u0026 DRINK",
+        "subcategory":  "EATING"
+    },
+    {
+        "catId":  "FOODGware",
+        "category":  "FOOD \u0026 DRINK",
+        "subcategory":  "GLASSWARE"
+    },
+    {
+        "catId":  "FOODIngr",
+        "category":  "FOOD \u0026 DRINK",
+        "subcategory":  "INGREDIENTS"
+    },
+    {
+        "catId":  "FOODKware",
+        "category":  "FOOD \u0026 DRINK",
+        "subcategory":  "KITCHENWARE"
+    },
+    {
+        "catId":  "FOODMisc",
+        "category":  "FOOD \u0026 DRINK",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "FOODPour",
+        "category":  "FOOD \u0026 DRINK",
+        "subcategory":  "POUR"
+    },
+    {
+        "catId":  "FOODTware",
+        "category":  "FOOD \u0026 DRINK",
+        "subcategory":  "TABLEWARE"
+    },
+    {
+        "catId":  "FEETAnml",
+        "category":  "FOOTSTEPS",
+        "subcategory":  "ANIMAL"
+    },
+    {
+        "catId":  "FEETCrea",
+        "category":  "FOOTSTEPS",
+        "subcategory":  "CREATURE"
+    },
+    {
+        "catId":  "FEETHors",
+        "category":  "FOOTSTEPS",
+        "subcategory":  "HORSE"
+    },
+    {
+        "catId":  "FEETHmn",
+        "category":  "FOOTSTEPS",
+        "subcategory":  "HUMAN"
+    },
+    {
+        "catId":  "FEETMisc",
+        "category":  "FOOTSTEPS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "GAMEArcd",
+        "category":  "GAMES",
+        "subcategory":  "ARCADE"
+    },
+    {
+        "catId":  "GAMEBoard",
+        "category":  "GAMES",
+        "subcategory":  "BOARD"
+    },
+    {
+        "catId":  "GAMECas",
+        "category":  "GAMES",
+        "subcategory":  "CASINO"
+    },
+    {
+        "catId":  "GAMEMisc",
+        "category":  "GAMES",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "GAMEVideo",
+        "category":  "GAMES",
+        "subcategory":  "VIDEO"
+    },
+    {
+        "catId":  "GEOFuma",
+        "category":  "GEOTHERMAL",
+        "subcategory":  "FUMAROLE"
+    },
+    {
+        "catId":  "GEOGeyser",
+        "category":  "GEOTHERMAL",
+        "subcategory":  "GEYSER"
+    },
+    {
+        "catId":  "GEOLava",
+        "category":  "GEOTHERMAL",
+        "subcategory":  "LAVA"
+    },
+    {
+        "catId":  "GEOMisc",
+        "category":  "GEOTHERMAL",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "GEOMudpot",
+        "category":  "GEOTHERMAL",
+        "subcategory":  "MUD POTS"
+    },
+    {
+        "catId":  "GLASBrk",
+        "category":  "GLASS",
+        "subcategory":  "BREAK"
+    },
+    {
+        "catId":  "GLASCrsh",
+        "category":  "GLASS",
+        "subcategory":  "CRASH \u0026 DEBRIS"
+    },
+    {
+        "catId":  "GLASFric",
+        "category":  "GLASS",
+        "subcategory":  "FRICTION"
+    },
+    {
+        "catId":  "GLASHndl",
+        "category":  "GLASS",
+        "subcategory":  "HANDLE"
+    },
+    {
+        "catId":  "GLASImpt",
+        "category":  "GLASS",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "GLASMisc",
+        "category":  "GLASS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "GLASMvmt",
+        "category":  "GLASS",
+        "subcategory":  "MOVEMENT"
+    },
+    {
+        "catId":  "GLASTonl",
+        "category":  "GLASS",
+        "subcategory":  "TONAL"
+    },
+    {
+        "catId":  "GOREBlood",
+        "category":  "GORE",
+        "subcategory":  "BLOOD"
+    },
+    {
+        "catId":  "GOREBone",
+        "category":  "GORE",
+        "subcategory":  "BONE"
+    },
+    {
+        "catId":  "GOREBurn",
+        "category":  "GORE",
+        "subcategory":  "BURN"
+    },
+    {
+        "catId":  "GOREFlsh",
+        "category":  "GORE",
+        "subcategory":  "FLESH"
+    },
+    {
+        "catId":  "GOREMisc",
+        "category":  "GORE",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "GOREOoze",
+        "category":  "GORE",
+        "subcategory":  "OOZE"
+    },
+    {
+        "catId":  "GORESrce",
+        "category":  "GORE",
+        "subcategory":  "SOURCE"
+    },
+    {
+        "catId":  "GORESplt",
+        "category":  "GORE",
+        "subcategory":  "SPLAT"
+    },
+    {
+        "catId":  "GORESqsh",
+        "category":  "GORE",
+        "subcategory":  "SQUISH"
+    },
+    {
+        "catId":  "GOREStab",
+        "category":  "GORE",
+        "subcategory":  "STAB"
+    },
+    {
+        "catId":  "GUNAntq",
+        "category":  "GUNS",
+        "subcategory":  "ANTIQUE"
+    },
+    {
+        "catId":  "GUNArtl",
+        "category":  "GUNS",
+        "subcategory":  "ARTILLERY"
+    },
+    {
+        "catId":  "GUNAuto",
+        "category":  "GUNS",
+        "subcategory":  "AUTOMATIC"
+    },
+    {
+        "catId":  "GUNCano",
+        "category":  "GUNS",
+        "subcategory":  "CANNON"
+    },
+    {
+        "catId":  "GUNHndl",
+        "category":  "GUNS",
+        "subcategory":  "HANDLE"
+    },
+    {
+        "catId":  "GUNTech",
+        "category":  "GUNS",
+        "subcategory":  "HITECH"
+    },
+    {
+        "catId":  "GUNMech",
+        "category":  "GUNS",
+        "subcategory":  "MECHANISM"
+    },
+    {
+        "catId":  "GUNMisc",
+        "category":  "GUNS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "GUNPis",
+        "category":  "GUNS",
+        "subcategory":  "PISTOL"
+    },
+    {
+        "catId":  "GUNRif",
+        "category":  "GUNS",
+        "subcategory":  "RIFLE"
+    },
+    {
+        "catId":  "GUNShotg",
+        "category":  "GUNS",
+        "subcategory":  "SHOTGUN"
+    },
+    {
+        "catId":  "GUNSupr",
+        "category":  "GUNS",
+        "subcategory":  "SUPPRESSED"
+    },
+    {
+        "catId":  "HORNAir",
+        "category":  "HORNS",
+        "subcategory":  "AIR POWERED"
+    },
+    {
+        "catId":  "HORNCele",
+        "category":  "HORNS",
+        "subcategory":  "CELEBRATION"
+    },
+    {
+        "catId":  "HORNMisc",
+        "category":  "HORNS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "HORNTrad",
+        "category":  "HORNS",
+        "subcategory":  "TRADITIONAL"
+    },
+    {
+        "catId":  "HMNBlow",
+        "category":  "HUMAN",
+        "subcategory":  "BLOW"
+    },
+    {
+        "catId":  "HMNBrth",
+        "category":  "HUMAN",
+        "subcategory":  "BREATH"
+    },
+    {
+        "catId":  "HMNBurp",
+        "category":  "HUMAN",
+        "subcategory":  "BURP"
+    },
+    {
+        "catId":  "HMNCough",
+        "category":  "HUMAN",
+        "subcategory":  "COUGH"
+    },
+    {
+        "catId":  "HMNHart",
+        "category":  "HUMAN",
+        "subcategory":  "HEARTBEAT"
+    },
+    {
+        "catId":  "HMNKiss",
+        "category":  "HUMAN",
+        "subcategory":  "KISS"
+    },
+    {
+        "catId":  "HMNMisc",
+        "category":  "HUMAN",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "HMNPee",
+        "category":  "HUMAN",
+        "subcategory":  "PEE"
+    },
+    {
+        "catId":  "HMNSkin",
+        "category":  "HUMAN",
+        "subcategory":  "SKIN"
+    },
+    {
+        "catId":  "HMNSneez",
+        "category":  "HUMAN",
+        "subcategory":  "SNEEZE"
+    },
+    {
+        "catId":  "HMNSniff",
+        "category":  "HUMAN",
+        "subcategory":  "SNIFF"
+    },
+    {
+        "catId":  "HMNSnor",
+        "category":  "HUMAN",
+        "subcategory":  "SNORE"
+    },
+    {
+        "catId":  "HMNSpit",
+        "category":  "HUMAN",
+        "subcategory":  "SPIT"
+    },
+    {
+        "catId":  "HMNVomit",
+        "category":  "HUMAN",
+        "subcategory":  "VOMIT"
+    },
+    {
+        "catId":  "ICEBrk",
+        "category":  "ICE",
+        "subcategory":  "BREAK"
+    },
+    {
+        "catId":  "ICECrsh",
+        "category":  "ICE",
+        "subcategory":  "CRASH \u0026 DEBRIS"
+    },
+    {
+        "catId":  "ICEFric",
+        "category":  "ICE",
+        "subcategory":  "FRICTION"
+    },
+    {
+        "catId":  "ICEHndl",
+        "category":  "ICE",
+        "subcategory":  "HANDLE"
+    },
+    {
+        "catId":  "ICEImpt",
+        "category":  "ICE",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "ICEMisc",
+        "category":  "ICE",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "ICEMvmt",
+        "category":  "ICE",
+        "subcategory":  "MOVEMENT"
+    },
+    {
+        "catId":  "ICETonl",
+        "category":  "ICE",
+        "subcategory":  "TONAL"
+    },
+    {
+        "catId":  "LASRBeam",
+        "category":  "LASERS",
+        "subcategory":  "BEAM"
+    },
+    {
+        "catId":  "LASRGun",
+        "category":  "LASERS",
+        "subcategory":  "GUN"
+    },
+    {
+        "catId":  "LASRImpt",
+        "category":  "LASERS",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "LASRMisc",
+        "category":  "LASERS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "LETHRCreak",
+        "category":  "LEATHER",
+        "subcategory":  "CREAK"
+    },
+    {
+        "catId":  "LETHRHndl",
+        "category":  "LEATHER",
+        "subcategory":  "HANDLE"
+    },
+    {
+        "catId":  "LETHRImpt",
+        "category":  "LEATHER",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "LETHRMisc",
+        "category":  "LEATHER",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "LETHRMvmt",
+        "category":  "LEATHER",
+        "subcategory":  "MOVEMENT"
+    },
+    {
+        "catId":  "LIQBubl",
+        "category":  "LIQUID \u0026 MUD",
+        "subcategory":  "BUBBLES"
+    },
+    {
+        "catId":  "LIQImpt",
+        "category":  "LIQUID \u0026 MUD",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "LIQMisc",
+        "category":  "LIQUID \u0026 MUD",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "LIQMvmt",
+        "category":  "LIQUID \u0026 MUD",
+        "subcategory":  "MOVEMENT"
+    },
+    {
+        "catId":  "LIQSuct",
+        "category":  "LIQUID \u0026 MUD",
+        "subcategory":  "SUCTION"
+    },
+    {
+        "catId":  "MACHAmus",
+        "category":  "MACHINES",
+        "subcategory":  "AMUSEMENT"
+    },
+    {
+        "catId":  "MACHAntq",
+        "category":  "MACHINES",
+        "subcategory":  "ANTIQUE"
+    },
+    {
+        "catId":  "MACHAppl",
+        "category":  "MACHINES",
+        "subcategory":  "APPLIANCE"
+    },
+    {
+        "catId":  "MACHCnst",
+        "category":  "MACHINES",
+        "subcategory":  "CONSTRUCTION"
+    },
+    {
+        "catId":  "MACHElev",
+        "category":  "MACHINES",
+        "subcategory":  "ELEVATOR"
+    },
+    {
+        "catId":  "MACHEscl",
+        "category":  "MACHINES",
+        "subcategory":  "ESCALATOR"
+    },
+    {
+        "catId":  "MACHFan",
+        "category":  "MACHINES",
+        "subcategory":  "FAN"
+    },
+    {
+        "catId":  "MACHGrdn",
+        "category":  "MACHINES",
+        "subcategory":  "GARDEN"
+    },
+    {
+        "catId":  "MACHGym",
+        "category":  "MACHINES",
+        "subcategory":  "GYM"
+    },
+    {
+        "catId":  "MACHTech",
+        "category":  "MACHINES",
+        "subcategory":  "HITECH"
+    },
+    {
+        "catId":  "MACHHvac",
+        "category":  "MACHINES",
+        "subcategory":  "HVAC"
+    },
+    {
+        "catId":  "MACHInd",
+        "category":  "MACHINES",
+        "subcategory":  "INDUSTRIAL"
+    },
+    {
+        "catId":  "MACHMech",
+        "category":  "MACHINES",
+        "subcategory":  "MECHANISM"
+    },
+    {
+        "catId":  "MACHMed",
+        "category":  "MACHINES",
+        "subcategory":  "MEDICAL"
+    },
+    {
+        "catId":  "MACHMisc",
+        "category":  "MACHINES",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "MACHOffc",
+        "category":  "MACHINES",
+        "subcategory":  "OFFICE"
+    },
+    {
+        "catId":  "MACHPump",
+        "category":  "MACHINES",
+        "subcategory":  "PUMP"
+    },
+    {
+        "catId":  "MAGAngl",
+        "category":  "MAGIC",
+        "subcategory":  "ANGELIC"
+    },
+    {
+        "catId":  "MAGElem",
+        "category":  "MAGIC",
+        "subcategory":  "ELEMENTAL"
+    },
+    {
+        "catId":  "MAGEvil",
+        "category":  "MAGIC",
+        "subcategory":  "EVIL"
+    },
+    {
+        "catId":  "MAGMisc",
+        "category":  "MAGIC",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "MAGPoof",
+        "category":  "MAGIC",
+        "subcategory":  "POOF"
+    },
+    {
+        "catId":  "MAGShim",
+        "category":  "MAGIC",
+        "subcategory":  "SHIMMER"
+    },
+    {
+        "catId":  "MAGSpel",
+        "category":  "MAGIC",
+        "subcategory":  "SPELL"
+    },
+    {
+        "catId":  "MECHClik",
+        "category":  "MECHANICAL",
+        "subcategory":  "CLICK"
+    },
+    {
+        "catId":  "MECHGear",
+        "category":  "MECHANICAL",
+        "subcategory":  "GEARS"
+    },
+    {
+        "catId":  "MECHHydr",
+        "category":  "MECHANICAL",
+        "subcategory":  "HYDRAULIC \u0026 PNEUMATIC"
+    },
+    {
+        "catId":  "MECHLtch",
+        "category":  "MECHANICAL",
+        "subcategory":  "LATCH"
+    },
+    {
+        "catId":  "MECHLvr",
+        "category":  "MECHANICAL",
+        "subcategory":  "LEVER"
+    },
+    {
+        "catId":  "MECHLock",
+        "category":  "MECHANICAL",
+        "subcategory":  "LOCK"
+    },
+    {
+        "catId":  "MECHMisc",
+        "category":  "MECHANICAL",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "MECHPuly",
+        "category":  "MECHANICAL",
+        "subcategory":  "PULLEY"
+    },
+    {
+        "catId":  "MECHRtch",
+        "category":  "MECHANICAL",
+        "subcategory":  "RATCHET"
+    },
+    {
+        "catId":  "MECHRelay",
+        "category":  "MECHANICAL",
+        "subcategory":  "RELAY"
+    },
+    {
+        "catId":  "MECHRolr",
+        "category":  "MECHANICAL",
+        "subcategory":  "ROLLER"
+    },
+    {
+        "catId":  "MECHSwtch",
+        "category":  "MECHANICAL",
+        "subcategory":  "SWITCH"
+    },
+    {
+        "catId":  "METLBrk",
+        "category":  "METAL",
+        "subcategory":  "BREAK"
+    },
+    {
+        "catId":  "METLCrsh",
+        "category":  "METAL",
+        "subcategory":  "CRASH \u0026 DEBRIS"
+    },
+    {
+        "catId":  "METLFric",
+        "category":  "METAL",
+        "subcategory":  "FRICTION"
+    },
+    {
+        "catId":  "METLHndl",
+        "category":  "METAL",
+        "subcategory":  "HANDLE"
+    },
+    {
+        "catId":  "METLImpt",
+        "category":  "METAL",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "METLMisc",
+        "category":  "METAL",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "METLMvmt",
+        "category":  "METAL",
+        "subcategory":  "MOVEMENT"
+    },
+    {
+        "catId":  "METLTonl",
+        "category":  "METAL",
+        "subcategory":  "TONAL"
+    },
+    {
+        "catId":  "MOTRAntq",
+        "category":  "MOTORS",
+        "subcategory":  "ANTIQUE"
+    },
+    {
+        "catId":  "MOTRComb",
+        "category":  "MOTORS",
+        "subcategory":  "COMBUSTION"
+    },
+    {
+        "catId":  "MOTRElec",
+        "category":  "MOTORS",
+        "subcategory":  "ELECTRIC"
+    },
+    {
+        "catId":  "MOTRMisc",
+        "category":  "MOTORS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "MOTRSrvo",
+        "category":  "MOTORS",
+        "subcategory":  "SERVO"
+    },
+    {
+        "catId":  "MOTRTurb",
+        "category":  "MOTORS",
+        "subcategory":  "TURBINE"
+    },
+    {
+        "catId":  "MOVEActv",
+        "category":  "MOVEMENT",
+        "subcategory":  "ACTIVITY"
+    },
+    {
+        "catId":  "MOVEAnml",
+        "category":  "MOVEMENT",
+        "subcategory":  "ANIMAL"
+    },
+    {
+        "catId":  "MOVECrea",
+        "category":  "MOVEMENT",
+        "subcategory":  "CREATURE"
+    },
+    {
+        "catId":  "MOVECrwd",
+        "category":  "MOVEMENT",
+        "subcategory":  "CROWD"
+    },
+    {
+        "catId":  "MOVEHmn",
+        "category":  "MOVEMENT",
+        "subcategory":  "HUMAN"
+    },
+    {
+        "catId":  "MOVEInsc",
+        "category":  "MOVEMENT",
+        "subcategory":  "INSECT"
+    },
+    {
+        "catId":  "MOVEMisc",
+        "category":  "MOVEMENT",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "MOVEPres",
+        "category":  "MOVEMENT",
+        "subcategory":  "PRESENCE"
+    },
+    {
+        "catId":  "MUSCBell",
+        "category":  "MUSICAL",
+        "subcategory":  "BELLS"
+    },
+    {
+        "catId":  "MUSCBrass",
+        "category":  "MUSICAL",
+        "subcategory":  "BRASS"
+    },
+    {
+        "catId":  "MUSCChim",
+        "category":  "MUSICAL",
+        "subcategory":  "CHIME"
+    },
+    {
+        "catId":  "MUSCChor",
+        "category":  "MUSICAL",
+        "subcategory":  "CHORAL"
+    },
+    {
+        "catId":  "MUSCExpr",
+        "category":  "MUSICAL",
+        "subcategory":  "EXPERIMENTAL"
+    },
+    {
+        "catId":  "MUSCInst",
+        "category":  "MUSICAL",
+        "subcategory":  "INSTRUMENT"
+    },
+    {
+        "catId":  "MUSCKeyd",
+        "category":  "MUSICAL",
+        "subcategory":  "KEYED"
+    },
+    {
+        "catId":  "MUSCLoop",
+        "category":  "MUSICAL",
+        "subcategory":  "LOOP"
+    },
+    {
+        "catId":  "MUSCMisc",
+        "category":  "MUSICAL",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "MUSCPerc",
+        "category":  "MUSICAL",
+        "subcategory":  "PERCUSSION"
+    },
+    {
+        "catId":  "MUSCTnprc",
+        "category":  "MUSICAL",
+        "subcategory":  "PERCUSSION TUNED"
+    },
+    {
+        "catId":  "MUSCPrfm",
+        "category":  "MUSICAL",
+        "subcategory":  "PERFORMANCE"
+    },
+    {
+        "catId":  "MUSCPluck",
+        "category":  "MUSICAL",
+        "subcategory":  "PLUCKED"
+    },
+    {
+        "catId":  "MUSCSmpl",
+        "category":  "MUSICAL",
+        "subcategory":  "SAMPLE"
+    },
+    {
+        "catId":  "MUSCShake",
+        "category":  "MUSICAL",
+        "subcategory":  "SHAKEN"
+    },
+    {
+        "catId":  "MUSCSong",
+        "category":  "MUSICAL",
+        "subcategory":  "SONG \u0026 PHRASE"
+    },
+    {
+        "catId":  "MUSCStngr",
+        "category":  "MUSICAL",
+        "subcategory":  "STINGER"
+    },
+    {
+        "catId":  "MUSCStr",
+        "category":  "MUSICAL",
+        "subcategory":  "STRINGED"
+    },
+    {
+        "catId":  "MUSCSynth",
+        "category":  "MUSICAL",
+        "subcategory":  "SYNTHESIZED"
+    },
+    {
+        "catId":  "MUSCToy",
+        "category":  "MUSICAL",
+        "subcategory":  "TOY"
+    },
+    {
+        "catId":  "MUSCWind",
+        "category":  "MUSICAL",
+        "subcategory":  "WOODWIND"
+    },
+    {
+        "catId":  "NATDAval",
+        "category":  "NATURAL DISASTER",
+        "subcategory":  "AVALANCHE"
+    },
+    {
+        "catId":  "NATDQuak",
+        "category":  "NATURAL DISASTER",
+        "subcategory":  "EARTHQUAKE"
+    },
+    {
+        "catId":  "NATDMisc",
+        "category":  "NATURAL DISASTER",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "NATDTorn",
+        "category":  "NATURAL DISASTER",
+        "subcategory":  "TORNADO"
+    },
+    {
+        "catId":  "NATDTsun",
+        "category":  "NATURAL DISASTER",
+        "subcategory":  "TSUNAMI"
+    },
+    {
+        "catId":  "NATDThyp",
+        "category":  "NATURAL DISASTER",
+        "subcategory":  "TYPHOON"
+    },
+    {
+        "catId":  "NATDVolc",
+        "category":  "NATURAL DISASTER",
+        "subcategory":  "VOLCANO"
+    },
+    {
+        "catId":  "OBJBag",
+        "category":  "OBJECTS",
+        "subcategory":  "BAG"
+    },
+    {
+        "catId":  "OBJBook",
+        "category":  "OBJECTS",
+        "subcategory":  "BOOK"
+    },
+    {
+        "catId":  "OBJCoin",
+        "category":  "OBJECTS",
+        "subcategory":  "COIN"
+    },
+    {
+        "catId":  "OBJCont",
+        "category":  "OBJECTS",
+        "subcategory":  "CONTAINER"
+    },
+    {
+        "catId":  "OBJFash",
+        "category":  "OBJECTS",
+        "subcategory":  "FASHION"
+    },
+    {
+        "catId":  "OBJFurn",
+        "category":  "OBJECTS",
+        "subcategory":  "FURNITURE"
+    },
+    {
+        "catId":  "OBJGrdn",
+        "category":  "OBJECTS",
+        "subcategory":  "GARDEN"
+    },
+    {
+        "catId":  "OBJGym",
+        "category":  "OBJECTS",
+        "subcategory":  "GYM"
+    },
+    {
+        "catId":  "OBJHsehld",
+        "category":  "OBJECTS",
+        "subcategory":  "HOUSEHOLD"
+    },
+    {
+        "catId":  "OBJJewl",
+        "category":  "OBJECTS",
+        "subcategory":  "JEWELRY"
+    },
+    {
+        "catId":  "OBJKey",
+        "category":  "OBJECTS",
+        "subcategory":  "KEYS"
+    },
+    {
+        "catId":  "OBJLug",
+        "category":  "OBJECTS",
+        "subcategory":  "LUGGAGE"
+    },
+    {
+        "catId":  "OBJMed",
+        "category":  "OBJECTS",
+        "subcategory":  "MEDICAL"
+    },
+    {
+        "catId":  "OBJMisc",
+        "category":  "OBJECTS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "OBJOffc",
+        "category":  "OBJECTS",
+        "subcategory":  "OFFICE"
+    },
+    {
+        "catId":  "OBJPack",
+        "category":  "OBJECTS",
+        "subcategory":  "PACKAGING"
+    },
+    {
+        "catId":  "OBJTape",
+        "category":  "OBJECTS",
+        "subcategory":  "TAPE"
+    },
+    {
+        "catId":  "OBJUmbr",
+        "category":  "OBJECTS",
+        "subcategory":  "UMBRELLA"
+    },
+    {
+        "catId":  "OBJWhled",
+        "category":  "OBJECTS",
+        "subcategory":  "WHEELED"
+    },
+    {
+        "catId":  "OBJWrite",
+        "category":  "OBJECTS",
+        "subcategory":  "WRITING"
+    },
+    {
+        "catId":  "OBJZipr",
+        "category":  "OBJECTS",
+        "subcategory":  "ZIPPER"
+    },
+    {
+        "catId":  "PAPRFltr",
+        "category":  "PAPER",
+        "subcategory":  "FLUTTER"
+    },
+    {
+        "catId":  "PAPRFric",
+        "category":  "PAPER",
+        "subcategory":  "FRICTION"
+    },
+    {
+        "catId":  "PAPRHndl",
+        "category":  "PAPER",
+        "subcategory":  "HANDLE"
+    },
+    {
+        "catId":  "PAPRImpt",
+        "category":  "PAPER",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "PAPRMisc",
+        "category":  "PAPER",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "PAPRRip",
+        "category":  "PAPER",
+        "subcategory":  "RIP"
+    },
+    {
+        "catId":  "PAPRTonl",
+        "category":  "PAPER",
+        "subcategory":  "TONAL"
+    },
+    {
+        "catId":  "PLASBrk",
+        "category":  "PLASTIC",
+        "subcategory":  "BREAK"
+    },
+    {
+        "catId":  "PLASCrsh",
+        "category":  "PLASTIC",
+        "subcategory":  "CRASH \u0026 DEBRIS"
+    },
+    {
+        "catId":  "PLASFric",
+        "category":  "PLASTIC",
+        "subcategory":  "FRICTION"
+    },
+    {
+        "catId":  "PLASHndl",
+        "category":  "PLASTIC",
+        "subcategory":  "HANDLE"
+    },
+    {
+        "catId":  "PLASImpt",
+        "category":  "PLASTIC",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "PLASMisc",
+        "category":  "PLASTIC",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "PLASMvmt",
+        "category":  "PLASTIC",
+        "subcategory":  "MOVEMENT"
+    },
+    {
+        "catId":  "PLASTonl",
+        "category":  "PLASTIC",
+        "subcategory":  "TONAL"
+    },
+    {
+        "catId":  "RAINClth",
+        "category":  "RAIN",
+        "subcategory":  "CLOTH"
+    },
+    {
+        "catId":  "RAINConc",
+        "category":  "RAIN",
+        "subcategory":  "CONCRETE"
+    },
+    {
+        "catId":  "RAIN",
+        "category":  "RAIN",
+        "subcategory":  "GENERAL"
+    },
+    {
+        "catId":  "RAINGlas",
+        "category":  "RAIN",
+        "subcategory":  "GLASS"
+    },
+    {
+        "catId":  "RAINInt",
+        "category":  "RAIN",
+        "subcategory":  "INTERIOR"
+    },
+    {
+        "catId":  "RAINMetl",
+        "category":  "RAIN",
+        "subcategory":  "METAL"
+    },
+    {
+        "catId":  "RAINPlas",
+        "category":  "RAIN",
+        "subcategory":  "PLASTIC"
+    },
+    {
+        "catId":  "RAINVege",
+        "category":  "RAIN",
+        "subcategory":  "VEGETATION"
+    },
+    {
+        "catId":  "RAINWatr",
+        "category":  "RAIN",
+        "subcategory":  "WATER"
+    },
+    {
+        "catId":  "RAINWood",
+        "category":  "RAIN",
+        "subcategory":  "WOOD"
+    },
+    {
+        "catId":  "ROBTMisc",
+        "category":  "ROBOTS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "ROBTMvmt",
+        "category":  "ROBOTS",
+        "subcategory":  "MOVEMENT"
+    },
+    {
+        "catId":  "ROBTVox",
+        "category":  "ROBOTS",
+        "subcategory":  "VOCAL"
+    },
+    {
+        "catId":  "ROCKBrk",
+        "category":  "ROCKS",
+        "subcategory":  "BREAK"
+    },
+    {
+        "catId":  "ROCKCrsh",
+        "category":  "ROCKS",
+        "subcategory":  "CRASH \u0026 DEBRIS"
+    },
+    {
+        "catId":  "ROCKFric",
+        "category":  "ROCKS",
+        "subcategory":  "FRICTION"
+    },
+    {
+        "catId":  "ROCKHndl",
+        "category":  "ROCKS",
+        "subcategory":  "HANDLE"
+    },
+    {
+        "catId":  "ROCKImpt",
+        "category":  "ROCKS",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "ROCKMisc",
+        "category":  "ROCKS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "ROCKMvmt",
+        "category":  "ROCKS",
+        "subcategory":  "MOVEMENT"
+    },
+    {
+        "catId":  "ROCKTonl",
+        "category":  "ROCKS",
+        "subcategory":  "TONAL"
+    },
+    {
+        "catId":  "ROPECreak",
+        "category":  "ROPE",
+        "subcategory":  "CREAK"
+    },
+    {
+        "catId":  "ROPEHndl",
+        "category":  "ROPE",
+        "subcategory":  "HANDLE"
+    },
+    {
+        "catId":  "ROPEImpt",
+        "category":  "ROPE",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "ROPEMisc",
+        "category":  "ROPE",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "ROPEMvmt",
+        "category":  "ROPE",
+        "subcategory":  "MOVEMENT"
+    },
+    {
+        "catId":  "RUBRCrsh",
+        "category":  "RUBBER",
+        "subcategory":  "CRASH \u0026 DEBRIS"
+    },
+    {
+        "catId":  "RUBRFric",
+        "category":  "RUBBER",
+        "subcategory":  "FRICTION"
+    },
+    {
+        "catId":  "RUBRHndl",
+        "category":  "RUBBER",
+        "subcategory":  "HANDLE"
+    },
+    {
+        "catId":  "RUBRImpt",
+        "category":  "RUBBER",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "RUBRMisc",
+        "category":  "RUBBER",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "RUBRMvmt",
+        "category":  "RUBBER",
+        "subcategory":  "MOVEMENT"
+    },
+    {
+        "catId":  "RUBRTonl",
+        "category":  "RUBBER",
+        "subcategory":  "TONAL"
+    },
+    {
+        "catId":  "SCIAlrm",
+        "category":  "SCIFI",
+        "subcategory":  "ALARM"
+    },
+    {
+        "catId":  "SCICmpt",
+        "category":  "SCIFI",
+        "subcategory":  "COMPUTER"
+    },
+    {
+        "catId":  "SCIDoor",
+        "category":  "SCIFI",
+        "subcategory":  "DOOR"
+    },
+    {
+        "catId":  "SCIEnrg",
+        "category":  "SCIFI",
+        "subcategory":  "ENERGY"
+    },
+    {
+        "catId":  "SCIImpt",
+        "category":  "SCIFI",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "SCIMach",
+        "category":  "SCIFI",
+        "subcategory":  "MACHINE"
+    },
+    {
+        "catId":  "SCIMech",
+        "category":  "SCIFI",
+        "subcategory":  "MECHANISM"
+    },
+    {
+        "catId":  "SCIMisc",
+        "category":  "SCIFI",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "SCIRetro",
+        "category":  "SCIFI",
+        "subcategory":  "RETRO"
+    },
+    {
+        "catId":  "SCIShip",
+        "category":  "SCIFI",
+        "subcategory":  "SPACESHIP"
+    },
+    {
+        "catId":  "SCIVeh",
+        "category":  "SCIFI",
+        "subcategory":  "VEHICLE"
+    },
+    {
+        "catId":  "SCIWeap",
+        "category":  "SCIFI",
+        "subcategory":  "WEAPON"
+    },
+    {
+        "catId":  "SNOWCrsh",
+        "category":  "SNOW",
+        "subcategory":  "CRASH \u0026 DEBRIS"
+    },
+    {
+        "catId":  "SNOWFric",
+        "category":  "SNOW",
+        "subcategory":  "FRICTION"
+    },
+    {
+        "catId":  "SNOWHndl",
+        "category":  "SNOW",
+        "subcategory":  "HANDLE"
+    },
+    {
+        "catId":  "SNOWImpt",
+        "category":  "SNOW",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "SNOWMisc",
+        "category":  "SNOW",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "SNOWMvmt",
+        "category":  "SNOW",
+        "subcategory":  "MOVEMENT"
+    },
+    {
+        "catId":  "SPRTCourt",
+        "category":  "SPORTS",
+        "subcategory":  "COURT"
+    },
+    {
+        "catId":  "SPRTField",
+        "category":  "SPORTS",
+        "subcategory":  "FIELD"
+    },
+    {
+        "catId":  "SPRTGym",
+        "category":  "SPORTS",
+        "subcategory":  "GYM"
+    },
+    {
+        "catId":  "SPRTIndor",
+        "category":  "SPORTS",
+        "subcategory":  "INDOOR"
+    },
+    {
+        "catId":  "SPRTMisc",
+        "category":  "SPORTS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "SPRTSkate",
+        "category":  "SPORTS",
+        "subcategory":  "SKATE"
+    },
+    {
+        "catId":  "SPRTTrck",
+        "category":  "SPORTS",
+        "subcategory":  "TRACK \u0026 FIELD"
+    },
+    {
+        "catId":  "SPRTWatr",
+        "category":  "SPORTS",
+        "subcategory":  "WATER"
+    },
+    {
+        "catId":  "SPRTWntr",
+        "category":  "SPORTS",
+        "subcategory":  "WINTER"
+    },
+    {
+        "catId":  "SWSH",
+        "category":  "SWOOSHES",
+        "subcategory":  "SWISH"
+    },
+    {
+        "catId":  "WHSH",
+        "category":  "SWOOSHES",
+        "subcategory":  "WHOOSH"
+    },
+    {
+        "catId":  "TOOLGrdn",
+        "category":  "TOOLS",
+        "subcategory":  "GARDEN"
+    },
+    {
+        "catId":  "TOOLHand",
+        "category":  "TOOLS",
+        "subcategory":  "HAND"
+    },
+    {
+        "catId":  "TOOLMisc",
+        "category":  "TOOLS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "TOOLPneu",
+        "category":  "TOOLS",
+        "subcategory":  "PNEUMATIC"
+    },
+    {
+        "catId":  "TOOLPowr",
+        "category":  "TOOLS",
+        "subcategory":  "POWER"
+    },
+    {
+        "catId":  "TOYElec",
+        "category":  "TOYS",
+        "subcategory":  "ELECTRONIC"
+    },
+    {
+        "catId":  "TOYMech",
+        "category":  "TOYS",
+        "subcategory":  "MECHANICAL"
+    },
+    {
+        "catId":  "TOYMisc",
+        "category":  "TOYS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "TRNBrake",
+        "category":  "TRAINS",
+        "subcategory":  "BRAKE"
+    },
+    {
+        "catId":  "TRNClak",
+        "category":  "TRAINS",
+        "subcategory":  "CLACK"
+    },
+    {
+        "catId":  "TRNDoor",
+        "category":  "TRAINS",
+        "subcategory":  "DOOR"
+    },
+    {
+        "catId":  "TRNDiesl",
+        "category":  "TRAINS",
+        "subcategory":  "DIESEL"
+    },
+    {
+        "catId":  "TRNElec",
+        "category":  "TRAINS",
+        "subcategory":  "ELECTRIC"
+    },
+    {
+        "catId":  "TRNHspd",
+        "category":  "TRAINS",
+        "subcategory":  "HIGH SPEED"
+    },
+    {
+        "catId":  "TRNHorn",
+        "category":  "TRAINS",
+        "subcategory":  "HORN"
+    },
+    {
+        "catId":  "TRNInt",
+        "category":  "TRAINS",
+        "subcategory":  "INTERIOR"
+    },
+    {
+        "catId":  "TRNMech",
+        "category":  "TRAINS",
+        "subcategory":  "MECHANISM"
+    },
+    {
+        "catId":  "TRNMisc",
+        "category":  "TRAINS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "TRNSteam",
+        "category":  "TRAINS",
+        "subcategory":  "STEAM"
+    },
+    {
+        "catId":  "TRNSbwy",
+        "category":  "TRAINS",
+        "subcategory":  "SUBWAY"
+    },
+    {
+        "catId":  "TRNTram",
+        "category":  "TRAINS",
+        "subcategory":  "TRAM"
+    },
+    {
+        "catId":  "UIAlert",
+        "category":  "USER INTERFACE",
+        "subcategory":  "ALERT"
+    },
+    {
+        "catId":  "UIBeep",
+        "category":  "USER INTERFACE",
+        "subcategory":  "BEEP"
+    },
+    {
+        "catId":  "UIClick",
+        "category":  "USER INTERFACE",
+        "subcategory":  "CLICK"
+    },
+    {
+        "catId":  "UIData",
+        "category":  "USER INTERFACE",
+        "subcategory":  "DATA"
+    },
+    {
+        "catId":  "UIGlitch",
+        "category":  "USER INTERFACE",
+        "subcategory":  "GLITCH"
+    },
+    {
+        "catId":  "UIMisc",
+        "category":  "USER INTERFACE",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "UIMvmt",
+        "category":  "USER INTERFACE",
+        "subcategory":  "MOTION"
+    },
+    {
+        "catId":  "VEGEGras",
+        "category":  "VEGETATION",
+        "subcategory":  "GRASS"
+    },
+    {
+        "catId":  "VEGELeaf",
+        "category":  "VEGETATION",
+        "subcategory":  "LEAVES"
+    },
+    {
+        "catId":  "VEGEMisc",
+        "category":  "VEGETATION",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "VEGETree",
+        "category":  "VEGETATION",
+        "subcategory":  "TREE"
+    },
+    {
+        "catId":  "VEHAlrm",
+        "category":  "VEHICLES",
+        "subcategory":  "ALARM"
+    },
+    {
+        "catId":  "VEHAntq",
+        "category":  "VEHICLES",
+        "subcategory":  "ANTIQUE"
+    },
+    {
+        "catId":  "VEHAtv",
+        "category":  "VEHICLES",
+        "subcategory":  "ATV"
+    },
+    {
+        "catId":  "VEHBike",
+        "category":  "VEHICLES",
+        "subcategory":  "BICYCLE"
+    },
+    {
+        "catId":  "VEHBrake",
+        "category":  "VEHICLES",
+        "subcategory":  "BRAKE"
+    },
+    {
+        "catId":  "VEHBus",
+        "category":  "VEHICLES",
+        "subcategory":  "BUS"
+    },
+    {
+        "catId":  "VEHCar",
+        "category":  "VEHICLES",
+        "subcategory":  "CAR"
+    },
+    {
+        "catId":  "VEHCnst",
+        "category":  "VEHICLES",
+        "subcategory":  "CONSTRUCTION"
+    },
+    {
+        "catId":  "VEHDoor",
+        "category":  "VEHICLES",
+        "subcategory":  "DOOR"
+    },
+    {
+        "catId":  "VEHElec",
+        "category":  "VEHICLES",
+        "subcategory":  "ELECTRIC"
+    },
+    {
+        "catId":  "VEHEmrg",
+        "category":  "VEHICLES",
+        "subcategory":  "EMERGENCY"
+    },
+    {
+        "catId":  "VEHFarm",
+        "category":  "VEHICLES",
+        "subcategory":  "FARM"
+    },
+    {
+        "catId":  "VEHFrght",
+        "category":  "VEHICLES",
+        "subcategory":  "FREIGHT"
+    },
+    {
+        "catId":  "VEHBy",
+        "category":  "VEHICLES",
+        "subcategory":  "GENERIC BY"
+    },
+    {
+        "catId":  "VEHHorn",
+        "category":  "VEHICLES",
+        "subcategory":  "HORN"
+    },
+    {
+        "catId":  "VEHInt",
+        "category":  "VEHICLES",
+        "subcategory":  "INTERIOR"
+    },
+    {
+        "catId":  "VEHJalop",
+        "category":  "VEHICLES",
+        "subcategory":  "JALOPY"
+    },
+    {
+        "catId":  "VEHMech",
+        "category":  "VEHICLES",
+        "subcategory":  "MECHANISM"
+    },
+    {
+        "catId":  "VEHMil",
+        "category":  "VEHICLES",
+        "subcategory":  "MILITARY"
+    },
+    {
+        "catId":  "VEHMisc",
+        "category":  "VEHICLES",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "VEHMoto",
+        "category":  "VEHICLES",
+        "subcategory":  "MOTORCYCLE"
+    },
+    {
+        "catId":  "VEHRace",
+        "category":  "VEHICLES",
+        "subcategory":  "RACING"
+    },
+    {
+        "catId":  "VEHSirn",
+        "category":  "VEHICLES",
+        "subcategory":  "SIREN"
+    },
+    {
+        "catId":  "VEHSkid",
+        "category":  "VEHICLES",
+        "subcategory":  "SKID"
+    },
+    {
+        "catId":  "VEHSusp",
+        "category":  "VEHICLES",
+        "subcategory":  "SUSPENSION"
+    },
+    {
+        "catId":  "VEHTire",
+        "category":  "VEHICLES",
+        "subcategory":  "TIRE"
+    },
+    {
+        "catId":  "VEHTruck",
+        "category":  "VEHICLES",
+        "subcategory":  "TRUCK VAN \u0026 SUV"
+    },
+    {
+        "catId":  "VEHUtil",
+        "category":  "VEHICLES",
+        "subcategory":  "UTILITY"
+    },
+    {
+        "catId":  "VEHWagn",
+        "category":  "VEHICLES",
+        "subcategory":  "WAGON"
+    },
+    {
+        "catId":  "VEHWndw",
+        "category":  "VEHICLES",
+        "subcategory":  "WINDOW"
+    },
+    {
+        "catId":  "VOXAlien",
+        "category":  "VOICES",
+        "subcategory":  "ALIEN"
+    },
+    {
+        "catId":  "VOXBaby",
+        "category":  "VOICES",
+        "subcategory":  "BABY"
+    },
+    {
+        "catId":  "VOXCheer",
+        "category":  "VOICES",
+        "subcategory":  "CHEER"
+    },
+    {
+        "catId":  "VOXChld",
+        "category":  "VOICES",
+        "subcategory":  "CHILD"
+    },
+    {
+        "catId":  "VOXCry",
+        "category":  "VOICES",
+        "subcategory":  "CRYING"
+    },
+    {
+        "catId":  "VOXEfrt",
+        "category":  "VOICES",
+        "subcategory":  "EFFORTS"
+    },
+    {
+        "catId":  "VOXFem",
+        "category":  "VOICES",
+        "subcategory":  "FEMALE"
+    },
+    {
+        "catId":  "VOXFutz",
+        "category":  "VOICES",
+        "subcategory":  "FUTZED"
+    },
+    {
+        "catId":  "VOXHist",
+        "category":  "VOICES",
+        "subcategory":  "HISTORICAL"
+    },
+    {
+        "catId":  "VOXLaff",
+        "category":  "VOICES",
+        "subcategory":  "LAUGH"
+    },
+    {
+        "catId":  "VOXMale",
+        "category":  "VOICES",
+        "subcategory":  "MALE"
+    },
+    {
+        "catId":  "VOXMisc",
+        "category":  "VOICES",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "VOXReac",
+        "category":  "VOICES",
+        "subcategory":  "REACTION"
+    },
+    {
+        "catId":  "VOXScrm",
+        "category":  "VOICES",
+        "subcategory":  "SCREAM"
+    },
+    {
+        "catId":  "VOXSing",
+        "category":  "VOICES",
+        "subcategory":  "SINGING"
+    },
+    {
+        "catId":  "VOXWhsp",
+        "category":  "VOICES",
+        "subcategory":  "WHISPER"
+    },
+    {
+        "catId":  "WATRBubl",
+        "category":  "WATER",
+        "subcategory":  "BUBBLES"
+    },
+    {
+        "catId":  "WATRDran",
+        "category":  "WATER",
+        "subcategory":  "DRAIN"
+    },
+    {
+        "catId":  "WATRDrip",
+        "category":  "WATER",
+        "subcategory":  "DRIP"
+    },
+    {
+        "catId":  "WATRFizz",
+        "category":  "WATER",
+        "subcategory":  "FIZZ"
+    },
+    {
+        "catId":  "WATRFlow",
+        "category":  "WATER",
+        "subcategory":  "FLOW"
+    },
+    {
+        "catId":  "WATRFoun",
+        "category":  "WATER",
+        "subcategory":  "FOUNTAIN"
+    },
+    {
+        "catId":  "WATRImpt",
+        "category":  "WATER",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "WATRLap",
+        "category":  "WATER",
+        "subcategory":  "LAP"
+    },
+    {
+        "catId":  "WATRMisc",
+        "category":  "WATER",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "WATRMvmt",
+        "category":  "WATER",
+        "subcategory":  "MOVEMENT"
+    },
+    {
+        "catId":  "WATRPlmb",
+        "category":  "WATER",
+        "subcategory":  "PLUMBING"
+    },
+    {
+        "catId":  "WATRPour",
+        "category":  "WATER",
+        "subcategory":  "POUR"
+    },
+    {
+        "catId":  "WATRSplsh",
+        "category":  "WATER",
+        "subcategory":  "SPLASH"
+    },
+    {
+        "catId":  "WATRSpray",
+        "category":  "WATER",
+        "subcategory":  "SPRAY"
+    },
+    {
+        "catId":  "WATRStm",
+        "category":  "WATER",
+        "subcategory":  "STEAM"
+    },
+    {
+        "catId":  "WATRSurf",
+        "category":  "WATER",
+        "subcategory":  "SURF"
+    },
+    {
+        "catId":  "WATRTurb",
+        "category":  "WATER",
+        "subcategory":  "TURBULENT"
+    },
+    {
+        "catId":  "WATRUndwtr",
+        "category":  "WATER",
+        "subcategory":  "UNDERWATER"
+    },
+    {
+        "catId":  "WATRFall",
+        "category":  "WATER",
+        "subcategory":  "WATERFALL"
+    },
+    {
+        "catId":  "WATRWave",
+        "category":  "WATER",
+        "subcategory":  "WAVE"
+    },
+    {
+        "catId":  "WEAPArmr",
+        "category":  "WEAPONS",
+        "subcategory":  "ARMOR"
+    },
+    {
+        "catId":  "WEAPArro",
+        "category":  "WEAPONS",
+        "subcategory":  "ARROW"
+    },
+    {
+        "catId":  "WEAPAxe",
+        "category":  "WEAPONS",
+        "subcategory":  "AXE"
+    },
+    {
+        "catId":  "WEAPBlnt",
+        "category":  "WEAPONS",
+        "subcategory":  "BLUNT"
+    },
+    {
+        "catId":  "WEAPBow",
+        "category":  "WEAPONS",
+        "subcategory":  "BOW"
+    },
+    {
+        "catId":  "WEAPKnif",
+        "category":  "WEAPONS",
+        "subcategory":  "KNIFE"
+    },
+    {
+        "catId":  "WEAPMisc",
+        "category":  "WEAPONS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "WEAPPole",
+        "category":  "WEAPONS",
+        "subcategory":  "POLEARM"
+    },
+    {
+        "catId":  "WEAPSiege",
+        "category":  "WEAPONS",
+        "subcategory":  "SIEGE"
+    },
+    {
+        "catId":  "WEAPSwrd",
+        "category":  "WEAPONS",
+        "subcategory":  "SWORD"
+    },
+    {
+        "catId":  "WEAPWhip",
+        "category":  "WEAPONS",
+        "subcategory":  "WHIP"
+    },
+    {
+        "catId":  "HAIL",
+        "category":  "WEATHER",
+        "subcategory":  "HAIL"
+    },
+    {
+        "catId":  "WTHR",
+        "category":  "WEATHER",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "STORM",
+        "category":  "WEATHER",
+        "subcategory":  "STORM"
+    },
+    {
+        "catId":  "THUN",
+        "category":  "WEATHER",
+        "subcategory":  "THUNDER"
+    },
+    {
+        "catId":  "WHSTHmn",
+        "category":  "WHISTLES",
+        "subcategory":  "HUMAN"
+    },
+    {
+        "catId":  "WHSTMech",
+        "category":  "WHISTLES",
+        "subcategory":  "MECHANICAL"
+    },
+    {
+        "catId":  "WHSTMisc",
+        "category":  "WHISTLES",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "WINDDsgn",
+        "category":  "WIND",
+        "subcategory":  "DESIGNED"
+    },
+    {
+        "catId":  "WIND",
+        "category":  "WIND",
+        "subcategory":  "GENERAL"
+    },
+    {
+        "catId":  "WINDGust",
+        "category":  "WIND",
+        "subcategory":  "GUST"
+    },
+    {
+        "catId":  "WINDInt",
+        "category":  "WIND",
+        "subcategory":  "INTERIOR"
+    },
+    {
+        "catId":  "WINDTonl",
+        "category":  "WIND",
+        "subcategory":  "TONAL"
+    },
+    {
+        "catId":  "WINDTurb",
+        "category":  "WIND",
+        "subcategory":  "TURBULENT"
+    },
+    {
+        "catId":  "WINDVege",
+        "category":  "WIND",
+        "subcategory":  "VEGETATION"
+    },
+    {
+        "catId":  "WNDWCover",
+        "category":  "WINDOWS",
+        "subcategory":  "COVERING"
+    },
+    {
+        "catId":  "WNDWHdwr",
+        "category":  "WINDOWS",
+        "subcategory":  "HARDWARE"
+    },
+    {
+        "catId":  "WNDWKnck",
+        "category":  "WINDOWS",
+        "subcategory":  "KNOCK"
+    },
+    {
+        "catId":  "WNDWMetl",
+        "category":  "WINDOWS",
+        "subcategory":  "METAL"
+    },
+    {
+        "catId":  "WNDWMisc",
+        "category":  "WINDOWS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "WNDWPlas",
+        "category":  "WINDOWS",
+        "subcategory":  "PLASTIC"
+    },
+    {
+        "catId":  "WNDWWood",
+        "category":  "WINDOWS",
+        "subcategory":  "WOOD"
+    },
+    {
+        "catId":  "WINGBird",
+        "category":  "WINGS",
+        "subcategory":  "BIRD"
+    },
+    {
+        "catId":  "WINGCrea",
+        "category":  "WINGS",
+        "subcategory":  "CREATURE"
+    },
+    {
+        "catId":  "WINGInsc",
+        "category":  "WINGS",
+        "subcategory":  "INSECT"
+    },
+    {
+        "catId":  "WINGMisc",
+        "category":  "WINGS",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "WOODBrk",
+        "category":  "WOOD",
+        "subcategory":  "BREAK"
+    },
+    {
+        "catId":  "WOODCrsh",
+        "category":  "WOOD",
+        "subcategory":  "CRASH \u0026 DEBRIS"
+    },
+    {
+        "catId":  "WOODFric",
+        "category":  "WOOD",
+        "subcategory":  "FRICTION"
+    },
+    {
+        "catId":  "WOODHndl",
+        "category":  "WOOD",
+        "subcategory":  "HANDLE"
+    },
+    {
+        "catId":  "WOODImpt",
+        "category":  "WOOD",
+        "subcategory":  "IMPACT"
+    },
+    {
+        "catId":  "WOODMisc",
+        "category":  "WOOD",
+        "subcategory":  "MISC"
+    },
+    {
+        "catId":  "WOODMvmt",
+        "category":  "WOOD",
+        "subcategory":  "MOVEMENT"
+    },
+    {
+        "catId":  "WOODTonl",
+        "category":  "WOOD",
+        "subcategory":  "TONAL"
+    }
+]
