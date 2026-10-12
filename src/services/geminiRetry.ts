@@ -96,7 +96,7 @@ const wait = (delayMs: number) => new Promise<void>((resolve) => {
 const trimTrailingSlashes = (value: string) => value.replace(/\/+$/, '');
 
 const normalizeTokenHubModel = (value: string | undefined) => {
-  const model = value?.trim() || 'gpt-5.6-sol';
+  const model = value?.trim() || 'gpt-6.1-sol';
   return model.includes('/') ? model : `ark/${model}`;
 };
 
@@ -112,7 +112,7 @@ const getGptGatewayConfig = (): GptGatewayConfig | null => {
           || process.env.GPT_BASE_URL?.trim()
           || 'https://api.openai.com/v1',
       ),
-      model: process.env.OPENAI_MODEL?.trim() || process.env.GPT_MODEL?.trim() || 'gpt-5.6-sol',
+      model: process.env.OPENAI_MODEL?.trim() || process.env.GPT_MODEL?.trim() || 'gpt-6.1-sol',
       provider: 'openai',
     };
   }
@@ -126,7 +126,7 @@ const getGptGatewayConfig = (): GptGatewayConfig | null => {
           || process.env.GPT_BASE_URL?.trim()
           || 'https://ark.cn-beijing.volces.com/api/v3',
       ),
-      model: process.env.ARK_MODEL?.trim() || process.env.GPT_MODEL?.trim() || 'gpt-5.6-sol',
+      model: process.env.ARK_MODEL?.trim() || process.env.GPT_MODEL?.trim() || 'gpt-6.1-sol',
       provider: 'ark',
     };
   }

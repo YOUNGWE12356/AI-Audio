@@ -1090,7 +1090,7 @@ const parseModelPlan = (value: unknown, model: unknown, provider: unknown): Assi
     tab: candidate.tab as TabType,
     steps: candidate.steps as string[],
     plannerSource: 'model',
-    plannerModel: typeof model === 'string' ? model : 'gpt-5.6-sol',
+    plannerModel: typeof model === 'string' ? model : 'gpt-6.1-sol',
     plannerProvider: provider === 'openai' || provider === 'ark' || provider === 'tokenhub'
       ? provider
       : undefined,
