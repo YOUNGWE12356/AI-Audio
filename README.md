@@ -36,6 +36,28 @@ API 密钥、系统命令和长期文件存储不得进入浏览器端。浏览�
 
 ### 服务器部署（Linux）
 
+#### 一键部署（systemd）
+
+服务器需安装 Node.js 20+、npm、Git、curl 和 flock，并使用 systemd。以项目目录所属用户执行（仅管理 systemd 时通过 sudo 提权）：
+
+```bash
+bash deploy.sh
+```
+
+脚本拉取当前分支（仅快进）、安装依赖、检查并构建，随后启动 `ai-audio` 服务，固定端口 **4030**，支持异常重启与开机启动。首次缺少 `.env` 时会创建模板并退出，填写配置后再次运行即可。已有 `.env`、`data/` 和 `uploads/` 保留，脚本通过进程环境将端口设为 4030。
+
+```bash
+sudo journalctl -u ai-audio -f    # 日志
+sudo systemctl status ai-audio  # 状态
+sudo systemctl restart ai-audio # 重启
+sudo systemctl stop ai-audio    # 停止
+SKIP_PULL=1 bash deploy.sh      # 部署当前本地代码，跳过拉取
+```
+
+部署会短暂中断服务，并非零停机发布。从旧的 nohup 启动方式切换时，先停止旧进程，避免端口占用和多进程写账本。脚本不调整防火墙或飞书回调配置。
+
+#### 手动部署
+
 在项目根目录执行，首次部署先复制 `.env.example` 为 `.env` 并填写配置；已有 `.env` 时保留原文件，将 `PORT` 设为 `4030`。
 
 ```bash
