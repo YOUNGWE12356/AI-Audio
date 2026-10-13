@@ -26,13 +26,31 @@ API 密钥、系统命令和长期文件存储不得进入浏览器端。浏览�
 1. 复制 `.env.example` 为 `.env`，填写本地开发所需的 API 密钥。
 2. 安装依赖：`npm ci`
 3. 启动开发服务：`npm run dev`
-4. 浏览器访问 `http://localhost:3000`
+4. 浏览器访问 `http://localhost:4030`
 
 本地 `.env` 支持以下配置：
 
 - `GEMINI_API_KEY`：Gemini 多模态分析、翻译和内容规划
 - `ELEVENLABS_API_KEY`：音效、音乐、配音和语音工具
-- `PORT`：可选，本地服务端口，默认 `3000`
+- `PORT`：可选，服务端口，默认 `4030`
+
+### 服务器部署（Linux）
+
+在项目根目录执行，首次部署先复制 `.env.example` 为 `.env` 并填写配置；已有 `.env` 时保留原文件，将 `PORT` 设为 `4030`。
+
+```bash
+npm ci
+npm run build
+NODE_ENV=production PORT=4030 npm start
+```
+
+服务监听 `0.0.0.0:4030`，同时提供网页和 API。后台运行：
+
+```bash
+nohup env NODE_ENV=production PORT=4030 npm start > server.log 2>&1 &
+```
+
+访问 `http://服务器IP:4030`，并在服务器防火墙/安全组中放行 TCP 4030。生产飞书登录使用实际 HTTPS 域名的回调地址，并同步更新飞书应用配置；使用反向代理时转发到 4030。账本仅支持单 Node 进程。
 
 ### 本地高质量音乐分轨
 
@@ -67,7 +85,7 @@ powershell -ExecutionPolicy Bypass -File tools/music-separation/setup-music-sepa
 FEISHU_AUTH_ENABLED=true
 FEISHU_APP_ID=cli_xxx
 FEISHU_APP_SECRET=应用密钥
-FEISHU_REDIRECT_URI=http://localhost:3000/api/auth/callback
+FEISHU_REDIRECT_URI=http://localhost:4030/api/auth/callback
 # 可选，至少 32 字符；未设置时从应用密钥派生本项目专用密钥。
 SESSION_SECRET=
 ```

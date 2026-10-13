@@ -92,7 +92,7 @@ import {
 
 async function startServer() {
   const app = express();
-  const PORT = Number.parseInt(process.env.PORT || '3000', 10);
+  const PORT = Number.parseInt(process.env.PORT || '4030', 10);
   const FFMPEG_BINARY = process.env.FFMPEG_PATH || ffmpegStatic || 'ffmpeg';
 
   app.disable('x-powered-by');
