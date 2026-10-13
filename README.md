@@ -36,15 +36,38 @@ API 密钥、系统命令和长期文件存储不得进入浏览器端。浏览�
 
 ### 服务器部署（Linux）
 
-#### 一键部署（systemd）
+#### 一键部署（自动选择 Docker / systemd）
 
-服务器需安装 Node.js 20+、npm、Git、curl 和 flock，并使用 systemd。以项目目录所属用户执行（仅管理 systemd 时通过 sudo 提权）：
+以项目目录所属用户执行。宿主机 Node.js 20+ 正常工作时使用 systemd（需要 npm、Git、curl、flock）；Node 缺失、版本不足或出现 `GLIBC_*` / `GLIBCXX_*` 错误时自动切换到 Docker（需要已安装且运行的 Docker、Git、flock）。仅管理系统服务或访问 Docker 需要时通过 sudo 提权：
 
 ```bash
 bash deploy.sh
 ```
 
-脚本拉取当前分支（仅快进）、安装依赖、检查并构建，随后启动 `ai-audio` 服务，固定端口 **4030**，支持异常重启与开机启动。首次缺少 `.env` 时会创建模板并退出，填写配置后再次运行即可。已有 `.env`、`data/` 和 `uploads/` 保留，脚本通过进程环境将端口设为 4030。
+脚本拉取当前分支（仅快进）、安装依赖、检查并构建，随后启动 `ai-audio`，固定端口 **4030**。首次缺少 `.env` 时会创建模板并退出，填写配置后再次运行即可。已有 `.env`、`data/` 和 `uploads/` 保留，脚本通过进程环境将端口设为 4030。
+
+##### 旧系统库服务器：Docker 部署
+
+参考 `kakavideogenerator` 的容器部署方式，Node 与 FFmpeg 在 Alpine 镜像内运行，不使用宿主机的 Node 或 glibc。脚本不升级系统库、不安装 Docker、不修改 Docker 镜像源。先由管理员配置可用的 Docker，然后执行：
+
+```bash
+DEPLOY_MODE=docker bash deploy.sh
+# 或直接执行：bash docker-deploy.sh
+docker logs -f ai-audio
+docker ps --filter name=ai-audio
+```
+
+若当前账号需要 sudo 访问 Docker，上面查看容器/日志命令也加 sudo。镜像默认 `node:22-alpine`；若服务器拉取 Docker Hub 受限，可指定已验证可访问的镜像源，例如：
+
+```bash
+NODE_IMAGE=docker.m.daocloud.io/library/node:22-alpine DEPLOY_MODE=docker bash deploy.sh
+```
+
+容器以当前用户 UID/GID 运行，挂载 `.env`（只读）、`data/`、`uploads/`，支持 SELinux 标签。镜像构建完成后才切换旧服务；健康检查失败时尝试恢复旧容器/原 systemd 服务。Docker 的 `unless-stopped` 策略负责重启，开机恢复还需要 Docker 服务已启用开机启动。改 `.env` 后重跑部署脚本。切换前先手动停止旧 nohup 进程。
+
+容器包含 FFmpeg 和 Python 3；Seed-VC、Demucs 等本地模型、GPU、虚拟环境及模型文件需另行配置，本脚本不迁移宿主机的这些可选组件。
+
+##### systemd 管理命令
 
 ```bash
 sudo journalctl -u ai-audio -f    # 日志
@@ -52,6 +75,7 @@ sudo systemctl status ai-audio  # 状态
 sudo systemctl restart ai-audio # 重启
 sudo systemctl stop ai-audio    # 停止
 SKIP_PULL=1 bash deploy.sh      # 部署当前本地代码，跳过拉取
+DEPLOY_MODE=systemd bash deploy.sh # 强制使用宿主机 Node
 ```
 
 部署会短暂中断服务，并非零停机发布。从旧的 nohup 启动方式切换时，先停止旧进程，避免端口占用和多进程写账本。脚本不调整防火墙或飞书回调配置。
@@ -92,6 +116,7 @@ powershell -ExecutionPolicy Bypass -File tools/music-separation/setup-music-sepa
 - 生产构建：`npm run build`
 - 完整检查：`npm run check`
 - 清理构建产物：`npm run clean`
+- 部署脚本回归测试（模拟 Docker/systemd，无真实部署）：`python3 tests/deploy_test.py`
 
 ## 当前架构说明
 
