@@ -5473,7 +5473,12 @@ ${JSON.stringify(normalizedVoices)}
       .filter(language => language.localCosyVoice)
       .map(language => [language.code, language.elevenLabsName]),
   );
-  type LocalVoiceCloneEngine = 'chatterbox' | 'cosyvoice3';
+  const qwen3TtsLanguages: Record<string, string> = Object.fromEntries(
+    AUDIO_LANGUAGE_REGISTRY
+      .filter(language => language.localQwen3Tts)
+      .map(language => [language.code, language.elevenLabsName]),
+  );
+  type LocalVoiceCloneEngine = 'chatterbox' | 'cosyvoice3' | 'qwen3_tts';
   const resolveLocalToolPath = (configuredPath: string | undefined, fallback: string) => (
     path.resolve(process.cwd(), configuredPath?.trim() || fallback)
   );
@@ -5501,6 +5506,18 @@ ${JSON.stringify(normalizedVoices)}
   const cosyVoiceModelDir = resolveLocalToolPath(
     process.env.COSYVOICE_MODEL_DIR,
     path.join('tools', 'cosyvoice', 'models', 'Fun-CosyVoice3-0.5B'),
+  );
+  const qwen3TtsPython = resolveLocalToolPath(
+    process.env.QWEN3_TTS_PYTHON,
+    path.join('tools', 'qwen3-tts', '.venv', ...(process.platform === 'win32' ? ['Scripts', 'python.exe'] : ['bin', 'python'])),
+  );
+  const qwen3TtsScript = resolveLocalToolPath(
+    process.env.QWEN3_TTS_SCRIPT,
+    path.join('tools', 'qwen3-tts', 'clone_voice.py'),
+  );
+  const qwen3TtsModelDir = resolveLocalToolPath(
+    process.env.QWEN3_TTS_MODEL_DIR,
+    path.join('tools', 'qwen3-tts', 'models', 'Qwen3-TTS-12Hz-0.6B-Base'),
   );
   const seedVcPython = resolveLocalToolPath(
     process.env.SEED_VC_PYTHON,
@@ -5599,10 +5616,11 @@ ${JSON.stringify(normalizedVoices)}
     engine: LocalVoiceCloneEngine,
   ): Promise<LocalVoiceCloneEngineStatus> => {
     const isCosyVoice = engine === 'cosyvoice3';
-    const pythonPath = isCosyVoice ? cosyVoicePython : localVoiceClonePython;
-    const scriptPath = isCosyVoice ? cosyVoiceScript : localVoiceCloneScript;
-    const languages = isCosyVoice ? cosyVoiceLanguages : localVoiceCloneLanguages;
-    const model = isCosyVoice ? 'Fun-CosyVoice3 0.5B' : 'Chatterbox Multilingual V3';
+    const isQwen3Tts = engine === 'qwen3_tts';
+    const pythonPath = isCosyVoice ? cosyVoicePython : isQwen3Tts ? qwen3TtsPython : localVoiceClonePython;
+    const scriptPath = isCosyVoice ? cosyVoiceScript : isQwen3Tts ? qwen3TtsScript : localVoiceCloneScript;
+    const languages = isCosyVoice ? cosyVoiceLanguages : isQwen3Tts ? qwen3TtsLanguages : localVoiceCloneLanguages;
+    const model = isCosyVoice ? 'Fun-CosyVoice3 0.5B' : isQwen3Tts ? 'Qwen3-TTS 0.6B Base' : 'Chatterbox Multilingual V3';
     const cosyVoiceRequiredFiles = [
       'cosyvoice3.yaml',
       'llm.pt',
@@ -5612,8 +5630,12 @@ ${JSON.stringify(normalizedVoices)}
       'speech_tokenizer_v3.onnx',
       path.join('CosyVoice-BlankEN', 'model.safetensors'),
     ];
+    const qwenModelCached = fs.existsSync(path.join(qwen3TtsModelDir, 'config.json'))
+      && fs.readdirSync(qwen3TtsModelDir, { recursive: true }).some(fileName => String(fileName).endsWith('.safetensors'));
     const modelCached = isCosyVoice
       ? cosyVoiceRequiredFiles.every(fileName => fs.existsSync(path.join(cosyVoiceModelDir, fileName)))
+      : isQwen3Tts
+        ? qwenModelCached
       : fs.existsSync(localVoiceCloneModelsDir)
         && fs.readdirSync(localVoiceCloneModelsDir, { withFileTypes: true }).length > 0;
     const baseStatus = { model, modelCached, supportedLanguages: languages };
@@ -5631,27 +5653,39 @@ ${JSON.stringify(normalizedVoices)}
         reason: modelCached ? 'CosyVoice 官方代码目录不存在。' : 'CosyVoice 3 模型尚未下载完成。',
       };
     }
+    if (isQwen3Tts && !modelCached) {
+      return {
+        ...baseStatus,
+        available: false,
+        reason: 'Qwen3-TTS 0.6B Base 模型尚未下载完成。',
+      };
+    }
     try {
       const runtimeProbe = isCosyVoice
         ? [
-          'import json, sys, torch',
+          'import importlib.util, json, sys, torch',
           `sys.path.insert(0, ${JSON.stringify(cosyVoiceRepoDir)})`,
           `sys.path.insert(0, ${JSON.stringify(path.join(cosyVoiceRepoDir, 'third_party', 'Matcha-TTS'))})`,
-          'from cosyvoice.cli.cosyvoice import AutoModel',
-          'print(json.dumps({"cuda": torch.cuda.is_available(), "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None}))',
+          'package = importlib.util.find_spec("cosyvoice.cli.cosyvoice") is not None',
+          'print(json.dumps({"cuda": torch.cuda.is_available(), "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None, "package": package}))',
         ].join('; ')
-        : 'import json, torch; print(json.dumps({"cuda": torch.cuda.is_available(), "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None}))';
+        : isQwen3Tts
+          ? 'import importlib.util, json, torch; package = importlib.util.find_spec("qwen_tts") is not None; print(json.dumps({"cuda": torch.cuda.is_available(), "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None, "package": package}))'
+          : 'import importlib.util, json, torch; package = importlib.util.find_spec("chatterbox") is not None; print(json.dumps({"cuda": torch.cuda.is_available(), "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None, "package": package}))';
       const stdout = await runLocalVoiceCloneProcess(pythonPath, [
         '-c',
         runtimeProbe,
       ], 30_000);
       const lastLine = stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) || '{}';
-      const runtime = JSON.parse(lastLine) as { cuda?: boolean; gpu?: string };
+      const runtime = JSON.parse(lastLine) as { cuda?: boolean; gpu?: string; package?: boolean };
+      const available = runtime.cuda === true && runtime.package !== false;
       return {
         ...baseStatus,
-        available: runtime.cuda === true,
+        available,
         gpu: runtime.gpu,
-        ...(runtime.cuda ? {} : { reason: '没有检测到可用的 NVIDIA CUDA 显卡。' }),
+        ...(available
+          ? {}
+          : { reason: runtime.package === false ? `${model} Python 包未安装。` : '没有检测到可用的 NVIDIA CUDA 显卡。' }),
       };
     } catch (error: any) {
       return {
@@ -5666,13 +5700,14 @@ ${JSON.stringify(normalizedVoices)}
     if (localVoiceCloneStatusCache && localVoiceCloneStatusCache.expiresAt > Date.now()) {
       return localVoiceCloneStatusCache.value;
     }
-    const [chatterbox, cosyvoice3] = await Promise.all([
+    const [chatterbox, cosyvoice3, qwen3_tts] = await Promise.all([
       readLocalVoiceCloneEngineStatus('chatterbox'),
       readLocalVoiceCloneEngineStatus('cosyvoice3'),
+      readLocalVoiceCloneEngineStatus('qwen3_tts'),
     ]);
     const value: LocalVoiceCloneServerStatus = {
-      defaultEngine: 'chatterbox',
-      engines: { chatterbox, cosyvoice3 },
+      defaultEngine: 'cosyvoice3',
+      engines: { chatterbox, cosyvoice3, qwen3_tts },
     };
     localVoiceCloneStatusCache = { expiresAt: Date.now() + 30_000, value };
     return value;
@@ -5945,10 +5980,12 @@ ${JSON.stringify(normalizedVoices)}
     if (text.length > 800) return res.status(400).json({ error: '单次台词不能超过 800 个字符，请分段生成。' });
 
     const engine = String(req.body?.engine || 'chatterbox').trim().toLowerCase() as LocalVoiceCloneEngine;
-    if (engine !== 'chatterbox' && engine !== 'cosyvoice3') {
+    if (engine !== 'chatterbox' && engine !== 'cosyvoice3' && engine !== 'qwen3_tts') {
       return res.status(400).json({ error: '不支持的本地声音克隆模型。' });
     }
-    const engineLanguages = engine === 'cosyvoice3' ? cosyVoiceLanguages : localVoiceCloneLanguages;
+    const engineLanguages = engine === 'cosyvoice3'
+      ? cosyVoiceLanguages
+      : engine === 'qwen3_tts' ? qwen3TtsLanguages : localVoiceCloneLanguages;
     const language = String(req.body?.language || '').trim().toLowerCase();
     if (!engineLanguages[language]) {
       return res.status(400).json({ error: '当前本地模型不支持这个目标语言。' });
@@ -6013,6 +6050,18 @@ ${JSON.stringify(normalizedVoices)}
           '--model-dir', cosyVoiceModelDir,
           '--seed', seed,
         ]
+        : engine === 'qwen3_tts'
+        ? [
+          qwen3TtsScript,
+          '--reference', referencePath,
+          '--reference-text', String(req.body?.referenceText || '').trim().slice(0, 1200),
+          '--text', text,
+          '--language', language,
+          '--output', outputPath,
+          '--temperature', String(parseNumber(req.body?.temperature, 0.85, 0.3, 1.4)),
+          '--model-dir', qwen3TtsModelDir,
+          '--seed', seed,
+        ]
         : [
           localVoiceCloneScript,
           '--reference', referencePath,
@@ -6025,7 +6074,9 @@ ${JSON.stringify(normalizedVoices)}
           '--temperature', String(parseNumber(req.body?.temperature, 0.8, 0.05, 2)),
           '--seed', seed,
         ];
-      const pythonPath = engine === 'cosyvoice3' ? cosyVoicePython : localVoiceClonePython;
+      const pythonPath = engine === 'cosyvoice3'
+        ? cosyVoicePython
+        : engine === 'qwen3_tts' ? qwen3TtsPython : localVoiceClonePython;
       const stdout = await runLocalVoiceCloneQueued(() => runLocalVoiceCloneProcess(
         pythonPath,
         processArgs,
@@ -6051,11 +6102,15 @@ ${JSON.stringify(normalizedVoices)}
         generatedDuration: metadata.duration_seconds,
         outputDuration: metadata.duration_seconds,
         timingMode: 'natural',
-        dubbingModel: engine === 'cosyvoice3' ? 'local_cosyvoice3' : 'local_chatterbox',
+        dubbingModel: engine === 'cosyvoice3'
+          ? 'local_cosyvoice3'
+          : engine === 'qwen3_tts' ? 'local_qwen3_tts' : 'local_chatterbox',
         outputFormat: 'wav',
         language,
         model: engine === 'cosyvoice3'
           ? String(metadata.model || 'Fun-CosyVoice3-0.5B-2512')
+          : engine === 'qwen3_tts'
+            ? String(metadata.model || 'Qwen3-TTS-12Hz-0.6B-Base')
           : metadata.model === 'v3' ? 'Chatterbox Multilingual V3' : String(metadata.model || 'Chatterbox Multilingual'),
         gpu: metadata.gpu || status.gpu,
         speakerSimilarity: Number.isFinite(metadata.speaker_similarity)
@@ -6085,12 +6140,14 @@ ${JSON.stringify(normalizedVoices)}
     }
 
     const engine = String(payload.engine || '').trim().toLowerCase() as LocalVoiceCloneEngine;
-    if (engine !== 'chatterbox' && engine !== 'cosyvoice3') {
+    if (engine !== 'chatterbox' && engine !== 'cosyvoice3' && engine !== 'qwen3_tts') {
       return res.status(400).json({ error: '不支持的本地声音克隆模型。' });
     }
     const language = String(payload.language || '').trim().toLowerCase();
     const dialogueMode = payload.dialogueMode === 'single' ? 'single' : 'multi';
-    const engineLanguages = engine === 'cosyvoice3' ? cosyVoiceLanguages : localVoiceCloneLanguages;
+    const engineLanguages = engine === 'cosyvoice3'
+      ? cosyVoiceLanguages
+      : engine === 'qwen3_tts' ? qwen3TtsLanguages : localVoiceCloneLanguages;
     if (!engineLanguages[language]) return res.status(400).json({ error: '当前模型不支持这个目标语言。' });
 
     const profiles = Array.isArray(payload.profiles) ? payload.profiles.slice(0, 8) : [];
@@ -6175,7 +6232,7 @@ ${JSON.stringify(normalizedVoices)}
         const profileId = String(profile.id || '').trim();
         if (!profileId) throw Object.assign(new Error('角色标识无效。'), { status: 400 });
         const isSingleChatterbox = dialogueMode === 'single' && engine === 'chatterbox';
-        const requestedRanges = engine === 'cosyvoice3'
+        const requestedRanges = engine === 'cosyvoice3' || engine === 'qwen3_tts'
           ? [{ start: profile.referenceStart, end: profile.referenceEnd }]
           : isSingleChatterbox
             ? (() => {
@@ -6216,7 +6273,7 @@ ${JSON.stringify(normalizedVoices)}
           let start = parseNumber(requestedRange?.start, 0, 0, Math.max(0, sourceDuration - 0.2));
           const requestedEnd = parseNumber(requestedRange?.end, start + 0.5, start + 0.2, sourceDuration);
           let end = Math.min(requestedEnd, start + Math.min(8, 15 - totalReferenceDuration));
-          if (engine === 'cosyvoice3') {
+          if (engine === 'cosyvoice3' || engine === 'qwen3_tts') {
             const matchingSegment = segments
               .filter((segment: any) => String(segment.speakerId || '') === profileId)
               .map((segment: any) => ({
@@ -6261,7 +6318,7 @@ ${JSON.stringify(normalizedVoices)}
           '-map', '[out]', '-vn', '-c:a', 'pcm_s16le', referencePath,
         ], 120_000);
         referencePaths.set(profileId, referencePath);
-        const referenceText = engine === 'cosyvoice3'
+        const referenceText = engine === 'cosyvoice3' || engine === 'qwen3_tts'
           ? (() => {
             const range = ranges[0];
             const matchingSegment = segments
@@ -6471,8 +6528,12 @@ ${JSON.stringify(normalizedVoices)}
 
       const processArgs = engine === 'cosyvoice3'
         ? [cosyVoiceScript, '--batch-manifest', manifestPath, '--repo-dir', cosyVoiceRepoDir, '--model-dir', cosyVoiceModelDir]
+        : engine === 'qwen3_tts'
+          ? [qwen3TtsScript, '--batch-manifest', manifestPath, '--model-dir', qwen3TtsModelDir]
         : [localVoiceCloneScript, '--batch-manifest', manifestPath, '--model', 'v3'];
-      const pythonPath = engine === 'cosyvoice3' ? cosyVoicePython : localVoiceClonePython;
+      const pythonPath = engine === 'cosyvoice3'
+        ? cosyVoicePython
+        : engine === 'qwen3_tts' ? qwen3TtsPython : localVoiceClonePython;
       const stdout = await runLocalVoiceCloneQueued(() => runLocalVoiceCloneProcess(
         pythonPath,
         processArgs,
@@ -6657,11 +6718,15 @@ ${JSON.stringify(normalizedVoices)}
             outputDuration: generatedDuration,
             timingMode: 'natural',
             dubbingModel: dialogueMode === 'single'
-              ? engine === 'cosyvoice3' ? 'local_cosyvoice3' : 'local_chatterbox'
+              ? engine === 'cosyvoice3'
+                ? 'local_cosyvoice3'
+                : engine === 'qwen3_tts' ? 'local_qwen3_tts' : 'local_chatterbox'
               : 'local_multispeaker',
             outputFormat: 'wav',
             model: engine === 'cosyvoice3'
               ? String(metadata.model || 'Fun-CosyVoice3-0.5B-2512')
+              : engine === 'qwen3_tts'
+                ? String(metadata.model || 'Qwen3-TTS-12Hz-0.6B-Base')
               : metadata.model === 'v3' ? 'Chatterbox Multilingual V3' : String(metadata.model || 'Chatterbox Multilingual'),
             gpu: metadata.gpu || status.gpu,
             speakerSimilarity: versionSimilarities.length > 0

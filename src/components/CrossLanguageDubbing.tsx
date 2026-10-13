@@ -44,6 +44,7 @@ import {
   DUBBING_TARGET_LANGUAGE_OPTIONS,
   getAudioLanguage,
   LOCAL_CLONE_LANGUAGE_OPTIONS,
+  QWEN3_TTS_LANGUAGE_OPTIONS,
 } from '../services/languageRegistry';
 import PointCostHint from './PointCostHint';
 
@@ -417,6 +418,7 @@ const sourceLanguageOptions = DUBBING_SOURCE_LANGUAGE_OPTIONS;
 const targetLanguageOptions = DUBBING_TARGET_LANGUAGE_OPTIONS;
 const localTargetLanguageOptions = LOCAL_CLONE_LANGUAGE_OPTIONS;
 const cosyVoiceTargetLanguageOptions = COSYVOICE_LANGUAGE_OPTIONS;
+const qwen3TtsTargetLanguageOptions = QWEN3_TTS_LANGUAGE_OPTIONS;
 const localVoiceEngineOptions: Array<{
   value: LocalVoiceCloneEngine;
   label: string;
@@ -435,7 +437,21 @@ const localVoiceEngineOptions: Array<{
     description: '音色与韵律更强，支持自然语言表现指令',
     coverage: '9 种语言',
   },
+  {
+    value: 'qwen3_tts',
+    label: 'Qwen3-TTS',
+    description: '实验性高相似度克隆，短参考音也能保留音色',
+    coverage: '10 种语言',
+  },
 ];
+
+const getLocalVoiceEngineLabel = (engine: LocalVoiceCloneEngine) => (
+  engine === 'cosyvoice3' ? 'CosyVoice 3' : engine === 'qwen3_tts' ? 'Qwen3-TTS' : 'Chatterbox V3'
+);
+
+const isLocalTextCloneResult = (model: TranslateDubbingResult['dubbingModel']) => (
+  model === 'local_chatterbox' || model === 'local_cosyvoice3' || model === 'local_qwen3_tts'
+);
 
 const localPerformancePresets = [
   {
@@ -486,7 +502,7 @@ function LocalVoiceEngineSelector({
   const selectedStatus = status?.engines[selectedEngine];
   return (
     <div className="space-y-2.5">
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
         {localVoiceEngineOptions.map(engineOption => {
           const engineStatus = status?.engines[engineOption.value];
           const isSelected = selectedEngine === engineOption.value;
@@ -655,7 +671,7 @@ export default function CrossLanguageDubbing({
   const selectedLocalEngineStatus = localEngineStatus?.engines[localVoiceEngine];
   const availableLocalTargetLanguageOptions = localVoiceEngine === 'cosyvoice3'
     ? cosyVoiceTargetLanguageOptions
-    : localTargetLanguageOptions;
+    : localVoiceEngine === 'qwen3_tts' ? qwen3TtsTargetLanguageOptions : localTargetLanguageOptions;
   const multiSpeakerTargetReady = multiSpeakerSegments.length > 0
     && multiSpeakerProfiles.length > 0
     && multiSpeakerSegments.every(segment => segment.targetText.trim());
@@ -723,7 +739,7 @@ export default function CrossLanguageDubbing({
       setLocalEngineStatus(await getLocalVoiceCloneStatus());
     } catch (statusError: any) {
       setLocalEngineStatus({
-        defaultEngine: 'chatterbox',
+        defaultEngine: 'cosyvoice3',
         engines: {
           chatterbox: {
             available: false,
@@ -735,6 +751,13 @@ export default function CrossLanguageDubbing({
           cosyvoice3: {
             available: false,
             model: 'Fun-CosyVoice3 0.5B',
+            modelCached: false,
+            supportedLanguages: {},
+            reason: statusError?.message || '无法连接本地声音克隆服务。',
+          },
+          qwen3_tts: {
+            available: false,
+            model: 'Qwen3-TTS 0.6B Base',
             modelCached: false,
             supportedLanguages: {},
             reason: statusError?.message || '无法连接本地声音克隆服务。',
@@ -1028,9 +1051,12 @@ export default function CrossLanguageDubbing({
   const handleLocalVoiceEngineChange = (engine: LocalVoiceCloneEngine) => {
     setLocalVoiceEngine(engine);
     setError(null);
-    if (engine === 'cosyvoice3' && !COSYVOICE_LANGUAGE_OPTIONS.some(option => option.value === localTargetLanguage)) {
+    const supportedOptions = engine === 'cosyvoice3'
+      ? COSYVOICE_LANGUAGE_OPTIONS
+      : engine === 'qwen3_tts' ? QWEN3_TTS_LANGUAGE_OPTIONS : LOCAL_CLONE_LANGUAGE_OPTIONS;
+    if (!supportedOptions.some(option => option.value === localTargetLanguage)) {
       handleLocalTargetLanguageChange('en');
-      setTargetTextExtractionMessage('CosyVoice 3 不支持原目标语种，已切换为英文，请重新提取台词。');
+      setTargetTextExtractionMessage(`${getLocalVoiceEngineLabel(engine)} 不支持原目标语种，已切换为英文，请重新提取台词。`);
     }
   };
 
@@ -1193,7 +1219,7 @@ export default function CrossLanguageDubbing({
     try {
       const isLocalSpeechToSpeech = dubbingMode === 'self_hosted' && localInputMode === 'speech_to_speech';
       const targetLabel = dubbingMode === 'self_hosted'
-        ? localTargetLanguageOptions.find(item => item.value === localTargetLanguage)?.label || localTargetLanguage
+        ? availableLocalTargetLanguageOptions.find(item => item.value === localTargetLanguage)?.label || localTargetLanguage
         : targetLanguageOptions.find(item => item.value === targetLanguage)?.label || targetLanguage;
       const selectedLocalPreset = localPerformancePresets.find(item => item.value === localPerformancePreset)
         || localPerformancePresets[0];
@@ -1230,6 +1256,12 @@ export default function CrossLanguageDubbing({
               engine: localVoiceEngine,
               language: localTargetLanguage,
               text: localTargetText.trim(),
+              referenceText: localVoiceEngine === 'qwen3_tts'
+                && localReferenceStart <= 0.05
+                && Boolean(sourceDuration)
+                && localReferenceEnd >= (sourceDuration || 0) - 0.1
+                ? extractedSourceTextRef.current
+                : undefined,
               referenceStart: localReferenceStart,
               referenceDuration: localReferenceInterval,
               sourceDuration: sourceDuration || undefined,
@@ -1249,6 +1281,12 @@ export default function CrossLanguageDubbing({
               engine: localVoiceEngine,
               language: localTargetLanguage,
               text: localTargetText.trim(),
+              referenceText: localVoiceEngine === 'qwen3_tts'
+                && localReferenceStart <= 0.05
+                && Boolean(sourceDuration)
+                && localReferenceEnd >= (sourceDuration || 0) - 0.1
+                ? extractedSourceTextRef.current
+                : undefined,
               referenceStart: localReferenceStart,
               referenceDuration: localReferenceInterval,
               sourceDuration: sourceDuration || undefined,
@@ -1268,7 +1306,7 @@ export default function CrossLanguageDubbing({
           : dubbingMode === 'self_hosted'
             ? localDialogueMode === 'multi'
               ? `多人配音 - ${targetLabel}（版本 A · ${selectedLocalPreset.label}）`
-              : `${localInputMode === 'speech_to_speech' ? '语音转语音' : localVoiceEngine === 'cosyvoice3' ? 'CosyVoice 3' : 'Chatterbox V3'} - ${targetLabel}（${selectedLocalPreset.label}）`
+              : `${localInputMode === 'speech_to_speech' ? '语音转语音' : getLocalVoiceEngineLabel(localVoiceEngine)} - ${targetLabel}（${selectedLocalPreset.label}）`
             : `Dubbing v2 - ${targetLabel}`,
       };
       const optionB: PendingTranslateDubbingOption | null = dataB ? {
@@ -1279,7 +1317,7 @@ export default function CrossLanguageDubbing({
           : dubbingMode === 'self_hosted'
           ? localDialogueMode === 'multi'
             ? `多人配音 - ${targetLabel}（版本 B · ${alternateLocalPreset.label}）`
-            : `${localInputMode === 'speech_to_speech' ? '语音转语音' : localVoiceEngine === 'cosyvoice3' ? 'CosyVoice 3' : 'Chatterbox V3'} - ${targetLabel}（${alternateLocalPreset.label}）`
+            : `${localInputMode === 'speech_to_speech' ? '语音转语音' : getLocalVoiceEngineLabel(localVoiceEngine)} - ${targetLabel}（${alternateLocalPreset.label}）`
           : `Dubbing v2 - ${targetLabel}（版本 B）`,
       } : null;
       waveformProgressRatiosRef.current.A = 0;
@@ -1306,6 +1344,7 @@ export default function CrossLanguageDubbing({
   const addTranslateResultToHistory = (option: PendingTranslateDubbingOption) => {
     const isLocalClone = option.data.dubbingModel === 'local_chatterbox'
       || option.data.dubbingModel === 'local_cosyvoice3'
+      || option.data.dubbingModel === 'local_qwen3_tts'
       || option.data.dubbingModel === 'local_multispeaker'
       || option.data.dubbingModel === 'local_seed_vc';
     const targetLabel = isLocalClone
@@ -1321,7 +1360,11 @@ export default function CrossLanguageDubbing({
       details: isLocalClone
         ? `${option.data.dubbingModel === 'local_seed_vc' ? '直接音色迁移' : targetLabel} · ${option.data.dubbingModel === 'local_multispeaker'
           ? `多人配音（${multiSpeakerProfiles.length} 位）`
-          : option.data.dubbingModel === 'local_seed_vc' ? 'Seed-VC V2' : option.data.dubbingModel === 'local_cosyvoice3' ? 'CosyVoice 3' : 'Chatterbox V3'}${option.data.dubbingModel === 'local_seed_vc' ? '' : ` · ${localPerformancePresets.find(item => item.value === localPerformancePreset)?.label || '自然'}表现`}`
+          : option.data.dubbingModel === 'local_seed_vc'
+            ? 'Seed-VC V2'
+            : option.data.dubbingModel === 'local_cosyvoice3'
+              ? 'CosyVoice 3'
+              : option.data.dubbingModel === 'local_qwen3_tts' ? 'Qwen3-TTS' : 'Chatterbox V3'}${option.data.dubbingModel === 'local_seed_vc' ? '' : ` · ${localPerformancePresets.find(item => item.value === localPerformancePreset)?.label || '自然'}表现`}`
         : `${targetLabel} · Dubbing v2`,
       inputText: option.data.translatedText,
       attachments: sourceFile ? [{
@@ -1611,18 +1654,6 @@ export default function CrossLanguageDubbing({
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
       <div className="xl:col-span-7 space-y-5">
         <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-5 shadow-sm">
-          {dubbingMode === 'self_hosted' && localInputMode === 'text' && (
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50/60 p-3.5">
-              <LocalVoiceEngineSelector
-                selectedEngine={localVoiceEngine}
-                status={localEngineStatus}
-                isChecking={isCheckingLocalEngine}
-                disabled={loading}
-                onSelect={handleLocalVoiceEngineChange}
-                onRefresh={() => void refreshLocalEngineStatus()}
-              />
-            </div>
-          )}
           {dubbingMode === 'self_hosted' && (
             <nav className="rounded-xl border border-sky-200 bg-sky-50/50 p-1.5" aria-label="声音克隆输入方式">
               <div className="grid grid-cols-2 gap-1 rounded-lg bg-white/80 p-1">
@@ -1646,6 +1677,18 @@ export default function CrossLanguageDubbing({
                 ))}
               </div>
             </nav>
+          )}
+          {dubbingMode === 'self_hosted' && localInputMode === 'text' && (
+            <div className="rounded-2xl border border-emerald-200 bg-emerald-50/60 p-3.5">
+              <LocalVoiceEngineSelector
+                selectedEngine={localVoiceEngine}
+                status={localEngineStatus}
+                isChecking={isCheckingLocalEngine}
+                disabled={loading}
+                onSelect={handleLocalVoiceEngineChange}
+                onRefresh={() => void refreshLocalEngineStatus()}
+              />
+            </div>
           )}
           {dubbingMode === 'self_hosted' && localInputMode === 'speech_to_speech' && (
             <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50/60 px-3.5 py-3 text-[10px] text-emerald-800">
@@ -2002,7 +2045,7 @@ export default function CrossLanguageDubbing({
                     <div className="flex items-center justify-between gap-3">
                       <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">角色与参考音色</span>
                       <span className="text-[9px] text-slate-400">
-                        {localVoiceEngine === 'cosyvoice3' ? '每位角色使用一段连续主参考音' : '自动拼接每位角色的多段干净台词'}
+                        {localVoiceEngine === 'chatterbox' ? '自动拼接每位角色的多段干净台词' : '每位角色使用一段连续主参考音'}
                       </span>
                     </div>
                     <div className="divide-y divide-sky-100 border-y border-sky-100">
@@ -2017,10 +2060,10 @@ export default function CrossLanguageDubbing({
                               className="h-8 w-full min-w-0 rounded-md border border-sky-200 bg-white px-2 text-xs font-bold text-slate-800 outline-none focus:border-sky-500"
                             />
                             {(() => {
-                              const referenceDuration = localVoiceEngine === 'cosyvoice3'
-                                ? profile.referenceEnd - profile.referenceStart
-                                : profile.referenceRanges.reduce((sum, range) => sum + range.end - range.start, 0);
-                              const referenceCount = localVoiceEngine === 'cosyvoice3' ? 1 : profile.referenceRanges.length;
+                              const referenceDuration = localVoiceEngine === 'chatterbox'
+                                ? profile.referenceRanges.reduce((sum, range) => sum + range.end - range.start, 0)
+                                : profile.referenceEnd - profile.referenceStart;
+                              const referenceCount = localVoiceEngine === 'chatterbox' ? profile.referenceRanges.length : 1;
                               return (
                                 <span className={`mt-1 block text-[9px] ${referenceDuration < 4 ? 'font-bold text-amber-600' : 'text-emerald-600'}`}>
                                   {referenceDuration < 4
@@ -2437,6 +2480,7 @@ export default function CrossLanguageDubbing({
                           <span className={`shrink-0 rounded-full px-2 py-0.5 text-[9px] font-black text-white ${
                             option.data.dubbingModel === 'local_chatterbox'
                             || option.data.dubbingModel === 'local_cosyvoice3'
+                            || option.data.dubbingModel === 'local_qwen3_tts'
                             || option.data.dubbingModel === 'local_multispeaker'
                             || option.data.dubbingModel === 'local_seed_vc'
                               ? 'bg-sky-600'
@@ -2448,6 +2492,8 @@ export default function CrossLanguageDubbing({
                                 ? '本地 Chatterbox'
                                 : option.data.dubbingModel === 'local_cosyvoice3'
                                   ? '本地 CosyVoice 3'
+                                  : option.data.dubbingModel === 'local_qwen3_tts'
+                                    ? '本地 Qwen3-TTS'
                                   : option.data.dubbingModel === 'local_multispeaker'
                                     ? `多人 · ${multiSpeakerProfiles.length} 位`
                                     : option.data.dubbingModel === 'local_seed_vc'
@@ -2472,12 +2518,14 @@ export default function CrossLanguageDubbing({
                               ? `本机克隆原音色 · ${localTargetLanguageOptions.find(item => item.value === localTargetLanguage)?.label || localTargetLanguage}`
                               : option.data.dubbingModel === 'local_cosyvoice3'
                               ? `CosyVoice 3 克隆原音色 · ${localTargetLanguageOptions.find(item => item.value === localTargetLanguage)?.label || localTargetLanguage}`
+                              : option.data.dubbingModel === 'local_qwen3_tts'
+                                ? `Qwen3-TTS 克隆原音色 · ${availableLocalTargetLanguageOptions.find(item => item.value === localTargetLanguage)?.label || localTargetLanguage}`
                               : option.data.dubbingModel === 'local_multispeaker'
                                   ? `${multiSpeakerProfiles.length} 位独立音色 · 分角色对齐时间线`
                                   : option.data.dubbingModel === 'local_seed_vc'
                                     ? 'Seed-VC V2 · 直接音色迁移'
                                     : `Dubbing v2 · ${targetLanguage}`}
-                          {(option.data.dubbingModel === 'local_chatterbox' || option.data.dubbingModel === 'local_cosyvoice3')
+                          {isLocalTextCloneResult(option.data.dubbingModel)
                             && (typeof option.data.speakerSimilarity === 'number'
                               ? ` · 克隆验证 ${Math.round(option.data.speakerSimilarity * 100)}%`
                               : ' · 克隆验证未返回')}
@@ -2527,7 +2575,7 @@ export default function CrossLanguageDubbing({
               })}
 
               <div className="space-y-3">
-                {result.dubbingModel !== 'local_chatterbox' && result.dubbingModel !== 'local_cosyvoice3' && result.dubbingModel !== 'local_seed_vc' && (
+                {!isLocalTextCloneResult(result.dubbingModel) && result.dubbingModel !== 'local_seed_vc' && (
                   <div>
                   <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">识别原文</p>
                   <div className="max-h-32 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs leading-relaxed text-slate-700 custom-scrollbar">
@@ -2537,7 +2585,7 @@ export default function CrossLanguageDubbing({
                 )}
                 {result.dubbingModel !== 'local_seed_vc' && <div>
                   <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                    {result.dubbingModel === 'local_chatterbox' || result.dubbingModel === 'local_cosyvoice3'
+                    {isLocalTextCloneResult(result.dubbingModel)
                       ? '本次生成台词'
                       : result.dubbingModel === 'local_multispeaker' ? '多人配音台词' : '目标译文'}
                   </p>

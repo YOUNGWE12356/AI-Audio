@@ -1,6 +1,6 @@
 import type { TranslateDubbingResult } from './elevenLabsService';
 
-export type LocalVoiceCloneEngine = 'chatterbox' | 'cosyvoice3';
+export type LocalVoiceCloneEngine = 'chatterbox' | 'cosyvoice3' | 'qwen3_tts';
 
 export interface LocalVoiceCloneEngineStatus {
   available: boolean;
@@ -20,6 +20,7 @@ export interface LocalVoiceCloneOptions {
   engine: LocalVoiceCloneEngine;
   language: string;
   text: string;
+  referenceText?: string;
   referenceStart: number;
   referenceDuration?: number;
   sourceDuration?: number;
@@ -30,7 +31,7 @@ export interface LocalVoiceCloneOptions {
 }
 
 export interface LocalVoiceCloneResult extends TranslateDubbingResult {
-  dubbingModel: 'local_chatterbox' | 'local_cosyvoice3';
+  dubbingModel: 'local_chatterbox' | 'local_cosyvoice3' | 'local_qwen3_tts';
   outputFormat: 'wav';
   language: string;
   model: string;
@@ -152,6 +153,7 @@ export function cloneVoiceLocally(
   formData.append('engine', options.engine);
   formData.append('language', options.language);
   formData.append('text', options.text);
+  if (options.referenceText?.trim()) formData.append('referenceText', options.referenceText.trim());
   formData.append('referenceStart', String(options.referenceStart));
   if (typeof options.referenceDuration === 'number' && Number.isFinite(options.referenceDuration)) {
     formData.append('referenceDuration', String(options.referenceDuration));

@@ -5,6 +5,7 @@ export type AudioLanguageDefinition = {
   elevenLabsCode: string;
   localChatterbox: boolean;
   localCosyVoice: boolean;
+  localQwen3Tts: boolean;
   cloudDubbing: boolean;
 };
 
@@ -16,6 +17,7 @@ const currentLocalLanguages = new Set([
 ]);
 
 const currentCosyVoiceLanguages = new Set(['zh', 'en', 'ja', 'ko', 'de', 'es', 'fr', 'it', 'ru']);
+const currentQwen3TtsLanguages = new Set(['zh', 'en', 'ja', 'ko', 'de', 'fr', 'ru', 'pt', 'es', 'it']);
 
 const elevenLabsLanguages: Array<[string, string, string, string]> = [
   ['en', '英文', 'English', 'en'],
@@ -61,6 +63,7 @@ export const AUDIO_LANGUAGE_REGISTRY: ReadonlyArray<AudioLanguageDefinition> = e
     elevenLabsCode,
     localChatterbox: currentLocalLanguages.has(code),
     localCosyVoice: currentCosyVoiceLanguages.has(code),
+    localQwen3Tts: currentQwen3TtsLanguages.has(code),
     cloudDubbing: true,
   }),
 );
@@ -87,6 +90,10 @@ export const LOCAL_CLONE_LANGUAGE_TUPLES = LOCAL_CLONE_LANGUAGE_OPTIONS
 
 export const COSYVOICE_LANGUAGE_OPTIONS = AUDIO_LANGUAGE_REGISTRY
   .filter(language => language.localCosyVoice)
+  .map(language => ({ value: language.code, label: language.label }));
+
+export const QWEN3_TTS_LANGUAGE_OPTIONS = AUDIO_LANGUAGE_REGISTRY
+  .filter(language => language.localQwen3Tts)
   .map(language => ({ value: language.code, label: language.label }));
 
 export const DUBBING_TARGET_LANGUAGE_OPTIONS = AUDIO_LANGUAGE_REGISTRY.map(language => ({
