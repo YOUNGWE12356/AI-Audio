@@ -231,8 +231,8 @@ const filmDemoResult: AudioDesignResult = {
       style: "新古典奇幻史诗交响乐 (Neo-Classical Epic Fantasy Orchestral)",
       instrumentation: "独奏钢琴, 凯尔特竖琴, 史诗弦乐群, 圣洁女声合唱团, 大号与圆号群, 影视大鼓",
       sunoPrompt: {
-        chinese: "新古典史诗奇幻管弦配乐；完整连贯的歌曲；核心乐器：独奏钢琴、凯尔特竖琴、史诗弦乐、圆号、影视大鼓；105 BPM；D minor；空灵女声与圣洁合唱。",
-        english: "Neo-classical epic fantasy orchestral; cohesive full-length song; featuring solo piano, Celtic harp, cinematic strings, French horns, taiko; 105 BPM; D minor; ethereal female vocals and sacred choir.",
+        chinese: "新古典史诗奇幻管弦配乐；完整连贯的歌曲；核心乐器：独奏钢琴、凯尔特竖琴、史诗弦乐、圆号、影视大鼓；100-110 BPM；D minor；空灵女声与圣洁合唱。",
+        english: "Neo-classical epic fantasy orchestral; cohesive full-length song; featuring solo piano, Celtic harp, cinematic strings, French horns, taiko; 100-110 BPM; D minor; ethereal female vocals and sacred choir.",
         bpm: "105",
         key: "D minor",
         structure: "Intro (0-5s) -> Build-up (5-12s) -> Climax Verse (12-20s) -> Reverb Outro (20-24s)",
@@ -269,8 +269,8 @@ const filmDemoResult: AudioDesignResult = {
       style: "神秘北欧民谣融合现代电子声景 (Nordic Ambient Folk & Cyber Soundscape)",
       instrumentation: "尼古赫帕琴 (Nyckelharpa), 尼泊尔竹笛, 重低音合成器 (Sub-bass), 模拟脉冲敲击, 迷幻合唱",
       sunoPrompt: {
-        chinese: "北欧极简民谣融合赛博电子声景；完整连贯的歌曲；核心乐器：尼古赫帕琴、竹笛、重低音合成器、模拟脉冲、电子鼓；80 BPM；A minor；冷峻克制的吟唱。",
-        english: "Nordic minimal folk with cyber soundscape; cohesive full-length song; featuring Nyckelharpa, bamboo flute, sub-bass synth, analog pulses, electronic drums; 80 BPM; A minor; restrained cold vocal chanting.",
+        chinese: "北欧极简民谣融合赛博电子声景；完整连贯的歌曲；核心乐器：尼古赫帕琴、竹笛、重低音合成器、模拟脉冲、电子鼓；75-85 BPM；A minor；冷峻克制的吟唱。",
+        english: "Nordic minimal folk with cyber soundscape; cohesive full-length song; featuring Nyckelharpa, bamboo flute, sub-bass synth, analog pulses, electronic drums; 75-85 BPM; A minor; restrained cold vocal chanting.",
         bpm: "80",
         key: "A minor",
         structure: "Intro (0-5s) -> Cyber Rise (5-12s) -> Heavy Beat (12-20s) -> Silence Tail (20-24s)",

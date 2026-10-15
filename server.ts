@@ -11,7 +11,7 @@ import { createServer as createViteServer } from 'vite';
 import JSZip from 'jszip';
 import { createSfxArchiveStream, downloadContentDisposition, safeDownloadFileName } from './src/services/sfxLibraryDownload';
 import ffmpegStatic from 'ffmpeg-static';
-import { DEFAULT_CATEGORIES, INITIAL_SOUNDS } from './src/data/sfxData';
+import { DEFAULT_CATEGORIES } from './src/data/sfxData';
 import type { SoundEffect } from './src/data/sfxData';
 import { buildSfxLibraryIndex, findSfxLibraryMatches } from './src/services/sfxLibraryIndex';
 import {
@@ -1361,7 +1361,8 @@ async function startServer() {
         if (Array.isArray(parsed)) sounds = parsed;
       }
     } catch (error) {
-      console.warn('Unable to parse library sounds; keeping the readable fallback index:', error);
+      console.error('Unable to parse library sounds:', error);
+      throw new Error('音效库清单无法读取，请检查 sounds.json。');
     }
 
     return {
@@ -1390,13 +1391,13 @@ async function startServer() {
 
   const readSfxSounds = (): SoundEffect[] => {
     try {
-      if (!fs.existsSync(soundsFile)) return INITIAL_SOUNDS;
+      if (!fs.existsSync(soundsFile)) return [];
       const content = fs.readFileSync(soundsFile, 'utf-8');
       const parsed = JSON.parse(content);
-      return Array.isArray(parsed) ? parsed : INITIAL_SOUNDS;
+      return Array.isArray(parsed) ? parsed : [];
     } catch (err) {
       console.error('Error reading indexed sounds:', err);
-      return INITIAL_SOUNDS;
+      return [];
     }
   };
 
@@ -1558,12 +1559,13 @@ async function startServer() {
 
   app.get('/api/sfx/library/state', (req, res) => {
     try {
+      if (!fs.existsSync(soundsFile)) return res.status(503).json({ error: '音效库清单不存在。' });
       const repaired = loadAndRepairLibraryMetadata();
       res.setHeader('Cache-Control', 'no-store');
       return res.json({
         revision: sfxLibraryRevision,
         categories: repaired.categories,
-        sounds: fs.existsSync(soundsFile) ? repaired.sounds : INITIAL_SOUNDS,
+        sounds: repaired.sounds,
       });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
@@ -2355,8 +2357,9 @@ async function startServer() {
   // 3. Get Sound Effects
   app.get('/api/sfx/sounds', (req, res) => {
     try {
+      if (!fs.existsSync(soundsFile)) return res.status(503).json({ error: '音效库清单不存在。' });
       const repaired = loadAndRepairLibraryMetadata();
-      return res.json(fs.existsSync(soundsFile) ? repaired.sounds : INITIAL_SOUNDS);
+      return res.json(repaired.sounds);
     } catch (err: any) {
       console.error('Error reading sounds:', err);
       return res.status(500).json({ error: err.message });
@@ -4352,7 +4355,7 @@ async function startServer() {
       })
       : [];
     const repairedLibrary = loadAndRepairLibraryMetadata();
-    const librarySounds = fs.existsSync(soundsFile) ? repairedLibrary.sounds : INITIAL_SOUNDS;
+    const librarySounds = repairedLibrary.sounds;
     const libraryIndex = buildSfxLibraryIndex(repairedLibrary.categories, librarySounds);
     const cacheKey = JSON.stringify({
       prompt,

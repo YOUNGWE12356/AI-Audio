@@ -264,6 +264,12 @@ const normalizeBpm = (value: unknown) => {
   return String(Number.isFinite(parsed) ? Math.min(220, Math.max(40, parsed)) : 90);
 };
 
+export const formatSunoBpmRange = (bpm: string): string => {
+  const roundedCenter = Math.round(Number(bpm) / 5) * 5;
+  const lower = Math.max(40, Math.min(210, roundedCenter - 5));
+  return `${lower}-${lower + 10} BPM`;
+};
+
 const normalizeAudioDesignScope = (scope?: Partial<AudioDesignScope>): AudioDesignScope => {
   if (!scope) return { music: true, sfx: true };
   const normalized = {
@@ -339,6 +345,7 @@ const materializeAudioDesignResult = (
     const styleEnglish = cleanEnglishText(plan.styleEnglish);
     const key = cleanEnglishText(plan.key);
     const bpm = normalizeBpm(plan.bpm);
+    const sunoBpmRange = formatSunoBpmRange(bpm);
     const sourceTimeline = Array.isArray(plan.timelineDesign) ? plan.timelineDesign : [];
     const overallInstrumentation = cleanText(plan.instrumentation);
     const overallInstrumentationEnglish = cleanEnglishText(plan.instrumentationEnglish);
@@ -470,7 +477,7 @@ const materializeAudioDesignResult = (
       compactStyle,
       isInstrumental ? '完整连贯的纯音乐配乐' : '完整连贯的歌曲',
       coreInstruments.length > 0 ? `核心乐器：${coreInstruments.join('、')}` : '',
-      `${bpm} BPM`,
+      sunoBpmRange,
       key,
       compactVocalDirection,
     ].filter(Boolean).join('；') + '。';
@@ -478,7 +485,7 @@ const materializeAudioDesignResult = (
       compactStyleEnglish,
       isInstrumental ? 'cohesive full-length instrumental soundtrack' : 'cohesive full-length song',
       coreInstrumentsEnglish.length > 0 ? `featuring ${coreInstrumentsEnglish.join(', ')}` : '',
-      `${bpm} BPM`,
+      sunoBpmRange,
       key,
       compactVocalDirectionEnglish,
     ].filter(Boolean).join('; ') + '.';
@@ -928,12 +935,12 @@ export async function analyzeAudioDesign(
     7. **游戏配乐只做整体方案（最高优先级）**：游戏音轨不按视频时间、镜头或动作切分音乐。每个 bgmRecommendations 项只提供一套统一的整曲风格，不得输出 timelineDesign，不得在任何音乐字段中写时间码、段落时长、进入时机、剪辑点或先后顺序。
     8. **整体配器双语同义（强制）**：instrumentation/instrumentationEnglish 用一句短语列出整首音乐最重要的 3-5 个核心乐器或音色，中英文必须语义等价。
     9. **画面推荐依据（强制）**：visualRationale 用中文说明画面题材、色彩/空间、动作节奏、玩法氛围或用户补充需求如何共同指向该音乐风格；必须解释“为什么推荐这种音乐”，但不得写时间码、段落时长或先后顺序，长度 60-120 字。
-    10. **Suno 整体音乐词（强制）**：style/styleEnglish 用一句短语概括整首音乐的统一曲风与情绪；结合整体配器、BPM、调性和统一人声方向生成简短明确的 Suno Style Prompt。不要生成曲式结构、动态时间线或剪辑说明。
+    10. **Suno 整体音乐词（强制）**：style/styleEnglish 用一句短语概括整首音乐的统一曲风与情绪，不得包含具体 BPM；单点推荐速度只写入 bpm 字段，系统会为 Suno 提示词生成适当的 BPM 范围。不要生成曲式结构、动态时间线或剪辑说明。
     11. **游戏适配原则**：音乐应适合长时间播放和自然循环，保持统一氛围与稳定能量，避免依赖固定画面时长或一次性剧情转折。素材内容与“补充需求”是判断整体风格的最高依据；没有素材时完全以补充需求为准，不得输出与其题材或情绪相冲突的音乐。
     ` : `
     7. **单一配乐蓝图（强制）**：每个 bgmRecommendations 项是一套完全独立、闭环的方案，timelineDesign 负责分秒级音画分析。顶层 style、BPM、调性、人声方向及所有时间段必须互相一致，禁止把两套推荐交叉混用；系统会从同一方案汇总最终 Suno 整体音乐词。
     8. **逐项双语同义（强制）**：style/styleEnglish，以及 timelineDesign 中每一组 emotion/emotionEnglish、instruments/instrumentsEnglish、description/descriptionEnglish 都必须语义等价。不得在英文项中新增中文方案没有的曲风、乐器、人声、情绪或时间节点。
-    9. **Suno 整体音乐词（强制）**：style/styleEnglish 必须用一句短语概括整首音乐的统一曲风和总体情绪，中文不超过 30 字、英文不超过 12 个单词，不得包含时间码、时间线、章节名或先后顺序。timelineDesign 的 instruments/instrumentsEnglish 只列该段使用的 1-4 个乐器或音色名称，进入时机、动态变化和剪辑配合统一写入 description/descriptionEnglish。系统将用整体曲风、最多 5 个核心乐器、BPM、调性和总体人声要求生成一条简短明确的 Suno Style Prompt，不会复制时间线文案。
+    9. **Suno 整体音乐词（强制）**：style/styleEnglish 必须用一句短语概括整首音乐的统一曲风和总体情绪，中文不超过 30 字、英文不超过 12 个单词，不得包含具体 BPM、时间码、时间线、章节名或先后顺序。单点推荐速度只写入 bpm 字段，系统会为 Suno 提示词生成适当的 BPM 范围。timelineDesign 的 instruments/instrumentsEnglish 只列该段使用的 1-4 个乐器或音色名称，进入时机、动态变化和剪辑配合统一写入 description/descriptionEnglish。系统将用整体曲风、最多 5 个核心乐器、调性和总体人声要求生成一条简短明确的 Suno Style Prompt，不会复制时间线文案。
     10. **配乐段落长度与连续性（最高优先级）**：timelineDesign 是音乐段落设计，不是逐动作音效清单。必须根据视频实际时长、叙事段落、镜头群和显著情绪拐点自适应划分，不能为了增加细节而强行增加段数。常规每段约 5-8 秒；连续镜头或同一情绪可保持 8-15 秒；短于 5 秒只允许用于视频首尾余量，或真正重要的转场、关键动作与强烈情绪变化。相邻段若情绪与核心配器相近必须合并，严禁连续出现大量 2-3 秒段落。高频画面采样只用于识别动作与 SFX，不代表 BGM 要以相同颗粒度切段；微小动作、卡点和瞬时声音写入 SFX 或当前段 description，不得据此更换整段音乐情绪。时间线必须从开头到结尾连续覆盖、无空隙、无重叠。
     11. **画面分析与方案分工**：musicAnalysis.emotionalCurve 只描述画面本身的客观情绪走势；每套音乐如何响应画面，必须分别写进该方案的 timelineDesign，不能用全局情绪曲线代替。
     `) : ''}
