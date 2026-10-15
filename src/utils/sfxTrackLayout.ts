@@ -47,3 +47,10 @@ export const distributeOverlappingSfxClips = <T extends TimedTrackClip>(clips: T
     trackIds: laneEndTimes.map((_, laneIndex) => getAutoSfxTrackId(laneIndex)),
   };
 };
+
+/** Allocate only system-managed SFX, preserving custom lanes and clip payloads. */
+export const distributeManagedSfxClips = <T extends TimedTrackClip>(clips: T[]) => {
+  const layout = distributeOverlappingSfxClips(clips.filter(clip => isAutoSfxTrackId(clip.trackId)));
+  let index = 0;
+  return { clips: clips.map(clip => isAutoSfxTrackId(clip.trackId) ? layout.clips[index++] : clip), trackIds: layout.trackIds };
+};

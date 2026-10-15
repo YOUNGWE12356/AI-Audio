@@ -21,7 +21,7 @@ import {
   type LocalVoiceCloneStatus,
 } from '../services/localVoiceCloneService';
 import { buildSeedVoiceTimeline, readMediaDuration, type SeedVoiceAudioEvent } from '../services/seedVoiceDriverService';
-import { translateTextToLanguage } from '../services/geminiService';
+import { translateTextToLanguage } from '../services/aiService';
 import GeneratedAudioPlayer from './GeneratedAudioPlayer';
 import PointCostHint from './PointCostHint';
 import { LOCAL_CLONE_LANGUAGE_TUPLES } from '../services/languageRegistry';

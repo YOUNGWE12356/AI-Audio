@@ -6,7 +6,6 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { isIP } from 'node:net';
 import { exec, execFile } from 'child_process';
-import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import JSZip from 'jszip';
 import { createSfxArchiveStream, downloadContentDisposition, safeDownloadFileName } from './src/services/sfxLibraryDownload';
@@ -20,11 +19,14 @@ import {
   scoreSfxSearchCandidate,
 } from './src/services/sfxSearchLexicon';
 import { planAssistantTask } from './src/services/assistantPlannerService';
+import { createAssistantAgentRouter } from './src/services/assistantAgentServer';
+import { createAssistantWorkspaceOperationCache } from './src/services/assistantWorkspaceOperations';
+import { detectMediaAudioStream } from './src/services/mediaStreamProbe';
+import { resolveVideoMixAudioInputs } from './src/services/videoMixInputs';
 import { createMusicSeparationRouter } from './src/services/musicSeparationServer';
 import multer from 'multer';
 import {
   analyzeAudioDesign,
-  analyzeAudioDesignVideoFile,
   generateSfxRequirements,
   generateLyricsFromMusicStyle,
   createEnglishMusicPromptForElevenLabs,
@@ -35,7 +37,7 @@ import {
   regenerateLyrics,
   translateTextToLanguage,
   translateToEnglish,
-} from './src/services/geminiService';
+} from './src/services/aiService';
 
 const ASSISTANT_PLAN_CACHE_TTL_MS = 10 * 60 * 1000;
 const ASSISTANT_PLAN_CACHE_MAX_ENTRIES = 100;
@@ -47,13 +49,8 @@ const assistantPlanCache = new Map<string, {
     provider: string;
   };
 }>();
-import {
-  GEMINI_PRIMARY_MODEL,
-  generateGeminiContent,
-  generateGptStructuredJson,
-  isGptTextConfigured,
-  isGeminiUnsupportedLocationError,
-} from './src/services/geminiRetry';
+import { generateAiContent, generateGptStructuredJson, isGptTextConfigured, SchemaType as Type,
+  audioUnderstandingUnavailableError } from './src/services/aiGateway';
 import {
   recordAiUsage,
   setAiUsageRecorder,
@@ -209,6 +206,7 @@ async function startServer() {
   const resolveUsageFeature = (req: express.Request) => {
     const endpoint = req.path;
     if (endpoint.includes('/assistant/plan')) return '智能助手 · GPT 任务规划';
+    if (endpoint.includes('/assistant/')) return '智能助手 · 自动任务执行';
     if (endpoint.includes('/audio-analysis/semantic')) return '音频工具 · 音频分析';
     if (endpoint.includes('/music-analysis-naming')) return '音频工具 · 音乐分析命名';
     if (endpoint.includes('/audio-design')) return 'AI 音频设计';
@@ -268,10 +266,8 @@ async function startServer() {
   const sfxLibraryEventClients = new Set<express.Response>();
   const SFX_LIBRARY_ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
   let sfxLibraryRevision = Date.now();
-  const geminiTempDir = path.join(dataDir, '.gemini-upload');
   const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
   const MAX_INLINE_MEDIA_BYTES = 24 * 1024 * 1024;
-  const AUDIO_DESIGN_VIDEO_OPTIMIZE_THRESHOLD_BYTES = 50 * 1024 * 1024;
   const MAX_CHUNK_COUNT = 100;
   const UPLOADS_RETENTION_DAYS = Math.max(
     1,
@@ -404,9 +400,6 @@ async function startServer() {
   for (const directory of [libraryDir, libraryOriginalsDir, libraryTempDir]) {
     if (!fs.existsSync(directory)) fs.mkdirSync(directory, { recursive: true });
   }
-  if (!fs.existsSync(geminiTempDir)) {
-    fs.mkdirSync(geminiTempDir, { recursive: true });
-  }
 
   const aiUsageLedgerPath = path.join(dataDir, 'ai-usage.jsonl');
   const aiUsageMetadataPath = path.join(dataDir, 'ai-usage-meta.json');
@@ -460,9 +453,9 @@ async function startServer() {
       .flatMap((line) => {
         try {
           const event = JSON.parse(line) as Partial<StoredAiUsageEvent>;
-          return event && ['elevenlabs', 'gemini', 'gpt'].includes(String(event.provider))
+          return event && typeof event.provider === 'string'
             ? [{
-                provider: event.provider as AiUsageEvent['provider'],
+                provider: ['elevenlabs', 'gpt'].includes(event.provider) ? event.provider as AiUsageEvent['provider'] : 'legacy',
                 model: String(event.model || 'unknown'),
                 inputTokens: Number(event.inputTokens) || 0,
                 outputTokens: Number(event.outputTokens) || 0,
@@ -865,13 +858,26 @@ async function startServer() {
   app.use(
     [
       '/api/ai/assistant',
-      '/api/ai/gemini',
+      '/api/ai/audio-design',
+      '/api/ai/regenerate-lyrics',
+      '/api/ai/generate-lyrics',
+      '/api/ai/sfx-requirements',
+      '/api/ai/batch-voice-image-ocr',
+      '/api/ai/optimize-metadata',
+      '/api/ai/translate',
+      '/api/ai/music-prompt',
+      '/api/ai/voice-v4-enhance',
+      '/api/ai/voice-v3-enhance',
+      '/api/ai/match-voice',
       '/api/ai/audio-analysis',
       '/api/ai/music-analysis-naming',
       '/api/video/match-similar-voices',
       '/api/video/analyze',
     ],
-    requireElevenLabsQuota(() => 0.1),
+    (req, res, next) => {
+      if (req.originalUrl.startsWith('/api/ai/assistant/') && (req.method === 'GET' || req.path.endsWith('/cancel'))) return next();
+      return requireElevenLabsQuota(() => 0.1)(req, res, next);
+    },
   );
 
   const getDateKey = (timestamp: string, timeZone: string) => {
@@ -933,60 +939,6 @@ async function startServer() {
     await fs.promises.unlink(filePath).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== 'ENOENT') console.warn(`Failed to remove temporary file ${filePath}:`, error);
     });
-  };
-
-  const isRetryableFileAccessError = (error: unknown) => {
-    const code = (error as NodeJS.ErrnoException)?.code;
-    return code === 'EPERM' || code === 'EBUSY' || code === 'EACCES';
-  };
-
-  const copyFileWithAccessRetry = async (sourcePath: string, destinationPath: string) => {
-    const delays = [0, 150, 350, 700, 1_200];
-    let lastError: unknown;
-
-    for (const delay of delays) {
-      if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
-      try {
-        await fs.promises.copyFile(sourcePath, destinationPath, fs.constants.COPYFILE_EXCL);
-        return;
-      } catch (error) {
-        lastError = error;
-        await safeUnlink(destinationPath);
-        if (!isRetryableFileAccessError(error)) throw error;
-      }
-    }
-
-    throw Object.assign(
-      new Error('视频临时文件正被系统占用，请稍后重新生成。'),
-      { status: 503, cause: lastError },
-    );
-  };
-
-  // Google Files API derives X-Goog-Upload-File-Name from the local path.
-  // Undici only accepts ByteString request-header values, so an existing
-  // Chinese (or otherwise non-ASCII) project filename must be uploaded through
-  // a short-lived ASCII alias. Windows gets an independent copy because newly
-  // uploaded files can be held briefly by scanners, and a hard link retains the
-  // same underlying file lock.
-  const createGeminiUploadAlias = async (sourcePath: string, mimeType: string) => {
-    const extension = getSafeUploadExtension(sourcePath, mimeType, '.mp4');
-    const aliasName = `gemini_video_${randomUUID()}${extension}`;
-    const aliasPath = path.resolve(geminiTempDir, aliasName);
-    if (!isPathInside(geminiTempDir, aliasPath)) {
-      throw Object.assign(new Error('无法创建安全的视频分析临时文件。'), { status: 500 });
-    }
-
-    if (process.platform === 'win32') {
-      await copyFileWithAccessRetry(sourcePath, aliasPath);
-    } else {
-      try {
-        await fs.promises.link(sourcePath, aliasPath);
-      } catch {
-        await copyFileWithAccessRetry(sourcePath, aliasPath);
-      }
-    }
-
-    return { aliasPath, aliasName };
   };
 
   const safeRemoveDirectory = async (directoryPath?: string) => {
@@ -1064,21 +1016,6 @@ async function startServer() {
     }, UPLOADS_CLEANUP_INTERVAL_MS);
   }
 
-  // Helper to initialize GoogleGenAI on the server
-  function getGoogleAI() {
-    const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error("GEMINI_API_KEY environment variable is not configured.");
-    }
-    return new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        }
-      }
-    });
-  }
 
   const parseSafeVideoFilename = (value: unknown) => {
     if (typeof value !== 'string' || value.length === 0 || value.length > 255) return null;
@@ -1414,7 +1351,7 @@ async function startServer() {
     if (url.startsWith('/uploads/') || fileName.startsWith('upload_') || fileName.startsWith('audio_')) {
       return 'uploaded';
     }
-    if (designer.includes('gemini') || designer.includes('elevenlabs') || designer.includes('ai')) {
+    if (designer.includes('elevenlabs') || designer.includes('ai')) {
       return 'generated';
     }
     if (url.startsWith('http://') || url.startsWith('https://')) {
@@ -1916,16 +1853,22 @@ async function startServer() {
   // HTML5 client bootstrapping and deployment diagnostics.
   // This endpoint only reports whether server-side secrets exist; it never
   // returns secret values to the browser.
-  app.get('/api/health', asyncRoute(async (_req, res) => {
+  app.get('/api/health', asyncRoute(async (req, res) => {
+    const aiServices = {
+      audioUnderstanding: false,
+      aiText: isGptTextConfigured(),
+      gptText: isGptTextConfigured(),
+      elevenLabs: getElevenLabsApiKeys().length > 0,
+    };
+    if (req.query.scope === 'ai') {
+      return res.json({ ok: true, runtime: 'server', services: aiServices, timestamp: new Date().toISOString() });
+    }
     const demucs = await probeDemucsAvailability();
     return res.json({
       ok: true,
       runtime: 'server',
       services: {
-        gemini: Boolean(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY),
-        aiText: isGptTextConfigured() || Boolean(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY),
-        gptText: isGptTextConfigured(),
-        elevenLabs: getElevenLabsApiKeys().length > 0,
+        ...aiServices,
         ffmpeg: Boolean(FFMPEG_BINARY),
         demucsConfigured: demucs.available,
       },
@@ -1967,7 +1910,7 @@ async function startServer() {
         requests: 0,
         elevenLabsCredits: 0,
         companyPoints: 0,
-        geminiTokens: 0,
+        legacyTokens: 0,
         gptTokens: 0,
         totalTokens: 0,
         lastUsedAt: profile.updatedAt,
@@ -2294,11 +2237,7 @@ async function startServer() {
           getElevenLabsApiKeys().length > 0,
           true,
         ),
-        gemini: summarizeLocalProvider(
-          'gemini',
-          Boolean(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY),
-          Boolean(Number(process.env.GEMINI_INPUT_USD_PER_MILLION_TOKENS) || Number(process.env.GEMINI_OUTPUT_USD_PER_MILLION_TOKENS)),
-        ),
+        legacy: summarizeLocalProvider('legacy', false, false),
         gpt: summarizeLocalProvider(
           'gpt',
           isGptTextConfigured(),
@@ -2488,22 +2427,19 @@ async function startServer() {
 
   type AudioDesignVideoPreupload = {
     uploadId: string;
-    fileUri: string;
+    localFileName: string;
+    keyframes: Array<{ timestamp: number; base64: string }>;
     mimeType: string;
     displayName: string;
-    geminiFileName: string;
     expiresAt: number;
   };
   const AUDIO_DESIGN_PREUPLOAD_TTL_MS = 30 * 60 * 1000;
   const audioDesignVideoPreuploads = new Map<string, AudioDesignVideoPreupload>();
 
-  const deleteGeminiPreupload = async (entry?: AudioDesignVideoPreupload) => {
-    if (!entry?.geminiFileName) return;
-    try {
-      await getGoogleAI().files.delete({ name: entry.geminiFileName });
-    } catch (error) {
-      console.warn('Failed to delete preuploaded Gemini video:', error);
-    }
+  const deleteVideoPreupload = async (entry?: AudioDesignVideoPreupload) => {
+    if (!entry) return;
+    const localPath = path.resolve(uploadsDir, entry.localFileName);
+    if (isPathInside(uploadsDir, localPath)) await safeUnlink(localPath);
   };
 
   const cleanupExpiredAudioDesignPreuploads = async () => {
@@ -2512,7 +2448,7 @@ async function startServer() {
       .filter(entry => entry.expiresAt <= now);
     for (const entry of expiredEntries) {
       audioDesignVideoPreuploads.delete(entry.uploadId);
-      await deleteGeminiPreupload(entry);
+      await deleteVideoPreupload(entry);
     }
   };
 
@@ -2524,6 +2460,12 @@ async function startServer() {
     storage: multer.memoryStorage(),
     limits: { fileSize: MAX_UPLOAD_BYTES },
   });
+
+  app.use(createAssistantWorkspaceOperationCache((req, res) => resolveUsageActor(req, res).userId));
+  app.use('/api/ai/assistant', createAssistantAgentRouter({
+    uploadsDir, ffmpegBinary: FFMPEG_BINARY, duration: filePath => getMediaDurationSeconds(filePath),
+    identity: (req, res) => resolveUsageActor(req, res).userId,
+  }));
 
   app.use('/api/audio/music-separation', createMusicSeparationRouter({
     uploadsDir,
@@ -3212,122 +3154,6 @@ async function startServer() {
     };
   };
 
-  const optimizeAudioDesignVideoForAnalysis = async (
-    sourcePath: string,
-    sourceMimeType: string,
-    displayName: string,
-  ): Promise<{
-    videoPath: string;
-    mimeType: string;
-    displayName: string;
-    optimized: boolean;
-    cleanupPath?: string;
-  }> => {
-    let sourceStat: fs.Stats;
-    try {
-      sourceStat = await fs.promises.stat(sourcePath);
-    } catch {
-      return {
-        videoPath: sourcePath,
-        mimeType: sourceMimeType,
-        displayName,
-        optimized: false,
-      };
-    }
-
-    if (sourceStat.size <= AUDIO_DESIGN_VIDEO_OPTIMIZE_THRESHOLD_BYTES) {
-      return {
-        videoPath: sourcePath,
-        mimeType: sourceMimeType,
-        displayName,
-        optimized: false,
-      };
-    }
-
-    const optimizedPath = path.resolve(uploadsDir, `audio_design_analysis_${randomUUID()}.mp4`);
-    if (!isPathInside(uploadsDir, optimizedPath)) {
-      throw Object.assign(new Error('无法创建安全的视频分析压缩文件。'), { status: 500 });
-    }
-
-    try {
-      await new Promise<void>((resolve, reject) => {
-        execFile(
-          FFMPEG_BINARY,
-          [
-            '-hide_banner',
-            '-loglevel', 'error',
-            '-y',
-            '-i', sourcePath,
-            '-map', '0:v:0',
-            '-map', '0:a?',
-            '-vf', 'fps=2,scale=960:540:force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2',
-            '-c:v', 'libx264',
-            '-preset', 'veryfast',
-            '-crf', '30',
-            '-pix_fmt', 'yuv420p',
-            '-c:a', 'aac',
-            '-b:a', '48k',
-            '-ac', '1',
-            '-ar', '16000',
-            '-movflags', '+faststart',
-            optimizedPath,
-          ],
-          {
-            timeout: 10 * 60_000,
-            windowsHide: true,
-            maxBuffer: 4 * 1024 * 1024,
-          },
-          (error, _stdout, stderr) => {
-            if (!error) {
-              resolve();
-              return;
-            }
-            const processError = error as NodeJS.ErrnoException & { killed?: boolean };
-            const ffmpegUnavailable = processError.code === 'ENOENT'
-              || /ffmpeg.*(?:not recognized|not found)|ENOENT/i.test(`${error.message}\n${stderr}`);
-            reject(Object.assign(
-              new Error(ffmpegUnavailable
-                ? '服务器 FFmpeg 不可用，无法自动压缩大视频。'
-                : `自动压缩大视频失败：${String(stderr || error.message).trim().split(/\r?\n/).slice(-1)[0] || error.message}`),
-              { status: ffmpegUnavailable ? 503 : processError.killed ? 504 : 422 },
-            ));
-          },
-        );
-      });
-
-      const optimizedStat = await fs.promises.stat(optimizedPath);
-      if (!optimizedStat.isFile() || optimizedStat.size <= 0 || optimizedStat.size >= sourceStat.size) {
-        await safeUnlink(optimizedPath);
-        return {
-          videoPath: sourcePath,
-          mimeType: sourceMimeType,
-          displayName,
-          optimized: false,
-        };
-      }
-
-      console.log(
-        `Audio design analysis video optimized: ${displayName} ${sourceStat.size} -> ${optimizedStat.size} bytes`,
-      );
-      return {
-        videoPath: optimizedPath,
-        mimeType: 'video/mp4',
-        displayName: `${displayName}（分析压缩版）`,
-        optimized: true,
-        cleanupPath: optimizedPath,
-      };
-    } catch (error) {
-      await safeUnlink(optimizedPath);
-      console.warn('Audio design video optimization failed; using original video:', error);
-      return {
-        videoPath: sourcePath,
-        mimeType: sourceMimeType,
-        displayName,
-        optimized: false,
-      };
-    }
-  };
-
   const buildTranslatedDubbingAtempoFilter = (tempo: number) => {
     const parts: number[] = [];
     let remaining = Math.min(2, Math.max(0.5, tempo));
@@ -3965,14 +3791,14 @@ async function startServer() {
   const extractServerVideoKeyframes = async (
     fileName: unknown,
     requestedDuration: unknown,
-    options: { dense?: boolean } = {},
+    options: { dense?: boolean; frameCount?: number } = {},
   ): Promise<Array<{ timestamp: number; base64: string }>> => {
     const { videoPath } = await resolveValidatedUploadedVideo(fileName);
 
     const duration = parseNumber(requestedDuration, 30, 1, 3_600);
-    const frameCount = options.dense
+    const frameCount = options.frameCount ?? (options.dense
       ? Math.min(48, Math.max(12, Math.ceil(duration)))
-      : 6;
+      : 6);
     const firstTimestamp = duration / (frameCount * 2);
     const temporaryDirectory = await fs.promises.mkdtemp(path.join(uploadsDir, '.video-analysis-'));
     if (!isPathInside(uploadsDir, temporaryDirectory)) {
@@ -4058,6 +3884,33 @@ async function startServer() {
     } finally {
       await safeRemoveDirectory(temporaryDirectory);
     }
+  };
+
+  const analyzeAudioDesignVideoWithKeyframes = async (
+    fileName: string,
+    displayName: string,
+    requirements: string,
+    target: Parameters<typeof analyzeAudioDesign>[2],
+    isInstrumental: boolean,
+    options: Parameters<typeof analyzeAudioDesign>[4],
+    precomputedFrames?: Array<{ timestamp: number; base64: string }>,
+  ) => {
+    const startedAt = Date.now();
+    let frames = precomputedFrames;
+    if (!frames) {
+      const { videoPath } = await resolveValidatedUploadedVideo(fileName);
+      const duration = await getMediaDurationSeconds(videoPath).catch(() => 30);
+      frames = await extractServerVideoKeyframes(fileName, duration, {
+        frameCount: target.avatar || target.gift ? 16 : 24,
+      });
+    }
+    console.info(`[audio-design] ${frames.length} video frames ready in ${Date.now() - startedAt}ms.`);
+    return analyzeAudioDesign(frames.map(frame => ({
+      data: `data:image/jpeg;base64,${frame.base64}`,
+      mimeType: 'image/jpeg',
+      label: `视频 ${displayName}，时间 ${frame.timestamp} 秒`,
+      videoMetadata: { startOffset: `${frame.timestamp}s` },
+    })), requirements, target, isInstrumental, options);
   };
 
   const validateVoiceId = (value: unknown) => {
@@ -4499,249 +4352,15 @@ async function startServer() {
     });
   }));
 
-  app.post('/api/ai/music-analysis-naming/audio', aiUpload.array('audio', 20), asyncRoute(async (req, res) => {
-    const uploadedFiles = (req.files || []) as Express.Multer.File[];
-    if (uploadedFiles.length === 0) {
-      return res.status(400).json({ error: '请上传需要分析命名的音乐音频。' });
-    }
-    const rawMetadata = typeof req.body?.metadata === 'string'
-      ? JSON.parse(req.body.metadata || '[]')
-      : [];
-    const metadata = Array.isArray(rawMetadata) ? rawMetadata : [];
-    const totalBytes = uploadedFiles.reduce((total, file) => total + file.size, 0);
-    if (totalBytes > MAX_INLINE_MEDIA_BYTES) {
-      return res.status(413).json({ error: '音乐分析素材总量过大，请减少批量数量或使用更短的分析片段。' });
-    }
+  app.post("/api/ai/music-analysis-naming/audio", (_req, res) => {
+    return res.status(503).json({ error: audioUnderstandingUnavailableError().message });
+  });
 
-    const parts: any[] = [];
-    uploadedFiles.forEach((file, index) => {
-      const item = metadata[index] || {};
-      parts.push({
-        text: `\n[音乐 ${index + 1}]
-文件名：${normalizeIdentityText(item.sourceName, 240) || file.originalname}
-时长：${Math.round(Number(item.duration) || 0)} 秒
-本地估算 BPM：${Math.round(Number(item.bpm) || 0)}
-本地估算调性：${normalizeIdentityText(item.keyName, 80) || 'Unknown'}
-本地估算能量：${normalizeIdentityText(item.energy, 40) || 'Unknown'}
-本地估算情绪：${normalizeIdentityText(item.mood, 80) || 'Unknown'}
-`,
-      });
-      parts.push({
-        inlineData: {
-          data: file.buffer.toString('base64'),
-          mimeType: file.mimetype || 'audio/mpeg',
-        },
-      });
-    });
+  app.post("/api/ai/audio-analysis/semantic", (_req, res) => {
+    return res.status(503).json({ error: audioUnderstandingUnavailableError().message });
+  });
 
-    parts.push({
-      text: `你是专业游戏音乐资产管理与音乐监督。请逐个聆听以上音乐音频，结合文件名和本地客观估算，判断每条音乐最适合的资产命名信息。
-
-分析重点：
-1. 必须真的根据音频听感判断，不要只照抄文件名或 BPM。
-2. 判断维度包括：音乐风格、情绪、编曲/主要乐器、能量、适合游戏场景、是否适合循环。
-3. 文件名里的业务语义可以作为辅助，例如 battle、victory、home、lobby、event、gift、board game、tabletop、Chinese、piano 等，但如果音频听感明显不符，要以音频为准。
-4. 如果无法可靠判断，style 返回 Review，scene 返回 Manual，confidence 返回 低，并在 reason 说明原因。
-5. namingCategory 必须是英文短标签，适合进入文件名，例如 Casual_Lobby、Battle_Battle、Chinese_Explore、Mystery_Suspense、SwingJazz_BoardGame。
-6. style 必须尽量使用这些标准标签之一：Epic、Battle、Casual、Healing、Mystery、Ambient、Electronic、Chinese、Cinematic、Orchestral、Rock、Piano、LoFi、SwingJazz、GypsyJazz、AcousticJazz、AcousticLounge、Jazz、Review。
-7. scene 必须尽量使用这些标准标签之一：Battle、Home、Lobby、Event、Gift、Puzzle、Victory、Suspense、Explore、Menu、UI、Cutscene、Reward、Store、BoardGame、Tabletop、CasualLounge、MiniGame、Manual。
-8. 每个输入都必须返回一条结果，index 从 0 开始，对应上传顺序。
-
-只返回 JSON，不要 Markdown。`,
-    });
-
-    try {
-      const ai = getGoogleAI();
-      const requestUsageContext = res.locals.aiUsageContext as UsageRequestContext;
-      const response = await usageRequestContext.run(requestUsageContext, () => generateGeminiContent(ai, {
-        model: GEMINI_PRIMARY_MODEL,
-        contents: [{ parts }],
-        config: {
-          responseMimeType: 'application/json',
-          maxOutputTokens: Math.min(8000, 900 + uploadedFiles.length * 260),
-          responseSchema: {
-            type: Type.OBJECT,
-            required: ['items'],
-            properties: {
-              items: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  required: ['index', 'style', 'scene', 'mood', 'namingCategory', 'confidence', 'reason'],
-                  properties: {
-                    index: { type: Type.INTEGER },
-                    style: { type: Type.STRING },
-                    scene: { type: Type.STRING },
-                    mood: { type: Type.STRING },
-                    namingCategory: { type: Type.STRING },
-                    confidence: { type: Type.STRING },
-                    reason: { type: Type.STRING },
-                  },
-                },
-              },
-            },
-          },
-        },
-      }));
-      const text = String(response.text || '').trim();
-      const parsed = JSON.parse(text) as {
-        items?: Array<{
-          index: number;
-          style: string;
-          scene: string;
-          mood: string;
-          namingCategory: string;
-          confidence: '高' | '中' | '低';
-          reason: string;
-        }>;
-      };
-      return res.json({
-        provider: 'gemini-audio',
-        model: response.modelVersion || GEMINI_PRIMARY_MODEL,
-        items: parsed.items || [],
-      });
-    } catch (error) {
-      if (isGeminiUnsupportedLocationError(error)) {
-        return res.status(400).json({
-          error: '当前 Gemini 音频理解 API 所在地区不支持此请求。音乐风格/场景需要真正听音频，请切换到支持 Gemini API 的网络/地区后重试。',
-        });
-      }
-      throw error;
-    }
-  }));
-
-  app.post('/api/ai/audio-analysis/semantic', aiUpload.single('audio'), asyncRoute(async (req, res) => {
-    if (!req.file) {
-      return res.status(400).json({ error: '请上传需要进行全球风格与调式分析的音频片段。' });
-    }
-    if (req.file.size > MAX_INLINE_MEDIA_BYTES) {
-      return res.status(413).json({ error: '音频分析片段过大，请缩短后重试。' });
-    }
-
-    let metadata: Record<string, unknown> = {};
-    if (typeof req.body?.metadata === 'string') {
-      try {
-        const parsed = JSON.parse(req.body.metadata);
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) metadata = parsed;
-      } catch {
-        return res.status(400).json({ error: '音频分析元数据格式无效。' });
-      }
-    }
-
-    const localSummary = {
-      sourceName: normalizeIdentityText(metadata.sourceName, 240) || req.file.originalname,
-      duration: Math.max(0, Number(metadata.duration) || 0),
-      bpm: Math.max(0, Number(metadata.bpm) || 0),
-      keyName: normalizeIdentityText(metadata.keyName, 80) || 'Unknown',
-      localMode: normalizeIdentityText(metadata.localMode, 120) || 'Unknown',
-      localModeConfidence: normalizeIdentityText(metadata.localModeConfidence, 20) || 'Unknown',
-    };
-
-    const parts = [
-      {
-        text: `你是世界音乐学、民族音乐学、调式理论与音乐信息检索专家。请真正聆听随后提供的音频片段，并结合本地 DSP 数据进行开放词汇分析。\n\n本地客观估算（只作辅助，不可盲从）：\n${JSON.stringify(localSummary, null, 2)}`,
-      },
-      {
-        inlineData: {
-          data: req.file.buffer.toString('base64'),
-          mimeType: req.file.mimetype || 'audio/wav',
-        },
-      },
-      {
-        text: `分析要求：
-1. 不使用封闭标签表。primaryStyle、subStyles 可以返回世界上任何音乐风格、子风格、融合风格或当地称谓，例如但不限于各地区传统、古典体系、流行分支、电子子类型、游戏与影视配乐语言。
-2. 必须严格区分“风格/子风格”“地域或文化传统”“调式/音阶体系”“具体调式名称”“主音”和“律制”。不要把乐器名、场景或情绪误当风格。
-3. 调式允许返回任意全球体系，例如西方教会调式与旋律/和声小调体系、印度 Raga、阿拉伯/土耳其/波斯 Maqam/Dastgah/Makam、中国民族调式、日本调式、东南亚音阶、非洲与其他民族音阶，以及微分音体系。不得强行映射为 Major/Minor。
-4. 仅凭短片无法区分具体 Raga、Maqam、转调或微分音时，相关字段写“不确定”，confidence 返回“低”，alternatives 给出最多 4 个合理候选并说明区分所需证据。
-5. 若音频存在多种风格或调式，请 primaryStyle 写最主要者，subStyles 和 alternatives 保留其他可信候选。
-6. reason 用中文，简明说明听觉证据（节奏、配器、旋律进行、特征音、终止式、律制或微分音），不得只复述文件名或本地估算。
-7. microtonal 只能返回“是”“否”或“不确定”。confidence 只能返回“高”“中”或“低”。
-8. 所有命名优先使用中文通用名；必要时在同一字段附原文/英文名。证据不足时宁可返回“不确定”，不要猜测。
-
-只返回符合 Schema 的 JSON，不要 Markdown。`,
-      },
-    ];
-
-    try {
-      const ai = getGoogleAI();
-      const requestUsageContext = res.locals.aiUsageContext as UsageRequestContext;
-      const response = await usageRequestContext.run(requestUsageContext, () => generateGeminiContent(ai, {
-        model: GEMINI_PRIMARY_MODEL,
-        contents: [{ parts }],
-        config: {
-          responseMimeType: 'application/json',
-          maxOutputTokens: 2400,
-          responseSchema: {
-            type: Type.OBJECT,
-            required: [
-              'primaryStyle',
-              'subStyles',
-              'regionalTradition',
-              'modeSystem',
-              'modeName',
-              'tonic',
-              'tuningSystem',
-              'microtonal',
-              'confidence',
-              'alternatives',
-              'reason',
-            ],
-            properties: {
-              primaryStyle: { type: Type.STRING },
-              subStyles: { type: Type.ARRAY, items: { type: Type.STRING } },
-              regionalTradition: { type: Type.STRING },
-              modeSystem: { type: Type.STRING },
-              modeName: { type: Type.STRING },
-              tonic: { type: Type.STRING },
-              tuningSystem: { type: Type.STRING },
-              microtonal: { type: Type.STRING },
-              confidence: { type: Type.STRING },
-              alternatives: { type: Type.ARRAY, items: { type: Type.STRING } },
-              reason: { type: Type.STRING },
-            },
-          },
-        },
-      }));
-      const parsed = JSON.parse(String(response.text || '').trim()) as Record<string, unknown>;
-      const cleanList = (value: unknown, limit: number) => (
-        Array.isArray(value)
-          ? value.map(item => normalizeIdentityText(item, 160)).filter(Boolean).slice(0, limit)
-          : []
-      );
-      const confidence = ['高', '中', '低'].includes(String(parsed.confidence))
-        ? String(parsed.confidence)
-        : '低';
-      const microtonal = ['是', '否', '不确定'].includes(String(parsed.microtonal))
-        ? String(parsed.microtonal)
-        : '不确定';
-      return res.json({
-        provider: 'gemini-audio',
-        model: response.modelVersion || GEMINI_PRIMARY_MODEL,
-        analysis: {
-          primaryStyle: normalizeIdentityText(parsed.primaryStyle, 160) || '不确定',
-          subStyles: cleanList(parsed.subStyles, 8),
-          regionalTradition: normalizeIdentityText(parsed.regionalTradition, 160) || '不确定',
-          modeSystem: normalizeIdentityText(parsed.modeSystem, 160) || '不确定',
-          modeName: normalizeIdentityText(parsed.modeName, 160) || '不确定',
-          tonic: normalizeIdentityText(parsed.tonic, 80) || '不确定',
-          tuningSystem: normalizeIdentityText(parsed.tuningSystem, 160) || '不确定',
-          microtonal,
-          confidence,
-          alternatives: cleanList(parsed.alternatives, 4),
-          reason: normalizeIdentityText(parsed.reason, 600) || '音频证据不足，无法可靠判断。',
-        },
-      });
-    } catch (error) {
-      if (isGeminiUnsupportedLocationError(error)) {
-        return res.status(400).json({
-          error: '当前 Gemini 音频理解 API 所在地区不支持此请求。全球风格与调式需要真实听音分析，请切换到支持 Gemini API 的服务网络后重试。',
-        });
-      }
-      throw error;
-    }
-  }));
-
-  app.post('/api/ai/gemini/audio-design', asyncRoute(async (req, res) => {
+  app.post('/api/ai/audio-design', asyncRoute(async (req, res) => {
     const { files, requirements = '', target = {}, isInstrumental = true, scope } = req.body || {};
     if (!Array.isArray(files)) {
       return res.status(400).json({ error: 'files must be an array' });
@@ -4767,7 +4386,7 @@ async function startServer() {
   }));
 
   app.post(
-    '/api/ai/gemini/audio-design-video-keyframes',
+    '/api/ai/audio-design-video-keyframes',
     upload.single('video'),
     asyncRoute(async (req, res) => {
       if (!req.file) {
@@ -4800,7 +4419,7 @@ async function startServer() {
   );
 
   app.post(
-    '/api/ai/gemini/audio-design-video-preupload',
+    '/api/ai/audio-design-video-preupload',
     upload.single('video'),
     asyncRoute(async (req, res) => {
       if (!req.file) {
@@ -4809,9 +4428,6 @@ async function startServer() {
 
       const uploadedPath = path.resolve(req.file.path);
       const uploadsRoot = `${path.resolve(uploadsDir)}${path.sep}`;
-      let geminiAliasPath: string | undefined;
-      let optimizedVideoPath: string | undefined;
-      let uploadedVideo: any;
       let cacheStored = false;
 
       try {
@@ -4828,76 +4444,36 @@ async function startServer() {
           req.body?.originalName,
           req.file.originalname,
         );
-        const analysisVideo = await optimizeAudioDesignVideoForAnalysis(
-          uploadedPath,
-          req.file.mimetype,
-          originalDisplayName,
-        );
-        optimizedVideoPath = analysisVideo.cleanupPath;
-        const geminiUpload = await createGeminiUploadAlias(analysisVideo.videoPath, analysisVideo.mimeType);
-        geminiAliasPath = geminiUpload.aliasPath;
-        const aiClient = getGoogleAI();
-        uploadedVideo = await aiClient.files.upload({
-          file: geminiUpload.aliasPath,
-          config: {
-            mimeType: analysisVideo.mimeType,
-            displayName: geminiUpload.aliasName,
-          },
+        if (!isGptTextConfigured()) return res.status(503).json({ error: 'AI 文本/视觉网关尚未配置。' });
+        const duration = await getMediaDurationSeconds(uploadedPath).catch(() => 30);
+        const keyframes = await extractServerVideoKeyframes(req.file.filename, duration, {
+          frameCount: req.body?.shortVideo === 'true' ? 16 : 24,
         });
-
-        const processingDeadline = Date.now() + 120_000;
-        while (uploadedVideo.state === 'PROCESSING') {
-          if (Date.now() >= processingDeadline) {
-            throw Object.assign(new Error('Gemini 视频预处理超过 2 分钟，请稍后点击分析继续。'), { status: 504 });
-          }
-          await new Promise(resolve => setTimeout(resolve, 1_500));
-          if (!uploadedVideo.name) {
-            throw new Error('Gemini 未返回视频文件标识。');
-          }
-          uploadedVideo = await aiClient.files.get({ name: uploadedVideo.name });
-        }
-
-        if (uploadedVideo.state === 'FAILED') {
-          throw Object.assign(new Error(uploadedVideo.error?.message || 'Gemini 无法处理此视频编码。'), { status: 422 });
-        }
-        if (uploadedVideo.state !== 'ACTIVE' || !uploadedVideo.uri || !uploadedVideo.name) {
-          throw Object.assign(new Error('Gemini 视频文件未进入可分析状态。'), { status: 502 });
-        }
-
         const uploadId = randomUUID();
-        const mimeType = uploadedVideo.mimeType || analysisVideo.mimeType;
         const expiresAt = Date.now() + AUDIO_DESIGN_PREUPLOAD_TTL_MS;
         audioDesignVideoPreuploads.set(uploadId, {
           uploadId,
-          fileUri: uploadedVideo.uri,
-          mimeType,
-          displayName: analysisVideo.displayName,
-          geminiFileName: uploadedVideo.name,
+          localFileName: req.file.filename,
+          keyframes,
+          mimeType: req.file.mimetype,
+          displayName: originalDisplayName,
           expiresAt,
         });
         cacheStored = true;
-
         return res.json({
           uploadId,
-          displayName: analysisVideo.displayName,
-          mimeType,
+          displayName: originalDisplayName,
+          mimeType: req.file.mimetype,
           expiresAt,
-          optimized: analysisVideo.optimized,
+          optimized: false,
         });
       } finally {
-        await safeUnlink(geminiAliasPath);
-        await safeUnlink(optimizedVideoPath);
-        if (uploadedPath.startsWith(uploadsRoot)) await safeUnlink(uploadedPath);
-        if (uploadedVideo?.name && !cacheStored) {
-          await getGoogleAI().files.delete({ name: uploadedVideo.name }).catch((error) => {
-            console.warn('Failed to delete failed preuploaded Gemini video:', error);
-          });
-        }
+        if (uploadedPath.startsWith(uploadsRoot) && !cacheStored) await safeUnlink(uploadedPath);
       }
     }),
   );
 
-  app.post('/api/ai/gemini/audio-design-video-preuploaded', asyncRoute(async (req, res) => {
+  app.post('/api/ai/audio-design-video-preuploaded', asyncRoute(async (req, res) => {
     const {
       uploadId,
       requirements = '',
@@ -4916,7 +4492,7 @@ async function startServer() {
     }
     if (cachedVideo.expiresAt <= Date.now()) {
       audioDesignVideoPreuploads.delete(uploadId);
-      await deleteGeminiPreupload(cachedVideo);
+      await deleteVideoPreupload(cachedVideo);
       return res.status(410).json({ error: '预上传视频已过期，请重新选择视频后再分析。' });
     }
 
@@ -4934,19 +4510,20 @@ async function startServer() {
       return res.status(400).json({ error: '当前模式不支持完整视频预上传分析。' });
     }
 
-    const result = await analyzeAudioDesign([{
-      fileUri: cachedVideo.fileUri,
-      mimeType: cachedVideo.mimeType,
-      label: `完整视频：${cachedVideo.displayName}`,
-      videoMetadata: {
-        fps: target.avatar || target.gift ? 2 : 1,
-      },
-    }], String(requirements), target, Boolean(isInstrumental), { scope });
+    const result = await analyzeAudioDesignVideoWithKeyframes(
+      cachedVideo.localFileName,
+      cachedVideo.displayName,
+      String(requirements),
+      target,
+      Boolean(isInstrumental),
+      { scope },
+      cachedVideo.keyframes,
+    );
     return res.json(result);
   }));
 
   app.post(
-    '/api/ai/gemini/audio-design-video',
+    '/api/ai/audio-design-video',
     upload.single('video'),
     asyncRoute(async (req, res) => {
       if (!req.file) {
@@ -4955,8 +4532,6 @@ async function startServer() {
 
       const uploadedPath = path.resolve(req.file.path);
       const uploadsRoot = `${path.resolve(uploadsDir)}${path.sep}`;
-      let geminiAliasPath: string | undefined;
-      let optimizedVideoPath: string | undefined;
       try {
         if (!uploadedPath.startsWith(uploadsRoot)) {
           return res.status(400).json({ error: '视频临时路径无效。' });
@@ -4991,39 +4566,28 @@ async function startServer() {
           req.body?.originalName,
           req.file.originalname,
         );
-        const analysisVideo = await optimizeAudioDesignVideoForAnalysis(
-          uploadedPath,
-          req.file.mimetype,
+        const result = await analyzeAudioDesignVideoWithKeyframes(
+          req.file.filename,
           originalDisplayName,
-        );
-        optimizedVideoPath = analysisVideo.cleanupPath;
-        const geminiUpload = await createGeminiUploadAlias(analysisVideo.videoPath, analysisVideo.mimeType);
-        geminiAliasPath = geminiUpload.aliasPath;
-        const result = await analyzeAudioDesignVideoFile(
-          geminiUpload.aliasPath,
-          analysisVideo.mimeType,
-          analysisVideo.displayName,
           String(req.body?.requirements || ''),
           target,
           String(req.body?.isInstrumental) !== 'false',
-          rawScope,
+          { scope: rawScope },
         );
         return res.json(result);
       } finally {
-        await safeUnlink(geminiAliasPath);
-        await safeUnlink(optimizedVideoPath);
         if (uploadedPath.startsWith(uploadsRoot)) await safeUnlink(uploadedPath);
       }
     }),
   );
 
-  app.post('/api/ai/gemini/regenerate-lyrics', asyncRoute(async (req, res) => {
+  app.post('/api/ai/regenerate-lyrics', asyncRoute(async (req, res) => {
     const { originalLyrics = '', selectedPart = '', direction = '' } = req.body || {};
     const text = await regenerateLyrics(String(originalLyrics), String(selectedPart), String(direction));
     return res.json({ text });
   }));
 
-  app.post('/api/ai/gemini/generate-lyrics', asyncRoute(async (req, res) => {
+  app.post('/api/ai/generate-lyrics', asyncRoute(async (req, res) => {
     const style = String(req.body?.style || '').trim();
     if (!style) {
       return res.status(400).json({ error: '请先输入歌曲风格描述。' });
@@ -5035,7 +4599,7 @@ async function startServer() {
     return res.json({ text });
   }));
 
-  app.post('/api/ai/gemini/sfx-requirements', asyncRoute(async (req, res) => {
+  app.post('/api/ai/sfx-requirements', asyncRoute(async (req, res) => {
     const { inputText = '', screenshot = null, templateType, projectName = null, existingItems = [] } = req.body || {};
     const allowedTemplates = ['game_sfx_general', 'game_sfx_middleware', 'voiceover_general', 'voiceover_multilang'];
     if (!allowedTemplates.includes(templateType)) {
@@ -5063,7 +4627,7 @@ async function startServer() {
     return res.json(result);
   }));
 
-  app.post('/api/ai/gemini/batch-voice-image-ocr', asyncRoute(async (req, res) => {
+  app.post('/api/ai/batch-voice-image-ocr', asyncRoute(async (req, res) => {
     const image = req.body?.image;
     const mimeType = String(image?.mimeType || '').toLowerCase();
     const data = String(image?.data || '');
@@ -5081,7 +4645,7 @@ async function startServer() {
     return res.json({ text });
   }));
 
-  app.post('/api/ai/gemini/optimize-metadata', asyncRoute(async (req, res) => {
+  app.post('/api/ai/optimize-metadata', asyncRoute(async (req, res) => {
     const items = req.body?.items;
     if (!Array.isArray(items)) {
       return res.status(400).json({ error: 'items must be an array' });
@@ -5090,12 +4654,12 @@ async function startServer() {
     return res.json({ items: optimizedItems });
   }));
 
-  app.post('/api/ai/gemini/translate', asyncRoute(async (req, res) => {
+  app.post('/api/ai/translate', asyncRoute(async (req, res) => {
     const text = await translateToEnglish(String(req.body?.text || ''));
     return res.json({ text });
   }));
 
-  app.post('/api/ai/gemini/music-prompt', asyncRoute(async (req, res) => {
+  app.post('/api/ai/music-prompt', asyncRoute(async (req, res) => {
     const text = String(req.body?.text || '').trim();
     if (!text) return res.status(400).json({ error: '请先输入配乐风格与情感描述。' });
     if (text.length > 5000) return res.status(400).json({ error: '配乐描述过长，请精简后重试。' });
@@ -5105,7 +4669,7 @@ async function startServer() {
     return res.json({ text: rewritten });
   }));
 
-  app.post('/api/ai/gemini/translate-language', asyncRoute(async (req, res) => {
+  app.post('/api/ai/translate-language', asyncRoute(async (req, res) => {
     const text = await translateTextToLanguage(
       String(req.body?.text || ''),
       String(req.body?.targetLanguage || 'English'),
@@ -5121,7 +4685,7 @@ async function startServer() {
     return res.json({ text });
   }));
 
-  app.post(['/api/ai/gemini/voice-v4-enhance', '/api/ai/gemini/voice-v3-enhance'], asyncRoute(async (req, res) => {
+  app.post(['/api/ai/voice-v4-enhance', '/api/ai/voice-v3-enhance'], asyncRoute(async (req, res) => {
     const text = String(req.body?.text || '').trim();
     if (!text) return res.status(400).json({ error: '请先输入要增强的配音台词。' });
     if (text.length > 10_000) return res.status(400).json({ error: '配音台词过长，请控制在 10,000 字符以内。' });
@@ -5133,7 +4697,7 @@ async function startServer() {
     return res.json(result);
   }));
 
-  app.post('/api/ai/gemini/match-voice', asyncRoute(async (req, res) => {
+  app.post('/api/ai/match-voice', asyncRoute(async (req, res) => {
     const { description = '', gender, voices } = req.body || {};
     if ((gender !== 'male' && gender !== 'female') || !Array.isArray(voices)) {
       return res.status(400).json({ error: 'Invalid voice matching request' });
@@ -5161,7 +4725,6 @@ async function startServer() {
     let filePath = '';
     let mimeType = 'audio/wav';
     let acousticGender: Awaited<ReturnType<typeof estimateReferenceVoiceGender>> = { gender: 'unknown', confidence: 0, medianF0: 0 };
-    let audioBase64 = '';
     try {
       const resolvedAudio = resolveUploadedAudioUrlPath(audioUrl);
       filePath = resolvedAudio.filePath;
@@ -5176,7 +4739,6 @@ async function startServer() {
         candidateVoices: normalizedVoices.length,
       });
       acousticGender = await estimateReferenceVoiceGender(filePath);
-      audioBase64 = await fs.promises.readFile(filePath, { encoding: 'base64' });
     } catch (inputError) {
       console.warn('Similar voice matching input/audio analysis failed; using metadata fallback:', inputError);
       const fallbackRecommendations = localVoiceMatchFallback(normalizedVoices, fallbackGender, matchingKeywords);
@@ -5193,175 +4755,15 @@ async function startServer() {
       : acousticGender.confidence >= 0.6 && (acousticGender.gender === 'male' || acousticGender.gender === 'female')
         ? acousticGender.gender
         : 'unknown';
-    if (process.env.ENABLE_GEMINI_VOICE_MATCH !== 'true') {
-      const recommendations = localVoiceMatchFallback(normalizedVoices, stableDetectedGender, matchingKeywords);
-      return res.json({
-        sourceDescription: stableDetectedGender === 'unknown'
-          ? '已根据参考音频和声音库标签给出相近声音推荐。'
-          : `已根据参考音频的${stableDetectedGender === 'male' ? '男声' : '女声'}倾向、声音库标签和关键词给出相近声音推荐。`,
-        performancePrompt: '参考原始配音的语气、语速、停顿和情绪自然演绎。',
-        gender: stableDetectedGender,
-        recommendations,
-      });
-    }
-
-    const ai = getGoogleAI();
-    const preferredGenderInstruction = preferredGender === 'male'
-      ? '用户已指定参考音频为男声，请只推荐候选库中的 male 声音。'
-      : preferredGender === 'female'
-        ? '用户已指定参考音频为女声，请只推荐候选库中的 female 声音。'
-        : acousticGender.gender === 'female' && acousticGender.confidence >= 0.6
-          ? `系统基于参考音频基频估算为女声，置信度 ${Math.round(acousticGender.confidence * 100)}%，请优先按 female 推荐。`
-          : acousticGender.gender === 'male' && acousticGender.confidence >= 0.6
-            ? `系统基于参考音频基频估算为男声，置信度 ${Math.round(acousticGender.confidence * 100)}%，请优先按 male 推荐。`
-            : '用户未手动指定参考性别，请根据音频自动判断。';
-    const matchingKeywordsInstruction = matchingKeywords
-      ? `用户补充匹配关键词：${matchingKeywords}
-这些关键词表示希望匹配的角色气质、音色风格、年龄感、用途或表演方向。请在性别一致和参考音频相似的基础上优先考虑这些关键词；不要为了关键词忽略参考音频本身。`
-      : '用户没有补充匹配关键词，请主要根据参考音频本身匹配。';
-    const prompt = `
-你是专业配音导演。请先聆听用户提供的人声音频，判断它的性别倾向、年龄感、音色、能量、语速、停顿、情绪、语气、口音/语言特征和适合的配音用途。
-然后在给定 ElevenLabs 声音库中选择最相似、最适合替代该人声的 3-6 个声音。
-
-重要约束：
-${preferredGenderInstruction}
-${matchingKeywordsInstruction}
-- 只从候选声音库中选择，不要编造 voiceId。
-- 如果音频中有人声不清晰，也要基于可听到的部分给出保守推荐。
-- 性别一致是硬约束：如果参考音频明显是男声，只能推荐候选库里的 male 声音；如果明显是女声，只能推荐 female 声音；只有无法判断时才返回 unknown 并允许混合推荐。
-- score 为 0-100，表示相似程度和可替代程度。
-- reason 用中文，简短说明为什么推荐；如果使用了用户关键词，请说明与关键词的对应关系。
-- performancePrompt 用中文写给 AI 配音合成使用，只描述这段台词的表演方式，不要重复台词正文；重点包含语气、情绪、语速、停顿、口吻和能量，不超过 120 个中文字符。
-
-候选声音库 JSON：
-${JSON.stringify(normalizedVoices)}
-
-请只返回 JSON：
-{
-  "sourceDescription": "中文描述",
-  "performancePrompt": "中文配音表演提示词",
-  "gender": "male" | "female" | "unknown",
-  "recommendations": [
-    { "voiceId": "候选声音ID", "score": 88, "reason": "中文原因" }
-  ]
-}`;
-
-    try {
-      const response = await generateGeminiContent(ai, {
-        model: GEMINI_PRIMARY_MODEL,
-        contents: [{
-          parts: [
-            { inlineData: { data: audioBase64, mimeType } },
-            { text: prompt },
-          ],
-        }],
-        config: {
-          responseMimeType: 'application/json',
-          maxOutputTokens: 4096,
-          responseSchema: {
-            type: Type.OBJECT,
-            required: ['sourceDescription', 'performancePrompt', 'gender', 'recommendations'],
-            properties: {
-              sourceDescription: { type: Type.STRING },
-              performancePrompt: { type: Type.STRING },
-              gender: { type: Type.STRING },
-              recommendations: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  required: ['voiceId', 'score', 'reason'],
-                  properties: {
-                    voiceId: { type: Type.STRING },
-                    score: { type: Type.NUMBER },
-                    reason: { type: Type.STRING },
-                  },
-                },
-              },
-            },
-          },
-        },
-      });
-
-      const parsed = JSON.parse(String(response.text || '{}'));
-      const forcedGender = preferredGender === 'male' || preferredGender === 'female' ? preferredGender : '';
-      const acousticDetectedGender = acousticGender.confidence >= 0.6
-        && (acousticGender.gender === 'male' || acousticGender.gender === 'female')
-        ? acousticGender.gender
-        : '';
-      const aiDetectedGender = parsed.gender === 'male' || parsed.gender === 'female' ? parsed.gender : 'unknown';
-      const detectedGender = forcedGender || acousticDetectedGender || aiDetectedGender;
-      const validVoiceIds = new Set(normalizedVoices.map(voice => voice.id));
-      const voiceById = new Map(normalizedVoices.map(voice => [voice.id, voice]));
-      const seenVoiceIds = new Set<string>();
-      let recommendations = Array.isArray(parsed.recommendations)
-        ? parsed.recommendations
-          .map((item: any) => ({
-            voiceId: String(item?.voiceId || '').trim(),
-            score: parseNumber(item?.score, 70, 0, 100),
-            reason: String(item?.reason || '音色、语气和用途接近。').slice(0, 160),
-          }))
-          .filter((item: any) => {
-            if (!validVoiceIds.has(item.voiceId) || seenVoiceIds.has(item.voiceId)) return false;
-            seenVoiceIds.add(item.voiceId);
-            return true;
-          })
-          .sort((left: any, right: any) => right.score - left.score)
-          .slice(0, 6)
-        : [];
-
-      if (detectedGender !== 'unknown') {
-        const genderMatchedRecommendations = recommendations.filter((item: any) => (
-          voiceById.get(item.voiceId)?.gender === detectedGender
-        ));
-        const genderMatchedCandidateCount = normalizedVoices.filter(voice => voice.gender === detectedGender).length;
-        if (genderMatchedRecommendations.length > 0) {
-          recommendations = genderMatchedRecommendations.slice(0, 6);
-        } else if (genderMatchedCandidateCount > 0) {
-          recommendations = localVoiceMatchFallback(normalizedVoices, detectedGender, matchingKeywords);
-        }
-      }
-
-      if (recommendations.length === 0) {
-        recommendations = localVoiceMatchFallback(normalizedVoices, detectedGender, matchingKeywords);
-      }
-
-      console.info('[similar-voice-match] recommendations ready', {
-        preferredGender: forcedGender || 'auto',
-        acousticGender,
-        aiGender: aiDetectedGender,
-        finalGender: detectedGender,
-        recommendations: recommendations.map((item: any) => ({
-          voiceId: item.voiceId,
-          score: item.score,
-          gender: voiceById.get(item.voiceId)?.gender || 'unknown',
-        })),
-      });
-
-      return res.json({
-        sourceDescription: String(parsed.sourceDescription || '已根据拆分人声音频提取音色特征。').slice(0, 300),
-        performancePrompt: String(parsed.performancePrompt || parsed.sourceDescription || '匹配当前选中音频片段的原始语气、语速、停顿和情绪。').slice(0, 180),
-        gender: detectedGender,
-        recommendations,
-      });
-    } catch (error) {
-      console.warn('Gemini similar voice matching failed; using local metadata fallback:', error);
-      const fallbackGender = preferredGender === 'male' || preferredGender === 'female' ? preferredGender : 'unknown';
-      const fallbackRecommendations = localVoiceMatchFallback(normalizedVoices, fallbackGender, matchingKeywords);
-      console.info('[similar-voice-match] fallback recommendations ready', {
-        preferredGender: fallbackGender,
-        recommendations: fallbackRecommendations.map((item: any) => ({
-          voiceId: item.voiceId,
-          score: item.score,
-          gender: normalizedVoices.find(voice => voice.id === item.voiceId)?.gender || 'unknown',
-        })),
-      });
-      return res.json({
-        sourceDescription: 'AI听辨暂时不可用，已根据声音库标签给出保守推荐。',
-        performancePrompt: '参考当前选中音频片段的原始语气、语速、停顿和情绪自然演绎。',
-        gender: fallbackGender,
-        recommendations: fallbackRecommendations,
-      });
-    }
+    const recommendations = localVoiceMatchFallback(normalizedVoices, stableDetectedGender, matchingKeywords);
+    return res.json({
+      sourceDescription: stableDetectedGender === "unknown"
+        ? "已根据参考音频和声音库标签给出相近声音推荐。"
+        : `已根据参考音频的${stableDetectedGender === "male" ? "男声" : "女声"}倾向、声音库标签和关键词给出相近声音推荐。`,
+      performancePrompt: "参考原始配音的语气、语速、停顿和情绪自然演绎。",
+      gender: stableDetectedGender,
+      recommendations,
+    });
   }));
 
   app.post('/api/video/extract-audio-clip', asyncRoute(async (req, res) => {
@@ -7511,9 +6913,7 @@ ${JSON.stringify(normalizedVoices)}
       });
     }
 
-    const warning = isGeminiUnsupportedLocationError(reason)
-      ? '当前 Gemini API 地区不可用，系统已自动改用本地兜底分析；配乐/音效会生成基础时间线，字幕配音需要可用的视觉 AI 服务后再精确识别。'
-      : 'AI 画面分析暂时不可用，系统已自动改用本地兜底分析；你可以先继续手动调整时间线，稍后再重试 AI 分析。';
+    const warning = 'AI 画面分析暂时不可用，系统已自动改用本地兜底分析；你可以先继续手动调整时间线，稍后再重试 AI 分析。';
 
     return {
       clips,
@@ -7527,8 +6927,6 @@ ${JSON.stringify(normalizedVoices)}
 
   // 7. Video AI Multi-modal Analysis
   app.post('/api/video/analyze', async (req, res) => {
-    let ai: ReturnType<typeof getGoogleAI> | undefined;
-    let temporaryGeminiFileName: string | undefined;
     try {
       const {
         fileName,
@@ -7538,6 +6936,7 @@ ${JSON.stringify(normalizedVoices)}
         sfxEnabled: requestedSfxEnabled,
         dubbingEnabled: requestedDubbingEnabled,
         analysisTrack,
+        requirements: userRequirements,
       } = req.body;
 
       // A track re-analysis must use the same analyzer as the full workflow,
@@ -7557,15 +6956,13 @@ ${JSON.stringify(normalizedVoices)}
         ? Boolean(requestedDubbingEnabled)
         : scopedAnalysisTrack === 'dubbing';
       
-      const aiClient = getGoogleAI();
-      ai = aiClient;
-      
       const prompt = `你是一个顶级的多模态AI视频音效与配乐设计师。
-请分析提供的信息（包含视频文件或关键帧画面序列、时间点），并针对此视频生成一份极其精确的“音效、配乐和配音时间轴清单 (JSON格式)”。
+用户的制作要求（按此约束风格、场景、配器和时间点）：${String(userRequirements || '').slice(0, 30000)}
+请仅依据提供的关键帧画面及时间点，为视频生成“音效、配乐和配音时间轴清单 (JSON格式)”。不要声称听过原音轨或看过帧间画面。
 请提供以下轨道的元素（你可以根据视频画面的时间长度和事件，智能规划最合适的开始时间 startTime 和时长 duration，单位为秒）：
 ${bgmEnabled ? '1. 背景音乐轨 (bgm): 通常是一段大气合适的 background music，覆盖视频主要时间。' : ''}
 ${sfxEnabled ? '2. 音效轨 (sfx): 根据视频中的关键动势、场景变化或特效出现，生成对应的短音效。' : ''}
-${dubbingEnabled ? '3. 配音轨 (dubbing): 逐帧识别视频中的字幕变化、说话人和嘴部活动，并将密集连续对白整理为较长的自然配音片段。' : ''}
+${dubbingEnabled ? '3. 配音轨 (dubbing): 仅识别关键帧中可见的字幕，保守估算时间；不可推断帧间缺失的对白或精确口型。' : ''}
 
 ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这里只规划台词与时间，不要为单个片段推荐或返回 voiceId。
 配音时间轴必须遵守以下规则：
@@ -7580,15 +6977,11 @@ ${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这
 - lipSyncConfidence 为 0 到 1；timingSource 只能说明依据，例如 "subtitle+lip"、"subtitle"、"speech+subtitle" 或 "visual-estimate"。
 - 保留视频中每一条可辨识字幕，不限制为少数重点片段。合并后整组台词会按组内第一句到最后一句的区间统一调整语速并对齐视频。
 
-CRITICAL SUBTITLE OCR PASS:
-- First scan the entire video chronologically for on-screen subtitles, captions, speech bubbles, lyrics, and dialogue text.
-- Every distinct visible subtitle/caption text MUST be preserved in chronological order, even if it is very short, appears only once, or is not visually important.
-- Do not summarize or skip "minor" captions. Merge dense adjacent captions from the same speaker into one continuous dubbing clip using the grouping limits above.
-- If one subtitle is split across two visual lines, combine both lines into the same text field in natural reading order.
-- If multiple subtitle areas are visible at the same time, return separate clips only when they represent different spoken lines; otherwise combine the lines for the same speaker.
-- Use best-effort OCR for partially occluded or stylized text, but keep the original language and punctuation as close as possible.
-- subtitleStartTime is when the exact visible text first appears. subtitleEndTime is when that exact text disappears or changes to the next text.
-- For dubbing clips, coverage is more important than being concise: return all readable subtitle changes, not just key moments.` : ''}
+KEYFRAME-ONLY SUBTITLE OCR:
+- Only transcribe text visibly present in the supplied frames. Never invent missing lines between frames.
+- Keep visible text in chronological order and preserve its original language.
+- Timestamp boundaries are estimates based on frame timestamps, not exact subtitle transitions.
+- Do not claim to have heard speech or measured lip motion from sparse frames.` : ''}
 
 返回的 JSON 必须包含一个 \`clips\` 数组，每项符合以下定义：
 {
@@ -7622,108 +7015,12 @@ CRITICAL SUBTITLE OCR PASS:
       const contents: any[] = [prompt];
 
       let analysisKeyframes: Array<{ timestamp: number; base64: string }> = [];
-      let analysisSource: 'client-keyframes' | 'server-ffmpeg' | 'server-native-video' | 'local-fallback' = 'client-keyframes';
-      let nativeVideoFps: number | undefined;
-      let dubbingAnalysisUnavailable = false;
-
-      const prepareNativeVideoAnalysis = async (fps: number, reason: string) => {
-        if (!fileName) {
-          throw Object.assign(
-            new Error('精确配音分析需要服务器上的完整视频，请等待上传完成后重试。'),
-            { status: 422 },
-          );
-        }
-
-        // Validate the local path before any third-party upload. Invalid,
-        // missing, or oversized files therefore never reach Gemini Files API.
-        const validatedVideo = await resolveValidatedUploadedVideo(fileName);
-        console.log(`${reason} Uploading ${validatedVideo.displayName} for native video analysis at ${fps} FPS.`);
-
-        const geminiUpload = await createGeminiUploadAlias(
-          validatedVideo.videoPath,
-          validatedVideo.mimeType,
-        );
-        let uploadedVideo: any;
-        try {
-          uploadedVideo = await aiClient.files.upload({
-            file: geminiUpload.aliasPath,
-            config: {
-              mimeType: validatedVideo.mimeType,
-              displayName: geminiUpload.aliasName,
-            },
-          });
-        } finally {
-          await safeUnlink(geminiUpload.aliasPath);
-        }
-        temporaryGeminiFileName = uploadedVideo.name;
-
-        const processingDeadline = Date.now() + 120_000;
-        while (uploadedVideo.state === 'PROCESSING') {
-          if (Date.now() >= processingDeadline) {
-            throw Object.assign(new Error('Gemini 视频预处理超过 2 分钟，请稍后重试。'), { status: 504 });
-          }
-          await new Promise(resolve => setTimeout(resolve, 1_500));
-          if (!uploadedVideo.name) {
-            throw new Error('Gemini 未返回视频文件标识。');
-          }
-          uploadedVideo = await aiClient.files.get({ name: uploadedVideo.name });
-          temporaryGeminiFileName = uploadedVideo.name || temporaryGeminiFileName;
-        }
-
-        if (uploadedVideo.state === 'FAILED') {
-          throw Object.assign(
-            new Error(uploadedVideo.error?.message || 'Gemini 无法处理此视频编码。'),
-            { status: 422 },
-          );
-        }
-        if (uploadedVideo.state !== 'ACTIVE' || !uploadedVideo.uri) {
-          throw Object.assign(new Error('Gemini 视频文件未进入可分析状态。'), { status: 502 });
-        }
-
-        contents.length = 0;
-        contents.push({
-          fileData: {
-            fileUri: uploadedVideo.uri,
-            mimeType: uploadedVideo.mimeType || validatedVideo.mimeType,
-          },
-          videoMetadata: { fps },
-        });
-        contents.push({ text: prompt });
-        nativeVideoFps = fps;
-        analysisSource = 'server-native-video';
-      };
+      let analysisSource: 'client-keyframes' | 'server-ffmpeg' | 'local-fallback' = 'client-keyframes';
 
       if (dubbingEnabled) {
-        // Sparse keyframes cannot reveal subtitle boundaries or mouth motion.
-        // Dubbing analysis therefore always uses the complete uploaded video.
-        try {
-          await prepareNativeVideoAnalysis(8, 'Dubbing is enabled;');
-        } catch (nativeVideoError) {
-          const canUseVisualGatewayFallback = isGptTextConfigured();
-          if (!canUseVisualGatewayFallback && !bgmEnabled && !sfxEnabled) {
-            if (isGeminiUnsupportedLocationError(nativeVideoError)) {
-              return res.json(buildLocalVideoAnalysisFallback({
-                videoDuration,
-                bgmEnabled: Boolean(bgmEnabled),
-                sfxEnabled: Boolean(sfxEnabled),
-                dubbingEnabled: Boolean(dubbingEnabled),
-                reason: nativeVideoError,
-              }));
-            }
-            throw nativeVideoError;
-          }
-          dubbingAnalysisUnavailable = !canUseVisualGatewayFallback;
-          console.warn(
-            'Native video analysis failed; falling back to dense server keyframes through the configured visual gateway:',
-            nativeVideoError,
-          );
-          analysisKeyframes = await extractServerVideoKeyframes(
-            fileName,
-            videoDuration,
-            { dense: canUseVisualGatewayFallback },
-          );
-          analysisSource = 'server-ffmpeg';
-        }
+        if (!fileName) return res.status(422).json({ error: "字幕配音分析需要服务器上的视频，请等待上传完成后重试。" });
+        analysisKeyframes = await extractServerVideoKeyframes(fileName, videoDuration, { dense: true });
+        analysisSource = "server-ffmpeg";
       } else if (Array.isArray(keyframes) && keyframes.length > 0) {
         if (keyframes.length > 8) {
           return res.status(400).json({ error: '关键帧数量过多，请重新分析。' });
@@ -7748,40 +7045,21 @@ CRITICAL SUBTITLE OCR PASS:
           return res.status(422).json({ error: '未收到视频关键帧，请重新选择视频后再分析。' });
         }
         console.log(`Client keyframe extraction unavailable; using safe FFmpeg fallback for ${fileName}.`);
-        try {
-          analysisKeyframes = await extractServerVideoKeyframes(fileName, videoDuration);
-          analysisSource = 'server-ffmpeg';
-        } catch (ffmpegError: any) {
-          const ffmpegStatus = Number(ffmpegError?.status);
-          if (![422, 503, 504].includes(ffmpegStatus)) throw ffmpegError;
-          await prepareNativeVideoAnalysis(
-            1,
-            `FFmpeg fallback unavailable (${ffmpegStatus});`,
-          );
-        }
+        analysisKeyframes = await extractServerVideoKeyframes(fileName, videoDuration);
+        analysisSource = 'server-ffmpeg';
       }
 
-      if (nativeVideoFps !== undefined) {
-        console.log(`Analyzing complete uploaded video with native visual and audio understanding (${nativeVideoFps} FPS).`);
-      } else {
-        console.log(`Analyzing video using ${analysisKeyframes.length} compact keyframes (${analysisSource}).`);
-        contents.push({ text: "\n下面是视频不同时间点的关键帧，请结合对应时间规划音轨：\n" });
-        for (const frame of analysisKeyframes) {
-          contents.push({ text: `\n[视频时间轴位置: ${frame.timestamp} 秒]` });
-          contents.push({
-            inlineData: {
-              data: frame.base64,
-              mimeType: 'image/jpeg',
-            },
-          });
-        }
+      console.log(`Analyzing video using ${analysisKeyframes.length} compact keyframes (${analysisSource}).`);
+      contents.push({ text: "\n下面是视频不同时间点的关键帧，请结合对应时间规划音轨：\n" });
+      for (const frame of analysisKeyframes) {
+        contents.push({ text: `\n[视频时间轴位置: ${frame.timestamp} 秒]` });
+        contents.push({ inlineData: { data: frame.base64, mimeType: 'image/jpeg' } });
       }
 
-      console.log(`Sending content generation request to Gemini (models/${GEMINI_PRIMARY_MODEL})...`);
-      let response: Awaited<ReturnType<typeof generateGeminiContent>>;
+      console.log('Sending keyframe analysis to the configured visual gateway...');
+      let response: Awaited<ReturnType<typeof generateAiContent>>;
       try {
-        response = await generateGeminiContent(ai, {
-          model: GEMINI_PRIMARY_MODEL,
+        response = await generateAiContent({
           contents,
           config: {
             responseMimeType: "application/json",
@@ -7819,16 +7097,10 @@ CRITICAL SUBTITLE OCR PASS:
           }
         });
       } catch (contentGenerationError) {
-        if (isGeminiUnsupportedLocationError(contentGenerationError)) {
-          return res.json(buildLocalVideoAnalysisFallback({
-            videoDuration,
-            bgmEnabled: Boolean(bgmEnabled),
-            sfxEnabled: Boolean(sfxEnabled),
-            dubbingEnabled: Boolean(dubbingEnabled),
-            reason: contentGenerationError,
-          }));
-        }
-        throw contentGenerationError;
+        return res.json(buildLocalVideoAnalysisFallback({
+          videoDuration, bgmEnabled: Boolean(bgmEnabled), sfxEnabled: Boolean(sfxEnabled),
+          dubbingEnabled: Boolean(dubbingEnabled), reason: contentGenerationError,
+        }));
       }
 
       if (!response.text) {
@@ -8071,19 +7343,17 @@ CRITICAL SUBTITLE OCR PASS:
       return res.json({
         clips: normalizedClips,
         analysisSource,
-        analysisPartial,
+        analysisPartial: analysisPartial || dubbingEnabled,
         dubbingCueCount,
         dubbingSourceCueCount,
-        dubbingStatus: dubbingEnabled
-          ? dubbingAnalysisUnavailable ? 'unavailable' : dubbingCueCount > 0 ? 'detected' : 'none-detected'
-          : 'disabled',
+        dubbingStatus: dubbingEnabled ? dubbingCueCount > 0 ? 'estimated' : 'unavailable' : 'disabled',
+        warning: dubbingEnabled
+          ? '配音时间码仅依据视频关键帧估算，无法验证原音轨或精确口型；合成前请逐条核对字幕和起止时间。'
+          : undefined,
       });
       
     } catch (err: any) {
       console.error('Error analyzing video:', err);
-      // The Gemini SDK may wrap the provider payload in Error.message. Unwrap it
-      // here as this route has its own response handler and bypasses the global
-      // API error middleware.
       let providerMessage = String(err?.message || '');
       try {
         const parsed = JSON.parse(providerMessage) as { error?: { message?: unknown } };
@@ -8092,21 +7362,10 @@ CRITICAL SUBTITLE OCR PASS:
       } catch {
         // Keep the original message when it is not JSON.
       }
-      const clientError = isGeminiUnsupportedLocationError(providerMessage)
-        ? Object.assign(
-          new Error('当前 Gemini API 所在地区不支持视频分析，请切换到支持 Gemini API 的网络地区，或配置可用的视觉模型网关后重试。'),
-          { status: 503 },
-        )
-        : Object.assign(err, { message: providerMessage });
+      const clientError = Object.assign(err, { message: providerMessage });
       return res.status(clientError.status || 500).json({
         error: clientError.message || '视频分析暂时失败，请稍后重试。',
       });
-    } finally {
-      if (ai && temporaryGeminiFileName) {
-        await ai.files.delete({ name: temporaryGeminiFileName }).catch((deleteError) => {
-          console.warn('Failed to delete temporary Gemini video file:', deleteError);
-        });
-      }
     }
   });
 
@@ -8429,8 +7688,13 @@ CRITICAL SUBTITLE OCR PASS:
     }
   }));
 
+  app.get('/api/video/audio-info', asyncRoute(async (req, res) => {
+    const { videoPath } = await resolveValidatedUploadedVideo(req.query.videoFileName);
+    res.json({ hasAudio: await detectMediaAudioStream(FFMPEG_BINARY, videoPath) });
+  }));
+
   // 9. Mix Video with Audio Timeline Clips using FFmpeg
-  app.post('/api/video/mix', (req, res) => {
+  app.post('/api/video/mix', async (req, res) => {
     try {
       const {
         videoFileName,
@@ -8455,7 +7719,7 @@ CRITICAL SUBTITLE OCR PASS:
 
       const requestedClips = Array.isArray(clips) ? clips : [];
       const targetClips = requestedClips.filter((clip: any) => !clip?.muted);
-      const validClips = targetClips.filter((clip: any) => {
+      let validClips = targetClips.filter((clip: any) => {
         if (!clip.audioUrl || typeof clip.audioUrl !== 'string') return false;
         const clipPath = path.join(uploadsDir, path.basename(clip.audioUrl));
         return fs.existsSync(clipPath);
@@ -8495,6 +7759,10 @@ CRITICAL SUBTITLE OCR PASS:
         });
       }
 
+      const mixInputs = await resolveVideoMixAudioInputs(uploadsDir, inputVideoPath, validClips,
+        filePath => detectMediaAudioStream(FFMPEG_BINARY, filePath), requestedOriginalAudio);
+      validClips = mixInputs.clips;
+
       // Generate a unique output file name
       const sourceExt = path.extname(safeVideoFileName);
       const base = path.basename(safeVideoFileName, sourceExt);
@@ -8503,18 +7771,18 @@ CRITICAL SUBTITLE OCR PASS:
 
       const finishWithFfmpeg = (args: string[]) => {
         console.log('Running FFmpeg with argument count:', args.length);
-        execFile(FFMPEG_BINARY, args, (err, stdout, stderr) => {
+        execFile(FFMPEG_BINARY, args, { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
           if (err) {
             console.error('FFmpeg execution failed:', err, stderr);
             const ffmpegUnavailable = /ffmpeg.*(?:not recognized|not found)|ENOENT/i.test(`${err.message}\n${stderr}`);
             return res.status(ffmpegUnavailable ? 503 : 500).json({
               error: ffmpegUnavailable
                 ? '当前服务器尚未安装 FFmpeg，暂时无法生成新的混音视频。'
-                : `FFmpeg mixing failed: ${err.message}.`,
+                : `视频混音失败：${String(stderr || err.message).trim().split(/\r?\n/).slice(-8).join('\n')}`,
             });
           }
           console.log('FFmpeg mixed video successfully created:', outputFileName);
-          return res.json({ videoUrl: `/uploads/${outputFileName}` });
+          return res.json({ videoUrl: `/uploads/${outputFileName}`, skippedOriginalClipIds: mixInputs.skippedOriginalClipIds });
         });
       };
 
@@ -8600,35 +7868,11 @@ CRITICAL SUBTITLE OCR PASS:
         ]);
       };
 
-      if (!requestedOriginalAudio) {
-        mixWithDetectedSource(false);
-        return;
-      }
-
-      execFile(
-        'ffprobe',
-        ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=index', '-of', 'csv=p=0', inputVideoPath],
-        (probeError, stdout, stderr) => {
-          if (probeError) {
-            console.error('FFprobe failed while checking original audio:', probeError, stderr);
-            return res.status(503).json({
-              code: 'MEDIA_PROBE_FAILED',
-              error: '服务器暂时无法检测视频原声，请确认已安装 FFmpeg/FFprobe 后重试。',
-            });
-          }
-          if (stdout.trim().length === 0) {
-            return res.status(422).json({
-              code: 'ORIGINAL_AUDIO_NOT_FOUND',
-              error: '源视频没有可保留的原声音轨，请关闭视频原声后再导出。',
-            });
-          }
-          mixWithDetectedSource(true);
-        },
-      );
+      mixWithDetectedSource(mixInputs.useOriginalAudio);
 
     } catch (err: any) {
       console.error('Error in video mixing:', err);
-      return res.status(500).json({ error: err.message });
+      return res.status(Number(err.status) || 500).json({ error: err.message, code: err.code });
     }
   });
 
@@ -8923,8 +8167,7 @@ CRITICAL SUBTITLE OCR PASS:
       || err?.status === 413
       || err?.statusCode === 413;
     const rawMessage = String(err?.message || '');
-    // Google SDK errors can arrive as a JSON string nested inside Error.message.
-    // Unwrap that payload so the client receives an actionable message.
+    // Gateways may return a JSON error string; expose its useful message.
     let providerMessage = rawMessage;
     try {
       const parsed = JSON.parse(rawMessage) as { error?: { message?: unknown } };
@@ -8933,27 +8176,21 @@ CRITICAL SUBTITLE OCR PASS:
     } catch {
       // Keep the original message when it is not JSON.
     }
-    const isUnsupportedGeminiLocation = isGeminiUnsupportedLocationError(providerMessage);
-    const normalizedMessage = isUnsupportedGeminiLocation
-      ? '当前 Gemini API 所在地区不支持视频分析，请切换到支持 Gemini API 的网络地区，或配置可用的视觉模型网关后重试。'
-      : providerMessage;
-    const status = isPayloadTooLarge
-      ? 413
-      : isUnsupportedGeminiLocation
-        ? 503
-        : err?.status || err?.statusCode || 500;
+    const status = isPayloadTooLarge ? 413 : err?.status || err?.statusCode || 500;
     const isJsonTruncationError = /Unterminated string in JSON|Unexpected end of JSON input|JSON at position/i.test(rawMessage);
     return res.status(status).json({
       error: isPayloadTooLarge
         ? '上传内容超过 100MB 限制。'
         : isJsonTruncationError
           ? 'AI 返回结果过长或被截断，请缩短素材、减少字幕密度，或分段生成后重试。'
-        : normalizedMessage || 'Internal Server Error'
+        : providerMessage || 'Internal Server Error'
     });
   });
 
   // --- Vite & SPA integration ---
-  if (process.env.NODE_ENV !== "production") {
+  // Compiled `npm start` is stable by default; source `npm run dev` keeps HMR.
+  const sourceDevelopment = /server\.ts$/.test(process.argv[1] || '');
+  if (process.env.NODE_ENV !== 'production' && (sourceDevelopment || process.env.NODE_ENV === 'development')) {
     console.log("Starting server in DEVELOPMENT mode with Vite proxy...");
     const vite = await createViteServer({
       server: { 

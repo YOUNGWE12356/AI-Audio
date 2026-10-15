@@ -18,12 +18,12 @@ import {
   regenerateLyrics,
   translateTextToLanguage,
   translateToEnglish,
-} from './services/geminiService';
+} from './services/aiService';
 import { generateSoundEffect, generateMusic, generateVoice } from './services/elevenLabsService';
 import { FileItem, HistoryItem, TabType } from './types';
 import { ELEVENLABS_VOICES, VoiceItem } from './data/voices';
 import { fetchPlatformHealth } from './services/platformService';
-import { prepareFilesForGemini } from './utils/mediaPreparation';
+import { isAudioFile, isPdfFile, prepareFilesForAnalysis } from './utils/mediaPreparation';
 import { loadPersistentHistory, persistHistory } from './services/historyStorage';
 import { readRecentVoiceIds } from './utils/recentVoices';
 
@@ -72,6 +72,8 @@ const SfxLibrary = lazy(() => import('./components/SfxLibrary'));
 const SfxRequirements = lazy(() => import('./components/SfxRequirements'));
 const VideoSoundtrack = lazy(() => import('./components/VideoSoundtrack'));
 import GlobalAssistant, { AssistantAudioRequest, AssistantDirectorRequest, AssistantLibraryRequest, AssistantMusicRequest, AssistantRequirementsRequest, AssistantSfxRequest, AssistantVideoRequest, AssistantVoiceRequest } from './components/GlobalAssistant';
+import { setAssistantWorkspaceNavigator } from './services/assistantWorkspaceClient';
+import { readWorkspaceTab, WORKSPACE_TAB_KEY } from './utils/workspaceNavigation';
 
 function WorkspaceLoading() {
   return (
@@ -85,8 +87,10 @@ function WorkspaceLoading() {
 }
 
 export default function App() {
-  const [currentTab, setCurrentTab] = useState<TabType>('workbench');
-  const [visitedTabs, setVisitedTabs] = useState<Set<TabType>>(() => new Set(['workbench']));
+  const [currentTab, setCurrentTab] = useState<TabType>(() => readWorkspaceTab(sessionStorage));
+  useEffect(() => { try { sessionStorage.setItem(WORKSPACE_TAB_KEY, currentTab); } catch {} }, [currentTab]);
+  useEffect(() => setAssistantWorkspaceNavigator(setCurrentTab), []);
+  const [visitedTabs, setVisitedTabs] = useState<Set<TabType>>(() => new Set(['workbench', currentTab]));
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   const [assistantAudioRequest, setAssistantAudioRequest] = useState<AssistantAudioRequest | null>(null);
   const [assistantVideoRequest, setAssistantVideoRequest] = useState<AssistantVideoRequest | null>(null);
@@ -110,7 +114,6 @@ export default function App() {
   
   // The HTML5 client only reads service availability from the same-origin API.
   // Secret values remain on the server and are never embedded into the bundle.
-  const [hasGeminiKey, setHasGeminiKey] = useState(false);
   const [hasAiTextModel, setHasAiTextModel] = useState(false);
   const [hasElevenLabsKey, setHasElevenLabsKey] = useState(false);
   const elevenLabsQualityMode = 'pro' as const;
@@ -119,12 +122,10 @@ export default function App() {
   const handleKeysUpdated = () => {
     fetchPlatformHealth()
       .then((health) => {
-        setHasGeminiKey(health.services.gemini);
-        setHasAiTextModel(health.services.aiText ?? health.services.gptText ?? health.services.gemini);
+        setHasAiTextModel(health.services.aiText ?? health.services.gptText);
         setHasElevenLabsKey(health.services.elevenLabs);
       })
       .catch(() => {
-        setHasGeminiKey(false);
         setHasAiTextModel(false);
         setHasElevenLabsKey(false);
       });
@@ -432,10 +433,9 @@ export default function App() {
       }
     });
 
-    // Full-video preupload is only useful for professional video paths.
-    // Quick/game analysis intentionally uses local keyframes, so uploading the
-    // original video there would add latency without improving the result.
-    if (!hasGeminiKey || !(target.video || target.avatar || target.gift || target.activity)) {
+    // Start server-side frame extraction while the user prepares the request.
+    // Quick/game analysis already uses local keyframes.
+    if (!hasAiTextModel || !(target.video || target.avatar || target.gift || target.activity)) {
       preuploadAbortControllersRef.current.forEach(controller => controller.abort('not-professional'));
       preuploadAbortControllersRef.current.clear();
       preuploadPromisesRef.current.clear();
@@ -464,13 +464,12 @@ export default function App() {
       updatePreuploadState(item.id, {
         status: 'uploading',
         progress: 0,
-        message: item.file.size > 50 * 1024 * 1024
-          ? '视频超过 50MB，后台会先生成分析压缩版...'
-          : '正在后台预上传视频...',
+        message: '正在后台上传并准备视频画面...',
       });
 
       const preuploadPromise = preuploadAudioDesignVideo(item.file, {
         signal: controller.signal,
+        shortVideo: Boolean(target.avatar || target.gift),
         onProgress: (progress, message) => {
           updatePreuploadState(item.id, {
             status: progress >= 96 ? 'processing' : 'uploading',
@@ -485,8 +484,8 @@ export default function App() {
             progress: 100,
             uploadId: upload.uploadId,
             message: upload.optimized
-              ? '大视频已压缩为分析版并预上传，点击分析会更快。'
-              : '视频已预上传，点击分析会更快。',
+              ? '视频分析副本已准备好。'
+              : '视频分析画面已准备好。',
           });
         })
         .catch((error) => {
@@ -496,9 +495,7 @@ export default function App() {
             status: 'error',
             progress: 0,
             error: detail,
-            message: detail.includes('Gemini API 所在地区不支持')
-              ? 'Gemini API 当前地区不支持视频分析，点击分析仍会尝试原流程。'
-              : '预上传失败，点击分析时会尝试原流程。',
+            message: '预上传失败，点击分析时会尝试直接提取关键帧。',
           });
         })
         .finally(() => {
@@ -507,7 +504,7 @@ export default function App() {
 
       preuploadPromisesRef.current.set(item.id, preuploadPromise);
     });
-  }, [files, hasGeminiKey, target.video, target.avatar, target.gift, target.activity]);
+  }, [files, hasAiTextModel, target.video, target.avatar, target.gift, target.activity]);
 
   useEffect(() => {
     return () => {
@@ -892,7 +889,7 @@ export default function App() {
         usedPromptRewrite = generationPrompt !== prompt;
       } catch (rewriteError) {
         console.error('Music prompt auto-rewrite failed:', rewriteError);
-        throw new Error('自动改写音乐提示词失败，请检查 Gemini 配置后重试，或先手动输入英文音乐提示词。');
+        throw new Error('自动改写音乐提示词失败，请检查 AI 网关后重试，或先手动输入英文音乐提示词。');
       }
 
       const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 16);
@@ -978,8 +975,18 @@ export default function App() {
       return;
     }
 
-    if (!hasGeminiKey) {
-      setError('GEMINI_API_KEY 未配置，请前往设置页面添加。');
+    if (!hasAiTextModel) {
+      setError('AI 文本/视觉模型未配置，请在服务端配置 GPT 网关。');
+      return;
+    }
+
+    if (files.some(item => isAudioFile(item.file))) {
+      setError('暂不支持音频分析，请上传图片或视频。');
+      return;
+    }
+
+    if (files.some(item => isPdfFile(item.file))) {
+      setError('暂不支持 PDF 分析，请上传图片或视频。');
       return;
     }
 
@@ -988,7 +995,7 @@ export default function App() {
     const wantsProfessionalVideo = Boolean(target.video || target.avatar || target.gift || target.activity);
     const needsProfessionalVideoAnalysis = wantsProfessionalVideo && Boolean(scope.sfx);
     if (needsProfessionalVideoAnalysis && videoFiles.length > 0 && (videoFiles.length !== 1 || files.length !== 1)) {
-      setError('影视/广告、Avatar、礼物与活动的完整视频音效分析一次只能单独使用 1 个视频。请移除其他视频、图片、音频或 PDF；如需综合多份素材或只分析音乐，请关闭音效后使用快速分析。');
+      setError('影视/广告、Avatar、礼物与活动的完整视频音效分析一次只能单独使用 1 个视频。请移除其他视频或图片；如需综合多份素材或只分析音乐，请关闭音效后使用快速分析。');
       return;
     }
 
@@ -1006,14 +1013,6 @@ export default function App() {
         if (latestBeforeWait.preupload?.status === 'ready' && latestBeforeWait.preupload.uploadId) {
           return latestBeforeWait.preupload.uploadId;
         }
-
-        const stopForUnsupportedGeminiLocation = (preupload?: FileItem['preupload']) => {
-          const detail = `${preupload?.error || ''} ${preupload?.message || ''}`;
-          if (/Gemini API 当前地区不支持|User location is not supported|地区不支持视频分析/i.test(detail)) {
-            throw new Error('当前 Gemini API 所在地区不支持视频分析，请切换到支持 Gemini API 的网络地区后重试。');
-          }
-        };
-        stopForUnsupportedGeminiLocation(latestBeforeWait.preupload);
 
         const preuploadPromise = preuploadPromisesRef.current.get(fileItem.id);
         const canWaitForPreupload = preuploadPromise
@@ -1034,7 +1033,6 @@ export default function App() {
         if (latestAfterWait?.preupload?.status === 'ready' && latestAfterWait.preupload.uploadId) {
           return latestAfterWait.preupload.uploadId;
         }
-        stopForUnsupportedGeminiLocation(latestAfterWait?.preupload);
         return null;
       };
 
@@ -1052,7 +1050,7 @@ export default function App() {
             continue;
           }
 
-          prepared.push(...await prepareFilesForGemini([item.file], {
+          prepared.push(...await prepareFilesForAnalysis([item.file], {
             signal: controller.signal,
             onProgress: (message) => setAnalysisStage(`${message}（${prefix}）`),
           }));
@@ -1069,9 +1067,7 @@ export default function App() {
             ? await waitForReadyPreupload(videoFiles[0])
             : null;
           if (preuploadId) {
-            setAnalysisStage(target.avatar || target.gift
-              ? '视频已预上传，正在进行短视频高精度分析...'
-              : '视频已预上传，正在进行影视级完整分析...');
+            setAnalysisStage('分析画面已准备好，正在生成音频方案...');
             res = await analyzeAudioDesignPreuploadedVideo(
               preuploadId,
               requirements,
@@ -1084,9 +1080,7 @@ export default function App() {
               },
             );
           } else {
-            setAnalysisStage(target.avatar || target.gift
-              ? '正在上传视频；超过 50MB 会自动压缩分析副本...'
-              : '正在上传视频；超过 50MB 会自动压缩分析副本...');
+            setAnalysisStage('正在上传视频并提取分析画面...');
             res = await analyzeAudioDesignVideo(
               videoFiles[0].file,
               requirements,
@@ -1118,7 +1112,7 @@ export default function App() {
         try {
           fileData = hasLargeVideo
             ? await prepareFilesWithServerVideoKeyframes('视频超过 50MB，正在使用服务器轻量关键帧分析')
-            : await prepareFilesForGemini(files.map(item => item.file), {
+            : await prepareFilesForAnalysis(files.map(item => item.file), {
                 signal: controller.signal,
                 onProgress: setAnalysisStage,
               });

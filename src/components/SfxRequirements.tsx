@@ -22,7 +22,7 @@ import {
   FileSpreadsheet
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { generateSfxRequirements, type ExistingSfxRequirementItem } from '../services/geminiService';
+import { generateSfxRequirements, type ExistingSfxRequirementItem } from '../services/aiService';
 import type { AssistantRequirementsRequest } from './GlobalAssistant';
 import PointCostHint from './PointCostHint';
 
@@ -1157,7 +1157,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
     return [...items, ...uniqueVoRows];
   };
 
-  // Generate / Optimize handler using Gemini model
+  // Generate or optimize the requirement table with the configured AI gateway.
   const handleGenerate = async (mode: GenerateMode = 'replace') => {
     if (!TEMPLATE_INFO[templateType]) {
       setError('请先选择一个需求表模板。模板是必选项，文字描述和图片资料都只是可选补充。');
@@ -1170,7 +1170,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
     }
 
     if (!hasAiTextModel) {
-      setError('AI 文本/视觉模型未配置，请在服务端配置 TOKENHUB_API_KEY、OPENAI_API_KEY、ARK_API_KEY 或 GEMINI_API_KEY 中任意一个。');
+      setError('AI 文本/视觉模型未配置，请在服务端配置 TOKENHUB_API_KEY、OPENAI_API_KEY 或 ARK_API_KEY。');
       return;
     }
 
@@ -1291,7 +1291,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
         submittedInputByTemplateRef.current[requestTemplateType] = currentInputText;
         setSuccess(true);
       } else {
-        throw new Error('AI 未生成任何需求，请确认服装名和 ID 格式，或检查 Gemini API 配置后重试。');
+        throw new Error('AI 未生成任何需求，请确认服装名和 ID 格式，或检查 AI 网关配置后重试。');
       }
     } catch (err: any) {
       console.error('Error generating SFX requirements:', err);
@@ -1643,7 +1643,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
               </p>
             </div>
             <p className="text-[10px] text-slate-400 max-w-sm text-center leading-relaxed">
-              Gemini 正在针对参考文件进行多模态识别与高级转译。为了确保技术参数、字幕与配音语境的准确性，可能需要 15-30 秒的时间。
+              AI 正在识别参考文件并整理需求。包含图片或表格时，处理可能需要一些时间。
             </p>
           </motion.div>
         )}

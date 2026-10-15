@@ -2515,10 +2515,11 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
 
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                       <div className="space-y-1.5">
-                        <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">自定义目标响度</label>
-                        <div className="flex items-center rounded-xl border border-slate-200 bg-slate-50 px-3">
+                        <label className={`text-[10px] font-bold uppercase tracking-wider block ${factoryNormalizeEnabled ? 'text-slate-500' : 'text-slate-400'}`}>自定义目标响度</label>
+                        <div className={`flex items-center rounded-xl border px-3 transition-colors ${factoryNormalizeEnabled ? 'border-slate-200 bg-slate-50' : 'border-slate-100 bg-slate-50/60'}`}>
                           <input
                             type="number"
+                            aria-label="自定义目标响度"
                             min={-45}
                             max={-6}
                             step={0.5}
@@ -2531,16 +2532,17 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                                 setFactoryTargetLufs(nextValue);
                               }
                             }}
-                            className="w-full bg-transparent py-2 text-xs font-bold text-slate-800 outline-none"
+                            className={`w-full bg-transparent py-2 text-xs font-bold outline-none ${factoryNormalizeEnabled ? 'text-slate-800' : 'text-slate-400'}`}
                           />
-                          <span className="text-[10px] font-bold text-slate-400">LUFS</span>
+                          <span className={`text-[10px] font-bold ${factoryNormalizeEnabled ? 'text-slate-400' : 'text-slate-300'}`}>LUFS</span>
                         </div>
                       </div>
                       <div className="space-y-1.5">
-                        <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">峰值上限保护</label>
-                        <div className="flex items-center rounded-xl border border-slate-200 bg-slate-50 px-3">
+                        <label className={`text-[10px] font-bold uppercase tracking-wider block ${factoryNormalizeEnabled ? 'text-slate-500' : 'text-slate-400'}`}>峰值上限保护</label>
+                        <div className={`flex items-center rounded-xl border px-3 transition-colors ${factoryNormalizeEnabled ? 'border-slate-200 bg-slate-50' : 'border-slate-100 bg-slate-50/60'}`}>
                           <input
                             type="number"
+                            aria-label="峰值上限保护"
                             min={-6}
                             max={0}
                             step={0.1}
@@ -2553,15 +2555,15 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                                 setFactoryPeakCeilingDb(nextValue);
                               }
                             }}
-                            className="w-full bg-transparent py-2 text-xs font-bold text-slate-800 outline-none"
+                            className={`w-full bg-transparent py-2 text-xs font-bold outline-none ${factoryNormalizeEnabled ? 'text-slate-800' : 'text-slate-400'}`}
                           />
-                          <span className="text-[10px] font-bold text-slate-400">dBFS</span>
+                          <span className={`text-[10px] font-bold ${factoryNormalizeEnabled ? 'text-slate-400' : 'text-slate-300'}`}>dBFS</span>
                         </div>
                       </div>
                       <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] text-slate-500 leading-relaxed">
                         当前模式：<span className="font-black text-slate-800">{factoryNormalizeEnabled ? `${factoryTargetLufs.toFixed(1)} LUFS` : '使用原音量'}</span>
                         <br />
-                        峰值不超过：<span className="font-black text-slate-800">{factoryPeakCeilingDb.toFixed(1)} dBFS</span>
+                        峰值保护：<span className={`font-black ${factoryNormalizeEnabled ? 'text-slate-800' : 'text-slate-400'}`}>{factoryNormalizeEnabled ? `不超过 ${factoryPeakCeilingDb.toFixed(1)} dBFS` : '未启用'}</span>
                       </div>
                     </div>
                   </div>

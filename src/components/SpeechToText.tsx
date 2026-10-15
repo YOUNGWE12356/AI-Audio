@@ -30,7 +30,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { transcribeSpeech } from '../services/elevenLabsService';
-import { translateTextToLanguage } from '../services/geminiService';
+import { translateTextToLanguage } from '../services/aiService';
 import PointCostHint from './PointCostHint';
 
 interface TranscriptionHistoryItem {

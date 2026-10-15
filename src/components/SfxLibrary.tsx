@@ -46,7 +46,7 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { HistoryItem } from '../types';
-import { optimizeImportMetadata } from '../services/geminiService';
+import { optimizeImportMetadata } from '../services/aiService';
 import { isBgmImportFileName, isUcsImportFileName } from '../services/ucsNaming';
 import {
   getSfxLibraryAdminHeaders,
@@ -840,7 +840,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   const [filterDuration, setFilterDuration] = useState<string>('全部'); // 全部, <1s, 1-3s, >3s
   const [filterChannel, setFilterChannel] = useState<string>('全部'); // 全部, Mono, Stereo
   const [filterFormat, setFilterFormat] = useState<string>('全部'); // 全部, WAV, OGG, MP3
-  const [filterDesigner, setFilterDesigner] = useState<string>('全部'); // 全部, AD_Design, Gemini_AI, ElevenLabs_Bot
+  const [filterDesigner, setFilterDesigner] = useState<string>('全部');
   const [filterSampleRate, setFilterSampleRate] = useState<string>('全部'); // 全部, 44.1, 48.0, 96.0
 
   // Dynamic Sounds state with backend synchronization
@@ -911,7 +911,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
         ? 'uploaded'
         : (sound.url || '').startsWith('http')
           ? 'external'
-          : ((sound.designer || '').toLowerCase().includes('ai') || (sound.designer || '').toLowerCase().includes('gemini') || (sound.designer || '').toLowerCase().includes('elevenlabs'))
+          : ((sound.designer || '').toLowerCase().includes('ai') || (sound.designer || '').toLowerCase().includes('elevenlabs'))
             ? 'generated'
             : 'library';
       const kind = inferAudioAssetKind(sound);
@@ -3289,7 +3289,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
         <div className="flex items-center gap-3">
 
           <button 
-            onClick={() => showCustomAlert("💡 操作使用指南", "1. 双轨制目录设计：左侧为“音效分类”、“全部音乐”与“公司游戏音效”树形目录树，支持无限层级拓展与手动删减/重命名，右侧支持一键AI智能标签匹配检索。\n\n2. 模糊意图智能搜索：输入“低频重击”等人类描述词时，Gemini 会自动声音情绪、物理特性并映射对齐 #低频、#撞击等对应资产标签。\n\n3. 键盘空格键热键：在浏览任何界面时，按下键盘“空格键 (Space)”可以一键控制当前选中音频文件的播放或暂停试听。")}
+            onClick={() => showCustomAlert("操作使用指南", "1. 左侧目录可管理音效分类、音乐和公司游戏音效。\n\n2. 智能搜索可按声音描述匹配资产标签。\n\n3. 空格键可播放或暂停当前选中的音频文件。")}
             className="p-2 bg-slate-100 border border-slate-200 text-slate-500 hover:text-slate-800 rounded-xl hover:bg-slate-200/50 transition-all"
             title="操作指南"
           >
@@ -4184,7 +4184,6 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                   >
                     <option value="全部">全部</option>
                     <option value="AD_Design">AD_Design</option>
-                    <option value="Gemini_AI">Gemini_AI</option>
                     <option value="ElevenLabs_Bot">ElevenLabs_Bot</option>
                   </select>
                 </div>
@@ -4673,7 +4672,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                     <div className="space-y-1">
                       <div className="flex items-center gap-2">
                         <span className="text-xs font-bold text-slate-800">AI 智能元数据高级调优</span>
-                        <span className="text-[9px] bg-emerald-150 text-emerald-700 px-1.5 py-0.5 rounded font-bold border border-emerald-200">Gemini 3.5 Flash 驱动</span>
+                        <span className="text-[9px] bg-emerald-150 text-emerald-700 px-1.5 py-0.5 rounded font-bold border border-emerald-200">AI 网关驱动</span>
                       </div>
                       <p className="text-[10px] text-slate-500">
                         根据原文件名与目录重新生成 UCS 8.2.1 音效名称；音乐沿用 BGM 命名。请在入库前核对分类。
@@ -4688,12 +4687,12 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                       {isAiBatchOptimizing ? (
                         <>
                           <RefreshCw className="w-3.5 h-3.5 animate-spin text-white" />
-                          <span>Gemini 正在翻译调优中...</span>
+                          <span>AI 正在翻译调优中...</span>
                         </>
                       ) : (
                         <>
                           <Sparkles className="w-3.5 h-3.5 text-white" />
-                          <span>Gemini 一键批量调优</span>
+                          <span>AI 一键批量调优</span>
                         </>
                       )}
                     </button>

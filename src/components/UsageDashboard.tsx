@@ -201,7 +201,7 @@ const PROVIDERS: Array<{
   iconClass: string;
 }> = [
   { key: 'elevenLabs', label: 'ElevenLabs', icon: Coins, iconClass: 'bg-fuchsia-50 text-fuchsia-700' },
-  { key: 'gemini', label: 'Gemini', icon: Sparkles, iconClass: 'bg-blue-50 text-blue-700' },
+  { key: 'legacy', label: '历史 AI', icon: Sparkles, iconClass: 'bg-slate-50 text-slate-700' },
   { key: 'gpt', label: 'GPT', icon: Bot, iconClass: 'bg-emerald-50 text-emerald-700' },
 ];
 
@@ -292,7 +292,7 @@ function ProviderSummary({
 }
 
 const providerLabel = (provider: UsageUser['details'][number]['provider']) => (
-  provider === 'elevenlabs' ? 'ElevenLabs' : provider === 'gemini' ? 'Gemini' : 'GPT'
+  provider === 'elevenlabs' ? 'ElevenLabs' : provider === 'legacy' ? '历史 AI' : 'GPT'
 );
 
 function MemberUsageTable({
@@ -334,7 +334,7 @@ function MemberUsageTable({
               <th className="px-3 py-2.5 font-semibold">IP 地址</th>
               <th className="px-3 py-2.5 text-right font-semibold">调用</th>
               <th className="px-3 py-2.5 text-right font-semibold">公司积分</th>
-              <th className="px-3 py-2.5 text-right font-semibold">Gemini Token</th>
+              <th className="px-3 py-2.5 text-right font-semibold">历史 AI Token</th>
               <th className="px-3 py-2.5 text-right font-semibold">GPT Token</th>
               <th className="px-3 py-2.5 text-right font-semibold">总 Token</th>
               <th className="px-3 py-2.5 text-right font-semibold">IP 黑名单</th>
@@ -380,7 +380,7 @@ function MemberUsageTable({
                     </td>
                     <td className="px-3 py-3 text-right font-mono">{formatInteger(user.requests)}</td>
                     <td className="px-3 py-3 text-right font-mono">{formatCredits(user.companyPoints)}</td>
-                    <td className="px-3 py-3 text-right font-mono">{formatInteger(user.geminiTokens)}</td>
+                    <td className="px-3 py-3 text-right font-mono">{formatInteger(user.legacyTokens)}</td>
                     <td className="px-3 py-3 text-right font-mono">{formatInteger(user.gptTokens)}</td>
                     <td className="px-3 py-3 text-right font-mono font-semibold text-slate-800">{formatInteger(user.totalTokens)}</td>
                     <td className="px-3 py-3">
@@ -480,7 +480,7 @@ function ModelUsageTable({ rows }: { rows: ModelUsageRow[] }) {
     <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
       <div className="flex flex-col gap-1 border-b border-slate-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <h3 className="text-xs font-bold text-slate-700">按模型统计</h3>
-        <p className="text-[10px] text-slate-400">ElevenLabs 按积分统计；Gemini / GPT 按总 Token 统计。</p>
+        <p className="text-[10px] text-slate-400">ElevenLabs 按积分统计；GPT 和历史 AI 按总 Token 统计。</p>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[760px] text-left text-[11px]">

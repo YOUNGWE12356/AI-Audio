@@ -27,7 +27,7 @@ import {
 } from 'lucide-react';
 import { HistoryItem } from '../types';
 import { transcribeSpeech, translateDubbingV2Audio, TranslateDubbingResult } from '../services/elevenLabsService';
-import { translateTextToLanguage } from '../services/geminiService';
+import { translateTextToLanguage } from '../services/aiService';
 import {
   cloneMultiSpeakerVoicesLocally,
   cloneVoiceLocally,

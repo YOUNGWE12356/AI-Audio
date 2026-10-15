@@ -1,9 +1,4 @@
-import {
-  createFriendlyGeminiNetworkError,
-  GEMINI_PRIMARY_MODEL,
-  generateGeminiContent,
-  isGeminiNetworkError,
-} from './geminiRetry';
+import { generateAiContent, SchemaType, ThinkingLevel } from './aiGateway';
 import { setClientIdentityHeader } from './clientIdentity';
 import { isBgmImportFileName, normalizeUcsImportFileName, normalizeUcsRequirementItems, UCS_CATALOG_PROMPT, UCS_CATALOG_VERSION } from './ucsNaming';
 
@@ -28,15 +23,6 @@ const createAsciiVideoUploadName = (fileName: string, mimeType = '') => {
     : mimeFallbacks[mimeType.toLowerCase()] || '.mp4';
   const nonce = Math.random().toString(36).slice(2, 10);
   return `video_${Date.now()}_${nonce}${extension}`;
-};
-
-type GeminiModule = typeof import('@google/genai');
-
-let geminiModulePromise: Promise<GeminiModule> | null = null;
-
-const loadGeminiModule = () => {
-  geminiModulePromise ??= import('@google/genai');
-  return geminiModulePromise;
 };
 
 async function postJson<T>(
@@ -84,19 +70,7 @@ async function postJson<T>(
   }
 }
 
-const getAI = async () => {
-  const key = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
-  if (!key) {
-    throw new Error("服务端 GEMINI_API_KEY 未配置。");
-  }
-
-  const { GoogleGenAI, Type, ThinkingLevel } = await loadGeminiModule();
-  return {
-    ai: new GoogleGenAI({ apiKey: key }),
-    Type,
-    ThinkingLevel,
-  };
-};
+const getAI = () => ({ Type: SchemaType, ThinkingLevel });
 
 export interface AudioDesignResult {
   sfxAnalysis: {
@@ -186,6 +160,22 @@ interface RawAudioDesignTimelineItem {
 interface RawAudioDesignBgmRecommendation {
   style: string;
   styleEnglish: string;
+  sunoDirection: {
+    use: string;
+    useEnglish: string;
+    moodEnergy: string;
+    moodEnergyEnglish: string;
+    instrumentRoles: string;
+    instrumentRolesEnglish: string;
+    tempoFeel: string;
+    tempoFeelEnglish: string;
+    melodyMix: string;
+    melodyMixEnglish: string;
+    formEnding: string;
+    formEndingEnglish: string;
+    exclude: string;
+    excludeEnglish: string;
+  };
   instrumentation?: string;
   instrumentationEnglish?: string;
   visualRationale?: string;
@@ -216,15 +206,20 @@ const isStandardMusicKey = (value: string) => /^[A-G](?:#|b)?\s+(?:major|minor)$
 
 const uniqueTexts = (values: string[]) => Array.from(new Set(values.filter(Boolean)));
 
-const SUNO_CORE_INSTRUMENT_LIMIT = 5;
 const SUNO_STYLE_WORD_LIMIT = 12;
 const SUNO_VOCAL_WORD_LIMIT = 14;
 const SUNO_STYLE_CHAR_LIMIT = 32;
 const SUNO_VOCAL_CHAR_LIMIT = 32;
 
-const containsTimelineReference = (value: string) => (
-  /(?:\d{1,2}:)?\d{1,2}(?:\.\d+)?\s*(?:-|–|—|~|至|到|to)\s*(?:\d{1,2}:)?\d{1,2}(?:\.\d+)?\s*(?:s|秒|secs?|seconds?)?/i.test(value)
-  || /\b(?:timeline|timecode|at\s+\d+(?:\.\d+)?\s*(?:s|secs?|seconds?))\b|(?:时间线|时间码|第\s*[一二三四五六七八九十\d]+\s*段)/i.test(value)
+const containsTimedCue = (value: string) => (
+  /(?<![\d:])(?:\d{1,2}:)?\d{1,2}(?:\.\d+)?\s*(?:-|–|—|~|至|到|to)\s*(?:\d{1,2}:)?\d{1,2}(?:\.\d+)?\s*(?:s|秒|secs?|seconds?)?(?!\d)(?!\s*BPM\b)/i.test(value)
+  || /(?<!\d)\d{1,2}:\d{2}(?:\.\d+)?(?!\d)/.test(value)
+  || /\b(?:timecode|at\s+\d+(?:\.\d+)?\s*(?:s|secs?|seconds?))\b|(?:时间码|第\s*[一二三四五六七八九十\d]+\s*段)/i.test(value)
+);
+
+export const containsTimelineReference = (value: string) => (
+  containsTimedCue(value)
+  || /\b(?:timeline)\b|(?:时间线)/i.test(value)
   || /\b(?:intro|verse|chorus|bridge|outro|starting\s+with|followed\s+by|ending\s+with|then|later|enters?)\b|(?:前奏|主歌|副歌|桥段|尾奏|开场|中段|后段|随后|然后|最后|结尾|收尾|进入)/i.test(value)
   || /(?:→|->)/.test(value)
 );
@@ -250,14 +245,6 @@ const selectWholeTrackText = (
     .find(part => part && !containsTimelineReference(part));
   return limiter(safeText || fallback, limit);
 };
-
-const extractCoreInstruments = (values: string[], isEnglish: boolean) => uniqueTexts(
-  values.flatMap(value => value
-    .split(isEnglish ? /[,;|/+]/ : /[、，,；;|/+]/)
-    .map(item => item.trim())
-    .filter(item => item && !containsTimelineReference(item))
-    .map(item => isEnglish ? limitWords(item, 4) : limitCharacters(item, 12))),
-).slice(0, SUNO_CORE_INSTRUMENT_LIMIT);
 
 const normalizeBpm = (value: unknown) => {
   const parsed = Number.parseInt(String(value), 10);
@@ -323,11 +310,8 @@ const normalizeVideoMotionTempo = (
   };
 };
 
-/**
- * 详细时间线只服务于音画分析；Suno 词由同一方案的全局风格与核心乐器汇总。
- * 最终词必须描述一首完整音乐，不携带时间码或分段编排说明。
- */
-const materializeAudioDesignResult = (
+/** Suno 词概括整曲，不复制视频剪辑时间码。 */
+export const materializeAudioDesignResult = (
   raw: RawAudioDesignResult,
   isInstrumental: boolean,
   includeTimeline: boolean,
@@ -433,14 +417,34 @@ const materializeAudioDesignResult = (
       throw new Error(`AI 生成的第 ${planIndex + 1} 套配乐缺少人声方向，请重试。`);
     }
 
-    const coreInstruments = extractCoreInstruments(
-      includeTimeline ? pairedTimeline.map(item => item.instruments) : [overallInstrumentation],
-      false,
-    );
-    const coreInstrumentsEnglish = extractCoreInstruments(
-      includeTimeline ? pairedTimeline.map(item => item.instrumentsEnglish) : [overallInstrumentationEnglish],
-      true,
-    );
+    const direction = plan.sunoDirection;
+    if (!direction) {
+      throw new Error(`AI 生成的第 ${planIndex + 1} 套配乐缺少 Suno 创作要点，请重试。`);
+    }
+    const chineseDirection = [
+      direction.use, direction.moodEnergy, direction.instrumentRoles,
+      direction.tempoFeel, direction.melodyMix, direction.formEnding, direction.exclude,
+    ].map(cleanText);
+    const englishDirection = [
+      direction.useEnglish, direction.moodEnergyEnglish, direction.instrumentRolesEnglish,
+      direction.tempoFeelEnglish, direction.melodyMixEnglish, direction.formEndingEnglish,
+      direction.excludeEnglish,
+    ].map(cleanEnglishText);
+    if (
+      chineseDirection.some(value => !value || !containsHan(value) || containsTimedCue(value))
+      || englishDirection.some(value => !value || containsNonEnglishContent(value) || containsTimedCue(value))
+      || (isInstrumental && (
+        containsVocalContentChinese(chineseDirection.slice(0, 6).join(' '))
+        || containsVocalContentEnglish(englishDirection.slice(0, 6).join(' '))
+      ))
+    ) {
+      throw new Error(`AI 生成的第 ${planIndex + 1} 套 Suno 创作要点不完整或包含时间码，请重试。`);
+    }
+    const [use, moodEnergy, instrumentRoles, tempoFeel, melodyMix, formEnding, exclude] =
+      chineseDirection.map(value => limitCharacters(value, 24));
+    const [useEnglish, moodEnergyEnglish, instrumentRolesEnglish, tempoFeelEnglish,
+      melodyMixEnglish, formEndingEnglish, excludeEnglish] =
+      englishDirection.map(value => limitWords(value, 10));
     const compactStyle = selectWholeTrackText(
       style,
       '现代电影感配乐',
@@ -474,24 +478,32 @@ const materializeAudioDesignResult = (
         limitWords,
       );
     const chinesePrompt = [
-      compactStyle,
-      isInstrumental ? '完整连贯的纯音乐配乐' : '完整连贯的歌曲',
-      coreInstruments.length > 0 ? `核心乐器：${coreInstruments.join('、')}` : '',
-      sunoBpmRange,
-      key,
-      compactVocalDirection,
+      `用途：${use}`,
+      `风格：${compactStyle}`,
+      `情绪/能量：${moodEnergy}`,
+      `配器：${instrumentRoles}`,
+      `速度：${tempoFeel}，${sunoBpmRange}`,
+      `调性：${key}`,
+      `旋律/混音：${melodyMix}`,
+      `结构/结尾：${formEnding}`,
+      isInstrumental ? '' : `人声：${compactVocalDirection}`,
+      `排除：${isInstrumental ? '人声、吟唱、歌词，' : ''}${exclude}`,
     ].filter(Boolean).join('；') + '。';
     const englishPrompt = [
-      compactStyleEnglish,
-      isInstrumental ? 'cohesive full-length instrumental soundtrack' : 'cohesive full-length song',
-      coreInstrumentsEnglish.length > 0 ? `featuring ${coreInstrumentsEnglish.join(', ')}` : '',
-      sunoBpmRange,
-      key,
-      compactVocalDirectionEnglish,
+      `Use: ${useEnglish}`,
+      `Style: ${compactStyleEnglish}`,
+      `Mood/energy: ${moodEnergyEnglish}`,
+      `Instruments: ${instrumentRolesEnglish}`,
+      `Tempo: ${tempoFeelEnglish}, ${sunoBpmRange}`,
+      `Key: ${key}`,
+      `Melody/mix: ${melodyMixEnglish}`,
+      `Form/ending: ${formEndingEnglish}`,
+      isInstrumental ? '' : `Vocals: ${compactVocalDirectionEnglish}`,
+      `Avoid: ${isInstrumental ? 'no vocals, no chanting, no lyrics, ' : ''}${excludeEnglish}`,
     ].filter(Boolean).join('; ') + '.';
 
-    if (containsTimelineReference(chinesePrompt) || containsTimelineReference(englishPrompt)) {
-      throw new Error(`AI 生成的第 ${planIndex + 1} 套整体音乐提示仍包含时间线，请重试。`);
+    if (containsTimedCue(chinesePrompt) || containsTimedCue(englishPrompt)) {
+      throw new Error(`AI 生成的第 ${planIndex + 1} 套整体音乐提示包含视频时间码，请重试。`);
     }
 
     return {
@@ -567,7 +579,7 @@ export async function extractAudioDesignVideoKeyframes(
     const cleanup = () => options.signal?.removeEventListener('abort', handleAbort);
     options.signal?.addEventListener('abort', handleAbort, { once: true });
 
-    request.open('POST', '/api/ai/gemini/audio-design-video-keyframes');
+    request.open('POST', '/api/ai/audio-design-video-keyframes');
     setClientIdentityHeader(request);
     request.responseType = 'json';
     request.timeout = 90_000;
@@ -613,6 +625,7 @@ export async function preuploadAudioDesignVideo(
   options: {
     signal?: AbortSignal;
     onProgress?: (progress: number, message: string) => void;
+    shortVideo?: boolean;
   } = {},
 ): Promise<AudioDesignVideoPreuploadResult> {
   if (!isBrowser) {
@@ -630,7 +643,7 @@ export async function preuploadAudioDesignVideo(
     const cleanup = () => options.signal?.removeEventListener('abort', handleAbort);
     options.signal?.addEventListener('abort', handleAbort, { once: true });
 
-    request.open('POST', '/api/ai/gemini/audio-design-video-preupload');
+    request.open('POST', '/api/ai/audio-design-video-preupload');
     setClientIdentityHeader(request);
     request.responseType = 'json';
     request.timeout = 180_000;
@@ -640,7 +653,7 @@ export async function preuploadAudioDesignVideo(
       options.onProgress?.(percent, `正在后台上传视频 ${percent}%...`);
     };
     request.upload.onload = () => {
-      options.onProgress?.(96, '视频已传到服务器，正在必要时压缩并交给 Gemini 预处理...');
+      options.onProgress?.(96, '视频已上传，正在提取分析画面...');
     };
     request.onload = () => {
       cleanup();
@@ -667,6 +680,7 @@ export async function preuploadAudioDesignVideo(
 
     const formData = new FormData();
     formData.append('originalName', video.name);
+    formData.append('shortVideo', String(Boolean(options.shortVideo)));
     formData.append('video', video, createAsciiVideoUploadName(video.name, video.type));
     request.send(formData);
   });
@@ -699,7 +713,7 @@ export async function analyzeAudioDesignVideo(
     const cleanup = () => options.signal?.removeEventListener('abort', handleAbort);
     options.signal?.addEventListener('abort', handleAbort, { once: true });
 
-    request.open('POST', '/api/ai/gemini/audio-design-video');
+    request.open('POST', '/api/ai/audio-design-video');
     setClientIdentityHeader(request);
     request.responseType = 'json';
     request.timeout = 240_000;
@@ -767,7 +781,7 @@ export async function analyzeAudioDesignPreuploadedVideo(
     throw new Error('该方法仅用于 HTML5 客户端分析预上传视频。');
   }
 
-  return postJson<AudioDesignResult>('/api/ai/gemini/audio-design-video-preuploaded', {
+  return postJson<AudioDesignResult>('/api/ai/audio-design-video-preuploaded', {
     uploadId,
     requirements,
     target,
@@ -775,66 +789,6 @@ export async function analyzeAudioDesignPreuploadedVideo(
     analysisMode: options.analysisMode || 'professional',
     scope: normalizeAudioDesignScope(options.scope),
   }, { signal: options.signal, timeoutMs: 180_000 });
-}
-
-export async function analyzeAudioDesignVideoFile(
-  videoPath: string,
-  mimeType: string,
-  displayName: string,
-  requirements: string,
-  target: { game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean; gift?: boolean; activity?: boolean },
-  isInstrumental: boolean,
-  scope?: AudioDesignScope,
-): Promise<AudioDesignResult> {
-  const { ai } = await getAI();
-  let uploadedFile: Awaited<ReturnType<typeof ai.files.upload>> | undefined;
-
-  try {
-    uploadedFile = await ai.files.upload({
-      file: videoPath,
-      config: {
-        mimeType,
-        displayName: createAsciiVideoUploadName(displayName, mimeType),
-      },
-    });
-
-    const deadline = Date.now() + 120_000;
-    while (uploadedFile.state === 'PROCESSING') {
-      if (Date.now() >= deadline) {
-        throw Object.assign(new Error('Gemini 视频预处理超过 2 分钟，请稍后重试。'), { status: 504 });
-      }
-      await new Promise(resolve => setTimeout(resolve, 1_500));
-      if (!uploadedFile.name) throw new Error('Gemini 未返回视频文件标识。');
-      uploadedFile = await ai.files.get({ name: uploadedFile.name });
-    }
-
-    if (uploadedFile.state === 'FAILED') {
-      throw Object.assign(new Error(uploadedFile.error?.message || 'Gemini 无法处理此视频编码。'), { status: 422 });
-    }
-    if (!uploadedFile.uri || !uploadedFile.mimeType) {
-      throw new Error('Gemini 未返回可分析的视频地址。');
-    }
-
-    return await analyzeAudioDesign([{
-      fileUri: uploadedFile.uri,
-      mimeType: uploadedFile.mimeType,
-      label: `完整视频：${displayName}`,
-      videoMetadata: {
-        fps: target.avatar || target.gift ? 2 : 1,
-      },
-    }], requirements, target, isInstrumental, { scope });
-  } catch (error) {
-    if (isGeminiNetworkError(error)) {
-      throw createFriendlyGeminiNetworkError(error);
-    }
-    throw error;
-  } finally {
-    if (uploadedFile?.name) {
-      await ai.files.delete({ name: uploadedFile.name }).catch((error) => {
-        console.warn('Failed to delete temporary Gemini file:', error);
-      });
-    }
-  }
 }
 
 export async function analyzeAudioDesign(
@@ -846,7 +800,7 @@ export async function analyzeAudioDesign(
 ): Promise<AudioDesignResult> {
   const analysisScope = normalizeAudioDesignScope(options.scope);
   if (isBrowser) {
-    return postJson<AudioDesignResult>('/api/ai/gemini/audio-design', {
+    return postJson<AudioDesignResult>('/api/ai/audio-design', {
       files,
       requirements,
       target,
@@ -860,6 +814,7 @@ export async function analyzeAudioDesign(
   const includeMusicTimeline = !isGameTrack;
   const hasVideoInput = files.some(file => (
     file.mimeType.startsWith('video/')
+    || Boolean(file.videoMetadata)
     || /^视频 .+关键帧/.test(file.label || '')
     || /^完整视频：/.test(file.label || '')
   ));
@@ -891,8 +846,9 @@ export async function analyzeAudioDesign(
     additionalSpecialInstructions = `
     【礼物动效特别设计要求（最高优先级）】：
     **短视频定位**：礼物素材通常是 4-12 秒的短动效，核心不是长叙事，而是“出现 → 蓄力 → 爆发/展示 → 收尾”的声音反馈。
-    ${analysisScope.sfx ? '**礼物音效重点**：优先捕捉画面里的闪光、粒子、能量聚集、物体出现、金币/奖励、UI弹出、镜头冲击、魔法或科技质感等节点；音效可以比普通场景更密集，但仍只保留最重要的 6-10 个触发点，时间码要精确。' : ''}
-    ${analysisScope.music ? '**礼物配乐重点**：若只分析音乐，给出简短、可循环或可一次性铺底的整体氛围，避免过度拆分；如视频很短，timelineDesign 可按 2-4 个阶段概括，但不能为了细节强行逐帧切段。' : ''}
+    ${analysisScope.sfx ? '**礼物音效重点**：只保留画面确实出现的 3-5 个主要触发点；同一动作的连续变化合并，不能为凑数量编造礼物、金币或奖励。每个节点的 description、scene、logic 各不超过 40 字，时间码以提供的关键帧为依据。' : ''}
+    ${analysisScope.music ? '**礼物配乐重点**：保留两套不同音乐方向，但每套 timelineDesign 最多 2 个阶段；视频不足 5 秒时优先使用 1 个完整阶段。每个字段简洁说明，不重复画面分析。' : ''}
+    **短视频输出控制**：总结和理由各用一两句话，数组只保留实际可辨识的信息；不要用冗长描述填充 JSON。
     `;
   } else if (target.activity) {
     additionalSpecialInstructions = `
@@ -912,18 +868,28 @@ export async function analyzeAudioDesign(
   }
 
   const prompt = `
-    你是一个顶级的音频设计师和视频分析专家。请深度分析上传的内容，并提供极其详尽且专业的${scopeDescription}方案。
+    你是一个顶级的音频设计师和视频分析专家。请深度分析上传的内容，并提供${target.gift ? '精炼且专业' : '极其详尽且专业'}的${scopeDescription}方案。
     【本次输出范围（最高优先级）】：${scopeDescription}。${analysisScope.music ? '必须输出音乐分析与背景音乐方案。' : '不得输出任何音乐分析、配乐方案、音乐提示词或视频动作速度。'}${analysisScope.sfx ? '必须输出音效分析与音效制作排程。' : '不得输出任何音效分析或音效制作排程。'}
     
     分析要求：
     1. **多文件逻辑**：有联系则综合分析，无联系则以第一张/段素材为主。
     2. **双语字段边界**：除字段名带 English、标准英文调性 key、数字 bpm、时间码 timecode 及规范英文音效名 name 外，所有分析描述必须使用中文；所有 English 字段必须只写英文，不得夹杂中文。
-    ${analysisScope.sfx ? '3. **动作级SFX**：在 "scene" 字段标明具体时间点。\n    5. **无语音**：音效严禁出现人声对白。\n    6. **性能与精度平衡**：只保留最重要的 6-10 个音效节点；字段描述保持专业但精炼，每段不超过 100 个汉字，避免重复内容。' : ''}
+    ${analysisScope.sfx ? `3. **动作级SFX**：在 "scene" 字段标明具体时间点。\n    5. **无语音**：音效严禁出现人声对白。\n    6. **性能与精度平衡**：只保留最重要的 ${target.gift ? '3-5' : '6-10'} 个音效节点；字段描述保持专业但精炼，每段不超过 ${target.gift ? '40' : '100'} 个汉字，避免重复内容。` : ''}
     ${analysisScope.music
       ? (isGameTrack
           ? '4. **双重BGM**：提供两个制作方向不同的整体风格方案，但两套都必须严格符合素材与补充需求的题材、情绪和玩法；差异只能来自曲风融合、核心配器或节奏处理，禁止为了制造差异而输出相反情绪。'
           : '4. **双重BGM**：提供两个差异巨大的风格方案。')
       : ''}
+    ${analysisScope.music ? `
+    **Suno 整曲创作要点（强制）**：每套配乐的 sunoDirection 必须填写中英同义的七组短语，每组中文不超过 24 字、英文不超过 10 个单词；只概括整首音乐，不复制视频时间码或逐秒剪辑指令。
+       - use/useEnglish：具体用途与画面。游戏写常驻、战斗、菜单或短演出等实际适用类型；其他场景写广告、礼物动效、活动页等实际用途，不要凭空套用游戏设定。
+       - moodEnergy/moodEnergyEnglish：玩家或观众的感受，以及能量保持稳定还是适度起伏。
+       - instrumentRoles/instrumentRolesEnglish：明确主奏、节奏、铺底各自的乐器或音色；没有鼓时如实写轻脉冲或无打击乐，不要编造。
+       - tempoFeel/tempoFeelEnglish：慢速、中速或快速的听感，与 bpm 字段一致；不要在此字段重复数字，Suno BPM 范围由系统生成。
+       - melodyMix/melodyMixEnglish：旋律突出或克制，以及是否给对白和音效留空间。
+       - formEnding/formEndingEnglish：整曲渐进、循环感和结尾方式；可写音乐段落类型，但不要写画面时间码或分秒进入指令。
+       - exclude/excludeEnglish：与本方案相关的 1-2 类不需要的乐器、音色或编排元素；纯音乐不得包含人声，带人声方案不要把所需人声写入排除项。
+    style/styleEnglish 必须写具体曲风或地域音乐传统，并与画面、七组要点及配器一致；不要仅写“史诗”“中东风”等宽泛标签。` : ''}
     ${shouldAnalyzeMotionTempo ? `
     **视频动作速度独立分析（最高优先级）**：videoMotionTempo 只分析视频画面中人物跳舞、上下抖动、摇晃、摆动、踏步等可见动作的重复周期，用于后续卡点配乐；它不是推荐音乐的速度，严禁从 bgmRecommendations.bpm 推导或为了匹配推荐曲风而修改。
        - 跟踪同一人物或主体的重复动作，以一次完整动作循环对应一拍，结合多个循环间隔估算 primaryBpm 与稳定区间 bpmRangeMin/bpmRangeMax。
@@ -935,12 +901,12 @@ export async function analyzeAudioDesign(
     7. **游戏配乐只做整体方案（最高优先级）**：游戏音轨不按视频时间、镜头或动作切分音乐。每个 bgmRecommendations 项只提供一套统一的整曲风格，不得输出 timelineDesign，不得在任何音乐字段中写时间码、段落时长、进入时机、剪辑点或先后顺序。
     8. **整体配器双语同义（强制）**：instrumentation/instrumentationEnglish 用一句短语列出整首音乐最重要的 3-5 个核心乐器或音色，中英文必须语义等价。
     9. **画面推荐依据（强制）**：visualRationale 用中文说明画面题材、色彩/空间、动作节奏、玩法氛围或用户补充需求如何共同指向该音乐风格；必须解释“为什么推荐这种音乐”，但不得写时间码、段落时长或先后顺序，长度 60-120 字。
-    10. **Suno 整体音乐词（强制）**：style/styleEnglish 用一句短语概括整首音乐的统一曲风与情绪，不得包含具体 BPM；单点推荐速度只写入 bpm 字段，系统会为 Suno 提示词生成适当的 BPM 范围。不要生成曲式结构、动态时间线或剪辑说明。
+    10. **Suno 整体音乐词（强制）**：style/styleEnglish 用一句短语概括具体曲风与总体情绪，不得包含具体 BPM；单点推荐速度只写入 bpm 字段。系统会结合 sunoDirection 生成简短的整曲创作提示词和 BPM 范围，不复制视频剪辑时间线。
     11. **游戏适配原则**：音乐应适合长时间播放和自然循环，保持统一氛围与稳定能量，避免依赖固定画面时长或一次性剧情转折。素材内容与“补充需求”是判断整体风格的最高依据；没有素材时完全以补充需求为准，不得输出与其题材或情绪相冲突的音乐。
     ` : `
     7. **单一配乐蓝图（强制）**：每个 bgmRecommendations 项是一套完全独立、闭环的方案，timelineDesign 负责分秒级音画分析。顶层 style、BPM、调性、人声方向及所有时间段必须互相一致，禁止把两套推荐交叉混用；系统会从同一方案汇总最终 Suno 整体音乐词。
     8. **逐项双语同义（强制）**：style/styleEnglish，以及 timelineDesign 中每一组 emotion/emotionEnglish、instruments/instrumentsEnglish、description/descriptionEnglish 都必须语义等价。不得在英文项中新增中文方案没有的曲风、乐器、人声、情绪或时间节点。
-    9. **Suno 整体音乐词（强制）**：style/styleEnglish 必须用一句短语概括整首音乐的统一曲风和总体情绪，中文不超过 30 字、英文不超过 12 个单词，不得包含具体 BPM、时间码、时间线、章节名或先后顺序。单点推荐速度只写入 bpm 字段，系统会为 Suno 提示词生成适当的 BPM 范围。timelineDesign 的 instruments/instrumentsEnglish 只列该段使用的 1-4 个乐器或音色名称，进入时机、动态变化和剪辑配合统一写入 description/descriptionEnglish。系统将用整体曲风、最多 5 个核心乐器、调性和总体人声要求生成一条简短明确的 Suno Style Prompt，不会复制时间线文案。
+    9. **Suno 整体音乐词（强制）**：style/styleEnglish 必须用一句短语概括具体曲风和总体情绪，中文不超过 30 字、英文不超过 12 个单词，不得包含具体 BPM 或视频时间码。单点推荐速度只写入 bpm 字段。timelineDesign 的 instruments/instrumentsEnglish 只列该段使用的 1-4 个乐器或音色名称，进入时机、动态变化和剪辑配合统一写入 description/descriptionEnglish。系统将用整体曲风、sunoDirection、调性和人声方向生成简短的整曲 Suno 提示词，不会复制视频时间线。
     10. **配乐段落长度与连续性（最高优先级）**：timelineDesign 是音乐段落设计，不是逐动作音效清单。必须根据视频实际时长、叙事段落、镜头群和显著情绪拐点自适应划分，不能为了增加细节而强行增加段数。常规每段约 5-8 秒；连续镜头或同一情绪可保持 8-15 秒；短于 5 秒只允许用于视频首尾余量，或真正重要的转场、关键动作与强烈情绪变化。相邻段若情绪与核心配器相近必须合并，严禁连续出现大量 2-3 秒段落。高频画面采样只用于识别动作与 SFX，不代表 BGM 要以相同颗粒度切段；微小动作、卡点和瞬时声音写入 SFX 或当前段 description，不得据此更换整段音乐情绪。时间线必须从开头到结尾连续覆盖、无空隙、无重叠。
     11. **画面分析与方案分工**：musicAnalysis.emotionalCurve 只描述画面本身的客观情绪走势；每套音乐如何响应画面，必须分别写进该方案的 timelineDesign，不能用全局情绪曲线代替。
     `) : ''}
@@ -1020,13 +986,12 @@ export async function analyzeAudioDesign(
     parts.push({ text: `${labels ? `[${labels}]\n` : ''}${prompt}` });
   }
 
-  const { ai, Type, ThinkingLevel } = await getAI();
-  const response = await generateGeminiContent(ai, {
-    model: GEMINI_PRIMARY_MODEL,
+  const { Type, ThinkingLevel } = getAI();
+  const response = await generateAiContent({
     contents: [{ parts }],
     config: {
       responseMimeType: "application/json",
-      maxOutputTokens: analysisScope.music && analysisScope.sfx ? 16_384 : 10_240,
+      maxOutputTokens: target.gift ? 8_192 : analysisScope.music && analysisScope.sfx ? 16_384 : 10_240,
       thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
       responseSchema: {
         type: Type.OBJECT,
@@ -1124,6 +1089,7 @@ export async function analyzeAudioDesign(
                 required: [
                   "style",
                   "styleEnglish",
+                  "sunoDirection",
                   ...(isGameTrack ? ["instrumentation", "instrumentationEnglish", "visualRationale"] : []),
                   "bpm",
                   "key",
@@ -1134,6 +1100,31 @@ export async function analyzeAudioDesign(
                 properties: {
                   style: { type: Type.STRING },
                   styleEnglish: { type: Type.STRING },
+                  sunoDirection: {
+                    type: Type.OBJECT,
+                    required: [
+                      'use', 'useEnglish', 'moodEnergy', 'moodEnergyEnglish',
+                      'instrumentRoles', 'instrumentRolesEnglish', 'tempoFeel', 'tempoFeelEnglish',
+                      'melodyMix', 'melodyMixEnglish', 'formEnding', 'formEndingEnglish',
+                      'exclude', 'excludeEnglish',
+                    ],
+                    properties: {
+                      use: { type: Type.STRING },
+                      useEnglish: { type: Type.STRING },
+                      moodEnergy: { type: Type.STRING },
+                      moodEnergyEnglish: { type: Type.STRING },
+                      instrumentRoles: { type: Type.STRING },
+                      instrumentRolesEnglish: { type: Type.STRING },
+                      tempoFeel: { type: Type.STRING },
+                      tempoFeelEnglish: { type: Type.STRING },
+                      melodyMix: { type: Type.STRING },
+                      melodyMixEnglish: { type: Type.STRING },
+                      formEnding: { type: Type.STRING },
+                      formEndingEnglish: { type: Type.STRING },
+                      exclude: { type: Type.STRING },
+                      excludeEnglish: { type: Type.STRING },
+                    },
+                  },
                   instrumentation: { type: Type.STRING },
                   instrumentationEnglish: { type: Type.STRING },
                   visualRationale: { type: Type.STRING },
@@ -1220,7 +1211,7 @@ export async function regenerateLyrics(
   direction: string
 ): Promise<string> {
   if (isBrowser) {
-    const result = await postJson<{ text: string }>('/api/ai/gemini/regenerate-lyrics', {
+    const result = await postJson<{ text: string }>('/api/ai/regenerate-lyrics', {
       originalLyrics,
       selectedPart,
       direction,
@@ -1228,7 +1219,7 @@ export async function regenerateLyrics(
     return result.text;
   }
 
-  const { ai, ThinkingLevel } = await getAI();
+  const { ThinkingLevel } = getAI();
   const prompt = `
     原始歌词：
     ${originalLyrics}
@@ -1242,8 +1233,7 @@ export async function regenerateLyrics(
     请仅返回修改后的这一部分歌词内容，保持原有的结构标注格式。
   `;
 
-  const response = await generateGeminiContent(ai, {
-    model: GEMINI_PRIMARY_MODEL,
+  const response = await generateAiContent({
     contents: [{ parts: [{ text: prompt }] }],
     config: {
       thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
@@ -1263,7 +1253,7 @@ export async function generateLyricsFromMusicStyle(
   }
 
   if (isBrowser) {
-    const result = await postJson<{ text: string }>('/api/ai/gemini/generate-lyrics', {
+    const result = await postJson<{ text: string }>('/api/ai/generate-lyrics', {
       style: normalizedStyle,
     }, {
       signal: options.signal,
@@ -1271,7 +1261,7 @@ export async function generateLyricsFromMusicStyle(
     return result.text;
   }
 
-  const { ai, ThinkingLevel } = await getAI();
+  const { ThinkingLevel } = getAI();
   const prompt = `
     请根据下面的歌曲风格与情绪描述，创作一版适合 Suno / AI 音乐生成使用的中文背景歌词。
 
@@ -1286,8 +1276,7 @@ export async function generateLyricsFromMusicStyle(
     5. 只返回歌词正文，不要解释，不要 Markdown 代码块。
   `;
 
-  const response = await generateGeminiContent(ai, {
-    model: GEMINI_PRIMARY_MODEL,
+  const response = await generateAiContent({
     contents: [{ parts: [{ text: prompt }] }],
     config: {
       thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
@@ -1345,15 +1334,13 @@ const SUNNY_ISLAND_NAMING_GUIDE = `
       - 命名应优先从用户给出的原始名称、类别、ID 和动作中提取信息，不要擅自改写成通用或华丽词汇。`;
 
 const extractSunnyIslandReferenceNames = async (
-  ai: any,
   Type: any,
   referenceFile: { data: string; mimeType: string },
 ): Promise<string[]> => {
   if (!referenceFile.mimeType.toLowerCase().startsWith('image/')) return [];
 
   try {
-    const response = await generateGeminiContent(ai, {
-      model: GEMINI_PRIMARY_MODEL,
+    const response = await generateAiContent({
       contents: [{
         parts: [
           {
@@ -1485,7 +1472,7 @@ export async function generateSfxRequirements(
   }
 
   if (isBrowser) {
-    return postJson<{ items: any[]; sourceItemCount?: number }>('/api/ai/gemini/sfx-requirements', {
+    return postJson<{ items: any[]; sourceItemCount?: number }>('/api/ai/sfx-requirements', {
       inputText,
       screenshot: referenceFile,
       templateType,
@@ -1494,7 +1481,7 @@ export async function generateSfxRequirements(
     });
   }
 
-  const { ai, Type, ThinkingLevel } = await getAI();
+  const { Type, ThinkingLevel } = getAI();
   let schema: any;
   let templateDescription = "";
 
@@ -1652,7 +1639,7 @@ export async function generateSfxRequirements(
     };
   }
 
-  // Ask Gemini to expose the number of rows it actually read from a table or
+  // Ask the visual model to expose the number of rows it actually read from a table or
   // checklist reference. The UI uses this only to remove hallucinated rows;
   // ordinary visual references return 0 and remain unconstrained.
   schema.required = Array.from(new Set([...(schema.required || []), 'sourceItemCount']));
@@ -1684,7 +1671,7 @@ export async function generateSfxRequirements(
     `;
 
   const sunnyIslandReferenceNames = isSunnyIslandProject && referenceFile
-    ? await extractSunnyIslandReferenceNames(ai, Type, referenceFile)
+    ? await extractSunnyIslandReferenceNames(Type, referenceFile)
     : [];
   const sunnyIslandReferenceContext = sunnyIslandReferenceNames.length > 0
     ? `
@@ -1792,8 +1779,7 @@ export async function generateSfxRequirements(
   }
 
   for (let attempt = 0; attempt < (useUcsSfxNaming ? 2 : 1); attempt++) {
-    const response = await generateGeminiContent(ai, {
-      model: GEMINI_PRIMARY_MODEL,
+    const response = await generateAiContent({
       contents: [{ parts: attempt === 0 ? parts : [
         ...parts,
         { text: '上次返回含无效 UCS CatID。请重新生成完整 JSON；每条 SFX 的 filename 必须以本提示中的真实 CatID 开头，格式为 CatID_FXName，不得使用 Sfx_。BGM/VO 不使用 CatID。' },
@@ -1847,11 +1833,11 @@ export async function optimizeImportMetadata(
   items: Array<{ id: string; originalName: string; path: string; size: string; type: string }>
 ): Promise<OptimizedImportItem[]> {
   if (isBrowser) {
-    const result = await postJson<{ items: OptimizedImportItem[] }>('/api/ai/gemini/optimize-metadata', { items });
+    const result = await postJson<{ items: OptimizedImportItem[] }>('/api/ai/optimize-metadata', { items });
     return result.items;
   }
 
-  const { ai, Type } = await getAI();
+  const { Type } = getAI();
   const schema = {
     type: Type.OBJECT,
     required: ["items"],
@@ -1919,8 +1905,7 @@ export async function optimizeImportMetadata(
   `;
 
   for (let attempt = 0; attempt < 2; attempt++) {
-    const response = await generateGeminiContent(ai, {
-      model: GEMINI_PRIMARY_MODEL,
+    const response = await generateAiContent({
       contents: [{ parts: [{ text: prompt + (attempt ? '\n上次命名未通过校验。重新生成完整列表，严格使用真实 UCS CatID 并保持各自原扩展名。' : '') }] }],
       config: { responseMimeType: "application/json", responseSchema: schema }
     });
@@ -1963,19 +1948,18 @@ export async function translateToEnglish(text: string): Promise<string> {
   }
 
   if (isBrowser) {
-    const result = await postJson<{ text: string }>('/api/ai/gemini/translate', { text });
+    const result = await postJson<{ text: string }>('/api/ai/translate', { text });
     return result.text;
   }
 
   try {
-    const { ai, ThinkingLevel } = await getAI();
+    const { ThinkingLevel } = getAI();
     const prompt = `你是一个专业的翻译专家。请将以下文本翻译成地道、简洁的英文，用于描述 AI 声线或情感。
 请只返回翻译后的英文文本，不要包含任何解释、说明或标点引号。
 
 需要翻译的文本: "${text.trim()}"`;
 
-    const response = await generateGeminiContent(ai, {
-      model: GEMINI_PRIMARY_MODEL,
+    const response = await generateAiContent({
       contents: [{ parts: [{ text: prompt }] }],
       config: {
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
@@ -2154,7 +2138,7 @@ export async function enhanceVoicePromptForElevenV4(
 
   if (isBrowser) {
     try {
-      return await postJson<VoiceExpressionPromptEnhancement>('/api/ai/gemini/voice-v4-enhance', {
+      return await postJson<VoiceExpressionPromptEnhancement>('/api/ai/voice-v4-enhance', {
         text: normalizedText,
         voiceName: options.voiceName || '',
         voiceDescription: options.voiceDescription || '',
@@ -2167,7 +2151,7 @@ export async function enhanceVoicePromptForElevenV4(
   }
 
   try {
-    const { ai, Type, ThinkingLevel } = await getAI();
+    const { Type, ThinkingLevel } = getAI();
     const prompt = `You are preparing text for ElevenLabs eleven_v4 text-to-speech.
 Enhance the script by adding sparse, audible performance tags in square brackets supported by ElevenLabs v4 audio prompting.
 
@@ -2188,8 +2172,7 @@ Language hint: ${options.language || 'auto'}
 Source script:
 ${normalizedText}`;
 
-    const response = await generateGeminiContent(ai, {
-      model: GEMINI_PRIMARY_MODEL,
+    const response = await generateAiContent({
       contents: [{ parts: [{ text: prompt }] }],
       config: {
         responseMimeType: 'application/json',
@@ -2306,7 +2289,7 @@ export async function createEnglishMusicPromptForElevenLabs(
 
   if (isBrowser) {
     try {
-      const result = await postJson<{ text: string }>('/api/ai/gemini/music-prompt', {
+      const result = await postJson<{ text: string }>('/api/ai/music-prompt', {
         text: normalizedText,
         instrumental: options.instrumental !== false,
       }, { timeoutMs: 8_000 });
@@ -2318,7 +2301,7 @@ export async function createEnglishMusicPromptForElevenLabs(
   }
 
   try {
-    const { ai, ThinkingLevel } = await getAI();
+    const { ThinkingLevel } = getAI();
     const prompt = `你是影视/游戏配乐提示词工程师。请把用户的中文或英文音乐需求改写成适合 ElevenLabs Music 生成的英文 prompt。
 
 要求：
@@ -2332,8 +2315,7 @@ export async function createEnglishMusicPromptForElevenLabs(
 
 用户需求：${normalizedText}`;
 
-    const response = await generateGeminiContent(ai, {
-      model: GEMINI_PRIMARY_MODEL,
+    const response = await generateAiContent({
       contents: [{ parts: [{ text: prompt }] }],
       config: {
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
@@ -2364,7 +2346,7 @@ export async function translateTextToLanguage(
   const normalizedTargetLanguage = targetLanguage.trim() || 'English';
 
   if (isBrowser) {
-    const result = await postJson<{ text: string }>('/api/ai/gemini/translate-language', {
+    const result = await postJson<{ text: string }>('/api/ai/translate-language', {
       text: normalizedText,
       targetLanguage: normalizedTargetLanguage,
       preserveTone: options?.preserveTone !== false,
@@ -2376,7 +2358,7 @@ export async function translateTextToLanguage(
   }
 
   try {
-    const { ai, ThinkingLevel } = await getAI();
+    const { ThinkingLevel } = getAI();
     const durationInstruction = typeof options?.maxDurationSeconds === 'number' && Number.isFinite(options.maxDurationSeconds)
       ? options.strictDuration
         ? `The spoken translation MUST fit within ${Math.max(0.5, options.maxDurationSeconds).toFixed(1)} seconds at a normal, unhurried speaking pace. This is a hard dubbing limit. Use the shortest natural wording, never expand the source, and preserve the essential meaning and emotional intention. Keep only repetitions, fillers, and interjections that are essential to the performance.`
@@ -2397,8 +2379,7 @@ Return only the translated dialogue. Do not add explanations, labels, quotation 
 Source dialogue:
 ${normalizedText}`;
 
-    const response = await generateGeminiContent(ai, {
-      model: GEMINI_PRIMARY_MODEL,
+    const response = await generateAiContent({
       contents: [{ parts: [{ text: prompt }] }],
       config: {
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
@@ -2427,14 +2408,14 @@ export async function extractBatchVoiceTextFromImage(
   }
 
   if (isBrowser) {
-    const result = await postJson<{ text: string }>('/api/ai/gemini/batch-voice-image-ocr', {
+    const result = await postJson<{ text: string }>('/api/ai/batch-voice-image-ocr', {
       image,
     }, { timeoutMs: 120_000 });
     return result.text;
   }
 
   try {
-    const { ai, ThinkingLevel } = await getAI();
+    const { ThinkingLevel } = getAI();
     const prompt = `你是配音台本整理助手。请对这张截图做 OCR，只提取适合“批量文本转语音”的台词内容。
 
 要求：
@@ -2446,8 +2427,7 @@ export async function extractBatchVoiceTextFromImage(
 6. 最多输出 200 条；不要编造截图里没有的台词。
 7. 只返回纯文本，不要 markdown、不要解释。`;
 
-    const response = await generateGeminiContent(ai, {
-      model: GEMINI_PRIMARY_MODEL,
+    const response = await generateAiContent({
       contents: [{
         parts: [
           { text: prompt },
@@ -2488,7 +2468,7 @@ export async function matchBestVoice(
   }
 
   if (isBrowser) {
-    const result = await postJson<{ voiceId: string }>('/api/ai/gemini/match-voice', {
+    const result = await postJson<{ voiceId: string }>('/api/ai/match-voice', {
       description,
       gender,
       voices,
@@ -2497,8 +2477,8 @@ export async function matchBestVoice(
   }
 
   try {
-    const { ai, ThinkingLevel } = await getAI();
-    // Prepare a simplified list of voices of the same gender for Gemini to consider
+    const { ThinkingLevel } = getAI();
+    // Prepare a simplified list of voices of the same gender for the model.
     const simplifiedVoices = voices
       .filter(v => v.gender === gender)
       .map(v => ({ id: v.id, name: v.name, englishName: v.englishName, description: v.description, tags: v.tags }));
@@ -2514,8 +2494,7 @@ ${JSON.stringify(simplifiedVoices, null, 2)}
 
 请仅返回最匹配的那个音色的 20 位 ElevenLabs ID，不要包含任何其他字符、标点、前缀、空格或解释。如果完全无法匹配，请返回可选人声列表中的第一个 ID。`;
 
-    const response = await generateGeminiContent(ai, {
-      model: GEMINI_PRIMARY_MODEL,
+    const response = await generateAiContent({
       contents: [{ parts: [{ text: prompt }] }],
       config: {
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
@@ -2534,7 +2513,7 @@ ${JSON.stringify(simplifiedVoices, null, 2)}
     
     return simplifiedVoices[0]?.id || '';
   } catch (err) {
-    console.error("Gemini voice matching failed, falling back:", err);
+    console.error("AI voice matching failed, falling back:", err);
     return voices[0]?.id || '';
   }
 }

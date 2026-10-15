@@ -2,7 +2,7 @@ export interface PlatformHealth {
   ok: boolean;
   runtime: 'server';
   services: {
-    gemini: boolean;
+    audioUnderstanding: boolean;
     aiText: boolean;
     gptText: boolean;
     elevenLabs: boolean;
@@ -11,7 +11,7 @@ export interface PlatformHealth {
 }
 
 export async function fetchPlatformHealth(signal?: AbortSignal): Promise<PlatformHealth> {
-  const response = await fetch('/api/health', {
+  const response = await fetch('/api/health?scope=ai', {
     method: 'GET',
     headers: {
       Accept: 'application/json',

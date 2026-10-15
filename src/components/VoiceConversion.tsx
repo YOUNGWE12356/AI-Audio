@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { AlertCircle, CheckCircle2, FileAudio, Info, Loader2, RefreshCw, UploadCloud, Volume2 } from 'lucide-react';
 import { convertWithSeedVc, getSeedVcStatus, type SeedVcConvertOptions, type SeedVcConvertResult, type SeedVcModel, type SeedVcStatus } from '../services/seedVoiceConversionService';
 import { transcribeSpeech, generateVoice } from '../services/elevenLabsService';
-import { translateTextToLanguage } from '../services/geminiService';
+import { translateTextToLanguage } from '../services/aiService';
 import type { VoiceItem } from '../data/voices';
 import type { HistoryItem } from '../types';
 import CrossLanguageDubbing from './CrossLanguageDubbing';

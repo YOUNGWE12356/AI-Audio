@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AudioDesignResult } from './services/geminiService';
+import { AudioDesignResult } from './services/aiService';
 
 export type TabType = 'workbench' | 'audio-director' | 'music-studio' | 'sfx-studio' | 'dubbing-studio' | 'settings' | 'sfx-library' | 'sfx-requirements' | 'audio-tools' | 'video-soundtrack';
 

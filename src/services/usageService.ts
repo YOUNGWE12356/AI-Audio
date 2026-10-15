@@ -1,7 +1,7 @@
 import { getSfxLibraryAdminHeaders } from './sfxLibraryAdminService';
 
 export type UsagePeriod = 'week' | 'month' | 'billingCycle' | 'custom';
-export type UsageProviderName = 'elevenLabs' | 'gemini' | 'gpt';
+export type UsageProviderName = 'elevenLabs' | 'legacy' | 'gpt';
 export type UsageIdentitySource = 'feishu' | 'device' | 'unknown';
 
 export type UsageFeature = {
@@ -125,7 +125,7 @@ export type PersonalPointBalance = {
 };
 
 export type UsageUserDetail = {
-  provider: 'elevenlabs' | 'gemini' | 'gpt';
+  provider: 'elevenlabs' | 'legacy' | 'gpt';
   feature: string;
   model: string;
   credits: number;
@@ -148,7 +148,7 @@ export type UsageUser = {
   requests: number;
   elevenLabsCredits: number;
   companyPoints: number;
-  geminiTokens: number;
+  legacyTokens: number;
   gptTokens: number;
   totalTokens: number;
   lastUsedAt: string;

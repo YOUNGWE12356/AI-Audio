@@ -37,7 +37,7 @@ export type UsageUserSummary = {
   requests: number;
   elevenLabsCredits: number;
   companyPoints: number;
-  geminiTokens: number;
+  legacyTokens: number;
   gptTokens: number;
   totalTokens: number;
   lastUsedAt: string;
@@ -61,7 +61,7 @@ export const summarizeUsageUsers = (events: StoredAiUsageEvent[]): UsageUserSumm
       requests: 0,
       elevenLabsCredits: 0,
       companyPoints: 0,
-      geminiTokens: 0,
+      legacyTokens: 0,
       gptTokens: 0,
       totalTokens: 0,
       lastUsedAt: event.timestamp,
@@ -70,7 +70,7 @@ export const summarizeUsageUsers = (events: StoredAiUsageEvent[]): UsageUserSumm
     member.requests += 1;
     member.elevenLabsCredits += event.provider === 'elevenlabs' ? event.credits : 0;
     member.companyPoints += event.companyPoints || 0;
-    member.geminiTokens += event.provider === 'gemini' ? event.totalTokens : 0;
+    member.legacyTokens += event.provider === 'legacy' ? event.totalTokens : 0;
     member.gptTokens += event.provider === 'gpt' ? event.totalTokens : 0;
     member.totalTokens += event.totalTokens;
     if (event.ipAddress && !member.ipAddresses.includes(event.ipAddress)) {

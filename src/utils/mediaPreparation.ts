@@ -3,11 +3,19 @@ export interface VideoKeyframe {
   base64: string;
 }
 
-export interface PreparedGeminiMedia {
+export interface PreparedAnalysisMedia {
   data: string;
   mimeType: string;
   label?: string;
 }
+
+export const isAudioFile = (file: Pick<File, 'name' | 'type'> | null | undefined) => Boolean(
+  file && (file.type.startsWith('audio/') || /\.(mp3|wav|flac|ogg|opus|aac|m4a|aif|aiff|wma|alac)$/i.test(file.name))
+);
+
+export const isPdfFile = (file: Pick<File, 'name' | 'type'> | null | undefined) => Boolean(
+  file && (file.type === 'application/pdf' || /\.pdf$/i.test(file.name))
+);
 
 interface ExtractVideoOptions {
   maxFrames?: number;
@@ -208,7 +216,7 @@ export async function extractVideoKeyframes(
   }
 }
 
-const compressImageForAnalysis = async (file: File, signal?: AbortSignal): Promise<PreparedGeminiMedia> => {
+const compressImageForAnalysis = async (file: File, signal?: AbortSignal): Promise<PreparedAnalysisMedia> => {
   throwIfAborted(signal);
   const bitmap = await createImageBitmap(file);
 
@@ -231,15 +239,15 @@ const compressImageForAnalysis = async (file: File, signal?: AbortSignal): Promi
   }
 };
 
-export async function prepareFilesForGemini(
+export async function prepareFilesForAnalysis(
   files: File[],
   options: {
     signal?: AbortSignal;
     onProgress?: (message: string) => void;
   } = {},
-): Promise<PreparedGeminiMedia[]> {
-  const prepared: PreparedGeminiMedia[] = [];
-  const appendPrepared = (parts: PreparedGeminiMedia[]) => {
+): Promise<PreparedAnalysisMedia[]> {
+  const prepared: PreparedAnalysisMedia[] = [];
+  const appendPrepared = (parts: PreparedAnalysisMedia[]) => {
     if (prepared.length + parts.length > MAX_PREPARED_PARTS) {
       throw new Error(`本次素材切片超过 ${MAX_PREPARED_PARTS} 个，请减少文件数量后分批分析。`);
     }

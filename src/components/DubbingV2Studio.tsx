@@ -28,7 +28,7 @@ import {
   type SpeechTranscriptionResult,
   type TranslateDubbingResult,
 } from '../services/elevenLabsService';
-import { translateTextToLanguage } from '../services/geminiService';
+import { translateTextToLanguage } from '../services/aiService';
 import {
   DUBBING_SOURCE_LANGUAGE_OPTIONS,
   DUBBING_TARGET_LANGUAGE_OPTIONS,

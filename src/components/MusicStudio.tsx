@@ -16,7 +16,7 @@ import {
   Languages,
 } from 'lucide-react';
 import { HistoryItem } from '../types';
-import { generateLyricsFromMusicStyle, translateToEnglish } from '../services/geminiService';
+import { generateLyricsFromMusicStyle, translateToEnglish } from '../services/aiService';
 import type { PendingMusicOption } from '../App';
 import GeneratedAudioPlayer from './GeneratedAudioPlayer';
 import PointCostHint from './PointCostHint';

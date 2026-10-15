@@ -17,7 +17,6 @@
     "check": "npm run lint && npm run build"
   },
   "dependencies": {
-    "@google/genai": "^1.29.0",
     "@tailwindcss/vite": "^4.1.14",
     "@tonejs/midi": "^2.0.28",
     "@types/jszip": "^3.4.0",

@@ -39,11 +39,12 @@ import CrossLanguageDubbing from './CrossLanguageDubbing';
 import VoiceConversion from './VoiceConversion';
 import { downloadAudioHelper } from '../utils/downloadHelper';
 import GeneratedAudioPlayer, { sanitizeAudioFileName } from './GeneratedAudioPlayer';
-import { enhanceVoicePromptForElevenV4, extractBatchVoiceTextFromImage } from '../services/geminiService';
+import { enhanceVoicePromptForElevenV4, extractBatchVoiceTextFromImage } from '../services/aiService';
 import { getElevenLabsQualityMode } from '../utils/elevenLabsQuality';
 import type { AssistantVoiceRequest } from './GlobalAssistant';
 import PointCostHint from './PointCostHint';
 import { clearRecentVoiceIds, readRecentVoiceIds, rememberVoiceId } from '../utils/recentVoices';
+import { deduplicateBatchVoiceImages } from '../utils/batchVoiceImport';
 
 interface PendingVoiceOption {
   url: string;
@@ -541,7 +542,7 @@ const readFileAsDataUrl = (file: File) => new Promise<string>((resolve, reject) 
   reader.readAsDataURL(file);
 });
 
-const readBatchVoiceFileText = async (file: File) => {
+const readBatchVoiceFileText = async (file: File, imageRequests: Map<string, Promise<string>>) => {
   if (file.size > BATCH_VOICE_MAX_FILE_SIZE_BYTES) {
     throw new Error(`${file.name} 文件过大（${(file.size / 1024 / 1024).toFixed(1)}MB），请拆分或另存为精简版 CSV/TXT 后再导入。`);
   }
@@ -572,11 +573,20 @@ const readBatchVoiceFileText = async (file: File) => {
       throw new Error('截图识别目前支持 PNG、JPG/JPEG、WebP 格式。');
     }
     const data = await readFileAsDataUrl(file);
-    return extractBatchVoiceTextFromImage({
+    const key = `${file.type}:${data}`;
+    const pending = imageRequests.get(key);
+    if (pending) return pending;
+    const request = extractBatchVoiceTextFromImage({
       data,
       mimeType: file.type,
       fileName: file.name,
     });
+    imageRequests.set(key, request);
+    try {
+      return await request;
+    } finally {
+      if (imageRequests.get(key) === request) imageRequests.delete(key);
+    }
   }
 
   if (/(\.txt|\.md|\.csv|\.tsv|\.json|\.html?)$/i.test(lowerName) || file.type.startsWith('text/')) {
@@ -887,6 +897,8 @@ export default function DubbingStudio({
   const [batchVoiceToneLoading, setBatchVoiceToneLoading] = useState(false);
   const [batchVoiceDragActive, setBatchVoiceDragActive] = useState(false);
   const batchVoiceImportIdRef = useRef(0);
+  const batchVoiceImageRequestsRef = useRef(new Map<string, Promise<string>>());
+  const dubbingViewRef = useRef<HTMLDivElement>(null);
   const parsedAutoNumberStart = Number(batchVoiceAutoNumberStart);
   const autoNumberStart = Number.isSafeInteger(parsedAutoNumberStart) && parsedAutoNumberStart >= 1
     ? parsedAutoNumberStart
@@ -1448,7 +1460,7 @@ export default function DubbingStudio({
   };
 
   const handleBatchVoiceFiles = async (files: File[]) => {
-    const pickedFiles = files.filter(Boolean);
+    let pickedFiles = files.filter(Boolean);
     if (pickedFiles.length === 0) return;
     const importId = ++batchVoiceImportIdRef.current;
     const containsImage = pickedFiles.some(file => file.type.startsWith('image/'));
@@ -1465,10 +1477,12 @@ export default function DubbingStudio({
       if (oversizedFile) {
         throw new Error(`${oversizedFile.name} 文件过大（${(oversizedFile.size / 1024 / 1024).toFixed(1)}MB），请拆分或另存为精简版 CSV/TXT 后再导入。`);
       }
+      pickedFiles = await deduplicateBatchVoiceImages(pickedFiles);
+      if (importId !== batchVoiceImportIdRef.current) return;
       setBatchVoiceFileName(pickedFiles.length === 1 ? pickedFiles[0].name : `${pickedFiles.length} 个文件`);
       const results = await Promise.allSettled(pickedFiles.map(async (file) => ({
         file,
-        text: await readBatchVoiceFileText(file),
+        text: await readBatchVoiceFileText(file, batchVoiceImageRequestsRef.current),
       })));
       if (importId !== batchVoiceImportIdRef.current) return;
       const readableTexts = results
@@ -1524,9 +1538,13 @@ export default function DubbingStudio({
   };
 
   useEffect(() => {
-    if (ttsInputMode !== 'batch') return;
+    if (activeSubTab !== 'tts' || ttsInputMode !== 'batch') return;
     const handleWindowPaste = (event: ClipboardEvent) => {
       if (event.defaultPrevented) return;
+      // Views stay mounted when navigating. A hidden dubbing view must not
+      // import screenshots pasted into the assistant or another tool.
+      const view = dubbingViewRef.current;
+      if (!view || view.closest('[hidden]') || !(event.target instanceof Node) || !view.contains(event.target)) return;
       const activeElement = document.activeElement;
       const isTextInput = activeElement instanceof HTMLTextAreaElement
         || activeElement instanceof HTMLInputElement
@@ -1542,7 +1560,7 @@ export default function DubbingStudio({
     };
     window.addEventListener('paste', handleWindowPaste);
     return () => window.removeEventListener('paste', handleWindowPaste);
-  }, [ttsInputMode]);
+  }, [activeSubTab, ttsInputMode]);
 
   const addBatchVoiceItem = () => {
     setBatchVoiceItems(prev => [
@@ -1758,7 +1776,7 @@ export default function DubbingStudio({
   }, [selectedVoiceObj, standaloneVoiceRole, setSelectedStandaloneVoice]);
 
   return (
-    <div id="dubbingstudio-view" className="flex-1 flex flex-col md:flex-row bg-slate-50 min-h-screen overflow-hidden">
+    <div ref={dubbingViewRef} id="dubbingstudio-view" className="flex-1 flex flex-col md:flex-row bg-slate-50 min-h-screen overflow-hidden">
       {/* Sub-navigation Sidebar */}
       <div
         className={`relative w-full md:w-[var(--dubbing-subnav-width)] bg-white border-b md:border-b-0 md:border-r border-slate-200 flex flex-col shrink-0 select-none ${

@@ -30,9 +30,10 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { FileItem } from '../types';
-import { AudioDesignResult, AudioDesignScope } from '../services/geminiService';
+import { AudioDesignResult, AudioDesignScope } from '../services/aiService';
 import { generateSoundEffect, generateMusic } from '../services/elevenLabsService';
 import PointCostHint from './PointCostHint';
+import { isAudioFile, isPdfFile } from '../utils/mediaPreparation';
 
 // Self-contained ElevenLabs Player for Demo Sound Effects inside table
 const ElevenLabsPlayer = ({
@@ -231,8 +232,8 @@ const filmDemoResult: AudioDesignResult = {
       style: "新古典奇幻史诗交响乐 (Neo-Classical Epic Fantasy Orchestral)",
       instrumentation: "独奏钢琴, 凯尔特竖琴, 史诗弦乐群, 圣洁女声合唱团, 大号与圆号群, 影视大鼓",
       sunoPrompt: {
-        chinese: "新古典史诗奇幻管弦配乐；完整连贯的歌曲；核心乐器：独奏钢琴、凯尔特竖琴、史诗弦乐、圆号、影视大鼓；100-110 BPM；D minor；空灵女声与圣洁合唱。",
-        english: "Neo-classical epic fantasy orchestral; cohesive full-length song; featuring solo piano, Celtic harp, cinematic strings, French horns, taiko; 100-110 BPM; D minor; ethereal female vocals and sacred choir.",
+        chinese: "用途：奇幻短片高潮配乐；风格：新古典奇幻管弦；情绪/能量：神秘至昂扬，适度渐强；配器：钢琴主奏、鼓定拍、弦乐铺底；速度：中速，100-110 BPM；调性：D minor；旋律/混音：主题鲜明，给音效留白；结构/结尾：渐进至高潮，尾音收束；人声：空灵女声与合唱；排除：电子舞曲鼓组。",
+        english: "Use: fantasy short-film climax; Style: neo-classical fantasy orchestral; Mood/energy: mysterious to triumphant, gradual lift; Instruments: piano lead, cinematic drums, strings bed; Tempo: moderate, 100-110 BPM; Key: D minor; Melody/mix: clear theme, room for sound effects; Form/ending: gradual build, resolved tail; Vocals: ethereal female voice and choir; Avoid: dance beats.",
         bpm: "105",
         key: "D minor",
         structure: "Intro (0-5s) -> Build-up (5-12s) -> Climax Verse (12-20s) -> Reverb Outro (20-24s)",
@@ -269,8 +270,8 @@ const filmDemoResult: AudioDesignResult = {
       style: "神秘北欧民谣融合现代电子声景 (Nordic Ambient Folk & Cyber Soundscape)",
       instrumentation: "尼古赫帕琴 (Nyckelharpa), 尼泊尔竹笛, 重低音合成器 (Sub-bass), 模拟脉冲敲击, 迷幻合唱",
       sunoPrompt: {
-        chinese: "北欧极简民谣融合赛博电子声景；完整连贯的歌曲；核心乐器：尼古赫帕琴、竹笛、重低音合成器、模拟脉冲、电子鼓；75-85 BPM；A minor；冷峻克制的吟唱。",
-        english: "Nordic minimal folk with cyber soundscape; cohesive full-length song; featuring Nyckelharpa, bamboo flute, sub-bass synth, analog pulses, electronic drums; 75-85 BPM; A minor; restrained cold vocal chanting.",
+        chinese: "用途：悬疑科幻短片铺底；风格：北欧民谣融合冷调电子；情绪/能量：冷峻紧绷，能量克制；配器：尼古赫帕琴主奏、脉冲定拍、低音铺底；速度：慢速，75-85 BPM；调性：A minor；旋律/混音：短动机，给动作音效留白；结构/结尾：缓慢堆叠，悬念式收束；人声：冷峻克制的吟唱；排除：明亮流行鼓组。",
+        english: "Use: suspenseful sci-fi short-film bed; Style: Nordic folk with cold electronic textures; Mood/energy: tense and restrained throughout; Instruments: nyckelharpa lead, pulse rhythm, sub-bass bed; Tempo: slow, 75-85 BPM; Key: A minor; Melody/mix: sparse motif, room for action effects; Form/ending: slow layering, unresolved close; Vocals: restrained cold chanting; Avoid: bright pop drums.",
         bpm: "80",
         key: "A minor",
         structure: "Intro (0-5s) -> Cyber Rise (5-12s) -> Heavy Beat (12-20s) -> Silence Tail (20-24s)",
@@ -402,6 +403,18 @@ export default function AudioDirector({
   const processFiles = async (selectedFiles: FileList | File[] | null, source: 'upload' | 'paste' = 'upload') => {
     if (selectedFiles && selectedFiles.length > 0) {
       const filesToProcess = Array.from(selectedFiles);
+      if (filesToProcess.some(isAudioFile)) {
+        setError('暂不支持音频分析，请上传图片或视频。');
+        setPasteMessage(null);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+        return;
+      }
+      if (filesToProcess.some(isPdfFile)) {
+        setError('暂不支持 PDF 分析，请上传图片或视频。');
+        setPasteMessage(null);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+        return;
+      }
       const MAX_VIDEO_SIZE = 100 * 1024 * 1024;
       const MAX_DIRECT_SIZE = 20 * 1024 * 1024;
       const oversizedFiles = filesToProcess.filter((file) => (
@@ -411,7 +424,7 @@ export default function AudioDirector({
       ));
 
       if (oversizedFiles.length > 0) {
-        setError(`文件过大：视频上限 100MB，图片、音频和 PDF 上限 20MB。请处理：${oversizedFiles.map(f => f.name).join(', ')}`);
+        setError(`文件过大：视频上限 100MB，图片上限 20MB。请处理：${oversizedFiles.map(f => f.name).join(', ')}`);
         return;
       }
 
@@ -456,7 +469,20 @@ export default function AudioDirector({
 
   const handlePaste = (e: React.ClipboardEvent | ClipboardEvent) => {
     if (isUploading) return;
-    const imageFile = getClipboardImageFile(e.clipboardData);
+    const clipboardData = e.clipboardData as DataTransfer;
+    const pastedFiles = Array.from(clipboardData.items || [])
+      .filter(item => item.kind === 'file')
+      .map(item => item.getAsFile());
+    if (pastedFiles.some(isAudioFile) || pastedFiles.some(isPdfFile)) {
+      e.preventDefault();
+      e.stopPropagation();
+      setPasteMessage(null);
+      setError(pastedFiles.some(isAudioFile)
+        ? '暂不支持音频分析，请上传图片或视频。'
+        : '暂不支持 PDF 分析，请上传图片或视频。');
+      return;
+    }
+    const imageFile = getClipboardImageFile(clipboardData);
     if (!imageFile) return;
     e.preventDefault();
     e.stopPropagation();
@@ -532,7 +558,7 @@ export default function AudioDirector({
                 type="file"
                 ref={fileInputRef}
                 onChange={handleFileChange}
-                accept="image/*,video/*,audio/*,application/pdf"
+                accept="image/*,video/*"
                 multiple
                 className="hidden"
               />
@@ -546,7 +572,7 @@ export default function AudioDirector({
                 <div className="flex flex-col items-center gap-2 group">
                   <Upload className="w-8 h-8 text-slate-400 group-hover:text-emerald-600 transition-colors" />
                   <p className="text-xs font-bold text-slate-700">拖拽文件到这里，或点击浏览</p>
-                  <p className="text-[10px] text-slate-400">视频最大 100MB，超过 50MB 会自动压缩分析副本；图片、音频与 PDF 最大 20MB；截图可直接 Ctrl+V 粘贴</p>
+                  <p className="text-[10px] text-slate-400">支持图片、视频；视频最大 100MB，图片最大 20MB；截图可直接在下方文本框直接粘贴</p>
                 </div>
               )}
             </div>
@@ -1203,7 +1229,7 @@ export default function AudioDirector({
                           </div>
 
                           <p className="text-[10px] text-slate-400">
-                            整首音乐的简短风格概述，不含时间线；复制时仅复制英文。
+                            整曲用途、风格与编排要点；不含视频时间码。复制时仅复制英文。
                           </p>
 
                           <div className="space-y-1.5">

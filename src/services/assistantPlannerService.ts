@@ -1,4 +1,4 @@
-import { generateGptStructuredJson } from './geminiRetry';
+import { generateGptStructuredJson } from './aiGateway';
 import { findSfxLibraryMatches } from './sfxLibraryIndex';
 import type { SfxLibraryIndexEntry } from './sfxLibraryIndex';
 

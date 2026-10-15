@@ -4,6 +4,9 @@
  */
 
 import React, { useState, useRef, useEffect } from 'react';
+import { flushSync } from 'react-dom';
+import { assistantWorkspaceHeaders, reportAssistantWorkspaceProgress, useAssistantWorkspace } from '../services/assistantWorkspaceClient';
+import type { AssistantWorkspaceCommand } from '../services/assistantAgentTypes';
 import type { AssistantVideoRequest } from './GlobalAssistant';
 import { 
   Upload, 
@@ -55,11 +58,18 @@ import { getElevenLabsQualityMode } from '../utils/elevenLabsQuality';
 import PointCostHint from './PointCostHint';
 import {
   distributeOverlappingSfxClips,
+  distributeManagedSfxClips,
   isAutoSfxTrackId,
 } from '../utils/sfxTrackLayout';
 
 const MAX_VIDEO_UPLOAD_BYTES = 100 * 1024 * 1024;
 const DEFAULT_DUBBING_VOICE_ID = '';
+const readVideoHasAudio = async (name: string, signal?: AbortSignal): Promise<boolean> => {
+  const response = await fetch(`/api/video/audio-info?videoFileName=${encodeURIComponent(name)}`, { signal });
+  const result = await response.json();
+  if (!response.ok || typeof result.hasAudio !== 'boolean') throw new Error(result.error || '无法读取视频音轨信息。');
+  return result.hasAudio;
+};
 const MIN_DUBBING_AUTO_SPEED = 0.25;
 const MAX_DUBBING_AUTO_SPEED = 4;
 const ORIGINAL_AUDIO_TRACK_ID = 'original-audio';
@@ -796,7 +806,7 @@ const reconcileAutoSfxTracks = (
   const existingBaseTrack = existingTracks.find(track => track.id === 'sfx');
   const baseTrack = existingBaseTrack || createStandardAudioTrack('sfx');
   const requiredTracks = requiredTrackIds.map((trackId, index) => ({
-    ...baseTrack,
+    ...(existingTracks.find(track => track.id === trackId) || baseTrack),
     id: trackId,
     name: requiredTrackIds.length > 1 ? `音效 SFX ${index + 1}` : '音效 SFX',
     type: 'sfx' as const,
@@ -891,6 +901,7 @@ export interface SoundtrackProject {
   sfxEnabled: boolean;
   dubbingEnabled: boolean;
   mixedVideoUrl: string | null;
+  mixedVideoDownloadName?: string;
   exportedMixedUrl?: string | null;
   exportedBgmUrl?: string | null;
   exportedSfxUrl?: string | null;
@@ -1024,6 +1035,7 @@ interface VideoSoundtrackProps {
 }
 
 export default function VideoSoundtrack({ assistantVideoRequest = null, onAssistantTaskRunningChange }: VideoSoundtrackProps) {
+  const [assistantWorkspaceActivity, setAssistantWorkspaceActivity] = useState('');
   // Project saving and loading states
   const [isProjectActive, setIsProjectActive] = useState<boolean>(false);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
@@ -1121,6 +1133,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
   const analysisLockRef = useRef(false);
   const [isMixing, setIsMixing] = useState<boolean>(false);
   const [mixedVideoUrl, setMixedVideoUrl] = useState<string | null>(null);
+  const [mixedVideoDownloadName, setMixedVideoDownloadName] = useState('');
   const [dismissedMixedVideoUrl, setDismissedMixedVideoUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [originalAudioSplitStatus, setOriginalAudioSplitStatus] = useState<OriginalAudioSplitStatus>('idle');
@@ -1584,7 +1597,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
       const storedTracks = Array.isArray(project.tracks)
         ? project.tracks
         : createLegacyTracksForClips(cleanedClips);
-      const normalizedTracks = storedTracks.map(track => {
+      let normalizedTracks: SoundtrackTrack[] = storedTracks.map(track => {
         const normalizedTrack = {
           ...track,
           volume: normalizeUnitVolume(track.volume, DEFAULT_VOLUME_FADER),
@@ -1604,7 +1617,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
           .filter(track => track.type === 'dubbing')
           .map(track => [track.id, track.defaultVoiceId || DEFAULT_DUBBING_VOICE_ID]),
       );
-      const normalizedClips = cleanedClips.map(clip => {
+      let normalizedClips = cleanedClips.map(clip => {
         const audioSource = resolveClipAudioSource(clip);
         const inheritedVoiceId = voiceByTrackId.get(clip.trackId);
         if (!inheritedVoiceId) {
@@ -1661,6 +1674,9 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
           ),
         };
       });
+      const restoredSfxLayout = distributeManagedSfxClips(normalizedClips);
+      normalizedClips = restoredSfxLayout.clips;
+      if (restoredSfxLayout.trackIds.length) normalizedTracks = reconcileAutoSfxTracks(normalizedTracks, restoredSfxLayout.trackIds);
       const hasStaleDubbingAudio = normalizedClips.some(
         clip => clip.voiceDirty || clip.timingDirty,
       );
@@ -1670,6 +1686,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
         ),
       );
       tracksRef.current = normalizedTracks;
+      clipsRef.current = normalizedClips;
       setTracks(normalizedTracks);
       setClips(normalizedClips);
       setSelectedClipId(null);
@@ -1680,6 +1697,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
       setSfxEnabled(project.sfxEnabled);
       setDubbingEnabled(project.dubbingEnabled);
       setMixedVideoUrl(hasStaleDubbingAudio ? null : project.mixedVideoUrl);
+      setMixedVideoDownloadName(project.mixedVideoDownloadName || '');
       setExportedMixedUrl(hasStaleDubbingAudio ? null : project.exportedMixedUrl || null);
       setExportedBgmUrl(project.exportedBgmUrl || null);
       setExportedSfxUrl(project.exportedSfxUrl || null);
@@ -1718,6 +1736,34 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
       setError(`打开工程失败: ${err.message}`);
     }
   };
+
+  useEffect(() => {
+    const importAssistantProject = () => {
+      const raw = sessionStorage.getItem('assistant_pending_video_project');
+      if (!raw) return;
+      try {
+        const project = JSON.parse(raw) as SoundtrackProject;
+        if (!project.videoFile || !Array.isArray(project.clips)) return;
+        const stored = JSON.parse(localStorage.getItem('video_soundtrack_projects') || '[]') as SoundtrackProject[];
+        const projects = [project, ...(Array.isArray(stored) ? stored.filter(item => item.id !== project.id) : [])];
+        localStorage.setItem('video_soundtrack_projects', JSON.stringify(projects));
+        setSavedProjectsList(projects);
+        sessionStorage.removeItem('assistant_pending_video_project');
+        handleOpenProject(project);
+      } catch { setError('助手工程读取失败。'); }
+    };
+    if (sessionStorage.getItem('assistant_pending_video_project')) importAssistantProject();
+    else {
+      try {
+        const id = sessionStorage.getItem('assistant_video_workspace_project');
+        const stored = JSON.parse(localStorage.getItem('video_soundtrack_projects') || '[]') as SoundtrackProject[];
+        const project = stored.find(item => item.id === id);
+        if (project) handleOpenProject(project);
+      } catch { setError('上次制作的工程读取失败，请从工程列表重新打开。'); }
+    }
+    window.addEventListener('ai-audio:assistant-project', importAssistantProject);
+    return () => window.removeEventListener('ai-audio:assistant-project', importAssistantProject);
+  }, []);
 
   const handleDeleteProject = (projectId: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -2091,6 +2137,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
           sfxEnabled,
           dubbingEnabled,
           mixedVideoUrl,
+          mixedVideoDownloadName,
           exportedMixedUrl,
           exportedBgmUrl,
           exportedSfxUrl,
@@ -2122,6 +2169,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
     sfxEnabled,
     dubbingEnabled,
     mixedVideoUrl,
+    mixedVideoDownloadName,
     exportedMixedUrl,
     exportedBgmUrl,
     exportedSfxUrl,
@@ -3342,6 +3390,24 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
         : clip
     )));
   };
+
+  useEffect(() => {
+    if (!videoFile?.isUploaded) return;
+    const controller = new AbortController();
+    void readVideoHasAudio(videoFile.name, controller.signal).then(hasAudio => {
+      if (controller.signal.aborted || hasAudio) return;
+      for (const clip of clipsRef.current.filter(isOriginalAudioClip)) {
+        audioInstancesRef.current[clip.id]?.pause();
+        disconnectClipAudioRouting(clip.id);
+        delete audioInstancesRef.current[clip.id];
+      }
+      clipsRef.current = clipsRef.current.filter(clip => !isOriginalAudioClip(clip));
+      tracksRef.current = tracksRef.current.filter(track => track.id !== ORIGINAL_AUDIO_TRACK_ID);
+      setClips(clipsRef.current);
+      setTracks(tracksRef.current);
+    }).catch(() => { /* Export independently checks the source before mixing. */ });
+    return () => controller.abort();
+  }, [videoFile?.name, videoFile?.url, videoFile?.isUploaded]);
 
   const getSplitSourceDubbingCues = (
     sourceClip: TimelineClip,
@@ -4898,8 +4964,8 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
     }
   };
 
-  // Call Gemini visual multimodal model to auto-create soundtrack timeline
-  const handleAnalyzeVideo = async () => {
+  // Analyze video keyframes to build the soundtrack timeline.
+  const handleAnalyzeVideo = async (workspaceOptions?: { commandId: string; requirements?: string }) => {
     if (!videoFile) return;
 
     const analysisBgmEnabled = bgmEnabled;
@@ -4974,7 +5040,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
 
       const res = await fetch('/api/video/analyze', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...assistantWorkspaceHeaders(workspaceOptions?.commandId, 'analyze') },
         signal: controller.signal,
         body: JSON.stringify({
           fileName: videoFile.name,
@@ -4988,6 +5054,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
           analysisTrack: 'all',
           analysisMode: usingFullVideoDubbingAnalysis ? 'full-video-dubbing-sync' : 'keyframes',
           dubbingSyncMode: usingFullVideoDubbingAnalysis ? 'subtitle-and-lip' : undefined,
+          requirements: workspaceOptions?.requirements,
         })
       });
 
@@ -4999,6 +5066,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
       }
 
       const data = await res.json();
+      if (workspaceOptions && (data.analysisSource === 'local-fallback' || data.analysisPartial)) throw new Error(data.warning || '无法完成精确画面分析，未执行后续合成。');
       if (data.clips && Array.isArray(data.clips)) {
         setAnalysisStage('正在整理时间轴...');
         const analysisRunId = Date.now().toString(36);
@@ -5052,7 +5120,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
               : undefined,
             timingSource: isDubbingClip && typeof clip.timingSource === 'string'
               ? clip.timingSource
-              : isDubbingClip ? 'full-video' : undefined,
+              : isDubbingClip ? 'keyframe-estimate' : undefined,
             volume: DEFAULT_VOLUME_FADER,
             isGenerating: false,
             voiceDirty: false,
@@ -5065,7 +5133,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
             : '';
           if (usingFullVideoDubbingAnalysis && targetTrackIds.size === 1) {
             const message = dubbingStatus === 'unavailable'
-              ? '完整视频字幕/口型分析暂时不可用，没有生成配音片段。你可以稍后重试，或先开启音乐/音效轨生成基础设计。'
+              ? '关键帧中没有可用字幕，暂未生成配音片段。可稍后补充更清晰的视频画面。'
               : 'AI分析完成，但没有识别到可拆成配音片段的台词/字幕。原视频轨已保留，可以换一个有清晰人声或字幕的视频再试。';
             setAnalysisStage(message);
             setToast({ message, type: 'info' });
@@ -5126,7 +5194,6 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
         const dubbingStatus = typeof data.dubbingStatus === 'string'
           ? data.dubbingStatus
           : '';
-        const usedNativeVideo = analysisSource === 'server-native-video';
         const usedServerFrames = analysisSource === 'server-ffmpeg';
         const usedLocalFallback = analysisSource === 'local-fallback';
         const serverWarning = typeof data.warning === 'string' ? data.warning.trim() : '';
@@ -5137,8 +5204,6 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
             ? `AI 分析完成：已将 ${dubbingSourceCueCount} 条字幕整理为 ${dubbingCueCount} 个连续配音片段。`
             : autoSfxTrackCount > 1
             ? `AI 分析完成：重叠音效已自动分配到 ${autoSfxTrackCount} 条音效轨。`
-            : usedNativeVideo
-            ? 'AI 分析完成：系统已自动改用完整视频与原音轨完成分析。'
             : usedServerFrames || usingServerFallback
               ? 'AI 分析完成：系统已从服务器原视频重新提取画面。'
               : 'AI 分析完成：已使用本地关键帧快速编排时间轴。',
@@ -5146,7 +5211,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
             ? 'info'
             : usingFullVideoDubbingAnalysis
             ? 'success'
-            : usedNativeVideo || usedServerFrames || usingServerFallback ? 'info' : 'success',
+            : usedServerFrames || usingServerFallback ? 'info' : 'success',
         });
         if (serverWarning || usedLocalFallback) {
           setToast({
@@ -5170,6 +5235,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
       } else {
         setError(err.message || '多模态智能分析出错');
       }
+      if (workspaceOptions) throw err;
     } finally {
       window.clearTimeout(timeoutId);
       if (analysisAbortRef.current === controller) {
@@ -5434,7 +5500,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
   // Single timeline clip generator using ElevenLabs API on the server
   const handleGenerateAudioClip = async (
     clipId: string,
-    options: { suppressToast?: boolean; forceRegenerate?: boolean } = {},
+    options: { suppressToast?: boolean; forceRegenerate?: boolean; workspaceCommandId?: string } = {},
   ): Promise<boolean> => {
     const { suppressToast = false, forceRegenerate = false } = options;
     const clip = clipsRef.current.find(c => c.id === clipId);
@@ -5491,6 +5557,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
     const generationTimingSignature = getDubbingTimingSignature(clip);
 
     // Update state to isGenerating
+    clipsRef.current = clipsRef.current.map(c => c.id === clipId ? { ...c, isGenerating: true, error: undefined } : c);
     setClips(prev => prev.map(c => c.id === clipId ? { ...c, isGenerating: true, error: undefined } : c));
 
     try {
@@ -5555,6 +5622,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
           timingDirty: timingChangedDuringGeneration,
         };
 
+        clipsRef.current = clipsRef.current.map(c => c.id === clipId ? { ...cachedClip, isGenerating: false } : c);
         setClips(prev => prev.map(c => {
           if (c.id !== clipId) return c;
           const didTimingChange = getDubbingTimingSignature(c) !== generationTimingSignature;
@@ -5598,7 +5666,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
 
       const res = await fetch('/api/video/generate-clip', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...assistantWorkspaceHeaders(options.workspaceCommandId, clipId) },
         body: JSON.stringify({
           prompt: clip.prompt,
           trackId: clip.trackId,
@@ -5673,6 +5741,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
       };
       
       // Update clip with audio URL
+      clipsRef.current = clipsRef.current.map(c => c.id === clipId ? { ...cachedClip, isGenerating: false } : c);
       setClips(prev => prev.map(c => {
         if (c.id !== clipId) return c;
         const didTimingChange = trackType === 'dubbing'
@@ -5735,6 +5804,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
       return true;
 
     } catch (err: any) {
+      clipsRef.current = clipsRef.current.map(c => c.id === clipId ? { ...c, isGenerating: false, error: err.message } : c);
       setClips(prev => prev.map(c => c.id === clipId ? { 
         ...c, 
         isGenerating: false, 
@@ -6750,7 +6820,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
   };
 
   // Mix all audio layers into original video using high performance ffmpeg
-  const handleExportVideo = async () => {
+  const handleExportVideo = async (workspaceOptions?: { commandId: string; name?: string; includeOriginalAudio?: boolean }) => {
     if (!videoFile) return;
 
     const isTrackExportable = (trackId: string) => {
@@ -6790,7 +6860,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
 
     try {
       const playableClips = clips
-        .filter(c => c.audioUrl && !c.muted && isTrackExportable(c.trackId))
+        .filter(c => c.audioUrl && !c.muted && isTrackExportable(c.trackId) && !(workspaceOptions?.includeOriginalAudio === false && isOriginalAudioClip(c)))
         .map(clip => ({
           ...clip,
           trackType: tracks.find(track => track.id === clip.trackId)?.type,
@@ -6800,7 +6870,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
 
       const res = await fetch('/api/video/mix', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...assistantWorkspaceHeaders(workspaceOptions?.commandId, 'export') },
         signal: controller.signal,
         body: JSON.stringify({
           videoFileName: videoFile.name,
@@ -6821,10 +6891,18 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
 
       const data = await res.json();
       if (!isCurrentExportJob('video', version, controller)) return;
+      if (data.skippedOriginalClipIds?.length) {
+        const skipped = new Set<string>(data.skippedOriginalClipIds);
+        clipsRef.current = clipsRef.current.filter(clip => !skipped.has(clip.id));
+        setClips(clipsRef.current);
+      }
       setMixedVideoUrl(data.videoUrl);
+      setMixedVideoDownloadName(workspaceOptions?.name ? `${workspaceOptions.name.replace(/\.mp4$/i, '')}.mp4` : '');
+      return data.videoUrl as string;
     } catch (err: any) {
       if (controller.signal.aborted || !isCurrentExportJob('video', version, controller)) return;
       setError(err.message || 'FFmpeg 音画合成出错');
+      if (workspaceOptions) throw err;
     } finally {
       if (isCurrentExportJob('video', version, controller)) {
         delete exportControllersRef.current.video;
@@ -7790,6 +7868,185 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
     setSelectedClipIds(prev => prev.filter(id => id !== clipId));
   };
 
+  // The assistant operates the same state and handlers as the visible editor.
+  // A ref keeps long running sequences on the latest React commit.
+  const assistantVideoPageRef = useRef({ videoFile, videoDuration, currentProjectId, savedProjectsList, bgmEnabled, sfxEnabled, dubbingEnabled,
+    mixedVideoUrl, mixedVideoDownloadName, error, isAnalyzing, isUploadingToServer, isMixing, analyze: handleAnalyzeVideo, generate: handleGenerateAudioClip,
+    exportVideo: handleExportVideo, openProject: handleOpenProject });
+  assistantVideoPageRef.current = { videoFile, videoDuration, currentProjectId, savedProjectsList, bgmEnabled, sfxEnabled, dubbingEnabled,
+    mixedVideoUrl, mixedVideoDownloadName, error, isAnalyzing, isUploadingToServer, isMixing, analyze: handleAnalyzeVideo, generate: handleGenerateAudioClip,
+    exportVideo: handleExportVideo, openProject: handleOpenProject };
+  useAssistantWorkspace('video-soundtrack', async (command: AssistantWorkspaceCommand, signal) => {
+    const args = command.args;
+    const commit = async () => { await new Promise(resolve => window.setTimeout(resolve, 0)); signal.throwIfAborted(); };
+    const snapshot = () => {
+      const state = assistantVideoPageRef.current;
+      const project: SoundtrackProject = {
+        id: state.currentProjectId || `assistant-page-${command.id}`,
+        name: state.savedProjectsList.find(item => item.id === state.currentProjectId)?.name || '视频声音制作工程',
+        createdAt: Date.now(), videoFile: state.videoFile, videoDuration: state.videoDuration,
+        clips: clipsRef.current.map(clip => ({ ...clip })), tracks: tracksRef.current.map(track => ({ ...track })),
+        bgmEnabled: state.bgmEnabled, sfxEnabled: state.sfxEnabled, dubbingEnabled: state.dubbingEnabled, mixedVideoUrl: state.mixedVideoUrl,
+        mixedVideoDownloadName: state.mixedVideoDownloadName,
+      };
+      return { project, busy: state.isAnalyzing || state.isUploadingToServer || state.isMixing || clipsRef.current.some(clip => clip.isGenerating),
+        clips: project.clips, tracks: project.tracks, duration: project.videoDuration };
+    };
+    const persistProject = () => {
+      const { project } = snapshot();
+      if (!project.videoFile) return;
+      const stored = JSON.parse(localStorage.getItem('video_soundtrack_projects') || '[]') as SoundtrackProject[];
+      const projects = [project, ...stored.filter(item => item.id !== project.id)];
+      localStorage.setItem('video_soundtrack_projects', JSON.stringify(projects));
+      sessionStorage.setItem('assistant_video_workspace_project', project.id);
+      setSavedProjectsList(projects); setCurrentProjectId(project.id);
+    };
+    const progress = (message: string) => {
+      setAssistantWorkspaceActivity(message);
+      reportAssistantWorkspaceProgress(message);
+    };
+    progress(command.message);
+    try {
+      if (!assistantVideoPageRef.current.videoFile && command.action !== 'load') {
+        const id = sessionStorage.getItem('assistant_video_workspace_project');
+        const stored = JSON.parse(localStorage.getItem('video_soundtrack_projects') || '[]') as SoundtrackProject[];
+        const project = stored.find(item => item.id === id);
+        if (project) { flushSync(() => assistantVideoPageRef.current.openProject(project)); await commit(); }
+      }
+      if (command.action === 'inspect') return { ...snapshot(), workspace: 'video-soundtrack' };
+      // A manual generation already in progress is awaited instead of cancelled
+      // or mistaken for a missing user action.
+      while (snapshot().busy) {
+        signal.throwIfAborted();
+        progress('等待页面当前制作完成，随后自动继续…');
+        await new Promise(resolve => window.setTimeout(resolve, 200));
+      }
+      progress(command.message);
+      if (command.action === 'load') {
+        const video = args.video;
+        if (!video?.mimeType?.startsWith('video/') || !video.url?.startsWith('/uploads/') || !(video.duration > 0)) throw new Error('请选择当前任务中有效的视频文件。');
+        const id = `assistant-video-${video.id}`;
+        if (assistantVideoPageRef.current.videoFile?.url === video.url) return snapshot();
+        const project: SoundtrackProject = {
+          id, name: args.name || video.name.replace(/\.[^.]+$/, ''), createdAt: Date.now(),
+          videoFile: { name: decodeURIComponent(video.url.split('/').pop()), url: video.url, isUploaded: true },
+          videoDuration: video.duration, tracks: createDefaultTracks(), clips: [],
+          bgmEnabled: !args.tracks || args.tracks.includes('bgm'), sfxEnabled: !args.tracks || args.tracks.includes('sfx'),
+          dubbingEnabled: !args.tracks || args.tracks.includes('dubbing'), mixedVideoUrl: null,
+        };
+        if (args.includeOriginalAudio !== false && await readVideoHasAudio(project.videoFile!.name, signal)) {
+          project.tracks!.push({ id: ORIGINAL_AUDIO_TRACK_ID, name: '视频原声', type: 'original', volume: DEFAULT_VOLUME_FADER, isMuted: false, isSoloed: false });
+          project.clips.push({ id: ORIGINAL_AUDIO_CLIP_ID, trackId: ORIGINAL_AUDIO_TRACK_ID, name: '视频原声', prompt: '', audioUrl: video.url,
+            audioSource: 'uploaded', startTime: 0, duration: video.duration, volume: DEFAULT_VOLUME_FADER, sourceAudioDuration: video.duration, speed: 1, autoSpeed: 1 });
+        }
+        const stored = JSON.parse(localStorage.getItem('video_soundtrack_projects') || '[]') as SoundtrackProject[];
+        const projects = [project, ...stored.filter(item => item.id !== id)];
+        localStorage.setItem('video_soundtrack_projects', JSON.stringify(projects));
+        sessionStorage.setItem('assistant_video_workspace_project', id);
+        flushSync(() => { setSelectedFile(null); setSavedProjectsList(projects); assistantVideoPageRef.current.openProject(project); });
+        await commit();
+      } else {
+        if (!assistantVideoPageRef.current.videoFile) throw new Error('视频声音制作中尚未导入视频。请先选择视频文件。');
+        if (command.action === 'analyze') {
+          if (args.tracks) flushSync(() => { setBgmEnabled(args.tracks.includes('bgm')); setSfxEnabled(args.tracks.includes('sfx')); setDubbingEnabled(args.tracks.includes('dubbing')); });
+          await assistantVideoPageRef.current.analyze({ commandId: command.id, requirements: args.requirements });
+          await commit();
+        } else if (command.action === 'edit_clips') {
+          const desiredTypes = (args.clips || []).map((item: any) => item.trackType) as Array<'bgm' | 'sfx' | 'dubbing'>;
+          ensureStandardAudioTracks(desiredTypes);
+          let next = [...clipsRef.current];
+          for (const [index, item] of (args.clips || []).entries()) {
+            const existing = item.id ? next.find(clip => clip.id === item.id) : undefined;
+            if (item.id && !existing) throw new Error(`页面片段不存在：${item.id}`);
+            if (existing && isOriginalAudioClip(existing)) throw new Error('请通过保留原声选项修改原声轨。');
+            if (item.remove) { next = next.filter(clip => clip.id !== item.id); continue; }
+            const previousTrack = existing && tracksRef.current.find(track => track.id === existing.trackId);
+            const track = (previousTrack?.type === item.trackType ? previousTrack : undefined)
+              || tracksRef.current.find(track => track.id === item.trackType) || tracksRef.current.find(track => track.type === item.trackType);
+            if (!track) throw new Error('对应音轨不存在。');
+            const asset = item.asset;
+            const startTime = item.startTime ?? existing?.startTime ?? 0;
+            const remaining = assistantVideoPageRef.current.videoDuration - startTime;
+            const duration = item.duration ?? asset?.duration ?? existing?.duration ?? (item.trackType === 'bgm' ? remaining : Math.min(3, remaining));
+            if (!Number.isFinite(startTime) || startTime < 0 || !Number.isFinite(duration) || duration <= 0 || startTime + duration > assistantVideoPageRef.current.videoDuration + .05) throw new Error('片段时间范围超出视频。');
+            if (asset && item.trackType === 'dubbing' && duration < asset.duration - .05) throw new Error('不能截断上传的完整配音。');
+            const changed = existing && ['text', 'prompt', 'targetLanguage', 'voiceId'].some(key => item[key] !== undefined && item[key] !== (existing as any)[key]);
+            const clip: TimelineClip = { ...existing, id: existing?.id || `clip-assistant-${command.id}-${index}`, trackId: track.id,
+              name: item.name || existing?.name || asset?.name || { bgm: '配乐', sfx: '音效', dubbing: '配音' }[item.trackType as string] || '音频片段',
+              prompt: item.prompt ?? existing?.prompt ?? item.text ?? '', text: item.text ?? existing?.text,
+              targetLanguage: item.targetLanguage ?? existing?.targetLanguage, voiceId: item.voiceId ?? existing?.voiceId ?? track.defaultVoiceId,
+              startTime, duration, volume: item.volume === undefined ? existing?.volume ?? DEFAULT_VOLUME_FADER : Math.max(0, Math.min(1, item.volume * DEFAULT_VOLUME_FADER)),
+              audioUrl: asset?.url || (changed ? undefined : existing?.audioUrl), audioSource: asset ? 'uploaded' : existing?.audioSource,
+              sourceAudioDuration: asset?.duration || existing?.sourceAudioDuration, speed: 1, autoSpeed: 1, origin: 'ai', isGenerating: false,
+              voiceDirty: false, timingDirty: false,
+              timingSource: existing?.timingSource || (item.trackType === 'dubbing' && item.duration === undefined && !asset ? 'assistant-free-speech' : 'assistant-timeline'),
+            };
+            if (item.voiceId && track.type === 'dubbing') {
+              tracksRef.current = tracksRef.current.map(t => t.id === track.id ? { ...t, defaultVoiceId: item.voiceId } : t);
+              setTracks(tracksRef.current);
+            }
+            next = existing ? next.map(c => c.id === clip.id ? clip : c) : [...next, clip];
+          }
+          // Apply the same automatic lane allocation as page analysis, after all edits.
+          // Only managed SFX lanes move; custom tracks and their controls remain intact.
+          const layout = distributeManagedSfxClips(next);
+          next = layout.clips;
+          const nextTracks = reconcileAutoSfxTracks(tracksRef.current, layout.trackIds.length ? layout.trackIds : ['sfx']);
+          tracksRef.current = nextTracks;
+          clipsRef.current = next;
+          flushSync(() => { setTracks(nextTracks); setClips(next); setMixedVideoUrl(null); });
+          if (next.length) handleSelectClip(next.filter(clip => !isOriginalAudioClip(clip)).at(-1)?.id || next[0].id);
+          await commit();
+        } else if (command.action === 'generate') {
+          const targets = args.clipIds?.length ? args.clipIds.map((id: string) => {
+            const clip = clipsRef.current.find(item => item.id === id);
+            if (!clip) throw new Error(`页面片段不存在：${id}`);
+            return clip;
+          }) : clipsRef.current.filter(clip => !isOriginalAudioClip(clip) && (!clip.audioUrl || clip.voiceDirty || clip.timingDirty));
+          for (const [index, clip] of targets.entries()) {
+            signal.throwIfAborted();
+            const current = clipsRef.current.find(item => item.id === clip.id);
+            if (current?.audioUrl && !current.error && !current.voiceDirty && !current.timingDirty) continue;
+            const track = tracksRef.current.find(track => track.id === clip.trackId);
+            if (track?.type === 'dubbing' && !(clip.voiceId || track.defaultVoiceId)) throw new Error('配音片段未设置可用人声，请先匹配人声并填写voiceId。');
+            progress(`正在生成 ${index + 1}/${targets.length}：${clip.name}，完成后自动继续`);
+            handleSelectClip(clip.id);
+            persistProject(); // Save pending clips before a long request so refresh can reconnect.
+            const success = await assistantVideoPageRef.current.generate(clip.id, { workspaceCommandId: command.id });
+            await commit();
+            const generated = clipsRef.current.find(item => item.id === clip.id);
+            if (!success || !generated?.audioUrl || generated.error) {
+              const message = generated?.error || '尚未成功生成';
+              throw new Error(`片段“${clip.name}”生成失败：${/terms of service|blocked|content.policy/i.test(message) ? '音频服务商拦截了该请求。' : ''}${message}`);
+            }
+            if (generated.timingSource === 'assistant-free-speech' && generated.sourceAudioDuration) {
+              if (generated.startTime + generated.sourceAudioDuration > assistantVideoPageRef.current.videoDuration + .05) throw new Error('完整台词超出视频结尾，已保留音频，请调整片段位置。');
+              clipsRef.current = clipsRef.current.map(item => item.id === clip.id ? { ...item, duration: generated.sourceAudioDuration!, autoSpeed: 1 } : item);
+              flushSync(() => setClips(clipsRef.current));
+            }
+            persistProject();
+          }
+        } else if (command.action === 'export') {
+          if (clipsRef.current.some(clip => !isOriginalAudioClip(clip) && !clip.muted && (!clip.audioUrl || clip.isGenerating || clip.error || clip.voiceDirty || clip.timingDirty))) throw new Error('时间线上还有未完成或需重新合成的片段，不能导出为已完成结果。');
+          const url = await assistantVideoPageRef.current.exportVideo({ commandId: command.id, name: args.name || snapshot().project.name, includeOriginalAudio: args.includeOriginalAudio });
+          await commit();
+          if (!url) throw new Error(assistantVideoPageRef.current.error || '页面混音未完成。');
+          persistProject();
+          return { ...snapshot(), files: [{ url, name: `${(args.name || snapshot().project.name).replace(/\.mp4$/i, '')}.mp4` }], workspace: 'video-soundtrack' };
+        }
+      }
+      persistProject();
+      const result = snapshot();
+      return { ...result, workspace: 'video-soundtrack', files: command.action === 'generate' ? result.clips.filter(clip => !isOriginalAudioClip(clip) && clip.audioUrl).map(clip => ({ url: clip.audioUrl, name: `${clip.name.replace(/\.[^.]+$/, '')}.${getUrlFileExtension(clip.audioUrl, 'wav')}` })) : [] };
+    } catch (error) {
+      // A failed batch still returns its real partial project and completed audio.
+      persistProject();
+      const failure = error instanceof Error ? error : new Error(String(error));
+      (failure as any).workspaceResult = snapshot();
+      throw failure;
+    } finally { setAssistantWorkspaceActivity(''); }
+  });
+
   if (!isProjectActive) {
     return (
       <div className="relative flex min-h-[calc(100dvh-4rem)] w-full select-none flex-col items-center justify-center overflow-hidden bg-slate-900 p-8 text-slate-100 lg:min-h-dvh">
@@ -7953,6 +8210,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
 
   return (
     <div id="video-soundtrack-container" className="flex h-[100dvh] min-h-0 flex-col bg-slate-900 text-slate-100 overflow-hidden">
+      {assistantWorkspaceActivity && <div role="status" className="flex shrink-0 items-center gap-2 border-b border-emerald-700/40 bg-emerald-950 px-5 py-2 text-xs text-emerald-200"><Loader2 className="h-3.5 w-3.5 animate-spin" />智能助手：{assistantWorkspaceActivity}</div>}
       {/* 顶部工具栏 */}
       <header id="daw-header" className="px-4 py-3 lg:px-6 lg:py-4 border-b border-slate-800 bg-slate-950 flex items-center justify-between gap-3 shadow-md shrink-0 select-none overflow-visible">
         <div className="flex min-w-0 flex-1 flex-nowrap items-center gap-3 overflow-x-auto overflow-y-hidden pr-2 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden lg:gap-6">
@@ -8624,7 +8882,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                     </div>
                     <div className="flex shrink-0 items-center gap-1.5">
                       <a
-                        href={`/api/sfx/download-file?path=${encodeURIComponent(mixedVideoUrl)}&name=${encodeURIComponent(`mixed_${(videoFile?.name || 'video').replace(/\.[^/.]+$/, '')}_${exportChannelMode}.${getUrlFileExtension(mixedVideoUrl, 'mp4')}`)}`}
+                        href={`/api/sfx/download-file?path=${encodeURIComponent(mixedVideoUrl)}&name=${encodeURIComponent(mixedVideoDownloadName || `mixed_${(videoFile?.name || 'video').replace(/\.[^/.]+$/, '')}_${exportChannelMode}.${getUrlFileExtension(mixedVideoUrl, 'mp4')}`)}`}
                         className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold px-2.5 py-1 rounded-md transition-colors"
                       >
                         <Download className="w-3 h-3" />
