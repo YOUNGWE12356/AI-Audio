@@ -79,4 +79,6 @@ powershell -ExecutionPolicy Bypass -File tools/music-separation/setup-music-sepa
 
 ## Git 工作流
 
+本地模型使用 Git LFS 随仓库保存，清单、校验及还原方法见 [本地模型包](tools/local-models/README.md)。推理环境、上传素材和生成结果仍不进入版本库。
+
 开发在独立的 `agent/*` 分支进行，通过 Draft Pull Request 合并到 `main`。不要提交 `.env`、用户上传文件、运行时数据或构建产物。
