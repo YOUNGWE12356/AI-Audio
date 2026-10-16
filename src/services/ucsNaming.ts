@@ -60,12 +60,17 @@ export const normalizeUcsRequirementItems = (items: Record<string, unknown>[], t
   const invalid: number[] = [];
   const normalized = items.map((item, index) => {
     if (!isUcsSfxRow(item, templateType)) return item;
-    const filename = normalizeUcsSfxFilename(item.filename);
+    // The requirements table uses an engineering prefix around the UCS name.
+    // Keep bare UCS validation unchanged for sound-library imports.
+    const candidate = typeof item.filename === 'string'
+      ? item.filename.trim().replace(/^(?:sfx_)+/i, '')
+      : item.filename;
+    const filename = normalizeUcsSfxFilename(candidate);
     if (!filename) {
       invalid.push(index + 1);
       return item;
     }
-    return { ...item, filename };
+    return { ...item, filename: `Sfx_${filename}` };
   });
   return { items: normalized, invalid };
 };

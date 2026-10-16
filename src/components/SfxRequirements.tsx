@@ -255,7 +255,7 @@ const getUncoveredRequirementText = (currentText: string, existingRows: any[], t
 
 const LOADING_STEPS = [
   "AI 正在识别用户上传的参考文件与文字...",
-  "正在提取表格、画面、字幕或音频线索...",
+  "正在提取表格、画面或字幕线索...",
   "正在应用专业音频工程规范重构文件名...",
   "正在扩充细致、具体的声学材质与动效描述...",
   "正在转换语境并生成多国台词对照...",
@@ -266,14 +266,12 @@ const MAX_REFERENCE_FILE_BYTES = 80 * 1024 * 1024;
 
 const isSupportedReferenceFile = (file: File) => (
   file.type.startsWith('image/')
-  || file.type.startsWith('audio/')
   || file.type.startsWith('video/')
 );
 
 const getReferenceFileKind = (file: File | null) => {
   if (!file) return '参考文件';
   if (file.type.startsWith('image/')) return '图片/截图';
-  if (file.type.startsWith('audio/')) return '音频/BGM参考';
   if (file.type.startsWith('video/')) return '视频/画面参考';
   return '参考文件';
 };
@@ -886,7 +884,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
 
   const processReferenceFile = (file: File, source: 'upload' | 'drop' | 'paste' = 'upload') => {
     if (!isSupportedReferenceFile(file)) {
-      setError('只支持上传图片/截图、音频或视频文件。');
+      setError('只支持上传图片/截图或视频文件，不支持音频参考。');
       return;
     }
     if (file.size > MAX_REFERENCE_FILE_BYTES) {
@@ -1362,7 +1360,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
             <h2 id="sfx-req-title" className="text-xl font-bold tracking-tight text-slate-800">音效需求表优化</h2>
           </div>
           <p className="text-xs text-slate-500">
-            支持输入简短想法，或上传图片/截图、音频、视频参考文件，通过 AI 识别表格、画面、字幕与音乐线索，标准化音频制作需求表。
+            支持输入简短想法，或上传图片/截图、视频参考文件，通过 AI 识别表格、画面与字幕，标准化音频制作需求表。
           </p>
         </div>
       </div>
@@ -1506,7 +1504,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
                 type="file"
                 ref={fileInputRef}
                 onChange={handleFileChange}
-                accept="image/*,audio/*,video/*"
+                accept="image/*,video/*"
                 className="hidden"
               />
 
@@ -1517,7 +1515,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
                   </div>
                   <div>
                     <p className="text-xs font-semibold text-slate-700">拖拽或上传参考文件到此</p>
-                    <p className="text-[10px] text-slate-400 mt-1">支持图片/截图、音频、视频；图片也可 Ctrl+V 粘贴</p>
+                    <p className="text-[10px] text-slate-400 mt-1">支持图片/截图、视频；图片也可 Ctrl+V 粘贴</p>
                   </div>
                 </div>
               ) : (
@@ -1558,7 +1556,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
               )}
             </div>
             <p className="text-[10px] text-slate-400 leading-relaxed">
-              参考文件不是必填：图片/截图用于识别表格或画面；音频按 BGM/音乐参考分析；视频只分析画面与字幕，默认忽略视频内音频。
+              参考文件不是必填：图片/截图用于识别表格或画面；视频只分析画面与字幕，不分析视频内音频。
             </p>
             {pasteMessage && (
               <div className="flex items-center gap-1.5 rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-[10px] font-medium text-emerald-700">
@@ -1613,7 +1611,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
               )}
               {!isImageLoading && !hasTextSource && !hasImageSource && (
                 <p className="text-[9px] text-slate-400 text-center mt-1.5">
-                  已选择模板。可直接生成标准表，也可补充文字描述、图片、音频或视频后再生成。
+                  已选择模板。可直接生成标准表，也可补充文字描述、图片或视频后再生成。
                 </p>
               )}
             </div>

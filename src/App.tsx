@@ -19,11 +19,12 @@ import {
   translateTextToLanguage,
   translateToEnglish,
 } from './services/aiService';
-import { generateSoundEffect, generateMusic, generateVoice } from './services/elevenLabsService';
+import { generateMusic, generateVoice } from './services/elevenLabsService';
+import { generateSoundEffectVersions } from './services/sfxGeneration';
 import { FileItem, HistoryItem, TabType } from './types';
 import { ELEVENLABS_VOICES, VoiceItem } from './data/voices';
 import { fetchPlatformHealth } from './services/platformService';
-import { isAudioFile, isPdfFile, prepareFilesForAnalysis } from './utils/mediaPreparation';
+import { isPdfFile, prepareFilesForAnalysis } from './utils/mediaPreparation';
 import { loadPersistentHistory, persistHistory } from './services/historyStorage';
 import { readRecentVoiceIds } from './utils/recentVoices';
 
@@ -218,6 +219,7 @@ export default function App() {
   const [standaloneDuration, setStandaloneDuration] = useState(1);
   const [standaloneDurationMode, setStandaloneDurationMode] = useState<'auto' | 'fixed'>('auto');
   const [standaloneLoading, setStandaloneLoading] = useState(false);
+  const standaloneGenerationInFlight = useRef(false);
   const [standaloneError, setStandaloneError] = useState<string | null>(null);
   const [pendingSfxOptions, setPendingSfxOptions] = useState<{
     optionA: { url: string; title: string; prompt: string; timestamp: string; details: string; duration: number } | null;
@@ -763,6 +765,7 @@ export default function App() {
 
   // SFX generator handler
   const handleStandaloneGenerate = async () => {
+    if (standaloneGenerationInFlight.current) return;
     if (!hasElevenLabsKey) {
       setStandaloneError('ELEVENLABS_API_KEY 未配置，请前往设置页面或 Secrets 面板添加。');
       return;
@@ -772,76 +775,47 @@ export default function App() {
       return;
     }
 
+    standaloneGenerationInFlight.current = true;
     setStandaloneLoading(true);
     setStandaloneError(null);
+    setPendingSfxOptions({ optionA: null, optionB: null });
     try {
       const prompt = standalonePrompt.trim();
-      const englishPrompt = await translateToEnglish(prompt);
-      const generationPrompt = englishPrompt.trim() || prompt;
       const requestedDuration = standaloneDurationMode === 'fixed' ? standaloneDuration : undefined;
-      const [blobA, blobB] = await Promise.all([
-        generateSoundEffect(generationPrompt, requestedDuration, {
-          qualityMode: elevenLabsQualityMode,
-        }),
-        generateSoundEffect(generationPrompt, requestedDuration, {
-          qualityMode: elevenLabsQualityMode,
-        }),
-      ]);
-      const urlA = URL.createObjectURL(blobA);
-      const urlB = URL.createObjectURL(blobB);
-
       const baseTitle = `独立音效 - ${prompt.substring(0, 20)}${prompt.length > 20 ? '...' : ''}`;
       const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 16);
-      const durationLabel = requestedDuration ? `${requestedDuration}秒` : '自动时长';
-      const details = generationPrompt !== prompt
-        ? `${durationLabel} · 48kHz WAV · 电影声效 · 已自动英译`
-        : `${durationLabel} · 48kHz WAV · 电影声效`;
-      setPendingSfxOptions({
-        optionA: {
-          url: urlA,
-          title: `${baseTitle}（版本 A）`,
-          prompt,
-          timestamp,
-          details,
-          duration: requestedDuration || 0,
-        },
-        optionB: {
-          url: urlB,
-          title: `${baseTitle}（版本 B）`,
-          prompt,
-          timestamp,
-          details,
-          duration: requestedDuration || 0,
+      const batchId = crypto.randomUUID();
+      const results = await generateSoundEffectVersions({
+        prompt,
+        duration: requestedDuration,
+        qualityMode: elevenLabsQualityMode,
+        onResult: result => {
+          if (result.status === 'rejected') {
+            setStandaloneError(previous => [previous, `版本 ${result.version} 生成失败：${result.error}`].filter(Boolean).join('；'));
+            return;
+          }
+          const durationLabel = `${Number(result.duration.toFixed(2))}秒`;
+          const details = `${durationLabel} · 48kHz WAV${result.generationPrompt !== prompt ? ' · 已自动英译' : ''}`;
+          const option = {
+            url: URL.createObjectURL(result.blob),
+            title: `${baseTitle}（版本 ${result.version}）`,
+            prompt, timestamp, details, duration: result.duration,
+          };
+          setPendingSfxOptions(previous => ({ ...previous, [result.version === 'A' ? 'optionA' : 'optionB']: option }));
+          setHistoryList(previous => [{
+            ...option, id: `sfx-${batchId}-${result.version}`, type: 'sfx', inputText: prompt,
+          }, ...previous]);
         },
       });
-      setHistoryList(prev => [
-        {
-          id: `sfx-${Date.now()}-A`,
-          type: 'sfx',
-          title: `${baseTitle}（版本 A）`,
-          prompt,
-          url: urlA,
-          timestamp,
-          details,
-          inputText: prompt,
-        },
-        {
-          id: `sfx-${Date.now()}-B`,
-          type: 'sfx',
-          title: `${baseTitle}（版本 B）`,
-          prompt,
-          url: urlB,
-          timestamp,
-          details,
-          inputText: prompt,
-        },
-        ...prev,
-      ]);
-      
-      // Auto play option A
+      const failed = results.flatMap(result => result.status === 'rejected' ? [`版本 ${result.version} 生成失败：${result.error}`] : []);
+      const succeeded = results.filter(result => result.status === 'fulfilled');
+      if (failed.length) {
+        setStandaloneError(`${failed.join('；')}${succeeded.length ? '。成功版本已保留，可试听或下载。' : ''}`);
+      }
     } catch (err: any) {
       setStandaloneError(err.message || '生成失败，请重试');
     } finally {
+      standaloneGenerationInFlight.current = false;
       setStandaloneLoading(false);
     }
   };
@@ -977,11 +951,6 @@ export default function App() {
 
     if (!hasAiTextModel) {
       setError('AI 文本/视觉模型未配置，请在服务端配置 GPT 网关。');
-      return;
-    }
-
-    if (files.some(item => isAudioFile(item.file))) {
-      setError('暂不支持音频分析，请上传图片或视频。');
       return;
     }
 
@@ -1126,7 +1095,7 @@ export default function App() {
         }
 
         if (fileData) {
-          setAnalysisStage('正在上传关键帧并生成音频方案...');
+          setAnalysisStage('素材已准备好，正在请求 GPT 生成音频方案...');
           res = await analyzeAudioDesign(
             fileData,
             requirements,

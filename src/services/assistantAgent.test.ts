@@ -115,6 +115,17 @@ test('actual FFmpeg conversion, exact timed clip propagation, and unicode ZIP fi
     await promisify(execFile)(ffmpeg!, ['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1', path.join(dir, '台词_09.wav')]);
     const speech = await register('/uploads/台词_09.wav', '台词_09.wav');
     const tools = createAssistantTools(context);
+    const requests: any[] = [];
+    const priorRequest = context.request;
+    context.request = async (endpoint, body) => { requests.push({ endpoint, body }); return { analysis: { analysisBasis: 'metrics' } }; };
+    await tools.find(t => t.name === 'audio_design')!.execute({ assetIds: [speech.id], requirements: '参考音频设计配乐' });
+    assert.equal(requests[0].body.files[0].audioMetrics.method, 'local-signal-estimation');
+    assert.equal(requests[0].body.files[0].data, undefined);
+    const semantic = await tools.find(t => t.name === 'semantic_audio_analysis')!.execute({ assetId: speech.id }) as any;
+    assert.equal(requests[1].endpoint, '/api/ai/audio-analysis/metrics');
+    assert.ok(requests[1].body.metadata.audioProfile);
+    assert.equal(semantic.analyzedSeconds, 1);
+    context.request = priorRequest;
     const processed = await tools.find(t => t.name === 'process_audio')!.execute({ assetId: speech.id, name: '台词_09_单声道', channels: 'mono', format: 'wav', sampleRate: 24000 }) as any;
     const wav = await readFile(context.filePath(processed.asset));
     assert.equal(wav.toString('ascii', 0, 4), 'RIFF');

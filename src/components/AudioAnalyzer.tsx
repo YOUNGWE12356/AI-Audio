@@ -19,7 +19,9 @@ import {
   Waves,
 } from 'lucide-react';
 
-import { analyzeDecodedAudio, AUDIO_FILE_EXTENSION_REGEX, formatBytes, formatTime, type AnalyzerResult, type Confidence } from '../utils/audioMetrics';
+import { AUDIO_FILE_EXTENSION_REGEX, formatBytes, formatTime, type AnalyzerResult, type Confidence } from '../utils/audioMetrics';
+import { analyzeAudioFile } from '../services/audioAnalysisClient';
+import PointCostHint from './PointCostHint';
 export { estimateKey, estimateMusicalMode } from '../utils/audioMetrics';
 
 type AnalysisItemStatus = 'pending' | 'analyzing' | 'done' | 'error';
@@ -33,120 +35,6 @@ interface AnalysisQueueItem {
   error?: string;
 }
 
-async function decodeAudioFile(file: File) {
-  const arrayBuffer = await file.arrayBuffer();
-  const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-  const audioCtx = new AudioContextClass();
-  try {
-    return await audioCtx.decodeAudioData(arrayBuffer.slice(0));
-  } finally {
-    await audioCtx.close();
-  }
-}
-
-const createSemanticAnalysisClip = (buffer: AudioBuffer, maxSeconds = 36, targetSampleRate = 16000) => {
-  const segmentCount = buffer.duration > maxSeconds ? 3 : 1;
-  const totalDuration = Math.min(buffer.duration, maxSeconds);
-  const segmentDuration = Math.max(totalDuration / segmentCount, 1 / targetSampleRate);
-  const segmentStarts = segmentCount === 1
-    ? [0]
-    : [
-        0,
-        Math.max(0, (buffer.duration - segmentDuration) / 2),
-        Math.max(0, buffer.duration - segmentDuration),
-      ];
-  const frameCount = Math.max(1, Math.floor(totalDuration * targetSampleRate));
-  const wavBuffer = new ArrayBuffer(44 + frameCount * 2);
-  const view = new DataView(wavBuffer);
-  const writeString = (offset: number, value: string) => {
-    for (let index = 0; index < value.length; index += 1) {
-      view.setUint8(offset + index, value.charCodeAt(index));
-    }
-  };
-  writeString(0, 'RIFF');
-  view.setUint32(4, 36 + frameCount * 2, true);
-  writeString(8, 'WAVE');
-  writeString(12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, targetSampleRate, true);
-  view.setUint32(28, targetSampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  writeString(36, 'data');
-  view.setUint32(40, frameCount * 2, true);
-
-  const channels = Array.from(
-    { length: Math.min(buffer.numberOfChannels, 2) },
-    (_, index) => buffer.getChannelData(index),
-  );
-  for (let index = 0; index < frameCount; index += 1) {
-    const outputSeconds = index / targetSampleRate;
-    const segmentIndex = Math.min(segmentStarts.length - 1, Math.floor(outputSeconds / segmentDuration));
-    const segmentOffsetSeconds = outputSeconds - segmentIndex * segmentDuration;
-    const sourceSeconds = segmentStarts[segmentIndex] + segmentOffsetSeconds;
-    const sourceIndex = Math.min(buffer.length - 1, Math.floor(sourceSeconds * buffer.sampleRate));
-    const sample = channels.reduce((sum, channel) => sum + (channel[sourceIndex] || 0), 0)
-      / Math.max(channels.length, 1);
-    const clamped = Math.max(-1, Math.min(1, sample));
-    view.setInt16(44 + index * 2, clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF, true);
-  }
-
-  return new Blob([view], { type: 'audio/wav' });
-};
-
-const requestGlobalMusicAnalysis = async (
-  file: File,
-  buffer: AudioBuffer,
-  localResult: Pick<AnalyzerResult, 'duration' | 'bpm' | 'key' | 'musicalMode'>,
-) => {
-  const formData = new FormData();
-  formData.append('metadata', JSON.stringify({
-    sourceName: file.name,
-    duration: localResult.duration,
-    bpm: localResult.bpm.value,
-    keyName: localResult.key.name,
-    localMode: localResult.musicalMode.name,
-    localModeConfidence: localResult.musicalMode.confidence,
-  }));
-  formData.append(
-    'audio',
-    createSemanticAnalysisClip(buffer),
-    `${file.name.replace(/\.[^/.]+$/, '') || 'music'}-semantic-analysis.wav`,
-  );
-
-  const response = await fetch('/api/ai/audio-analysis/semantic', {
-    method: 'POST',
-    headers: { Accept: 'application/json' },
-    body: formData,
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    throw new Error(payload?.error || `全球风格与调式分析失败（${response.status}）。`);
-  }
-  if (!payload?.analysis) throw new Error('全球风格与调式分析未返回有效结果。');
-  return {
-    ...payload.analysis,
-    model: payload.model,
-  } as NonNullable<AnalyzerResult['globalAnalysis']>;
-};
-
-async function analyzeAudioFile(file: File): Promise<AnalyzerResult> {
-  const buffer = await decodeAudioFile(file);
-  const localResult = analyzeDecodedAudio(buffer, file.name);
-  try {
-    return {
-      ...localResult,
-      globalAnalysis: await requestGlobalMusicAnalysis(file, buffer, localResult),
-    };
-  } catch (error: any) {
-    return {
-      ...localResult,
-      semanticError: error?.message || '全球风格与调式分析失败，请稍后重试。',
-    };
-  }
-}
 
 const MetricCard = ({ label, value, hint }: { label: string; value: string; hint?: string }) => (
   <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -317,15 +205,18 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
               上传一首或多首音乐后，分析 BPM、调性、全球音乐风格与调式体系、主要和弦、乐器/音色倾向、响度、动态范围、底噪 RMS、SNR 信噪比、频段分布和立体声宽度。
             </p>
           </div>
-          <button
-            type="button"
-            disabled={!analysisItems.length || loading}
-            onClick={handleAnalyze}
-            className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-5 text-xs font-black text-white shadow-lg shadow-emerald-600/15 transition-all hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"
-          >
-            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <BarChart3 className="h-4 w-4" />}
-            {loading ? `批量分析中 ${progress}%` : analysisItems.length > 1 ? `分析 ${analysisItems.length} 个音频` : '开始分析'}
-          </button>
+          <div className="flex shrink-0 flex-col items-end gap-1.5">
+            <button
+              type="button"
+              disabled={!analysisItems.length || loading}
+              onClick={handleAnalyze}
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-5 text-xs font-black text-white shadow-lg shadow-emerald-600/15 transition-all hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"
+            >
+              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <BarChart3 className="h-4 w-4" />}
+              {loading ? `批量分析中 ${progress}%` : analysisItems.length > 1 ? `分析 ${analysisItems.length} 个音频` : '开始分析'}
+            </button>
+            <PointCostHint kind="token-audio" />
+          </div>
         </div>
 
         <div
@@ -404,7 +295,7 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
             <div className="flex items-start gap-2">
               {error ? <AlertCircle className="h-4 w-4 shrink-0 text-rose-600" /> : <Loader2 className="h-4 w-4 shrink-0 animate-spin text-emerald-600" />}
               <div className="flex-1">
-                <p className="font-bold">{error || '正在分析节拍、调性、频谱、和弦与乐器倾向...'}</p>
+                <p className="font-bold">{error || '正在检测本地指标并请求 GPT 分析，请稍候...'}</p>
                 {loading && (
                   <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200">
                     <div className="h-full rounded-full bg-emerald-600 transition-all" style={{ width: `${progress}%` }} />
@@ -442,7 +333,7 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
                   : item.status === 'analyzing'
                   ? '分析中'
                   : item.status === 'done'
-                  ? '已完成'
+                  ? item.result?.semanticError ? '仅本地结果' : '已完成'
                   : '失败';
                 const statusClass = item.status === 'done'
                   ? 'border-emerald-100 bg-emerald-50 text-emerald-700'
@@ -557,13 +448,19 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <Globe2 className="h-5 w-5 text-emerald-600" />
-                <h3 className="text-sm font-black text-slate-900">全球风格与调式</h3>
+                <h3 className="text-sm font-black text-slate-900">GPT 音频分析</h3>
               </div>
               {result.globalAnalysis ? <ConfidencePill value={result.globalAnalysis.confidence} /> : null}
             </div>
 
             {result.globalAnalysis ? (
               <div className="mt-4">
+                <p className="mb-3 text-xs leading-relaxed text-slate-500">
+                  {result.globalAnalysis.analysisBasis === 'audio'
+                    ? '本次已由 GPT 直接分析音频片段（最多 36 秒，长音频取开头、中间和结尾）。'
+                    : '本次由 GPT 解读本地检测指标，未直接听音；具体风格、乐器和特殊调式无法据此确认。'}
+                  {result.globalAnalysis.model ? ` · ${result.globalAnalysis.model}` : ''}
+                </p>
                 <div className="grid grid-cols-1 border-y border-slate-100 sm:grid-cols-2 xl:grid-cols-4">
                   {[
                     ['主要风格', result.globalAnalysis.primaryStyle],
@@ -597,7 +494,7 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
               </div>
             ) : (
               <div className="mt-4 rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-xs leading-relaxed text-red-700">
-                <span className="font-black">开放语义分析失败：</span>
+                <span className="font-black">GPT 分析失败，以下仅保留本地检测结果：</span>
                 {result.semanticError || '未返回全球风格与调式结果，请重新分析。'}
               </div>
             )}
@@ -625,7 +522,7 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
             <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
               <div className="mb-4 flex items-center gap-2">
                 <Guitar className="h-5 w-5 text-emerald-600" />
-                <h3 className="text-sm font-black text-slate-900">乐器 / 音色倾向</h3>
+                <h3 className="text-sm font-black text-slate-900">{result.globalAnalysis?.analysisBasis === 'audio' && result.globalAnalysis.instruments?.length ? 'GPT 乐器 / 音色判断' : '本地音色倾向（非乐器识别）'}</h3>
               </div>
               <div className="space-y-3">
                 {result.instruments.map((instrument) => (
@@ -688,7 +585,7 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
           </div>
 
           <div className="rounded-2xl border border-amber-100 bg-amber-50 p-4 text-[11px] leading-relaxed text-amber-800">
-            <strong>说明：</strong>BPM、Key、和弦和基础 Mode 由浏览器本地 DSP 估算；全球风格、地域传统、Raga、Maqam、民族音阶与微分音体系由音频理解模型开放识别。复杂转调、调式互换或短片段证据不足时会返回低置信度与候选，请结合判断依据人工确认。
+            <strong>说明：</strong>BPM、Key、和弦和基础 Mode 由浏览器本地计算估算。GPT 分析会注明输入依据：只有配置音频模型后才会直接分析声音；仅有检测指标时不会据此确认风格、地域、具体乐器或微分音。AI 判断与本地估算均需结合实际听感复核。
           </div>
         </div>
       )}

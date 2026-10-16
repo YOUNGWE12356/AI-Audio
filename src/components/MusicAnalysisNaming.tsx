@@ -4,6 +4,8 @@
  */
 
 import React, { useMemo, useRef, useState } from 'react';
+import { extractLocalAudioEvidence } from '../services/audioAnalysisClient';
+import type { AudioMetricEvidence } from '../utils/audioEvidence';
 import {
   AlertCircle,
   CheckCircle2,
@@ -14,6 +16,7 @@ import {
   Sparkles,
   Upload,
 } from 'lucide-react';
+import PointCostHint from './PointCostHint';
 
 type MusicNamingStatus = 'pending' | 'analyzing' | 'done' | 'error';
 type Confidence = '高' | '中' | '低';
@@ -36,7 +39,7 @@ interface MusicNamingItem {
   sceneCandidates?: string[];
   semanticReason?: string;
   semanticModel?: string;
-  analysisClip?: Blob;
+  audioMetrics?: AudioMetricEvidence;
   energy?: string;
   mood?: string;
   bassPercent?: number;
@@ -50,9 +53,6 @@ interface MusicNamingItem {
 }
 
 const AUDIO_FILE_EXTENSION_REGEX = /\.(mp3|wav|m4a|aac|ogg|oga|flac|webm|opus|aif|aiff|caf)$/i;
-const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-const MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
-const MINOR_PROFILE = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
 
 const STYLE_OPTIONS = [
   'Review',
@@ -205,382 +205,45 @@ const downloadBlob = (blob: Blob, fileName: string) => {
   URL.revokeObjectURL(url);
 };
 
-const toMono = (buffer: AudioBuffer) => {
-  const mono = new Float32Array(buffer.length);
-  for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
-    const data = buffer.getChannelData(channel);
-    for (let i = 0; i < data.length; i += 1) mono[i] += data[i] / buffer.numberOfChannels;
-  }
-  return mono;
-};
-
-const estimateTempo = (mono: Float32Array, sampleRate: number) => {
-  const envelopeRate = 100;
-  const hop = Math.max(1, Math.floor(sampleRate / envelopeRate));
-  const envelopeLength = Math.floor(mono.length / hop);
-  const envelope = new Float32Array(envelopeLength);
-
-  for (let i = 0; i < envelopeLength; i += 1) {
-    let sum = 0;
-    const start = i * hop;
-    for (let j = 0; j < hop && start + j < mono.length; j += 1) {
-      const sample = mono[start + j];
-      sum += sample * sample;
-    }
-    envelope[i] = Math.sqrt(sum / hop);
-  }
-
-  let mean = 0;
-  for (let i = 0; i < envelope.length; i += 1) mean += envelope[i];
-  mean /= Math.max(envelope.length, 1);
-
-  const novelty = new Float32Array(envelope.length);
-  let previous = 0;
-  for (let i = 0; i < envelope.length; i += 1) {
-    const current = Math.max(0, envelope[i] - mean);
-    novelty[i] = Math.max(0, current - previous);
-    previous = current;
-  }
-
-  const candidates: Array<{ bpm: number; score: number }> = [];
-  for (let bpm = 60; bpm <= 200; bpm += 1) {
-    const lag = Math.round((60 / bpm) * envelopeRate);
-    let score = 0;
-    for (let i = lag; i < novelty.length; i += 1) score += novelty[i] * novelty[i - lag];
-    candidates.push({ bpm, score });
-  }
-
-  candidates.sort((left, right) => right.score - left.score);
-  return candidates[0]?.bpm || 120;
-};
-
-const goertzelPower = (samples: Float32Array, start: number, size: number, sampleRate: number, frequency: number) => {
-  const omega = (2 * Math.PI * frequency) / sampleRate;
-  const coeff = 2 * Math.cos(omega);
-  let q0 = 0;
-  let q1 = 0;
-  let q2 = 0;
-  for (let i = 0; i < size; i += 1) {
-    const sample = samples[start + i] || 0;
-    q0 = coeff * q1 - q2 + sample;
-    q2 = q1;
-    q1 = q0;
-  }
-  return q1 * q1 + q2 * q2 - q1 * q2 * coeff;
-};
-
-const computeChroma = (mono: Float32Array, sampleRate: number) => {
-  const chroma = new Array(12).fill(0) as number[];
-  const windowSize = Math.min(4096, Math.max(1024, Math.floor(sampleRate * 0.09)));
-  const hop = Math.max(windowSize * 4, Math.floor(sampleRate * 0.5));
-  const safeEnd = Math.max(windowSize, mono.length - windowSize);
-  let windows = 0;
-
-  for (let start = 0; start < safeEnd && windows < 120; start += hop) {
-    for (let note = 0; note < 12; note += 1) {
-      for (let octave = 2; octave <= 6; octave += 1) {
-        const midi = (octave + 1) * 12 + note;
-        const frequency = 440 * Math.pow(2, (midi - 69) / 12);
-        if (frequency > 60 && frequency < Math.min(sampleRate / 2, 4200)) {
-          chroma[note] += Math.sqrt(goertzelPower(mono, start, windowSize, sampleRate, frequency));
-        }
-      }
-    }
-    windows += 1;
-  }
-
-  const total = chroma.reduce((sum, value) => sum + value, 0) || 1;
-  return chroma.map(value => value / total);
-};
-
-const rotateProfile = (profile: number[], root: number) => profile.map((_, index) => profile[(index - root + 12) % 12]);
-
-const correlation = (a: number[], b: number[]) => {
-  const meanA = a.reduce((sum, value) => sum + value, 0) / a.length;
-  const meanB = b.reduce((sum, value) => sum + value, 0) / b.length;
-  let top = 0;
-  let bottomA = 0;
-  let bottomB = 0;
-  for (let i = 0; i < a.length; i += 1) {
-    const da = a[i] - meanA;
-    const db = b[i] - meanB;
-    top += da * db;
-    bottomA += da * da;
-    bottomB += db * db;
-  }
-  return top / Math.sqrt(Math.max(bottomA * bottomB, 1e-9));
-};
-
-const estimateKey = (chroma: number[]) => {
-  const scores: Array<{ root: number; mode: 'Major' | 'Minor'; score: number }> = [];
-  for (let root = 0; root < 12; root += 1) {
-    scores.push({ root, mode: 'Major', score: correlation(chroma, rotateProfile(MAJOR_PROFILE, root)) });
-    scores.push({ root, mode: 'Minor', score: correlation(chroma, rotateProfile(MINOR_PROFILE, root)) });
-  }
-  scores.sort((left, right) => right.score - left.score);
-  const best = scores[0] || { root: 0, mode: 'Major' as const, score: 0 };
-  const second = scores[1] || best;
-  const margin = best.score - second.score;
-  return {
-    name: `${NOTES[best.root]} ${best.mode}`,
-    confidence: (margin > 0.08 ? '中' : '低') as Confidence,
-  };
-};
-
-const analyzeSpectrum = (mono: Float32Array, sampleRate: number) => {
-  const size = Math.min(8192, mono.length);
-  const start = Math.max(0, Math.floor((mono.length - size) / 2));
-  let bass = 0;
-  let mid = 0;
-  let high = 0;
-  let zeroCrossings = 0;
-  let rms = 0;
-
-  for (let i = 0; i < mono.length; i += 1) {
-    const sample = mono[i];
-    rms += sample * sample;
-    if (i > 0 && Math.sign(sample) !== Math.sign(mono[i - 1])) zeroCrossings += 1;
-  }
-  rms = Math.sqrt(rms / Math.max(mono.length, 1));
-
-  for (let frequency = 80; frequency <= Math.min(sampleRate / 2, 8000); frequency += 120) {
-    const power = goertzelPower(mono, start, size, sampleRate, frequency);
-    if (frequency < 250) bass += power;
-    else if (frequency < 2200) mid += power;
-    else high += power;
-  }
-
-  const total = bass + mid + high || 1;
-  return {
-    rms,
-    zeroCrossingRate: zeroCrossings / Math.max(mono.length, 1),
-    bassPercent: (bass / total) * 100,
-    midPercent: (mid / total) * 100,
-    highPercent: (high / total) * 100,
-  };
-};
-
-const createMusicAnalysisClip = (buffer: AudioBuffer, maxSeconds = 36, targetSampleRate = 16000) => {
-  const segmentCount = buffer.duration > maxSeconds ? 3 : 1;
-  const segmentDuration = Math.min(buffer.duration, maxSeconds) / segmentCount;
-  const segmentStarts = segmentCount === 1
-    ? [0]
-    : [
-        0,
-        Math.max(0, (buffer.duration - segmentDuration) / 2),
-        Math.max(0, buffer.duration - segmentDuration),
-      ];
-  const frameCount = Math.max(1, Math.floor(segmentDuration * segmentStarts.length * targetSampleRate));
-  const wavBuffer = new ArrayBuffer(44 + frameCount * 2);
-  const view = new DataView(wavBuffer);
-  const writeString = (offset: number, value: string) => {
-    for (let i = 0; i < value.length; i += 1) view.setUint8(offset + i, value.charCodeAt(i));
-  };
-  writeString(0, 'RIFF');
-  view.setUint32(4, 36 + frameCount * 2, true);
-  writeString(8, 'WAVE');
-  writeString(12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, targetSampleRate, true);
-  view.setUint32(28, targetSampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  writeString(36, 'data');
-  view.setUint32(40, frameCount * 2, true);
-
-  const channels = Array.from({ length: Math.min(buffer.numberOfChannels, 2) }, (_, index) => buffer.getChannelData(index));
-  for (let i = 0; i < frameCount; i += 1) {
-    const outputSeconds = i / targetSampleRate;
-    const segmentIndex = Math.min(segmentStarts.length - 1, Math.floor(outputSeconds / segmentDuration));
-    const segmentOffsetSeconds = outputSeconds - segmentIndex * segmentDuration;
-    const sourceSeconds = segmentStarts[segmentIndex] + segmentOffsetSeconds;
-    const sourceIndex = Math.min(buffer.length - 1, Math.floor(sourceSeconds * buffer.sampleRate));
-    const sample = channels.reduce((sum, channel) => sum + (channel[sourceIndex] || 0), 0) / Math.max(channels.length, 1);
-    const clamped = Math.max(-1, Math.min(1, sample));
-    view.setInt16(44 + i * 2, clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF, true);
-  }
-
-  return new Blob([view], { type: 'audio/wav' });
-};
-
-const addScore = (scores: Map<string, number>, key: string, amount: number) => {
-  scores.set(key, (scores.get(key) || 0) + amount);
-};
-
-const sortedCandidates = (scores: Map<string, number>) => (
-  Array.from(scores.entries())
-    .sort((left, right) => right[1] - left[1])
-);
-
-const scoreConfidence = (candidates: Array<[string, number]>): Confidence => {
-  const best = candidates[0]?.[1] || 0;
-  const second = candidates[1]?.[1] || 0;
-  if (best >= 7 && best - second >= 3) return '高';
-  if (best >= 4 && best - second >= 1.5) return '中';
-  return '低';
-};
-
-const inferMusicTags = (
-  fileName: string,
-  bpm: number,
-  keyName: string,
-  profile: ReturnType<typeof analyzeSpectrum>,
-) => {
-  const normalizedName = fileName.toLowerCase();
-  const minor = /Minor/.test(keyName);
-  const highEnergy = profile.rms > 0.09 || bpm >= 132;
-  const lowEnergy = profile.rms < 0.035 || bpm < 86;
-  const styleScores = new Map<string, number>();
-  const sceneScores = new Map<string, number>();
-
-  [
-    [/战斗|battle|combat|fight|boss|attack|war|热血/, 'Battle', 'Battle', 8],
-    [/胜利|victory|win|success|clear|结算|奖励|reward/, 'Epic', 'Victory', 8],
-    [/失败|fail|lose|gameover|警告|危机/, 'Mystery', 'Suspense', 7],
-    [/主页|首页|home|main|lobby|大厅|登录|login/, 'Casual', 'Lobby', 8],
-    [/board[\s_-]?game|tabletop|dice|cozy|桌游|棋盘|棋牌/, 'Casual', 'Lobby', 8],
-    [/afternoon|evening|night|sunday|coffee|cafe|日常|午后|夜晚|咖啡/, 'Healing', 'Home', 6],
-    [/菜单|menu|ui|界面/, 'Casual', 'Menu', 7],
-    [/活动|event|festival|运营/, 'Cinematic', 'Event', 8],
-    [/礼物|gift|avatar|入场|present/, 'Casual', 'Gift', 8],
-    [/商店|store|shop|商城/, 'Casual', 'Store', 7],
-    [/剧情|cutscene|story|cinematic|过场/, 'Cinematic', 'Cutscene', 8],
-    [/探索|explore|adventure|map|world/, 'Ambient', 'Explore', 6],
-    [/悬疑|恐怖|horror|suspense|mystery|dark/, 'Mystery', 'Suspense', 8],
-    [/国风|仙侠|古风|chinese|oriental|erhu|guzheng|pipa/, 'Chinese', 'Explore', 8],
-    [/钢琴|piano/, 'Piano', 'Home', 7],
-    [/摇滚|rock|guitar/, 'Rock', 'Battle', 6],
-    [/电子|electro|edm|synth|cyber/, 'Electronic', 'Event', 7],
-    [/环境|ambient|atmo|氛围/, 'Ambient', 'Explore', 7],
-    [/治愈|温暖|healing|calm|soft|relax|peace/, 'Healing', 'Home', 7],
-  ].forEach(([pattern, style, scene, score]) => {
-    if ((pattern as RegExp).test(normalizedName)) {
-      addScore(styleScores, style as string, score as number);
-      addScore(sceneScores, scene as string, score as number);
-    }
-  });
-
-  if (bpm >= 140 && profile.highPercent > 22) {
-    addScore(styleScores, 'Electronic', 3);
-    addScore(sceneScores, 'Battle', 2);
-  }
-  if (bpm >= 122 && profile.bassPercent > 32) {
-    addScore(styleScores, 'Battle', 3);
-    addScore(sceneScores, 'Battle', 3);
-  }
-  if (lowEnergy && profile.highPercent < 18) {
-    addScore(styleScores, 'Ambient', 3);
-    addScore(sceneScores, minor ? 'Suspense' : 'Explore', 2);
-  }
-  if (bpm < 105 && !minor) {
-    addScore(styleScores, 'Healing', 2);
-    addScore(sceneScores, 'Home', 2);
-  }
-  if (minor && profile.midPercent > 52) {
-    addScore(styleScores, 'Mystery', 3);
-    addScore(sceneScores, 'Suspense', 3);
-  }
-  if (profile.bassPercent > 38 && bpm >= 100) {
-    addScore(styleScores, 'Cinematic', 2);
-    addScore(sceneScores, 'Event', 2);
-  }
-  if (styleScores.size === 0) addScore(styleScores, 'Casual', 1);
-  if (sceneScores.size === 0) addScore(sceneScores, bpm >= 116 ? 'Event' : 'Lobby', 1);
-
-  const styleCandidates = sortedCandidates(styleScores);
-  const sceneCandidates = sortedCandidates(sceneScores);
-  const styleConfidence = scoreConfidence(styleCandidates);
-  const sceneConfidence = scoreConfidence(sceneCandidates);
-  const selectedStyle = styleConfidence === '低' ? 'Review' : styleCandidates[0][0];
-  const selectedScene = sceneConfidence === '低' ? 'Manual' : sceneCandidates[0][0];
-
-  return {
-    style: selectedStyle,
-    scene: selectedScene,
-    styleConfidence,
-    sceneConfidence,
-    styleCandidates: styleCandidates.slice(0, 3).map(([name]) => name),
-    sceneCandidates: sceneCandidates.slice(0, 3).map(([name]) => name),
-    energy: lowEnergy ? 'Low' : highEnergy ? 'High' : 'Medium',
-    mood: minor ? (highEnergy ? 'Tense' : 'SoftDark') : highEnergy ? 'Excited' : 'Bright',
-  };
-};
-
-const decodeAudioFile = async (file: File) => {
-  const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-  if (!AudioContextClass) throw new Error('当前浏览器不支持音频分析。');
-  const context = new AudioContextClass();
-  try {
-    const arrayBuffer = await file.arrayBuffer();
-    return await context.decodeAudioData(arrayBuffer.slice(0));
-  } finally {
-    void context.close?.();
-  }
-};
-
 const analyzeMusicFile = async (file: File) => {
-  const buffer = await decodeAudioFile(file);
-  const mono = toMono(buffer);
-  const bpm = estimateTempo(mono, buffer.sampleRate);
-  const key = estimateKey(computeChroma(mono, buffer.sampleRate));
-  const profile = analyzeSpectrum(mono, buffer.sampleRate);
-  const tags = inferMusicTags(file.name, bpm, key.name, profile);
-  return {
-    duration: buffer.duration,
-    bpm,
-    keyName: key.name,
-    keyConfidence: key.confidence,
-    bassPercent: profile.bassPercent,
-    midPercent: profile.midPercent,
-    highPercent: profile.highPercent,
-    rms: profile.rms,
-    analysisClip: createMusicAnalysisClip(buffer),
-    ...tags,
-  };
+  const audioMetrics = await extractLocalAudioEvidence(file);
+  const { metrics } = audioMetrics;
+  return { duration: audioMetrics.sourceDuration, bpm: metrics.bpm.value,
+    keyName: metrics.key.name, keyConfidence: metrics.key.confidence,
+    bassPercent: metrics.audioProfile.bassPercent, midPercent: metrics.audioProfile.midPercent,
+    highPercent: metrics.audioProfile.highPercent, rms: Math.pow(10, metrics.audioProfile.rmsDb / 20),
+    audioMetrics };
 };
 
+type NamingResponseItem = { index: number; style: string; scene: string; mood: string;
+  namingCategory: string; confidence: Confidence; reason: string; model?: string; error?: string };
 const requestAudioSemanticMusicNaming = async (items: MusicNamingItem[]) => {
-  const formData = new FormData();
-  formData.append('metadata', JSON.stringify(items.map((item, index) => ({
-    index,
-    sourceName: item.sourcePath || item.file.name,
-    duration: item.duration,
-    bpm: item.bpm,
-    keyName: item.keyName,
-    keyConfidence: item.keyConfidence,
-    energy: item.energy,
-    mood: item.mood,
-  }))));
-  items.forEach((item, index) => {
-    if (!item.analysisClip) throw new Error('缺少音乐分析片段，请重新分析音频。');
-    formData.append('audio', item.analysisClip, `${index + 1}-${item.file.name.replace(/\.[^/.]+$/, '') || 'music'}-analysis.wav`);
-  });
-
-  const response = await fetch('/api/ai/music-analysis-naming/audio', {
-    method: 'POST',
-    headers: {
-      Accept: 'application/json',
-    },
-    body: formData,
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    throw new Error(payload?.error || `音乐语义分析失败（${response.status}）。`);
+  const output: NamingResponseItem[] = [];
+  let model: string | undefined;
+  for (let offset = 0; offset < items.length; offset += 10) {
+    const batch = items.slice(offset, offset + 10);
+    try {
+      const response = await fetch('/api/ai/music-analysis-naming', {
+        method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(90_000),
+        body: JSON.stringify({ items: batch.map(item => ({ sourceName: item.sourcePath || item.file.name, audioMetrics: item.audioMetrics })) }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(payload?.error || `GPT 命名分析失败（${response.status}）。`);
+      if (!Array.isArray(payload?.items) || payload.items.length !== batch.length
+        || new Set(payload.items.map((item: NamingResponseItem) => item.index)).size !== batch.length
+        || payload.items.some((item: NamingResponseItem) => !Number.isInteger(item.index) || item.index < 0 || item.index >= batch.length)) {
+        throw new Error('GPT 命名结果不完整，请重试。');
+      }
+      model = payload.model;
+      output.push(...payload.items.map((item: NamingResponseItem) => ({ ...item, index: offset + item.index, model: payload.model })));
+    } catch (error: any) {
+      output.push(...batch.map((_, index) => ({ index: offset + index, style: 'Review', scene: 'Manual', mood: '不确定',
+        namingCategory: 'Review_Manual', confidence: '低' as const, reason: '',
+        error: error?.name === 'TimeoutError' ? 'GPT 命名分析超时，请重试。' : error?.message || 'GPT 命名分析失败。' })));
+    }
   }
-  return payload as {
-    model?: string;
-    items?: Array<{
-      index: number;
-      style: string;
-      scene: string;
-      mood: string;
-      namingCategory: string;
-      confidence: Confidence;
-      reason: string;
-    }>;
-  };
+  return { model, items: output };
 };
 
 const getDroppedFiles = async (dataTransfer: DataTransfer) => {
@@ -738,24 +401,24 @@ export default function MusicAnalysisNaming() {
     }
 
     setItems(buildOutputNames(nextItems));
-    const locallyAnalyzedItems = nextItems.filter(item => item.status === 'analyzing' && item.analysisClip);
+    const locallyAnalyzedItems = nextItems.filter(item => item.status === 'analyzing' && item.audioMetrics);
     if (locallyAnalyzedItems.length > 0) {
       try {
-        setStatus(`本地参数分析完成，正在上传音频片段给 API 听音分析...`);
+        setStatus('本地参数检测完成，正在请求 GPT 解读并生成待审核命名...');
         const semanticResult = await requestAudioSemanticMusicNaming(locallyAnalyzedItems);
         const semanticByOriginalIndex = new Map<number, NonNullable<typeof semanticResult.items>[number]>();
         (semanticResult.items || []).forEach(item => semanticByOriginalIndex.set(item.index, item));
         let doneIndex = 0;
         nextItems = nextItems.map((item) => {
-          if (item.status !== 'analyzing' || !item.analysisClip) return item;
+          if (item.status !== 'analyzing' || !item.audioMetrics) return item;
           const semantic = semanticByOriginalIndex.get(doneIndex);
           doneIndex += 1;
-          if (!semantic) {
+          if (!semantic || semantic.error) {
             return {
               ...item,
               status: 'error',
               progress: 0,
-              error: 'API 未返回该音乐的风格/场景分析结果。',
+              error: semantic?.error || 'GPT 未返回该音乐的命名建议。',
             };
           }
           const normalizedStyle = normalizeStyleLabel(semantic.style);
@@ -777,12 +440,13 @@ export default function MusicAnalysisNaming() {
             styleCandidates: [semantic.style, categoryStyle].filter(Boolean),
             sceneCandidates: [semantic.scene, categoryScene].filter(Boolean),
             semanticReason: semantic.reason,
-            semanticModel: semanticResult.model,
+            semanticModel: semantic.model || semanticResult.model,
           };
         });
         setItems(buildOutputNames(nextItems));
         const semanticDoneCount = nextItems.filter(item => item.status === 'done').length;
-        setStatus(`API 分析完成：${semanticDoneCount}/${nextItems.length} 个文件已生成语义命名。`);
+        const failedCount = nextItems.filter(item => item.status === 'error').length;
+        setStatus(`GPT 指标解读完成：${semanticDoneCount}/${nextItems.length} 个文件已生成命名建议；未直接听音。${failedCount ? ` ${failedCount} 个失败，可重新分析。` : ''}`);
       } catch (reason: any) {
         nextItems = nextItems.map(item => item.status === 'analyzing' ? {
           ...item,
@@ -806,7 +470,7 @@ export default function MusicAnalysisNaming() {
 
   const exportCsv = () => {
     const rows = [
-      ['原始路径', '新文件名', 'BPM', '调式', '风格', '适合场景', '能量', '情绪', '状态'],
+      ['原始路径', '新文件名', 'BPM', '调式', '风格建议', '场景建议', '能量', '情绪建议', '状态', '分析方式', '已检测秒数', '命名依据'],
       ...previewItems.map(item => [
         item.sourcePath,
         item.outputName || '',
@@ -817,6 +481,9 @@ export default function MusicAnalysisNaming() {
         item.energy || '',
         item.mood || '',
         item.status === 'done' ? '已命名' : item.status === 'error' ? (item.error || '分析失败') : '未分析',
+        item.audioMetrics ? '本地指标 + GPT解读（未直接听音）' : '',
+        item.audioMetrics ? String(item.audioMetrics.analyzedSeconds) : '',
+        item.semanticReason || '',
       ]),
     ];
     const csv = rows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\n');
@@ -863,7 +530,7 @@ export default function MusicAnalysisNaming() {
           <div>
             <h2 className="text-lg font-black text-slate-900">音乐分析命名</h2>
             <p className="mt-1 max-w-2xl text-xs leading-relaxed text-slate-500">
-              批量或单个上传音乐后，本地分析 BPM、调式、风格与适合场景，并把分析结果作为新文件名。相同类别会自动在前方加序号，默认从 001 开始。
+              上传音乐后，本地检测 BPM、调式与频谱（最长前 5 分钟），再由 GPT 结合指标和文件名线索给出命名建议，未直接听音。缺少风格或场景证据时标记 Review / Manual，分类可手动修改。相同类别按序编号，默认从 001 开始。
             </p>
           </div>
           <div className="grid grid-cols-2 gap-2 rounded-2xl border border-slate-100 bg-slate-50 p-2 text-[10px] font-bold text-slate-500">
@@ -967,17 +634,21 @@ export default function MusicAnalysisNaming() {
           <div className="text-xs text-slate-500">
             <span className="font-black text-slate-800">{items.length}</span> 个文件 · 已生成 <span className="font-black text-emerald-700">{doneCount}</span> 个命名
             {error && <p className="mt-1 flex items-center gap-1 text-[11px] font-bold text-rose-600"><AlertCircle className="h-3.5 w-3.5" />{error}</p>}
+            {status && <p role="status" className="mt-1 text-[11px] leading-relaxed text-slate-500">{status}</p>}
           </div>
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              disabled={items.length === 0 || analyzing}
-              onClick={analyzeAll}
-              className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-black text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
-            >
-              {analyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-              {analyzing ? '分析中...' : '开始分析并命名'}
-            </button>
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="flex flex-col items-end gap-1.5">
+              <button
+                type="button"
+                disabled={items.length === 0 || analyzing}
+                onClick={analyzeAll}
+                className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-black text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+              >
+                {analyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                {analyzing ? '分析中...' : '开始分析并命名'}
+              </button>
+              <PointCostHint kind="token" />
+            </div>
             <button
               type="button"
               disabled={doneCount === 0}
@@ -1040,6 +711,7 @@ export default function MusicAnalysisNaming() {
                       <p className="truncate font-bold text-slate-800" title={item.sourcePath}>{item.file.name}</p>
                     </div>
                     <p className="mt-1 text-[10px] text-slate-400">{formatBytes(item.file.size)}{item.duration ? ` · ${formatDuration(item.duration)}` : ''}</p>
+                    {item.audioMetrics && <p className="mt-1 text-[10px] text-slate-400">已检测前 {formatDuration(item.audioMetrics.analyzedSeconds)}</p>}
                   </div>
                   <div className="text-slate-600">
                     {item.status === 'analyzing' && <span className="inline-flex items-center gap-1 font-bold text-emerald-700"><Loader2 className="h-3.5 w-3.5 animate-spin" />分析中</span>}

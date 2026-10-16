@@ -130,9 +130,9 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
       tag: '清单',
       icon: ClipboardList,
       accent: 'bg-teal-50 text-teal-700 border-teal-100',
-      intro: '从描述、截图、音频或视频中整理标准化音效、配乐和配音制作需求。',
+      intro: '从描述、截图或视频画面中整理标准化音效、配乐和配音制作需求。',
       usage: [
-        '先选择项目模板，再输入简短需求，或上传截图、音频、视频等参考文件；系统会按模板整理字段。',
+        '先选择项目模板，再输入简短需求，或上传截图、视频等参考文件；系统会按模板整理字段，只分析画面与字幕。',
         '检查生成表格中的类型、描述、数量、优先级、命名和 ID；发现遗漏时可补充说明并再次优化。',
         '逐行确认后继续追加任务，最后导出 CSV，交给 Excel、WPS 或团队协作，并保留项目模板便于复用。',
       ],

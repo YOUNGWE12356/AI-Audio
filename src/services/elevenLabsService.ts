@@ -9,6 +9,9 @@ import {
 } from '../utils/elevenLabsQuality';
 import type { ElevenLabsQualityMode } from '../utils/elevenLabsQuality';
 import { recordElevenLabsResponseUsage } from './usageTracking';
+import { prepareSoundEffectPrompt } from './sfxPromptService';
+import { withAudioRequestTimeout } from '../utils/audioRequestTimeout';
+import { getSoundEffectPcmDuration, SOUND_EFFECT_CHANNELS, SOUND_EFFECT_SAMPLE_RATE } from '../utils/soundEffectAudio';
 
 const isBrowser = typeof window !== 'undefined';
 
@@ -66,6 +69,11 @@ export const ELEVENLABS_MUSIC_OUTPUT_FORMAT = 'mp3_48000_192';
 // uncompressed format and wrap the raw PCM response as WAV for playback.
 export const ELEVENLABS_SOUND_MODEL = 'eleven_text_to_sound_v2';
 export const ELEVENLABS_SOUND_OUTPUT_FORMAT = 'pcm_48000';
+// Sound Effects v2 returns interleaved stereo PCM, unlike mono TTS PCM.
+export const ELEVENLABS_SOUND_CHANNELS = SOUND_EFFECT_CHANNELS;
+const SOUND_EFFECT_GENERATION_TIMEOUT_MS = 120_000;
+// Direct callers may also need up to 90 seconds for server-side translation.
+const SOUND_EFFECT_REQUEST_TIMEOUT_MS = 225_000;
 export const ELEVENLABS_TTS_MODELS = [
   'eleven_v4',
   'eleven_v3',
@@ -199,20 +207,25 @@ const makeMusicPromptPolicyFriendly = (value: string) => {
   );
 };
 
-async function requestBlob(path: string, init: RequestInit): Promise<Blob> {
-  const response = await fetch(path, init);
-  if (!response.ok) {
-    const errorBody = await response.json().catch(() => ({}));
-    const message = String(errorBody.error || `音频服务请求失败 (${response.status})`);
-    if (/Multiple voice additions\/deletions for the same voice/i.test(message)) {
-      throw new Error('声音库正在同步这个声音，请稍等几秒后重试。');
+async function requestBlob(path: string, init: RequestInit, timeoutMs?: number): Promise<Blob> {
+  const readResponse = async (signal?: AbortSignal) => {
+    const response = await fetch(path, { ...init, ...(signal ? { signal } : {}) });
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({}));
+      const message = String(errorBody.error || `音频服务请求失败 (${response.status})`);
+      if (/Multiple voice additions\/deletions for the same voice/i.test(message)) {
+        throw new Error('声音库正在同步这个声音，请稍等几秒后重试。');
+      }
+      if (path.includes('/music') && ELEVENLABS_PROMPT_POLICY_ERROR.test(message)) {
+        throw new Error(MUSIC_PROMPT_POLICY_MESSAGE);
+      }
+      throw new Error(formatElevenLabsErrorMessage(message));
     }
-    if (path.includes('/music') && ELEVENLABS_PROMPT_POLICY_ERROR.test(message)) {
-      throw new Error(MUSIC_PROMPT_POLICY_MESSAGE);
-    }
-    throw new Error(formatElevenLabsErrorMessage(message));
-  }
-  return response.blob();
+    return await response.blob();
+  };
+  return timeoutMs
+    ? withAudioRequestTimeout(readResponse, timeoutMs, '音效请求超时，已停止等待，请稍后重试。')
+    : readResponse();
 }
 
 async function requestJson<T>(path: string, init: RequestInit): Promise<T> {
@@ -336,31 +349,13 @@ export async function generateSoundEffect(text: string, duration?: number, optio
         ...(normalizedDuration ? { duration: normalizedDuration } : {}),
         qualityMode,
       }),
-    });
+    }, SOUND_EFFECT_REQUEST_TIMEOUT_MS);
   }
 
-  // Build a richer English prompt instead of stripping Chinese to nothing.
-  let cleanText = text.trim();
-  const searchKeywordRegex = /(?:Search Keyword|Keyword):\s*([^)]+)/i;
-  const match = text.match(searchKeywordRegex);
-  if (match) {
-    cleanText = match[1].replace(/\)$/, '').trim();
-  }
-  cleanText = cleanText.replace(/\[Duration:\s*\d+s\]/gi, '').trim();
-  cleanText = cleanText.replace(/[，。；：！？（）“”‘’【】()\[\]]/g, ' ').replace(/\s+/g, ' ').trim();
-
-  if (!cleanText) {
-    cleanText = "sound effect";
-  }
-
-  // Keep the prompt short and direct, which aligns better with the ElevenLabs sound generator.
-  cleanText = cleanText.split(/\s+/).slice(0, 20).join(" ");
-
-  // Keep the model focused on the user's description without over-biasing toward impact / metal Foley.
+  // Both standalone and timeline generation pass through this server-side gate.
+  // Keep the complete description, including its final constraints and sequence.
+  const sfxPrompt = await prepareSoundEffectPrompt(text);
   const isProQuality = isElevenLabsProQualityMode(qualityMode);
-  const sfxPrompt = isProQuality
-    ? `Studio-quality sound effect, realistic texture, layered ambience, clear spatial depth, high fidelity, no spoken words. Description: ${cleanText}`
-    : `Sound effect, realistic texture, clear spatial depth, no spoken words. Description: ${cleanText}`;
 
   console.log("Generating sound effect with English prompt:", sfxPrompt);
 
@@ -372,29 +367,35 @@ export async function generateSoundEffect(text: string, duration?: number, optio
   };
 
   return withElevenLabsApiKey('ElevenLabs sound effect generation', async (apiKey) => {
-    const response = await fetch(
-      `https://api.elevenlabs.io/v1/sound-generation?output_format=${ELEVENLABS_SOUND_OUTPUT_FORMAT}`,
-      {
-      method: "POST",
-      headers: {
-        "xi-api-key": apiKey,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(requestBody),
-      },
-    );
+    const { response, pcm } = await withAudioRequestTimeout(async signal => {
+      const response = await fetch(
+        `https://api.elevenlabs.io/v1/sound-generation?output_format=${ELEVENLABS_SOUND_OUTPUT_FORMAT}`,
+        {
+          method: "POST",
+          signal,
+          headers: {
+            "xi-api-key": apiKey,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(requestBody),
+        },
+      );
 
-    if (!response.ok) {
-      throw new Error(await getElevenLabsErrorMessage(response));
-    }
+      if (!response.ok) {
+        throw new Error(await getElevenLabsErrorMessage(response));
+      }
+      const pcm = await response.arrayBuffer();
+      return { response, pcm };
+    }, SOUND_EFFECT_GENERATION_TIMEOUT_MS, '音效生成超过 120 秒，已停止等待，请稍后重试。');
+    const actualDuration = getSoundEffectPcmDuration(pcm.byteLength);
 
     recordElevenLabsResponseUsage(response, ELEVENLABS_SOUND_MODEL, {
       fallbackCredits: ELEVENLABS_SOUND_EFFECT_CREDITS_PER_GENERATION,
-      companyPoints: estimateTimedCompanyPoints(normalizedDuration || 5, COMPANY_POINTS.soundEffectPerSecond),
-      billingQuantity: normalizedDuration || 5,
+      companyPoints: estimateTimedCompanyPoints(actualDuration, COMPANY_POINTS.soundEffectPerSecond),
+      billingQuantity: actualDuration,
       billingUnit: 'second',
     });
-    return wrapElevenLabsPcmAsWav(await response.arrayBuffer());
+    return wrapElevenLabsPcmAsWav(pcm, SOUND_EFFECT_SAMPLE_RATE, ELEVENLABS_SOUND_CHANNELS);
   });
 }
 

@@ -1,4 +1,8 @@
 import { recordAiUsage, toUsageNumber } from './usageTracking';
+import {
+  estimateGptTokenCompanyPoints,
+  GPT_COMPANY_POINT_PRICING_VERSION,
+} from './companyPointPricing';
 
 export const SchemaType = {
   OBJECT: 'object', ARRAY: 'array', STRING: 'string', INTEGER: 'integer', NUMBER: 'number', BOOLEAN: 'boolean',
@@ -25,11 +29,6 @@ type InputPart = { type: 'input_text'; text: string } | { type: 'input_image'; i
 type CompatibleInput = { hasImage: boolean; input: string | Array<{ role: 'user'; content: InputPart[] }> };
 export type AiContentRequest = { contents: unknown; config?: Record<string, any>; model?: string };
 export type AiContentResponse = { text: string; modelVersion: string };
-
-const companyPoints = (input: number, output: number) => (
-  input * (Number(process.env.GPT_INPUT_USD_PER_MILLION_TOKENS) || 0)
-  + output * (Number(process.env.GPT_OUTPUT_USD_PER_MILLION_TOKENS) || 0)
-) / 1000;
 
 const trimTrailingSlashes = (value: string) => value.replace(/\/+$/, '');
 const normalizeTokenHubModel = (value: string | undefined) => {
@@ -79,7 +78,8 @@ const trackUsage = (result: ResponseBody, gateway: Gateway) => {
   const reasoningTokens = toUsageNumber(result.usage?.output_tokens_details?.reasoning_tokens);
   recordAiUsage({ provider: 'gpt', model: result.model || gateway.model, inputTokens, outputTokens,
     reasoningTokens, totalTokens: toUsageNumber(result.usage?.total_tokens) || inputTokens + outputTokens,
-    credits: 0, companyPoints: companyPoints(inputTokens, outputTokens), pricingVersion: 'company-v1',
+    credits: 0, companyPoints: estimateGptTokenCompanyPoints({ inputTokens, outputTokens }),
+    pricingVersion: GPT_COMPANY_POINT_PRICING_VERSION,
     billingQuantity: inputTokens + outputTokens, billingUnit: 'token' });
   return { inputTokens, outputTokens, reasoningTokens };
 };

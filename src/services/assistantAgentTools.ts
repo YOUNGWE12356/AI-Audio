@@ -5,7 +5,8 @@ import JSZip from 'jszip';
 import type { AgentTool } from './assistantAgentLoop';
 import type { AssistantAsset, AssistantWorkspaceCommand } from './assistantAgentTypes';
 import { buildSfxLibraryIndex, findSfxLibraryMatches } from './sfxLibraryIndex';
-import { analyzeDecodedAudio } from '../utils/audioMetrics';
+import { analyzeDecodedAudio, AUDIO_FILE_EXTENSION_REGEX } from '../utils/audioMetrics';
+import { AUDIO_METRICS_MIME, createAudioEvidence } from '../utils/audioEvidence';
 import { readAssistantDocument } from './assistantDocument';
 
 type Args = Record<string, any>;
@@ -42,6 +43,21 @@ export const safeAgentName = (value: string) => path.win32.basename(value).norma
 
 export function createAssistantTools(c: AgentToolContext): AgentTool[] {
   const tools: AgentTool[] = [];
+  const extractAudioMetrics = async (asset: AssistantAsset) => {
+    const decoded = await c.save(Buffer.alloc(0), 'metrics.f32');
+    try {
+      c.progress?.(`正在本地检测 ${asset.name} 的节拍、调性与频谱...`);
+      await c.ffmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-i', c.filePath(asset), '-t', '300', '-vn', '-ac', '2', '-ar', '22050', '-f', 'f32le', c.filePath(decoded)]);
+      const bytes = await fs.readFile(c.filePath(decoded));
+      const samples = new Float32Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 4));
+      const channels = [new Float32Array(Math.floor(samples.length / 2)), new Float32Array(Math.floor(samples.length / 2))];
+      for (let i = 0; i < channels[0].length; i++) { channels[0][i] = samples[i * 2]; channels[1][i] = samples[i * 2 + 1]; }
+      if (!channels[0].length) throw new Error('音频没有可分析的声音数据。');
+      const buffer = { sampleRate: 22050, duration: channels[0].length / 22050, numberOfChannels: 2, length: channels[0].length, getChannelData: (index: number) => channels[index] } as AudioBuffer;
+      const result = analyzeDecodedAudio(buffer, asset.name);
+      return { result, evidence: createAudioEvidence(result, Math.max(asset.duration || 0, buffer.duration)) };
+    } finally { await fs.unlink(c.filePath(decoded)).catch(() => undefined); }
+  };
   const add = (name: string, description: string, properties: Args, required: string[], execute: AgentTool['execute']) => {
     tools.push({ name, description, parameters: object(properties, required), execute });
   };
@@ -167,7 +183,7 @@ export function createAssistantTools(c: AgentToolContext): AgentTool[] {
       }
       return c.request('/api/ai/sfx-requirements', { inputText: a.inputText || '', screenshot, templateType: a.templateType || 'game_sfx_general', projectName: a.projectName });
     });
-  add('audio_design', 'AI音频设计：分析图片/视频或文字，生成设计、音乐/SUNO提示词等。暂不支持音频和PDF分析，严禁按文件名猜测。',
+  add('audio_design', 'AI音频设计：分析图片/视频或文字；音频先提取本地指标，再由GPT解读并生成设计与SUNO创作建议，未直接听音。风格/配器建议不代表原音频已有内容。暂不支持PDF。',
     { assetIds: strings, requirements: str, target: object({ game: bool, video: bool, avatar: bool, sunnyIsland: bool, gift: bool, activity: bool }), isInstrumental: bool }, ['requirements'], async a => {
       const files = [];
       for (const id of a.assetIds || []) {
@@ -177,7 +193,10 @@ export function createAssistantTools(c: AgentToolContext): AgentTool[] {
           files.push(...result.frames);
         } else if (asset.mimeType.startsWith('image/')) {
           files.push({ data: (await fs.readFile(c.filePath(asset))).toString('base64'), mimeType: asset.mimeType, label: asset.name });
-        } else throw new Error('暂不支持音频或PDF分析；请上传图片、视频，或输入文字需求。');
+        } else if (asset.mimeType.startsWith('audio/') || AUDIO_FILE_EXTENSION_REGEX.test(asset.name)) {
+          const { evidence } = await extractAudioMetrics(asset);
+          files.push({ mimeType: AUDIO_METRICS_MIME, audioMetrics: evidence, label: asset.name });
+        } else throw new Error('请上传图片、视频或音频，或输入文字需求；暂不支持 PDF 分析。');
       }
       return c.request('/api/ai/audio-design', { ...a, files });
     });
@@ -202,7 +221,6 @@ export function createAssistantTools(c: AgentToolContext): AgentTool[] {
     ['audio_to_midi', '调用已安装的通用/乐器专用本地MIDI模型。先查engine_status。', '/api/audio-to-midi/convert', { assetId: str, mode: choice('basic-pitch', 'piano', 'drums', 'guitar', 'bass', 'strings', 'multi') }, ['assetId', 'mode'], { assetId: 'media' }],
     ['clone_voice', '本地参考音色克隆，免费模型。先查就绪状态，text最多800字；referenceAssetId指定参考音频。', '/api/ai/local/voice-clone', { referenceAssetId: str, text: str, engine: choice('chatterbox', 'cosyvoice3', 'qwen3_tts'), language: str, referenceStart: num, referenceDuration: num }, ['referenceAssetId', 'text', 'engine'], { referenceAssetId: 'reference' }],
     ['local_voice_conversion', 'SeedVC本地声音转换，需源音频和参考音频。', '/api/ai/local/seed-vc/convert', { sourceAssetId: str, referenceAssetId: str, model: choice('v1', 'v2'), targetDuration: num }, ['sourceAssetId', 'referenceAssetId'], { sourceAssetId: 'source', referenceAssetId: 'reference' }],
-    ['semantic_audio_analysis', '音乐风格/场景/调式语义分析。只有真实音频理解模型就绪才可执行；当前TokenHub不支持时会明确报错，禁止猜测。', '/api/ai/audio-analysis/semantic', { assetId: str, metadata: object({ sourceName: str, duration: num, bpm: num, keyName: str }) }, ['assetId'], { assetId: 'audio' }],
   ] as const) {
     add(name, description, properties, [...required], async a => ingest(await multipart(endpoint, a, fields), `${c.asset(a.assetId || a.sourceAssetId || a.referenceAssetId).name}_${name}`));
   }
@@ -289,16 +307,19 @@ export function createAssistantTools(c: AgentToolContext): AgentTool[] {
   add('analyze_music_metrics', '复用音频工具本地算法，估算BPM、调性、调式、和弦及频谱/乐器倾向，保留置信度。这是信号估算，不是AI听音风格识别，不承诺世界全部调式。',
     { assetId: str }, ['assetId'], async a => {
       const asset = c.asset(a.assetId);
-      const decoded = await c.save(Buffer.alloc(0), 'metrics.f32');
-      try {
-        await c.ffmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-i', c.filePath(asset), '-t', '300', '-vn', '-ac', '2', '-ar', '22050', '-f', 'f32le', c.filePath(decoded)]);
-        const bytes = await fs.readFile(c.filePath(decoded));
-        const samples = new Float32Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 4));
-        const channels = [new Float32Array(Math.floor(samples.length / 2)), new Float32Array(Math.floor(samples.length / 2))];
-        for (let i = 0; i < channels[0].length; i++) { channels[0][i] = samples[i * 2]; channels[1][i] = samples[i * 2 + 1]; }
-        const buffer = { sampleRate: 22050, duration: channels[0].length / 22050, numberOfChannels: 2, length: channels[0].length, getChannelData: (index: number) => channels[index] } as AudioBuffer;
-        return { ...analyzeDecodedAudio(buffer, asset.name), sourceDuration: asset.duration, analyzedSeconds: buffer.duration, method: 'local-signal-estimation', note: '本地信号估算；最长分析前300秒。风格与场景需真实音频理解服务，不能据这些指标推断。' };
-      } finally { await fs.unlink(c.filePath(decoded)).catch(() => undefined); }
+      const { result, evidence } = await extractAudioMetrics(asset);
+      return { ...result, sourceDuration: evidence.sourceDuration, analyzedSeconds: evidence.analyzedSeconds,
+        method: evidence.method, note: '本地信号估算，最长前300秒；可交给GPT解读参数，不能据此确认原曲风格、具体乐器或声音事件。' };
+    });
+  add('semantic_audio_analysis', '先用本地工具检测真实音频指标，再调用GPT解读。返回analysisBasis=metrics，未直接听音；不能据此确认风格、具体乐器、声音事件或特殊地域调式。',
+    { assetId: str }, ['assetId'], async a => {
+      const { evidence } = await extractAudioMetrics(c.asset(a.assetId));
+      const m = evidence.metrics;
+      const result = await c.request('/api/ai/audio-analysis/metrics', { metadata: {
+        duration: m.duration, bpm: m.bpm.value, keyName: m.key.name, tempo: m.bpm,
+        key: m.key, musicalMode: m.musicalMode, chords: m.chords, audioProfile: m.audioProfile,
+      } });
+      return { ...result, sourceDuration: evidence.sourceDuration, analyzedSeconds: evidence.analyzedSeconds };
     });
   const clipSchema = object({ assetId: str, name: str, trackType: choice('bgm', 'sfx', 'dubbing'), startTime: num, duration: num, sourceOffset: num, allowTrim: bool, volume: num, speed: num, fadeIn: num, fadeOut: num }, ['assetId', 'startTime']);
   add('mix_timeline', '按秒对齐多轨并导出音频或带声音的视频，同时生成可编辑时间线工程。配音默认保留实测时长，严格使用用户指定开始秒；若超出视频须先处理，不得静默截断。volume为0到2。',

@@ -707,6 +707,7 @@ const formatTimingSourceLabel = (source: string | undefined) => {
   if (normalized === 'subtitle+lip') return '字幕与口型';
   if (normalized === 'speech+subtitle') return '对白与字幕';
   if (normalized === 'subtitle' || normalized === 'subtitle-only') return '字幕时间';
+  if (normalized === 'sampled-subtitle-ocr') return '逐帧字幕（0.5 秒采样）';
   if (normalized === 'visual-estimate') return '画面估算';
   if (normalized === 'full-video') return '完整视频分析';
   if (normalized === 'legacy-timeline') return '旧工程时间线';
@@ -4995,7 +4996,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
     const controller = new AbortController();
     analysisLockRef.current = true;
     analysisAbortRef.current = controller;
-    const timeoutId = window.setTimeout(() => controller.abort('timeout'), 240_000);
+    const timeoutId = window.setTimeout(() => controller.abort('timeout'), analysisDubbingEnabled ? 900_000 : 240_000);
     setIsAnalyzing(true);
     setAnalysisStage('准备解析画面...');
     setError(null);
@@ -5007,7 +5008,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
         if (isUploadingToServer || !videoFile.isUploaded) {
           throw new Error('配音同步需要分析完整视频。请等待视频上传到服务器完成后再试。');
         }
-        setAnalysisStage('正在分析完整视频中的字幕、对白与口型...');
+        setAnalysisStage('正在逐帧识别画面字幕并匹配每句时间...');
       } else if (selectedFile) {
         try {
           setAnalysisStage('正在提取关键帧...');
@@ -5188,9 +5189,6 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
           : mappedClips.filter((clip: TimelineClip) => (
             analysisTracks.find(track => track.id === clip.trackId)?.type === 'dubbing'
           )).length;
-        const dubbingSourceCueCount = typeof data.dubbingSourceCueCount === 'number'
-          ? data.dubbingSourceCueCount
-          : dubbingCueCount;
         const dubbingStatus = typeof data.dubbingStatus === 'string'
           ? data.dubbingStatus
           : '';
@@ -5201,7 +5199,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
           message: usingFullVideoDubbingAnalysis && dubbingCueCount === 0
             ? 'AI 分析完成，但没有识别到可配音字幕。'
             : usingFullVideoDubbingAnalysis
-            ? `AI 分析完成：已将 ${dubbingSourceCueCount} 条字幕整理为 ${dubbingCueCount} 个连续配音片段。`
+            ? `AI 分析完成：${dubbingCueCount} 条字幕已分别对应配音片段和时间区间。`
             : autoSfxTrackCount > 1
             ? `AI 分析完成：重叠音效已自动分配到 ${autoSfxTrackCount} 条音效轨。`
             : usedServerFrames || usingServerFallback
@@ -5288,7 +5286,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
     const controller = new AbortController();
     analysisLockRef.current = true;
     analysisAbortRef.current = controller;
-    const timeoutId = window.setTimeout(() => controller.abort('timeout'), 240_000);
+    const timeoutId = window.setTimeout(() => controller.abort('timeout'), trackId === 'dubbing' ? 900_000 : 240_000);
     setIsAnalyzing(true);
     setAnalyzingTrackId(trackId);
     setError(null);
@@ -5298,7 +5296,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
       let usingServerFallback = false;
       const requiresFullVideo = trackId === 'dubbing';
       if (requiresFullVideo) {
-        setAnalysisStage('正在重新分析完整视频中的字幕、对白与口型...');
+        setAnalysisStage('正在逐帧重新识别字幕及每句时间...');
       } else if (selectedFile) {
         try {
           setAnalysisStage('正在提取关键画面...');
@@ -5435,7 +5433,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
         ? `配乐轨重新分析完成，已生成 ${mappedClips.length} 个片段。`
         : trackId === 'sfx'
           ? `音效轨重新分析完成，已生成 ${mappedClips.length} 个片段，并分配到 ${autoSfxTrackCount} 条无重叠音效轨。`
-          : `配音轨重新分析完成：已将 ${typeof data.dubbingSourceCueCount === 'number' ? data.dubbingSourceCueCount : mappedClips.length} 条字幕整理为 ${mappedClips.length} 个连续配音片段。`;
+          : `配音轨重新分析完成：${mappedClips.length} 条字幕已分别对应配音片段和时间区间。`;
       setToast({ message, type: 'success' });
       window.setTimeout(() => setToast(null), 4_000);
     } catch (err: any) {
@@ -6248,10 +6246,6 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
       setOriginalAudioSplitStage(err?.message || '视频原声音频拆分失败，请稍后重试。');
       setError(err?.message || '视频原声音频拆分失败，请稍后重试。');
     }
-  };
-
-  const handleMusicReplacementWorkflow = () => {
-    showAudioRepairWorkflowToast('已放置“音乐替换分析”入口：下一步会同时分析画面和原音乐，生成替换音乐风格说明与 Suno / ElevenLabs 提示词。');
   };
 
   const handleCloneVoiceWorkflow = () => {
@@ -9097,23 +9091,11 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                           onClick={() => void handleAnalyzeTrack('bgm')}
                           disabled={isAnalyzing}
                           aria-label="重新分析配乐轨"
-                          title="只重新分析配乐轨，保留其他轨道"
+                          title="仅根据视频画面重新规划配乐，保留其他轨道，不分析原音乐"
                           className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[10px] font-bold text-emerald-200 transition-colors hover:bg-emerald-500/20 hover:text-white disabled:cursor-wait disabled:opacity-60"
                         >
                           {analyzingTrackId === 'bgm' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
-                          <span>{analyzingTrackId === 'bgm' ? '正在重新分析配乐轨...' : '重新分析配乐轨'}</span>
-                        </button>
-                        <div className="flex items-center justify-between gap-3">
-                          <p className="text-[10px] font-bold uppercase tracking-wider text-emerald-300">音乐替换分析</p>
-                          <Music className="h-5 w-5 shrink-0 text-emerald-400" />
-                        </div>
-                        <button
-                          type="button"
-                          onClick={handleMusicReplacementWorkflow}
-                          className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[10px] font-bold text-emerald-200 transition-colors hover:bg-emerald-500/20 hover:text-white"
-                        >
-                          <Sparkles className="h-3.5 w-3.5" />
-                          <span>分析画面与原音乐，生成替换提示词</span>
+                          <span>{analyzingTrackId === 'bgm' ? '正在分析画面并规划配乐...' : '根据画面重新规划配乐'}</span>
                         </button>
                       </div>
                     )}
@@ -9207,7 +9189,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                         </div>
                         <div className="flex items-center justify-between gap-3">
                           <div>
-                            <p className="text-[10px] font-bold uppercase tracking-wider text-sky-300">音效轨分析</p>
+                            <p className="text-[10px] font-bold uppercase tracking-wider text-sky-300">画面音效需求</p>
                             <p className="mt-1 text-[10px] leading-relaxed text-slate-500">只重新分析画面中的音效需求，保留配乐和配音轨。</p>
                           </div>
                           <Waves className="h-5 w-5 shrink-0 text-sky-400" />
@@ -9217,11 +9199,11 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                           onClick={() => void handleAnalyzeTrack('sfx')}
                           disabled={isAnalyzing}
                           aria-label="重新分析音效轨"
-                          title="只重新分析音效轨，保留其他轨道"
+                          title="仅根据视频画面重新规划音效，保留其他轨道，不分析原声"
                           className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-[10px] font-bold text-sky-200 transition-colors hover:bg-sky-500/20 hover:text-white disabled:cursor-wait disabled:opacity-60"
                         >
                           {analyzingTrackId === 'sfx' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
-                          <span>{analyzingTrackId === 'sfx' ? '正在重新分析音效轨...' : '重新分析音效轨'}</span>
+                          <span>{analyzingTrackId === 'sfx' ? '正在分析画面并规划音效...' : '根据画面重新规划音效'}</span>
                         </button>
                         </div>
                       </div>
@@ -9362,7 +9344,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                           <div className="flex items-center justify-between gap-3">
                             <div>
                               <p className="text-[10px] font-bold uppercase tracking-wider text-purple-300">配音轨分析</p>
-                              <p className="mt-1 text-[10px] leading-relaxed text-slate-500">只重新识别字幕、对白与口型，保留配乐和音效轨。</p>
+                              <p className="mt-1 text-[10px] leading-relaxed text-slate-500">逐条识别画面字幕及出现时间，保留配乐和音效轨。</p>
                             </div>
                             <RotateCcw className="h-5 w-5 shrink-0 text-purple-400" />
                           </div>
@@ -9374,7 +9356,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                             onClick={() => void handleAnalyzeTrack('dubbing')}
                             disabled={isAnalyzing}
                             aria-label="重新分析配音轨"
-                            title="只重新识别配音轨字幕、对白与口型"
+                            title="只重新识别配音轨字幕及每句时间"
                             className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg border border-purple-500/30 bg-purple-500/10 px-3 py-2 text-[10px] font-bold text-purple-200 transition-colors hover:bg-purple-500/20 hover:text-white disabled:cursor-wait disabled:opacity-60"
                           >
                             {analyzingTrackId === 'dubbing' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
@@ -9984,7 +9966,8 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                           const autoSpeed = normalizeAutoSpeed(selectedClip.autoSpeed);
                           const manualSpeed = normalizeManualSpeed(selectedClip.speed);
                           const effectiveSpeed = getEffectiveClipSpeed(selectedClip);
-                          const hasLipWindow = normalizeOptionalTime(selectedClip.lipStartTime) !== undefined
+                          const hasLipWindow = normalizeUnitVolume(selectedClip.lipSyncConfidence, 0) >= 0.6
+                            && normalizeOptionalTime(selectedClip.lipStartTime) !== undefined
                             && normalizeOptionalTime(selectedClip.lipEndTime) !== undefined
                             && (selectedClip.lipEndTime as number) > (selectedClip.lipStartTime as number);
                           const confidence = normalizeUnitVolume(selectedClip.lipSyncConfidence, 0);
@@ -10000,7 +9983,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                               <div className="flex items-center justify-between gap-2">
                                 <div className="flex items-center gap-1.5">
                                   <Gauge className="h-3.5 w-3.5 text-indigo-400" />
-                                  <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-300">字幕与口型同步</span>
+                                  <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-300">字幕时间同步</span>
                                 </div>
                                 <span className="rounded bg-indigo-500/10 px-1.5 py-0.5 font-mono text-[10px] font-bold text-indigo-300">
                                   自动 {autoSpeed.toFixed(2)}x
@@ -10048,7 +10031,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                                 </div>
                               ) : (
                                 <p className="text-[10px] leading-relaxed text-slate-500">
-                                  系统按整句自然时长自动匹配字幕与口型窗口，不会在一句话中途改变语速。
+                                  每条字幕分别合成并匹配该句的时间区间，字幕空白间隔保持留白。
                                 </p>
                               )}
 

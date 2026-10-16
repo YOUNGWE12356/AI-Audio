@@ -403,12 +403,6 @@ export default function AudioDirector({
   const processFiles = async (selectedFiles: FileList | File[] | null, source: 'upload' | 'paste' = 'upload') => {
     if (selectedFiles && selectedFiles.length > 0) {
       const filesToProcess = Array.from(selectedFiles);
-      if (filesToProcess.some(isAudioFile)) {
-        setError('暂不支持音频分析，请上传图片或视频。');
-        setPasteMessage(null);
-        if (fileInputRef.current) fileInputRef.current.value = '';
-        return;
-      }
       if (filesToProcess.some(isPdfFile)) {
         setError('暂不支持 PDF 分析，请上传图片或视频。');
         setPasteMessage(null);
@@ -418,19 +412,19 @@ export default function AudioDirector({
       const MAX_VIDEO_SIZE = 100 * 1024 * 1024;
       const MAX_DIRECT_SIZE = 20 * 1024 * 1024;
       const oversizedFiles = filesToProcess.filter((file) => (
-        file.type.startsWith('video/')
+        file.type.startsWith('video/') || isAudioFile(file)
           ? file.size > MAX_VIDEO_SIZE
           : file.size > MAX_DIRECT_SIZE
       ));
 
       if (oversizedFiles.length > 0) {
-        setError(`文件过大：视频上限 100MB，图片上限 20MB。请处理：${oversizedFiles.map(f => f.name).join(', ')}`);
+        setError(`文件过大：视频/音频上限 100MB，图片上限 20MB。请处理：${oversizedFiles.map(f => f.name).join(', ')}`);
         return;
       }
 
       setIsUploading(true);
       setError(null);
-      setPasteMessage(source === 'paste' ? '已从剪贴板导入截图，可直接开始分析。' : null);
+      setPasteMessage(source === 'paste' ? '已从剪贴板导入素材，可直接开始分析。' : null);
 
       const newFiles = filesToProcess.map((file: File) => ({
         id: typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -438,7 +432,7 @@ export default function AudioDirector({
           : `file-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
         file,
         preview: URL.createObjectURL(file),
-        type: file.type
+        type: isAudioFile(file) ? file.type || 'audio/unknown' : file.type
       }));
       setFiles(prev => [...prev, ...newFiles]);
       setIsUploading(false);
@@ -468,18 +462,24 @@ export default function AudioDirector({
   };
 
   const handlePaste = (e: React.ClipboardEvent | ClipboardEvent) => {
-    if (isUploading) return;
+    if (isUploading || e.defaultPrevented) return;
+    const view = document.getElementById('audiodirector-view');
+    if (!view || view.closest('[hidden]') || !view.getClientRects().length) return;
     const clipboardData = e.clipboardData as DataTransfer;
     const pastedFiles = Array.from(clipboardData.items || [])
       .filter(item => item.kind === 'file')
       .map(item => item.getAsFile());
-    if (pastedFiles.some(isAudioFile) || pastedFiles.some(isPdfFile)) {
+    if (pastedFiles.some(isPdfFile)) {
       e.preventDefault();
       e.stopPropagation();
       setPasteMessage(null);
-      setError(pastedFiles.some(isAudioFile)
-        ? '暂不支持音频分析，请上传图片或视频。'
-        : '暂不支持 PDF 分析，请上传图片或视频。');
+      setError('暂不支持 PDF 分析，请上传图片、视频或音频。');
+      return;
+    }
+    const audioFiles = pastedFiles.filter((file): file is File => Boolean(file && isAudioFile(file)));
+    if (audioFiles.length) {
+      e.preventDefault(); e.stopPropagation();
+      void processFiles(audioFiles, 'paste');
       return;
     }
     const imageFile = getClipboardImageFile(clipboardData);
@@ -558,7 +558,7 @@ export default function AudioDirector({
                 type="file"
                 ref={fileInputRef}
                 onChange={handleFileChange}
-                accept="image/*,video/*"
+                accept="image/*,video/*,audio/*,.mp3,.wav,.m4a,.flac,.ogg"
                 multiple
                 className="hidden"
               />
@@ -572,7 +572,8 @@ export default function AudioDirector({
                 <div className="flex flex-col items-center gap-2 group">
                   <Upload className="w-8 h-8 text-slate-400 group-hover:text-emerald-600 transition-colors" />
                   <p className="text-xs font-bold text-slate-700">拖拽文件到这里，或点击浏览</p>
-                  <p className="text-[10px] text-slate-400">支持图片、视频；视频最大 100MB，图片最大 20MB；截图可直接在下方文本框直接粘贴</p>
+                  <p className="text-[10px] text-slate-400">支持图片、视频和音频；视频/音频最大 100MB，图片最大 20MB；截图可直接粘贴</p>
+                  <p className="text-[10px] text-slate-400">音频先在本地检测参数（最长前 5 分钟），再由 GPT 解读与设计。</p>
                 </div>
               )}
             </div>
@@ -872,7 +873,7 @@ export default function AudioDirector({
               </div>
               <div className="space-y-1">
                 <p className="text-sm font-bold text-slate-700">尚未生成音频方案</p>
-                <p className="text-xs text-slate-500 max-w-sm mx-auto">在左侧上传您的游戏场景视频/画稿或填写详细背景文本，即可生成完整的音效 cue sheet 与背景音乐配置方案。</p>
+                <p className="text-xs text-slate-500 max-w-sm mx-auto">上传游戏场景视频、画稿、参考音频或填写背景需求，生成音效与配乐方案；音频参考采用本地指标 + GPT 解读。</p>
               </div>
               {onLoadDemo && (
                 <div className="pt-2 flex flex-col items-center gap-2">
@@ -899,6 +900,17 @@ export default function AudioDirector({
           {/* Results Render Area */}
           {!loading && result && (
             <div className="space-y-5">
+              {Boolean(result.audioAnalysisSources?.length) && (
+                <div className="rounded-xl border border-amber-100 bg-amber-50 p-4 text-xs leading-relaxed text-amber-800">
+                  <p className="font-bold">音频参考：本地指标 + GPT 解读，未直接听音</p>
+                  <p>风格、配器和 Suno 提示词是创作建议；不能据此确认原音频的具体乐器或声音事件。</p>
+                  {result.audioAnalysisSources!.map((source, index) => (
+                    <p key={`${source.sourceName}-${index}`} className="mt-1 break-words">
+                      {source.sourceName} · 已检测 {source.analyzedSeconds.toFixed(1)} / {source.sourceDuration.toFixed(1)} 秒
+                    </p>
+                  ))}
+                </div>
+              )}
               {/* Output Tabs Selection */}
               {hasSfxResult && hasMusicResult && <div className="bg-white border border-slate-200 p-1.5 rounded-xl flex shadow-sm">
                 <button

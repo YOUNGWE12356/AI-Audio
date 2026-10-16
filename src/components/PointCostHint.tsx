@@ -10,7 +10,8 @@ export type PointCostKind =
   | 'audio-isolation'
   | 'speech-to-text'
   | 'dubbing-v2'
-  | 'token';
+  | 'token'
+  | 'token-audio';
 
 const RATE = {
   'tts-standard': { unit: 'character', value: 0.1, label: '100 分 / 千字符' },
@@ -21,7 +22,8 @@ const RATE = {
   'audio-isolation': { unit: 'second', value: 2, label: '120 分 / 分钟' },
   'speech-to-text': { unit: 'second', value: 36 / 60, label: '36 分 / 分钟' },
   'dubbing-v2': { unit: 'second', value: 2204 / 60, label: '约 2,204 分 / 源分钟' },
-  token: { unit: 'token', value: 0, label: '按实际 Token 结算' },
+  token: { unit: 'token', value: 0, label: '按 Token 结算，最低 1 分 / 次' },
+  'token-audio': { unit: 'token', value: 0, label: '按 Token 结算；原生听音最低 10 分 / 次' },
 } as const;
 
 const countCharacters = (text: string) => Array.from(text.trim()).length;
@@ -101,8 +103,8 @@ export default function PointCostHint({
   const pendingLabel = rate.unit === 'character'
     ? '输入内容后显示预计积分'
     : '选择素材后显示预计积分';
-  const label = kind === 'token'
-    ? '按实际 Token 扣分'
+  const label = rate.unit === 'token'
+    ? rate.label
     : points === null
       ? `${pendingLabel}${outputLabel}`
       : `预计 ${formatPoints(points)} 积分${outputLabel}`;

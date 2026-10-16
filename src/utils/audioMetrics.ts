@@ -35,6 +35,9 @@ export interface AnalyzerResult {
     alternatives: string[];
     reason: string;
     model?: string;
+    analysisBasis?: 'audio' | 'metrics';
+    instruments?: AnalyzerResult['instruments'];
+    productionNotes?: string[];
   };
   semanticError?: string;
   chords: Array<{

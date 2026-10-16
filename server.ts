@@ -24,6 +24,9 @@ import { createAssistantWorkspaceOperationCache } from './src/services/assistant
 import { detectMediaAudioStream } from './src/services/mediaStreamProbe';
 import { resolveVideoMixAudioInputs } from './src/services/videoMixInputs';
 import { createMusicSeparationRouter } from './src/services/musicSeparationServer';
+import { createMusicAnalysisRouter, isGptAudioAnalysisConfigured } from './src/services/musicAnalysisServer';
+import { analyzeMusicNaming } from './src/services/musicNamingAnalysis';
+import { AUDIO_METRICS_MIME, validateAudioEvidence } from './src/utils/audioEvidence';
 import multer from 'multer';
 import {
   analyzeAudioDesign,
@@ -49,8 +52,7 @@ const assistantPlanCache = new Map<string, {
     provider: string;
   };
 }>();
-import { generateAiContent, generateGptStructuredJson, isGptTextConfigured, SchemaType as Type,
-  audioUnderstandingUnavailableError } from './src/services/aiGateway';
+import { generateAiContent, generateGptStructuredJson, isGptTextConfigured, SchemaType as Type } from './src/services/aiGateway';
 import {
   recordAiUsage,
   setAiUsageRecorder,
@@ -86,13 +88,10 @@ import {
   transcribeSpeech,
 } from './src/services/elevenLabsService';
 import { normalizeElevenLabsQualityMode } from './src/utils/elevenLabsQuality';
+import { prepareSoundEffectPrompt } from './src/services/sfxPromptService';
+import { isGptCompanyPointPricingEnabled } from './src/services/companyPointPricing';
 import { AUDIO_LANGUAGE_REGISTRY } from './src/services/languageRegistry';
-import {
-  DUBBING_GROUP_MAX_GAP_SECONDS,
-  DUBBING_GROUP_MAX_SPAN_SECONDS,
-  DUBBING_GROUP_MAX_TEXT_LENGTH,
-  groupContinuousDubbingClips,
-} from './src/utils/dubbingClipGrouping';
+import { analyzeVideoSubtitles, MAX_SUBTITLE_VIDEO_SECONDS, SUBTITLE_SAMPLE_INTERVAL } from './src/services/videoSubtitleAnalysis';
 
 async function startServer() {
   const app = express();
@@ -207,12 +206,13 @@ async function startServer() {
     const endpoint = req.path;
     if (endpoint.includes('/assistant/plan')) return '智能助手 · GPT 任务规划';
     if (endpoint.includes('/assistant/')) return '智能助手 · 自动任务执行';
-    if (endpoint.includes('/audio-analysis/semantic')) return '音频工具 · 音频分析';
+    if (endpoint.includes('/audio-analysis/')) return '音频工具 · 音频分析';
     if (endpoint.includes('/music-analysis-naming')) return '音频工具 · 音乐分析命名';
     if (endpoint.includes('/audio-design')) return 'AI 音频设计';
     if (endpoint.includes('/regenerate-lyrics') || endpoint.includes('/generate-lyrics')) return 'AI 音乐 · 歌词生成';
     if (endpoint.includes('/music-prompt')) return 'AI 音乐 · 提示词优化';
     if (endpoint.includes('/sfx-requirements')) return '音效需求表';
+    if (endpoint.includes('/batch-voice-image-ocr')) return 'AI 配音 · 台词图片识别';
     if (endpoint.includes('/optimize-metadata')) return '音效库 · 元数据优化';
     if (endpoint.includes('/match-voice') || endpoint.includes('/match-similar-voices')) return 'AI 配音 · 声音匹配';
     if (/\/voice-v[34]-enhance/.test(endpoint)) return 'AI 配音 · 台词增强';
@@ -1855,7 +1855,7 @@ async function startServer() {
   // returns secret values to the browser.
   app.get('/api/health', asyncRoute(async (req, res) => {
     const aiServices = {
-      audioUnderstanding: false,
+      audioUnderstanding: isGptAudioAnalysisConfigured(),
       aiText: isGptTextConfigured(),
       gptText: isGptTextConfigured(),
       elevenLabs: getElevenLabsApiKeys().length > 0,
@@ -2241,7 +2241,7 @@ async function startServer() {
         gpt: summarizeLocalProvider(
           'gpt',
           isGptTextConfigured(),
-          Boolean(Number(process.env.GPT_INPUT_USD_PER_MILLION_TOKENS) || Number(process.env.GPT_OUTPUT_USD_PER_MILLION_TOKENS)),
+          isGptCompanyPointPricingEnabled(),
         ),
       },
     });
@@ -3791,15 +3791,18 @@ async function startServer() {
   const extractServerVideoKeyframes = async (
     fileName: unknown,
     requestedDuration: unknown,
-    options: { dense?: boolean; frameCount?: number } = {},
+    options: { dense?: boolean; frameCount?: number; subtitles?: boolean } = {},
   ): Promise<Array<{ timestamp: number; base64: string }>> => {
     const { videoPath } = await resolveValidatedUploadedVideo(fileName);
 
     const duration = parseNumber(requestedDuration, 30, 1, 3_600);
-    const frameCount = options.frameCount ?? (options.dense
+    if (options.subtitles && duration > MAX_SUBTITLE_VIDEO_SECONDS) {
+      throw Object.assign(new Error('逐条字幕同步目前支持 5 分钟以内的视频，请分段后分析。'), { status: 422 });
+    }
+    const frameCount = options.subtitles ? Math.ceil(duration / SUBTITLE_SAMPLE_INTERVAL) : options.frameCount ?? (options.dense
       ? Math.min(48, Math.max(12, Math.ceil(duration)))
       : 6);
-    const firstTimestamp = duration / (frameCount * 2);
+    const firstTimestamp = options.subtitles ? 0 : duration / (frameCount * 2);
     const temporaryDirectory = await fs.promises.mkdtemp(path.join(uploadsDir, '.video-analysis-'));
     if (!isPathInside(uploadsDir, temporaryDirectory)) {
       await safeRemoveDirectory(temporaryDirectory);
@@ -3808,18 +3811,22 @@ async function startServer() {
 
     try {
       const outputPattern = path.join(temporaryDirectory, 'frame_%02d.jpg');
-      const filter = `fps=${frameCount}/${duration.toFixed(3)},scale=512:512:force_original_aspect_ratio=decrease`;
+      const subtitleFrameTimestamps: number[] = [];
+      const filter = options.subtitles
+        ? `setpts=PTS-STARTPTS,select='isnan(prev_selected_t)+gte(t-prev_selected_t,${SUBTITLE_SAMPLE_INTERVAL})',scale=1280:1280:force_original_aspect_ratio=decrease,showinfo`
+        : `fps=${frameCount}/${duration.toFixed(3)},scale=512:512:force_original_aspect_ratio=decrease`;
       await new Promise<void>((resolve, reject) => {
         execFile(
           FFMPEG_BINARY,
           [
             '-hide_banner',
-            '-loglevel', 'error',
+            '-loglevel', options.subtitles ? 'info' : 'error',
             '-ss', firstTimestamp.toFixed(3),
             '-i', videoPath,
             '-an',
             '-sn',
             '-vf', filter,
+            ...(options.subtitles ? ['-fps_mode', 'vfr'] : []),
             '-frames:v', String(frameCount),
             '-q:v', '6',
             '-start_number', '0',
@@ -3827,12 +3834,17 @@ async function startServer() {
             outputPattern,
           ],
           {
-            timeout: 30_000,
+            timeout: options.subtitles ? 120_000 : 30_000,
             windowsHide: true,
             maxBuffer: 2 * 1024 * 1024,
           },
           (error, _stdout, stderr) => {
             if (!error) {
+              if (options.subtitles) {
+                for (const match of String(stderr).matchAll(/\bn:\s*\d+\s+pts:.*?\bpts_time:([\d.e+-]+)/g)) {
+                  subtitleFrameTimestamps.push(Number(match[1]));
+                }
+              }
               resolve();
               return;
             }
@@ -3853,10 +3865,16 @@ async function startServer() {
 
       const frameFiles = (await fs.promises.readdir(temporaryDirectory))
         .filter(name => /^frame_\d+\.jpg$/i.test(name))
-        .sort()
+        .sort((left, right) => Number(left.match(/\d+/)?.[0]) - Number(right.match(/\d+/)?.[0]))
         .slice(0, frameCount);
       if (frameFiles.length === 0) {
         throw Object.assign(new Error('服务器未能从视频中提取画面，请转换为 H.264 MP4 后重试。'), { status: 422 });
+      }
+      if (options.subtitles && (subtitleFrameTimestamps.length < frameFiles.length
+        || subtitleFrameTimestamps[0] > 0.05
+        || subtitleFrameTimestamps[frameFiles.length - 1] < duration - 0.8
+        || subtitleFrameTimestamps.slice(1, frameFiles.length).some((time, index) => time - subtitleFrameTimestamps[index] > 0.75))) {
+        throw Object.assign(new Error('字幕采样未覆盖完整视频，已停止分析，请检查视频时长或重新上传。'), { status: 422 });
       }
 
       const frames: Array<{ timestamp: number; base64: string }> = [];
@@ -3866,14 +3884,14 @@ async function startServer() {
         if (!isPathInside(temporaryDirectory, framePath)) continue;
         const base64 = (await fs.promises.readFile(framePath)).toString('base64');
         totalEncodedLength += base64.length;
-        if (base64.length > 1_500_000 || totalEncodedLength > 8_000_000) {
+        if (base64.length > 1_500_000 || totalEncodedLength > (options.subtitles ? 100_000_000 : 8_000_000)) {
           throw Object.assign(new Error('服务器提取的关键帧数据过大。'), { status: 413 });
         }
         frames.push({
           timestamp: Number(Math.min(
             Math.max(0, duration - 0.05),
-            firstTimestamp + (index * duration / frameCount),
-          ).toFixed(1)),
+            options.subtitles ? subtitleFrameTimestamps[index] : firstTimestamp + index * duration / frameCount,
+          ).toFixed(3)),
           base64,
         });
       }
@@ -4262,103 +4280,19 @@ async function startServer() {
   }));
 
   app.post('/api/ai/music-analysis-naming', asyncRoute(async (req, res) => {
-    const rawItems = Array.isArray(req.body?.items) ? req.body.items.slice(0, 60) : [];
-    if (rawItems.length === 0) {
-      return res.status(400).json({ error: '请先上传并分析至少一个音乐文件。' });
-    }
-    if (!isGptTextConfigured()) {
-      return res.status(503).json({ error: '音乐风格/场景语义分析 API 尚未配置。请配置 OPENAI_API_KEY、ARK_API_KEY 或 TOKENHUB_API_KEY。' });
-    }
-
-    const items = rawItems.map((item: any, index: number) => ({
-      index,
-      sourceName: normalizeIdentityText(item?.sourceName, 240) || `music_${index + 1}`,
-      duration: Math.max(0, Math.min(Number(item?.duration) || 0, 60 * 60)),
-      bpm: Math.max(0, Math.min(Number(item?.bpm) || 0, 300)),
-      keyName: normalizeIdentityText(item?.keyName, 80) || 'Unknown',
-      keyConfidence: normalizeIdentityText(item?.keyConfidence, 12) || '低',
-      energy: normalizeIdentityText(item?.energy, 40) || 'Unknown',
-      mood: normalizeIdentityText(item?.mood, 80) || 'Unknown',
-      bassPercent: Math.max(0, Math.min(Number(item?.bassPercent) || 0, 100)),
-      midPercent: Math.max(0, Math.min(Number(item?.midPercent) || 0, 100)),
-      highPercent: Math.max(0, Math.min(Number(item?.highPercent) || 0, 100)),
-      rms: Math.max(0, Math.min(Number(item?.rms) || 0, 1)),
-    }));
-
-    const schema = {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        items: {
-          type: 'array',
-          minItems: items.length,
-          maxItems: items.length,
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              index: { type: 'integer', minimum: 0 },
-              style: {
-                type: 'string',
-                enum: ['Epic', 'Battle', 'Casual', 'Healing', 'Mystery', 'Ambient', 'Electronic', 'Chinese', 'Cinematic', 'Orchestral', 'Rock', 'Piano', 'LoFi', 'Review'],
-              },
-              scene: {
-                type: 'string',
-                enum: ['Battle', 'Home', 'Lobby', 'Event', 'Gift', 'Puzzle', 'Victory', 'Suspense', 'Explore', 'Menu', 'Cutscene', 'Reward', 'Store', 'Manual'],
-              },
-              mood: { type: 'string' },
-              namingCategory: { type: 'string' },
-              confidence: { type: 'string', enum: ['高', '中', '低'] },
-              reason: { type: 'string' },
-            },
-            required: ['index', 'style', 'scene', 'mood', 'namingCategory', 'confidence', 'reason'],
-          },
-        },
-      },
-      required: ['items'],
-    };
-
-    const result = await generateGptStructuredJson<{
-      items: Array<{
-        index: number;
-        style: string;
-        scene: string;
-        mood: string;
-        namingCategory: string;
-        confidence: '高' | '中' | '低';
-        reason: string;
-      }>;
-    }>({
-      schemaName: 'music_analysis_naming',
-      schema,
-      reasoningEffort: 'low',
-      maxOutputTokens: Math.min(6000, 800 + items.length * 180),
-      instructions: `你是游戏与互动音频资产命名专家。你需要根据文件名和客观音频指标，为每个音乐素材判断最适合的音乐风格、使用场景和命名类别。
-
-重要要求：
-1. 文件名、文件夹名中的业务语义优先级最高，例如 battle、victory、home、lobby、event、gift、board game、tabletop、Chinese、piano 等。
-2. BPM、调性和频段只能作为辅助证据，不要只因为慢速就判断 Ambient，不要只因为低频多就判断 Battle。
-3. 如果证据不足，style 必须返回 Review，scene 必须返回 Manual，confidence 返回 低；不要假装确定。
-4. namingCategory 用英文短标签，适合进入文件名，格式示例 Casual_Lobby、Battle_Battle、Chinese_Explore、Review_Manual。
-5. reason 用中文，简短说明为什么这么判断，最多 40 字。
-6. 必须为每个输入 index 返回一条结果，不要丢项，不要新增项。`,
-      input: JSON.stringify({ items }),
-    });
-
-    return res.json({
-      provider: result.provider,
-      model: result.model,
-      items: result.value.items,
-    });
+    return res.json(await analyzeMusicNaming(req.body?.items));
   }));
 
-  app.post("/api/ai/music-analysis-naming/audio", (_req, res) => {
-    return res.status(503).json({ error: audioUnderstandingUnavailableError().message });
-  });
+  // Compatibility for older clients: only interpret supplied local evidence.
+  const namingUpload = multer({ storage: multer.memoryStorage(), limits: { files: 10, fileSize: 2 * 1024 * 1024, fields: 1, fieldSize: 256 * 1024 } });
+  app.post('/api/ai/music-analysis-naming/audio', namingUpload.array('audio', 10), asyncRoute(async (req, res) => {
+    let items: unknown;
+    try { items = JSON.parse(req.body?.metadata || 'null'); }
+    catch { return res.status(400).json({ error: '音乐检测指标格式无效。' }); }
+    return res.json(await analyzeMusicNaming(items));
+  }));
 
-  app.post("/api/ai/audio-analysis/semantic", (_req, res) => {
-    return res.status(503).json({ error: audioUnderstandingUnavailableError().message });
-  });
+  app.use('/api/ai/audio-analysis', createMusicAnalysisRouter());
 
   app.post('/api/ai/audio-design', asyncRoute(async (req, res) => {
     const { files, requirements = '', target = {}, isInstrumental = true, scope } = req.body || {};
@@ -4368,8 +4302,12 @@ async function startServer() {
     if (files.length > 16) {
       return res.status(400).json({ error: '素材切片数量过多，请减少文件后重试。' });
     }
-    if (files.some((file: any) => file?.fileUri || typeof file?.data !== 'string')) {
+    if (files.some((file: any) => !file || file.fileUri || typeof file.mimeType !== 'string'
+      || (file.mimeType !== AUDIO_METRICS_MIME && typeof file.data !== 'string'))) {
       return res.status(400).json({ error: '快速模式素材格式无效。' });
+    }
+    for (const file of files) {
+      if (file.mimeType === AUDIO_METRICS_MIME) file.audioMetrics = validateAudioEvidence(file.audioMetrics);
     }
     const decodedLength = files.reduce((total: number, file: any) => {
       if (typeof file?.data !== 'string') return total;
@@ -4655,7 +4593,10 @@ async function startServer() {
   }));
 
   app.post('/api/ai/translate', asyncRoute(async (req, res) => {
-    const text = await translateToEnglish(String(req.body?.text || ''));
+    const source = String(req.body?.text || '');
+    const text = req.body?.purpose === 'sound-effect'
+      ? await prepareSoundEffectPrompt(source)
+      : await translateToEnglish(source);
     return res.json({ text });
   }));
 
@@ -4829,7 +4770,9 @@ async function startServer() {
   app.post(
     '/api/ai/elevenlabs/sound-effect',
     requireElevenLabsQuota(req => estimateTimedCompanyPoints(
-      parseNumber(req.body?.duration, 5, 0.5, 30),
+      // Automatic generation can produce up to 30s; reserve the upper bound,
+      // then settle only the actual PCM duration recorded by the service.
+      parseNumber(req.body?.duration, 30, 0.5, 30),
       COMPANY_POINTS.soundEffectPerSecond,
     )),
     asyncRoute(async (req, res) => {
@@ -4840,10 +4783,7 @@ async function startServer() {
       ? undefined
       : parseNumber(rawDuration, 10, 0.5, 30);
     const qualityMode = normalizeElevenLabsQualityMode(req.body?.qualityMode);
-    const englishText = /[^\x00-\x7F]/.test(text)
-      ? await translateToEnglish(text)
-      : text;
-    return sendAudioBlob(res, await generateSoundEffect(englishText || text, duration, { qualityMode }));
+    return sendAudioBlob(res, await generateSoundEffect(text, duration, { qualityMode }));
     }),
   );
 
@@ -6962,26 +6902,7 @@ async function startServer() {
 请提供以下轨道的元素（你可以根据视频画面的时间长度和事件，智能规划最合适的开始时间 startTime 和时长 duration，单位为秒）：
 ${bgmEnabled ? '1. 背景音乐轨 (bgm): 通常是一段大气合适的 background music，覆盖视频主要时间。' : ''}
 ${sfxEnabled ? '2. 音效轨 (sfx): 根据视频中的关键动势、场景变化或特效出现，生成对应的短音效。' : ''}
-${dubbingEnabled ? '3. 配音轨 (dubbing): 仅识别关键帧中可见的字幕，保守估算时间；不可推断帧间缺失的对白或精确口型。' : ''}
-
-${dubbingEnabled ? `配音声音由用户在配音轨属性中统一设置；这里只规划台词与时间，不要为单个片段推荐或返回 voiceId。
-配音时间轴必须遵守以下规则：
-- 先逐条识别字幕，再把同一说话人的连续字幕按时间顺序合并成一个 dubbing clip；短停顿保留为自然标点或换行，不要让合成声音逐句重新起音。
-- 相邻字幕间隔不超过 ${DUBBING_GROUP_MAX_GAP_SECONDS} 秒时应优先合并；间隔超过 ${DUBBING_GROUP_MAX_GAP_SECONDS} 秒、明确更换说话人、合并区间超过 ${DUBBING_GROUP_MAX_SPAN_SECONDS} 秒或合并文字超过 ${DUBBING_GROUP_MAX_TEXT_LENGTH} 字符时才新建片段。
-- 同一条字幕在连续画面中保持不变时只生成一个 clip，不要因逐帧重复看到而重复创建。
-- 每个合并后的片段使用稳定且唯一的 subtitleId，例如 "subtitle-group-001"；speaker 表示这一组的说话人或画面角色，无法确定时写 "unknown"。
-- text 必须逐字保留组内每一条字幕，按出现顺序连接，不得总结、改写或漏字；使用自然标点或换行表现组内短暂停顿。
-- subtitleStartTime 必须等于组内第一条字幕的实际出现时间；subtitleEndTime 必须等于组内最后一条字幕的实际消失时间，两者构成合并片段的硬边界。
-- startTime 必须等于 subtitleStartTime，duration 必须等于 subtitleEndTime - subtitleStartTime；口型时间只作为 lipStartTime/lipEndTime 元数据，不得用来缩短配音片段。
-- lipStartTime/lipEndTime 是整组对白区间内说话人口型开始和结束活动的时间，必须限制在合并片段的字幕边界内。
-- lipSyncConfidence 为 0 到 1；timingSource 只能说明依据，例如 "subtitle+lip"、"subtitle"、"speech+subtitle" 或 "visual-estimate"。
-- 保留视频中每一条可辨识字幕，不限制为少数重点片段。合并后整组台词会按组内第一句到最后一句的区间统一调整语速并对齐视频。
-
-KEYFRAME-ONLY SUBTITLE OCR:
-- Only transcribe text visibly present in the supplied frames. Never invent missing lines between frames.
-- Keep visible text in chronological order and preserve its original language.
-- Timestamp boundaries are estimates based on frame timestamps, not exact subtitle transitions.
-- Do not claim to have heard speech or measured lip motion from sparse frames.` : ''}
+配音字幕由独立的逐帧识别流程处理，本次只返回 bgm/sfx，禁止返回 dubbing 或把标题、拟声文字当成对白。
 
 返回的 JSON 必须包含一个 \`clips\` 数组，每项符合以下定义：
 {
@@ -7005,7 +6926,7 @@ KEYFRAME-ONLY SUBTITLE OCR:
 请确保 clips 数组中只包含启用的轨道类型：
 - bgmEnabled: ${bgmEnabled ? '开启' : '关闭'}
 - sfxEnabled: ${sfxEnabled ? '开启' : '关闭'}
-- dubbingEnabled: ${dubbingEnabled ? '开启' : '关闭'}
+- dubbingEnabled: 关闭（独立识别）
 
 视频总时长约为 ${parseNumber(videoDuration, 30, 1, 3_600).toFixed(1)} 秒。所有片段必须严格位于该时长内。
 为保证生成速度，请保持非配音结果精炼：BGM 最多 1 段、SFX 最多 8 段。配音不得抽样或截断，必须覆盖所有可辨识字幕变化。
@@ -7015,11 +6936,17 @@ KEYFRAME-ONLY SUBTITLE OCR:
       const contents: any[] = [prompt];
 
       let analysisKeyframes: Array<{ timestamp: number; base64: string }> = [];
+      let subtitleClips: any[] = [];
       let analysisSource: 'client-keyframes' | 'server-ffmpeg' | 'local-fallback' = 'client-keyframes';
 
       if (dubbingEnabled) {
         if (!fileName) return res.status(422).json({ error: "字幕配音分析需要服务器上的视频，请等待上传完成后重试。" });
-        analysisKeyframes = await extractServerVideoKeyframes(fileName, videoDuration, { dense: true });
+        const subtitleFrames = await extractServerVideoKeyframes(fileName, videoDuration, { subtitles: true });
+        subtitleClips = await analyzeVideoSubtitles(subtitleFrames, parseNumber(videoDuration, 30, 1, 3_600));
+        // Music/SFX planning needs broad visual context, not hundreds of OCR images.
+        analysisKeyframes = Array.from({ length: Math.min(6, subtitleFrames.length) }, (_, index) => (
+          subtitleFrames[Math.round(index * (subtitleFrames.length - 1) / Math.max(1, Math.min(6, subtitleFrames.length) - 1))]
+        ));
         analysisSource = "server-ffmpeg";
       } else if (Array.isArray(keyframes) && keyframes.length > 0) {
         if (keyframes.length > 8) {
@@ -7059,7 +6986,9 @@ KEYFRAME-ONLY SUBTITLE OCR:
       console.log('Sending keyframe analysis to the configured visual gateway...');
       let response: Awaited<ReturnType<typeof generateAiContent>>;
       try {
-        response = await generateAiContent({
+        response = !bgmEnabled && !sfxEnabled
+          ? { text: '{"clips":[]}', modelVersion: 'subtitle-only' }
+          : await generateAiContent({
           contents,
           config: {
             responseMimeType: "application/json",
@@ -7097,6 +7026,7 @@ KEYFRAME-ONLY SUBTITLE OCR:
           }
         });
       } catch (contentGenerationError) {
+        if (dubbingEnabled) throw contentGenerationError;
         return res.json(buildLocalVideoAnalysisFallback({
           videoDuration, bgmEnabled: Boolean(bgmEnabled), sfxEnabled: Boolean(sfxEnabled),
           dubbingEnabled: Boolean(dubbingEnabled), reason: contentGenerationError,
@@ -7133,6 +7063,7 @@ KEYFRAME-ONLY SUBTITLE OCR:
       if (!Array.isArray(parsed.clips)) {
         throw new Error('AI 未返回有效的时间轴片段。');
       }
+      parsed.clips = [...parsed.clips.filter((clip: any) => clip?.trackId !== 'dubbing'), ...subtitleClips];
 
       const durationLimit = parseNumber(videoDuration, 30, 1, 3_600);
       const enabledTracks = new Set<string>([
@@ -7286,10 +7217,9 @@ KEYFRAME-ONLY SUBTITLE OCR:
         compactDubbingClips.push(clip);
       }
       const dubbingSourceCueCount = compactDubbingClips.length;
-      const groupedDubbingClips = groupContinuousDubbingClips(compactDubbingClips);
       normalizedClips = [
         ...normalizedClips.filter((clip: any) => clip.trackId !== 'dubbing'),
-        ...groupedDubbingClips,
+        ...compactDubbingClips,
       ].sort((left: any, right: any) => left.startTime - right.startTime);
 
       const usedSubtitleIds = new Set<string>();
@@ -7343,12 +7273,12 @@ KEYFRAME-ONLY SUBTITLE OCR:
       return res.json({
         clips: normalizedClips,
         analysisSource,
-        analysisPartial: analysisPartial || dubbingEnabled,
+        analysisPartial,
         dubbingCueCount,
         dubbingSourceCueCount,
         dubbingStatus: dubbingEnabled ? dubbingCueCount > 0 ? 'estimated' : 'unavailable' : 'disabled',
         warning: dubbingEnabled
-          ? '配音时间码仅依据视频关键帧估算，无法验证原音轨或精确口型；合成前请逐条核对字幕和起止时间。'
+          ? '已按每条画面字幕独立安排配音；字幕边界以 0.5 秒间隔采样估算，不代表精确口型。'
           : undefined,
       });
       
@@ -7465,13 +7395,10 @@ KEYFRAME-ONLY SUBTITLE OCR:
         
       } else {
         // Sound effect (Sound generation)
-        const sfxPrompt = isProQuality
-          ? `Studio-quality sound effect, realistic texture, clear spatial depth: ${prompt}`
-          : `Sound effect, realistic texture: ${prompt}`;
-        console.log(`ElevenLabs server SFX Gen: prompt="${sfxPrompt}" duration=${duration}`);
+        console.log(`ElevenLabs server SFX Gen: prompt="${prompt}" duration=${duration}`);
         
         const wavBlob = await generateSoundEffect(
-          sfxPrompt,
+          prompt,
           Math.min(30, Math.max(0.5, duration || 4)),
           { qualityMode },
         );

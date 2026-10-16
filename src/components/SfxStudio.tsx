@@ -8,6 +8,7 @@ import { Loader2, Play, Pause, Download, AlertCircle, Sparkles } from 'lucide-re
 import { HistoryItem } from '../types';
 import GeneratedAudioPlayer, { sanitizeAudioFileName } from './GeneratedAudioPlayer';
 import PointCostHint from './PointCostHint';
+import { requiresSoundEffectTranslation } from '../services/sfxPromptService';
 
 interface PendingSfxOption {
   url: string;
@@ -80,6 +81,7 @@ export default function SfxStudio({
   };
 
   const sfxHistory = historyList.filter(item => item.type === 'sfx');
+  const generatedVersionCount = Number(Boolean(pendingSfxOptions.optionA)) + Number(Boolean(pendingSfxOptions.optionB));
 
   return (
     <div id="sfxstudio-view" className="flex-1 p-6 space-y-6 max-w-6xl mx-auto w-full">
@@ -96,6 +98,7 @@ export default function SfxStudio({
             <div className="space-y-2">
               <label className="text-xs font-bold text-slate-700 block uppercase tracking-wider">音效场景描述</label>
               <textarea
+                disabled={standaloneLoading}
                 value={standalonePrompt}
                 onChange={(e) => setStandalonePrompt(e.target.value)}
                 placeholder="例如：雨夜里远处雷声、细雨打在树叶上、脚步声慢慢靠近"
@@ -113,6 +116,7 @@ export default function SfxStudio({
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
+                  disabled={standaloneLoading}
                   onClick={() => setStandaloneDurationMode('auto')}
                   className={`rounded-lg border px-3 py-2 text-[11px] font-bold transition-all ${
                     standaloneDurationMode === 'auto'
@@ -124,6 +128,7 @@ export default function SfxStudio({
                 </button>
                 <button
                   type="button"
+                  disabled={standaloneLoading}
                   onClick={() => setStandaloneDurationMode('fixed')}
                   className={`rounded-lg border px-3 py-2 text-[11px] font-bold transition-all ${
                     standaloneDurationMode === 'fixed'
@@ -142,7 +147,7 @@ export default function SfxStudio({
                   step="1"
                   value={standaloneDuration}
                   onChange={(e) => setStandaloneDuration(parseInt(e.target.value))}
-                  disabled={standaloneDurationMode === 'auto'}
+                  disabled={standaloneLoading || standaloneDurationMode === 'auto'}
                   className={`w-full h-1.5 rounded-lg appearance-none accent-emerald-600 ${
                     standaloneDurationMode === 'auto'
                       ? 'bg-slate-100 cursor-not-allowed opacity-45'
@@ -159,12 +164,13 @@ export default function SfxStudio({
               </div>
             )}
 
-            <div className="flex justify-end">
-              <PointCostHint
+            <div className="flex flex-col items-end gap-1 text-right text-[10px] font-semibold text-amber-700" aria-live="polite">
+              {standaloneDurationMode === 'fixed' ? <PointCostHint
                 kind="sound-effect"
-                durationSeconds={standaloneDurationMode === 'fixed' ? standaloneDuration : 5}
+                durationSeconds={standaloneDuration}
                 outputs={2}
-              />
+              /> : <span>音效按实际时长结算：2 分 / 秒 / 版本，共 2 版</span>}
+              {requiresSoundEffectTranslation(standalonePrompt) && <span>描述翻译另计积分，按实际用量结算</span>}
             </div>
             <button
               onClick={handleStandaloneGenerate}
@@ -192,9 +198,9 @@ export default function SfxStudio({
               <div className="flex items-center justify-between gap-3 border-b border-emerald-500/10 pb-2.5">
                 <div className="flex items-center gap-2">
                   <Sparkles className="w-4 h-4 text-emerald-600" />
-                  <h4 className="text-[11px] font-black text-slate-800 uppercase tracking-wider">已生成双版本音效</h4>
+                  <h4 className="text-[11px] font-black text-slate-800 uppercase tracking-wider">{generatedVersionCount === 2 ? '已生成双版本音效' : '已生成 1 个版本音效'}</h4>
                 </div>
-                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[9px] font-bold text-emerald-700">先试听再保留</span>
+                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[9px] font-bold text-emerald-700">{standaloneLoading ? '其余版本生成中' : '先试听再保留'}</span>
               </div>
 
               <div className="grid grid-cols-1 gap-3">

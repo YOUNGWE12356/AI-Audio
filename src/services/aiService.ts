@@ -1,5 +1,6 @@
 import { generateAiContent, SchemaType, ThinkingLevel } from './aiGateway';
 import { setClientIdentityHeader } from './clientIdentity';
+import { AUDIO_METRICS_MIME, AUDIO_EVIDENCE_RULES, validateAudioEvidence, type AudioMetricEvidence } from '../utils/audioEvidence';
 import { isBgmImportFileName, normalizeUcsImportFileName, normalizeUcsRequirementItems, UCS_CATALOG_PROMPT, UCS_CATALOG_VERSION } from './ucsNaming';
 
 const isBrowser = typeof window !== 'undefined';
@@ -73,6 +74,7 @@ async function postJson<T>(
 const getAI = () => ({ Type: SchemaType, ThinkingLevel });
 
 export interface AudioDesignResult {
+  audioAnalysisSources?: Array<{ sourceName: string; sourceDuration: number; analyzedSeconds: number; method: 'local-metrics-gpt'; model: string }>;
   sfxAnalysis: {
     summary: string;
     keyElements: string[];
@@ -538,6 +540,7 @@ export const materializeAudioDesignResult = (
 };
 
 export interface AudioDesignMedia {
+  audioMetrics?: AudioMetricEvidence;
   data?: string;
   fileUri?: string;
   mimeType: string;
@@ -809,6 +812,11 @@ export async function analyzeAudioDesign(
     }, { signal: options.signal, timeoutMs: 180_000 });
   }
 
+  const audioEvidence = files.filter(file => file.mimeType === AUDIO_METRICS_MIME).map(file => validateAudioEvidence(file.audioMetrics));
+  if (files.some(file => file.mimeType.startsWith('audio/'))) {
+    throw new Error('请先提取音频本地指标后再分析，不支持向文本模型直接发送音频。');
+  }
+
   let targetDesc = target.game && target.video ? "游戏CG宣传片" : target.game ? "游戏" : target.video ? "视频" : "音频设计";
   const isGameTrack = (target.game || target.activity) && !target.video && !target.avatar && !target.sunnyIsland && !target.gift;
   const includeMusicTimeline = !isGameTrack;
@@ -957,12 +965,17 @@ export async function analyzeAudioDesign(
 
     目标方向：${targetDesc}
     补充需求：${requirements}
+    ${audioEvidence.length ? `【音频参考的证据边界，优先于其他分析要求】：${AUDIO_EVIDENCE_RULES}\n音效只能给出待验证的创意方向，不可声称识别到原音频事件。仅有音频指标时，不可声称观察到画面、动作或确定原曲风格。` : ''}
     ${analysisScope.music ? `音乐类型：${isInstrumental ? "纯音乐（Instrumental）" : "带有人声的歌曲"}` : ''}
   `;
 
   const usesNativeVideo = files.some(file => Boolean(file.fileUri));
   const parts: any[] = usesNativeVideo ? [] : [{ text: prompt }];
   files.forEach((file) => {
+    if (file.mimeType === AUDIO_METRICS_MIME) {
+      parts.push({ text: `本地提取的音频指标（未直接听音）：${JSON.stringify(validateAudioEvidence(file.audioMetrics))}` });
+      return;
+    }
     if (!usesNativeVideo && file.label) parts.push({ text: `\n[${file.label}]` });
     if (file.fileUri) {
       parts.push({
@@ -1202,7 +1215,10 @@ export async function analyzeAudioDesign(
     throw new Error("AI 返回的数据格式有误，请重试");
   }
 
-  return materializeAudioDesignResult(rawResult, isInstrumental, includeMusicTimeline, analysisScope);
+  const result = materializeAudioDesignResult(rawResult, isInstrumental, includeMusicTimeline, analysisScope);
+  if (audioEvidence.length) result.audioAnalysisSources = audioEvidence.map(e => ({ sourceName: e.sourceName,
+    sourceDuration: e.sourceDuration, analyzedSeconds: e.analyzedSeconds, method: 'local-metrics-gpt', model: response.modelVersion }));
+  return result;
 }
 
 export async function regenerateLyrics(
@@ -1457,6 +1473,9 @@ export async function generateSfxRequirements(
   projectName: string | null = null,
   existingItems: ExistingSfxRequirementItem[] = [],
 ): Promise<{ items: any[]; sourceItemCount?: number }> {
+  if (referenceFile && !/^(?:image|video)\//i.test(referenceFile.mimeType)) {
+    throw Object.assign(new Error('音效需求表只支持图片/截图或视频参考，不支持音频参考。'), { status: 400 });
+  }
   const normalizedProjectName = projectName?.trim().toLowerCase() || '';
   const isJinnProject = normalizedProjectName === 'jinn';
   const isAvatarProject = normalizedProjectName === 'avatar';
@@ -1491,7 +1510,7 @@ export async function generateSfxRequirements(
       该模板主要包含以下字段，请在输出 JSON 时填充：
       - index (序号): 整数，从1开始递增。
       - audio_type (类型): 必须填写 "SFX"、"BGM" 或 "VO"。音效为 SFX，背景音乐为 BGM，角色台词/旁白/字幕配音为 VO。
-      - filename (文件命名): ${useUcsSfxNaming ? 'SFX 使用下方 UCS 8.2.1 分类中的真实 CatID_FXName，例如 FOLYFeet_Wood Footstep 01；FXName 内不使用下划线，BGM/VO 仍用 Bgm_/Vo_ 工程命名。' : '采用下划线英文命名规范，且每个单词首字母大写。例如 Sfx_Ui_Button, Bgm_Battle, Sfx_Foley_Footstep_Wood_01。'}只有同一基础音效存在多个变体/随机样本时才添加尾号；如果该类型只有一个音效，不要添加尾号。
+      - filename (文件命名): ${useUcsSfxNaming ? 'SFX 使用 Sfx_CatID_FXName，例如 Sfx_FOLYFeet_Wood Footstep 01；Sfx_ 是必需的工程前缀，CatID 从下方 UCS 8.2.1 分类中选择，FXName 内不使用下划线，BGM/VO 仍用 Bgm_/Vo_ 工程命名。' : '采用下划线英文命名规范，且每个单词首字母大写。例如 Sfx_Ui_Button, Bgm_Battle, Sfx_Foley_Footstep_Wood_01。'}只有同一基础音效存在多个变体/随机样本时才添加尾号；如果该类型只有一个音效，不要添加尾号。
       - duration_logic (时长&播放逻辑): 声效时长描述及触发/播放逻辑，例如 "1s, 单次播放", "10s, 循环播放", "3s, 随机多样本触发"。
       - scene (应用场景): 音效触发的具体场景与时机描述，如 "通用与主界面&游戏内的ui点击按键"。
       - description (描述): 对声音声学物理表现与听觉感受的文字描述，如 "清脆的交互点击声，带有科技高频感"。
@@ -1530,7 +1549,7 @@ export async function generateSfxRequirements(
       【游戏音效需求表模板参考2（应用到FMOD,WWISE音频中间件引擎的需求表）】
       该模板主要包含以下字段，请在输出 JSON 时填充：
       - index (序号): 整数，从1开始递增。
-      - filename (文件命名): ${isJinnProject ? 'Jinn 资源工程名，严格遵循文末 Jinn 项目命名规范。' : isAvatarProject ? 'Avatar 服装音频名，只能使用文末 Avatar 固定模板。' : isSunnyIslandProject ? '小岛有晴天资源名，严格遵循文末小岛有晴天项目命名规范。' : useUcsSfxNaming ? 'SFX 使用下方 UCS 8.2.1 分类中的真实 CatID_FXName，例如 FOLYFeet_Wood Footstep 01。FXName 内不使用下划线，仅同一音效的多个变体才加编号。' : '采用下划线英文命名规范，且每个单词首字母大写。如 Sfx_Player_Dash。只有同一基础音效存在多个变体/随机样本时才使用 _01/_02/_03，例如 Sfx_Footstep_Grass_01。'}
+      - filename (文件命名): ${isJinnProject ? 'Jinn 资源工程名，严格遵循文末 Jinn 项目命名规范。' : isAvatarProject ? 'Avatar 服装音频名，只能使用文末 Avatar 固定模板。' : isSunnyIslandProject ? '小岛有晴天资源名，严格遵循文末小岛有晴天项目命名规范。' : useUcsSfxNaming ? 'SFX 使用 Sfx_CatID_FXName，例如 Sfx_FOLYFeet_Wood Footstep 01。必须保留 Sfx_ 工程前缀，CatID 从下方 UCS 8.2.1 分类中选择。FXName 内不使用下划线，仅同一音效的多个变体才加编号。' : '采用下划线英文命名规范，且每个单词首字母大写。如 Sfx_Player_Dash。只有同一基础音效存在多个变体/随机样本时才使用 _01/_02/_03，例如 Sfx_Footstep_Grass_01。'}
        - event_name (事件命名): ${isJinnProject ? 'Jinn ID 事件名必须逐字复制 filename，不使用 event:/、Event_、SFX_ 或 Play_ 前缀；多个编号资源也保留与 filename 相同的编号。' : isAvatarProject ? 'Avatar ID 事件名必须逐字复制 filename，只能使用文末 Avatar 固定模板，不使用 event:/ 路径。' : isSunnyIslandProject ? '小岛有晴天事件名优先沿用同一资源命名；除非参考表明确不同，否则与 filename 保持一致。' : '音频中间件事件路径规范。如 "event:/SFX/Player/dash" 或 "Play_sfx_player_dash"；只有多个变体时才在末尾编号。'}
       - duration (时长): 预估的时长，如 "0.5s", "12s", "loop"。
       - scene (应用场景): 音效在游戏/关卡/引擎中的应用时机，如 "玩家瞬间前冲闪避时"。
@@ -1645,7 +1664,7 @@ export async function generateSfxRequirements(
   schema.required = Array.from(new Set([...(schema.required || []), 'sourceItemCount']));
   schema.properties.sourceItemCount = {
     type: Type.INTEGER,
-    description: '仅当上传参考文件是需求表、表格或清单截图且能数清数据行时，填写不含表头的实际数据行数；普通图片、音频、视频或纯文字需求填写 0。',
+    description: '仅当上传参考文件是需求表、表格或清单截图且能数清数据行时，填写不含表头的实际数据行数；普通图片、视频或纯文字需求填写 0。',
   };
 
   const hasTextInput = inputText.trim().length > 0;
@@ -1706,7 +1725,7 @@ export async function generateSfxRequirements(
 
   const prompt = `
     你是一个顶级的游戏音频总监、声音设计师和配音导演。
-    你的任务是：根据用户输入的文字描述、或上传的参考文件（图片/截图、音频、视频），进行高品质的识别、结构化重构、工程化规范命名、以及专业化的填充和优化。最终生成一张完美格式的、可以直接用于项目开发、给外包和合作团队看的专业“音效/配音需求表”。
+    你的任务是：根据用户输入的文字描述、或上传的参考文件（图片/截图、视频画面），进行高品质的识别、结构化重构、工程化规范命名、以及专业化的填充和优化。最终生成一张完美格式的、可以直接用于项目开发、给外包和合作团队看的专业“音效/配音需求表”。
 
     ${inputInterpretationInstruction}
     ${sunnyIslandReferenceContext}
@@ -1717,20 +1736,19 @@ export async function generateSfxRequirements(
        - **图片/截图/表格草稿**：如果上传文件是已有需求表、表格截图、手写/截图清单，请先逐行 OCR，排除表头、合计行和空白行，数出实际数据行，并将该数字写入 \`sourceItemCount\`；重构和优化时 \`items\` 数组必须与原输入条目数量 1:1 对应，\`items.length\` 必须等于 \`sourceItemCount\`，绝不能为了补充专业建议而额外增加行。
        - 如果截图中的数据行无法可靠数清，\`sourceItemCount\` 填 0，不要猜测；此时仅按能确认的条目输出，不要添加截图中没有的需求。
        - **普通图片/视觉参考图**：如果上传文件不是表格，而是画面、角色、场景、UI 或概念图，请根据画面内容生成适合当前模板的音乐/音效/配音需求，不要求 1:1。
-       - **音频文件**：音频通常作为 BGM/音乐参考处理。请聆听并分析风格、情绪、速度、节奏密度、配器、音色、段落结构、循环/无缝衔接需求和适用场景；优先生成 BGM 或音乐方向需求。如果用户文字另有说明，再结合文字修正。
-       - **视频文件**：视频默认只分析画面、镜头节奏、角色动作、UI变化、场景氛围和画面中的可见字幕；请忽略视频内嵌音频，因为它大概率与画面无关。不要根据视频原声推断音乐或音效。
+       - **视频文件**：视频只分析画面、镜头节奏、角色动作、UI变化、场景氛围和画面中的可见字幕；不分析视频内嵌音频。不要根据视频原声推断音乐或音效，也不要声称听过原声。
        - **视频字幕 / 配音需求混合输出**：如果视频画面中有字幕，或用户文字/参考文件里出现角色台词、旁白、对白、播报、引导语、口语化文案等配音需求，必须识别字幕内容和语境，并生成对应 VO 配音需求。即使当前选择的是“游戏音效配乐通用表”或其它音效/BGM模板，也不能忽略配音需求；通用表里请把音效、BGM、VO 放在同一个 items 数组中，VO 行使用 \`Vo_\` 文件名，\`audio_type\` 填 \`VO\`，\`script\` 只填写台词文案，\`tone\` 单独填写语气和表演提示。
        - **同一素材的一次性综合需求**：同一个视频、图片或文字需求可能同时包含 SFX、BGM 和 VO。除非用户明确只要某一种类型，否则请一次性输出素材中可识别的所有音频需求，避免让用户反复切模板才能得到完整结果。
        - **空泛输入或只选模板**：当用户没有提供具体列表、表格或参考文件，只选择模板或输入非常抽象的提示词时，自动头脑风暴生成 6-10 行典型专业条目。
 
     2. **文件名命名优化与直接保留**：
        - 如果用户输入或上传的参考文件/草稿表格中**本身就带有文件命名或名称**（如 \`sfx_click\`, \`bg_battle\`, \`刀剑砍击声\` 等）：
-         - ${isJinnProject ? '必须按 Jinn 参考规范优化为 PascalCase 分段命名，并优先保留素材中已经出现的 Item、Loot、Weapon、Monster、对象名和动作词。' : isAvatarProject ? '必须按 Avatar 固定模板生成小写 audio_avatar_show 或 audio_avatar_bgm 命名，并保留服装名、服装 ID 与性别/双人后缀；禁止任何其他格式。' : isSunnyIslandProject ? '必须按小岛有晴天参考规范保留 Ani、Tool、Pet、Char、Music、Npc、FWSH 前缀、数字 ID 和动作词；多变体才追加 `_[序号]`，配音可使用 CloseA01、Collect01 等组合。' : useUcsSfxNaming ? 'SFX 保留原名描述语义，但前缀必须换成下方真实 UCS CatID；BGM/VO 保持现有工程命名。' : '必须使用下划线分隔的英文命名，并确保每个单词首字母大写（如 `Sfx_Ui_Button_Click`）；多变体时才追加 `_[序号]`。'}
+         - ${isJinnProject ? '必须按 Jinn 参考规范优化为 PascalCase 分段命名，并优先保留素材中已经出现的 Item、Loot、Weapon、Monster、对象名和动作词。' : isAvatarProject ? '必须按 Avatar 固定模板生成小写 audio_avatar_show 或 audio_avatar_bgm 命名，并保留服装名、服装 ID 与性别/双人后缀；禁止任何其他格式。' : isSunnyIslandProject ? '必须按小岛有晴天参考规范保留 Ani、Tool、Pet、Char、Music、Npc、FWSH 前缀、数字 ID 和动作词；多变体才追加 `_[序号]`，配音可使用 CloseA01、Collect01 等组合。' : useUcsSfxNaming ? 'SFX 保留原名描述语义，统一使用 Sfx_CatID_FXName，CatID 取下方真实 UCS 分类；BGM/VO 保持现有工程命名。' : '必须使用下划线分隔的英文命名，并确保每个单词首字母大写（如 `Sfx_Ui_Button_Click`）；多变体时才追加 `_[序号]`。'}
          - 如果用户提供的命名已经相当成熟、合理或带有特定的版本代号，你应当**直接使用和保留**给到的命名；
          - 确保优化的命名与原始名称的意图保持强关联，不得凭空捏造全新的无关名称。
 
     3. **专业化设计与规范**：
-       ${isJinnProject ? JINN_NAMING_GUIDE : isAvatarProject ? AVATAR_NAMING_GUIDE : isSunnyIslandProject ? SUNNY_ISLAND_NAMING_GUIDE : useUcsSfxNaming ? `- **UCS ${UCS_CATALOG_VERSION} 音效分类命名**：只有 SFX 行使用 CatID_FXName。CatID 必须从下方完整目录逐字选择并保留精确大小写，按声音本身所属类别选择，不能编造 CatID，也不能用 Sfx_ 代替。FXName 用简洁英文描述声音对象和动作，内部不用下划线；同一基础音效多个变体才在 FXName 后加空格和编号。未提供 CreatorID 或 SourceID，不要编造这两个字段。BGM 和 VO 不是 UCS 音效分类，继续使用 Bgm_[Scene]_[StyleOrState] 与 Vo_[SpeakerOrRole]_[Intent]。中间件 event_name 仍保持现有事件路径规则，不照抄 CatID。
+       ${isJinnProject ? JINN_NAMING_GUIDE : isAvatarProject ? AVATAR_NAMING_GUIDE : isSunnyIslandProject ? SUNNY_ISLAND_NAMING_GUIDE : useUcsSfxNaming ? `- **UCS ${UCS_CATALOG_VERSION} 音效分类命名**：只有 SFX 行使用 Sfx_CatID_FXName，例如 Sfx_UIClick_Button Click。Sfx_ 为固定工程前缀，仅添加一次；CatID 必须从下方完整目录逐字选择并保留精确大小写，按声音本身所属类别选择，不能编造 CatID。FXName 用简洁英文描述声音对象和动作，内部不用下划线；同一基础音效多个变体才在 FXName 后加空格和编号。未提供 CreatorID 或 SourceID，不要编造这两个字段。BGM 和 VO 不是 UCS 音效分类，继续使用 Bgm_[Scene]_[StyleOrState] 与 Vo_[SpeakerOrRole]_[Intent]。中间件 event_name 仍保持现有事件路径规则，不照抄文件名。
        - **UCS ${UCS_CATALOG_VERSION} 分类目录 (CatID:Category/SubCategory)**：${UCS_CATALOG_PROMPT}
        - **语义准确**：优先根据应用场景和声音内容选分类；如果没有可靠分类，不要随便填 Misc，明确无法分类。` : `- **工程化文件命名 (filename)**：禁止用中文命名文件。所有文件名必须使用下划线分隔，并确保每个单词首字母大写。
          格式：\`[Sfx / Bgm / Vo]_[模块]_[动作/角色]_[描述]\`；只有同一基础音效/台词存在多个变体、随机样本、连号资产时，才追加 \`_[序号]\`。
@@ -1763,7 +1781,7 @@ export async function generateSfxRequirements(
           ? '当前项目：小岛有晴天。严格执行上方“小岛有晴天项目命名规范（优先级最高）”，不得回退到通用命名。'
         : projectName
           ? `当前项目：${projectName}。请优先参考该项目的专有命名习惯；目前尚未提供该项目的具体规则，不要凭空捏造专有词汇，先沿用通用工程命名规范，并保留项目名称作为上下文。`
-          : `当前未指定项目，${useUcsSfxNaming ? `SFX 使用 UCS ${UCS_CATALOG_VERSION} 分类命名，BGM/VO 沿用工程命名。` : '请使用通用工程命名规范。'}`}
+          : `当前未指定项目，${useUcsSfxNaming ? `SFX 使用 Sfx_ 工程前缀加 UCS ${UCS_CATALOG_VERSION} 分类命名，BGM/VO 沿用工程命名。` : '请使用通用工程命名规范。'}`}
 
     用户输入要求：${inputText || "请根据上传参考文件生成；如果没有参考文件，则自动生成该类型游戏的标准专业需求表"}
   `;
@@ -1782,7 +1800,7 @@ export async function generateSfxRequirements(
     const response = await generateAiContent({
       contents: [{ parts: attempt === 0 ? parts : [
         ...parts,
-        { text: '上次返回含无效 UCS CatID。请重新生成完整 JSON；每条 SFX 的 filename 必须以本提示中的真实 CatID 开头，格式为 CatID_FXName，不得使用 Sfx_。BGM/VO 不使用 CatID。' },
+        { text: '上次返回含无效 UCS CatID。请重新生成完整 JSON；每条 SFX 的 filename 格式必须为 Sfx_CatID_FXName，Sfx_ 后使用本提示中的真实 CatID。BGM/VO 不使用 CatID。' },
       ] }],
       config: {
         responseMimeType: "application/json",

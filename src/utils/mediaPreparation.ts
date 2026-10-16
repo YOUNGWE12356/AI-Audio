@@ -1,10 +1,13 @@
+import { AUDIO_METRICS_MIME, type AudioMetricEvidence } from './audioEvidence';
+
 export interface VideoKeyframe {
   timestamp: number;
   base64: string;
 }
 
 export interface PreparedAnalysisMedia {
-  data: string;
+  data?: string;
+  audioMetrics?: AudioMetricEvidence;
   mimeType: string;
   label?: string;
 }
@@ -259,6 +262,14 @@ export async function prepareFilesForAnalysis(
     throwIfAborted(options.signal);
     const prefix = `${fileIndex + 1}/${files.length}`;
 
+    if (isAudioFile(file)) {
+      options.onProgress?.(`正在本地检测音频参数（${prefix}），随后交给 GPT 解读`);
+      const { extractLocalAudioEvidence } = await import('../services/audioAnalysisClient');
+      const audioMetrics = await extractLocalAudioEvidence(file, options.signal);
+      appendPrepared([{ mimeType: AUDIO_METRICS_MIME, audioMetrics, label: `音频参考：${file.name}` }]);
+      continue;
+    }
+
     if (file.type.startsWith('video/')) {
       options.onProgress?.(`正在提取视频关键帧（${prefix}）`);
       const frames = await extractVideoKeyframes(file, {
@@ -293,6 +304,7 @@ export async function prepareFilesForAnalysis(
   }
 
   const estimatedBytes = prepared.reduce((total, part) => {
+    if (!part.data) return total + JSON.stringify(part.audioMetrics || {}).length;
     const base64 = part.data.includes(',') ? part.data.split(',')[1] : part.data;
     const paddingBytes = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
     const decodedBytes = Math.max(0, Math.floor((base64.length * 3) / 4) - paddingBytes);

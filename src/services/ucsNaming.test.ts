@@ -35,9 +35,21 @@ test('only general SFX rows require UCS naming', () => {
   assert.equal(isUcsSfxRow({ audio_type: 'SFX', filename: 'Bgm_Wrong' }, 'game_sfx_general'), true);
   assert.deepEqual(normalizeUcsRequirementItems(rows, 'game_sfx_general'), {
     items: [
-      { audio_type: 'SFX', filename: 'UIClick_Confirm' },
+      { audio_type: 'SFX', filename: 'Sfx_UIClick_Confirm' },
       rows[1],
       rows[2],
+    ],
+    invalid: [],
+  });
+  assert.deepEqual(normalizeUcsRequirementItems([
+    { filename: 'sfx_Sfx_uiclick_Confirm' },
+    { filename: 'Bgm_Battle_Loop' },
+    { filename: 'Vo_Narrator_Intro' },
+  ], 'game_sfx_middleware'), {
+    items: [
+      { filename: 'Sfx_UIClick_Confirm' },
+      { filename: 'Bgm_Battle_Loop' },
+      { filename: 'Vo_Narrator_Intro' },
     ],
     invalid: [],
   });
