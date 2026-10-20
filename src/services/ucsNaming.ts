@@ -56,6 +56,21 @@ export const isUcsSfxRow = (item: Record<string, unknown>, templateType: string)
   return !/^(?:bgm|vo)_/i.test(filename);
 };
 
+// Engineering identifiers in requirements tables must not contain whitespace.
+// Descriptions, dialogue and other prose fields retain their original spacing.
+export const normalizeRequirementEngineeringNames = <T extends Record<string, unknown>>(items: T[]): T[] => (
+  items.map(item => {
+    const normalized = { ...item };
+    for (const key of ['filename', 'event_name'] as const) {
+      const value = item[key];
+      if (typeof value === 'string') {
+        Object.assign(normalized, { [key]: value.replace(/\s+/gu, '_') });
+      }
+    }
+    return normalized;
+  })
+);
+
 export const normalizeUcsRequirementItems = (items: Record<string, unknown>[], templateType: string) => {
   const invalid: number[] = [];
   const normalized = items.map((item, index) => {
@@ -63,14 +78,17 @@ export const normalizeUcsRequirementItems = (items: Record<string, unknown>[], t
     // The requirements table uses an engineering prefix around the UCS name.
     // Keep bare UCS validation unchanged for sound-library imports.
     const candidate = typeof item.filename === 'string'
-      ? item.filename.trim().replace(/^(?:sfx_)+/i, '')
-      : item.filename;
-    const filename = normalizeUcsSfxFilename(candidate);
-    if (!filename) {
+      ? item.filename.trim().replace(/^(?:sfx_)+/i, '').replace(/\.(?:wav|mp3|ogg|flac)$/i, '')
+      : '';
+    const [category, ...description] = candidate.split('_');
+    const catId = catIdByLowercase.get(category.toLowerCase());
+    const fxName = description.join('_').trim().replace(/\s+/gu, '_');
+    // Unlike bare UCS library names, engineering FXName words use underscores.
+    if (!catId || !/^[A-Za-z0-9][A-Za-z0-9-]*(?:_[A-Za-z0-9-]+)*$/.test(fxName)) {
       invalid.push(index + 1);
       return item;
     }
-    return { ...item, filename: `Sfx_${filename}` };
+    return { ...item, filename: `Sfx_${catId}_${fxName}` };
   });
-  return { items: normalized, invalid };
+  return { items: normalizeRequirementEngineeringNames(normalized), invalid };
 };

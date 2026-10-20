@@ -6,6 +6,7 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { useNativeAssistantTool } from '../services/useNativeAssistantTool';
 import { reportAssistantWorkspaceProgress } from '../services/assistantWorkspaceClient';
+import { normalizeRequirementEngineeringNames } from '../services/ucsNaming';
 import { 
   Upload, 
   FileText, 
@@ -814,7 +815,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
         : nextRowsOrUpdater;
       return {
         ...prev,
-        [type]: nextRows,
+        [type]: normalizeRequirementEngineeringNames(nextRows),
       };
     });
     if (typeof isDraft === 'boolean') {

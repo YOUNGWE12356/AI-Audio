@@ -1,7 +1,7 @@
 import { generateAiContent, SchemaType, ThinkingLevel } from './aiGateway';
 import { setClientIdentityHeader } from './clientIdentity';
 import { AUDIO_METRICS_MIME, AUDIO_EVIDENCE_RULES, validateAudioEvidence, type AudioMetricEvidence } from '../utils/audioEvidence';
-import { isBgmImportFileName, normalizeUcsImportFileName, normalizeUcsRequirementItems, UCS_CATALOG_PROMPT, UCS_CATALOG_VERSION } from './ucsNaming';
+import { isBgmImportFileName, normalizeRequirementEngineeringNames, normalizeUcsImportFileName, normalizeUcsRequirementItems, UCS_CATALOG_PROMPT, UCS_CATALOG_VERSION } from './ucsNaming';
 
 const isBrowser = typeof window !== 'undefined';
 
@@ -1510,10 +1510,10 @@ export async function generateSfxRequirements(
       该模板主要包含以下字段，请在输出 JSON 时填充：
       - index (序号): 整数，从1开始递增。
       - audio_type (类型): 必须填写 "SFX"、"BGM" 或 "VO"。音效为 SFX，背景音乐为 BGM，角色台词/旁白/字幕配音为 VO。
-      - filename (文件命名): ${useUcsSfxNaming ? 'SFX 使用 Sfx_CatID_FXName，例如 Sfx_FOLYFeet_Wood Footstep 01；Sfx_ 是必需的工程前缀，CatID 从下方 UCS 8.2.1 分类中选择，FXName 内不使用下划线，BGM/VO 仍用 Bgm_/Vo_ 工程命名。' : '采用下划线英文命名规范，且每个单词首字母大写。例如 Sfx_Ui_Button, Bgm_Battle, Sfx_Foley_Footstep_Wood_01。'}只有同一基础音效存在多个变体/随机样本时才添加尾号；如果该类型只有一个音效，不要添加尾号。
+      - filename (文件命名): ${useUcsSfxNaming ? 'SFX 使用 Sfx_CatID_FXName，例如 Sfx_UIClick_Confirm、Sfx_FEETHmn_Wood_Heavy；Sfx_ 是必需的工程前缀，CatID 从下方 UCS 8.2.1 分类中选择。FXName 通常仅保留 1-3 个必要英文关键词，用下划线分隔、禁止空格，避免重复 CatID 已表达的类别。BGM/VO 仍用 Bgm_/Vo_ 工程命名。' : '采用下划线英文命名规范，且每个单词首字母大写。例如 Sfx_Ui_Confirm, Bgm_Battle_Loop。对象、动作只保留必要关键词，详细听感写入 description。'}只有同一基础音效存在多个变体/随机样本时才添加尾号；如果该类型只有一个音效，不要添加尾号。
       - duration_logic (时长&播放逻辑): 声效时长描述及触发/播放逻辑，例如 "1s, 单次播放", "10s, 循环播放", "3s, 随机多样本触发"。
-      - scene (应用场景): 音效触发的具体场景与时机描述，如 "通用与主界面&游戏内的ui点击按键"。
-      - description (描述): 对声音声学物理表现与听觉感受的文字描述，如 "清脆的交互点击声，带有科技高频感"。
+      - scene (应用场景): 说明具体对象、动作/交互、触发节点及必要的结束条件；例如“设置页确认按钮点击且操作被接受时触发一次，与按钮按下反馈同步”，禁止只写“UI界面”或“游戏中”。
+      - description (描述): 按实际要听到的声音行为描述声源/材质、起音、主体变化和尾音，再按需要补充力度、速度、层次与空间；用 2-3 个简洁分句给出可制作的方向，避免只有“清脆、震撼、有质感”等形容词。
       - script (台词): SFX/BGM 行填 "-"；VO 行必须填写识别到或创作出的台词文案，不要混入语气说明。
       - tone (语气): SFX/BGM 行填 "-"；VO 行填写情绪、语速、口吻、年龄感、性别倾向等表演提示，例如 "沉稳、亲切、略带科技感"。
       - remarks (备注): 混音、响度或音频程序实现的注意事项，如 "链接&视频说明" 或 "需要混响衰减处理"。
@@ -1549,11 +1549,11 @@ export async function generateSfxRequirements(
       【游戏音效需求表模板参考2（应用到FMOD,WWISE音频中间件引擎的需求表）】
       该模板主要包含以下字段，请在输出 JSON 时填充：
       - index (序号): 整数，从1开始递增。
-      - filename (文件命名): ${isJinnProject ? 'Jinn 资源工程名，严格遵循文末 Jinn 项目命名规范。' : isAvatarProject ? 'Avatar 服装音频名，只能使用文末 Avatar 固定模板。' : isSunnyIslandProject ? '小岛有晴天资源名，严格遵循文末小岛有晴天项目命名规范。' : useUcsSfxNaming ? 'SFX 使用 Sfx_CatID_FXName，例如 Sfx_FOLYFeet_Wood Footstep 01。必须保留 Sfx_ 工程前缀，CatID 从下方 UCS 8.2.1 分类中选择。FXName 内不使用下划线，仅同一音效的多个变体才加编号。' : '采用下划线英文命名规范，且每个单词首字母大写。如 Sfx_Player_Dash。只有同一基础音效存在多个变体/随机样本时才使用 _01/_02/_03，例如 Sfx_Footstep_Grass_01。'}
+      - filename (文件命名): ${isJinnProject ? 'Jinn 资源工程名，严格遵循文末 Jinn 项目命名规范。' : isAvatarProject ? 'Avatar 服装音频名，只能使用文末 Avatar 固定模板。' : isSunnyIslandProject ? '小岛有晴天资源名，严格遵循文末小岛有晴天项目命名规范。' : useUcsSfxNaming ? 'SFX 使用 Sfx_CatID_FXName，例如 Sfx_UIClick_Confirm、Sfx_FEETHmn_Wood_Heavy。保留 Sfx_ 工程前缀和真实 UCS CatID，FXName 通常仅保留 1-3 个必要英文关键词，用下划线分隔、禁止空格，避免重复类别；仅同一音效多个变体才加编号。' : '采用下划线英文命名规范，且每个单词首字母大写。如 Sfx_Player_Dash。只有同一基础音效存在多个变体/随机样本时才使用 _01/_02/_03，例如 Sfx_Footstep_Grass_01。'}
        - event_name (事件命名): ${isJinnProject ? 'Jinn ID 事件名必须逐字复制 filename，不使用 event:/、Event_、SFX_ 或 Play_ 前缀；多个编号资源也保留与 filename 相同的编号。' : isAvatarProject ? 'Avatar ID 事件名必须逐字复制 filename，只能使用文末 Avatar 固定模板，不使用 event:/ 路径。' : isSunnyIslandProject ? '小岛有晴天事件名优先沿用同一资源命名；除非参考表明确不同，否则与 filename 保持一致。' : '音频中间件事件路径规范。如 "event:/SFX/Player/dash" 或 "Play_sfx_player_dash"；只有多个变体时才在末尾编号。'}
       - duration (时长): 预估的时长，如 "0.5s", "12s", "loop"。
-      - scene (应用场景): 音效在游戏/关卡/引擎中的应用时机，如 "玩家瞬间前冲闪避时"。
-      - description (描述): 对声效材质、空间、力量感的详细描述，如 "带有疾风气流破空声，以及微弱的粒子汇聚声"。
+      - scene (应用场景): 写明具体声源、动作/状态、动画或交互触发节点；持续声补充开始/停止条件，与 playback_logic 的单次/循环及 2D/3D 保持一致。无依据时不要捏造秒数或帧号。
+      - description (描述): 给出实际声音行为、材质交互、起音/主体/尾音、力度与速度；必要时说明分层及近远空间关系。说明设计目标，不重复场景文字，也不要只堆砌“有冲击力”等空泛形容词。
       - remarks (备注): 声音备注或技术要点，如 "需要加入 3D 空间衰减 (Spatialization)"。
       - video_link (动效视频): 占位说明或对应动效分镜视频。
       - reference (参考): 参考音频链接或灵感来源，如 "参考《尼尔：机械纪元》闪避声效"。
@@ -1723,6 +1723,25 @@ export async function generateSfxRequirements(
     `
     : '';
 
+  const sfxDesignInstruction = templateType.startsWith('game_sfx_') ? `
+    【音效分析与命名顺序】
+    先在内部梳理“输入证据 → 具体触发事件 → 实际发声行为 → 制作描述”，最后才提炼 filename；只输出最终表格，不输出推理过程。
+    - scene 回答“谁/什么，在什么场景或状态，发生什么动作，在哪个节点触发声音”。优先利用用户文字、可见画面和参考表已有信息；单张图片不能确定的动作时序只写建议，不编造时间码。
+    - 区分触发原因和声音本体：受惊触发的老鼠吱叫应描述短促高频吱叫，不可误写成撞击声；UI 成功反馈也不能擅自变成金币拾取声。分类与 filename 必须对应实际声音本体。
+    - description 回答“具体怎么做、怎么听”：材质/发声方式、起音瞬态、主体的节奏/音高/力度变化、尾音衰减；按声音需要选取关键维度，用 2-3 个分句描述。持续氛围说明层次与变化密度；瞬时动作突出接触点与尾音。无需把所有维度逐项凑满。
+    - 描述是设计方向，不代表已听过音频。参考中明确的信息按原意保留；不确定的材质、空间、力度只能标“建议”，未知触发条件在 remarks 标“待确认”。禁止编造具体角色、物件、时间或现有音色事实。
+    - duration/duration_logic 写时长、单次/循环与变体需求；remarks/playback_logic 写同步、防重复触发、随机采样、打断/停止或空间化等真正必要的实现要点。各字段互相补充，不重复粘贴同一段话，不无端添加未要求的音层、音乐或配音。
+    - 示例（用户明确“木门缓慢打开，铰链吱响，末尾锁扣轻响”）：scene 可写“木门由关闭转为缓慢开启时触发，铰链吱响跟随开门过程，锁扣声对齐末端动作”；description 可写“建议以干涩、断续的铰链摩擦为主体，随开启速度轻微起伏；末端一声短促锁扣轻响，自然收尾”。命名只提炼门/开启，细节留在描述内。
+    - 输出前逐行复核：场景触发是否具体？声音描述是否足以让设计师制作？两者是否指向同一声音？没有依据的细节是否标为建议/待确认？保持原有需求数量约束，不因补充分析增加无关条目。
+  ` : '';
+  const conciseNamingInstruction = !normalizedProjectName && templateType.startsWith('game_sfx_') ? `
+    【精简命名要求】
+    - SFX 采用 Sfx_CatID_FXName，FXName 通常只用 1-3 个必要英文关键词；BGM/VO 保留既有前缀，后接必要的场景/角色与动作/状态。新生成的名称尽量在 48 个字符以内。
+    - 优先保留能区分资产的对象/用途、动作及必要材质；不把描述中的起音、频段、尾音、空间或修饰词全部塞进文件名。CatID 已说明的类别无需在 FXName 重复。
+    - 例如 Sfx_UIClick_Confirm_Button_Click 精简为 Sfx_UIClick_Confirm；Sfx_FEETHmn_Wood_Heavy_Footstep 精简为 Sfx_FEETHmn_Wood_Heavy。但若需区分行走/奔跑，则应保留 Walk/Run 等差异，不能为了短而丢失用途或产生同名。
+    - 单个声音不添加序号；真实的变体编号、用户锁定的成熟名称和必要 ID 原样保留。多行最终名称不得重名，需要区分时添加有意义的对象/动作/材质差异，真实多变体才用编号。不要机械截断文件名或使用难懂的自造缩写。
+  ` : '';
+
   const prompt = `
     你是一个顶级的游戏音频总监、声音设计师和配音导演。
     你的任务是：根据用户输入的文字描述、或上传的参考文件（图片/截图、视频画面），进行高品质的识别、结构化重构、工程化规范命名、以及专业化的填充和优化。最终生成一张完美格式的、可以直接用于项目开发、给外包和合作团队看的专业“音效/配音需求表”。
@@ -1730,6 +1749,8 @@ export async function generateSfxRequirements(
     ${inputInterpretationInstruction}
     ${sunnyIslandReferenceContext}
     ${appendDedupInstruction}
+    ${sfxDesignInstruction}
+    ${conciseNamingInstruction}
 
     请严格遵守以下规则进行处理：
     1. **多模态输入识别与需求数量控制**：
@@ -1748,7 +1769,7 @@ export async function generateSfxRequirements(
          - 确保优化的命名与原始名称的意图保持强关联，不得凭空捏造全新的无关名称。
 
     3. **专业化设计与规范**：
-       ${isJinnProject ? JINN_NAMING_GUIDE : isAvatarProject ? AVATAR_NAMING_GUIDE : isSunnyIslandProject ? SUNNY_ISLAND_NAMING_GUIDE : useUcsSfxNaming ? `- **UCS ${UCS_CATALOG_VERSION} 音效分类命名**：只有 SFX 行使用 Sfx_CatID_FXName，例如 Sfx_UIClick_Button Click。Sfx_ 为固定工程前缀，仅添加一次；CatID 必须从下方完整目录逐字选择并保留精确大小写，按声音本身所属类别选择，不能编造 CatID。FXName 用简洁英文描述声音对象和动作，内部不用下划线；同一基础音效多个变体才在 FXName 后加空格和编号。未提供 CreatorID 或 SourceID，不要编造这两个字段。BGM 和 VO 不是 UCS 音效分类，继续使用 Bgm_[Scene]_[StyleOrState] 与 Vo_[SpeakerOrRole]_[Intent]。中间件 event_name 仍保持现有事件路径规则，不照抄文件名。
+       ${isJinnProject ? JINN_NAMING_GUIDE : isAvatarProject ? AVATAR_NAMING_GUIDE : isSunnyIslandProject ? SUNNY_ISLAND_NAMING_GUIDE : useUcsSfxNaming ? `- **UCS ${UCS_CATALOG_VERSION} 音效分类命名**：只有 SFX 行使用 Sfx_CatID_FXName，例如 Sfx_UIClick_Confirm。Sfx_ 为固定工程前缀，仅添加一次；CatID 必须从下方完整目录逐字选择并保留精确大小写，按声音本身所属类别选择，不能编造 CatID。FXName 通常只用 1-3 个必要英文关键词，不重复类别信息；英文单词以下划线分隔，禁止空格（例如 Sfx_FEETHmn_Wood_Heavy）；同一基础音效多个变体才追加 _01、_02 等编号。未提供 CreatorID 或 SourceID，不要编造这两个字段。BGM 和 VO 不是 UCS 音效分类，继续使用 Bgm_[Scene]_[StyleOrState] 与 Vo_[SpeakerOrRole]_[Intent]。中间件 event_name 仍保持现有事件路径规则，不照抄文件名。
        - **UCS ${UCS_CATALOG_VERSION} 分类目录 (CatID:Category/SubCategory)**：${UCS_CATALOG_PROMPT}
        - **语义准确**：优先根据应用场景和声音内容选分类；如果没有可靠分类，不要随便填 Misc，明确无法分类。` : `- **工程化文件命名 (filename)**：禁止用中文命名文件。所有文件名必须使用下划线分隔，并确保每个单词首字母大写。
          格式：\`[Sfx / Bgm / Vo]_[模块]_[动作/角色]_[描述]\`；只有同一基础音效/台词存在多个变体、随机样本、连号资产时，才追加 \`_[序号]\`。
@@ -1769,7 +1790,8 @@ export async function generateSfxRequirements(
 
     4. **输出格式**：
        - 必须输出符合以下模板要求的 JSON 数组。
-       - 为避免生成结果过长导致 JSON 截断，每个字段都要简洁：description、remarks、script、tone 尽量控制在 120 个中文字符内；除非用户原始表格本身包含更多条目，否则一次最多输出 24 行。
+       - 所有模板的 filename 和 event_name 均禁止空格，单词之间使用半角下划线；保留项目规定的大小写、前缀、ID 及事件路径结构。description、scene、台词等自然语言字段正常保留空格。
+       - 文件名短、分析具体：scene 尽量控制在 100 个中文字符内，description 用 2-3 个分句且尽量在 160 个中文字符内，remarks、script、tone 尽量在 120 个中文字符内。避免套话和重复，但不能为了短而省掉关键触发、声音变化或用户原有约束；用户原台词不得截断。除非用户原始表格本身包含更多条目，否则一次最多输出 24 行。
        - 视频字幕类 VO 行不要重复写长段分析；优先保留台词、语气、时间/场景和制作注意事项。
        ${templateDescription}
 
@@ -1822,7 +1844,7 @@ export async function generateSfxRequirements(
     const items = Array.isArray(parsed.items) ? parsed.items : [];
     const checked = useUcsSfxNaming
       ? normalizeUcsRequirementItems(items, templateType)
-      : { items, invalid: [] };
+      : { items: normalizeRequirementEngineeringNames(items), invalid: [] };
     if (checked.invalid.length) {
       if (attempt === 0) continue;
       throw new Error(`AI 未能为第 ${checked.invalid.join('、')} 行选出有效 UCS ${UCS_CATALOG_VERSION} 分类，请调整音效描述后重试。`);
