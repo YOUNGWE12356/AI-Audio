@@ -990,6 +990,7 @@ export async function isolateAudio(audioFile: File | Blob): Promise<Blob> {
 export interface SpeechTranscriptionOptions {
   diarize?: boolean;
   numSpeakers?: number;
+  signal?: AbortSignal;
 }
 
 export interface SpeechTranscriptionResult {
@@ -1035,6 +1036,7 @@ export async function transcribeSpeech(
     const response = await fetch('/api/ai/elevenlabs/speech-to-text', {
       method: 'POST',
       body: proxyFormData,
+      signal: options.signal,
     });
     if (!response.ok) {
       const errorBody = await response.json().catch(() => ({}));

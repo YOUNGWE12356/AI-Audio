@@ -1,4 +1,7 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { usePreparedAssistantTool } from '../services/usePreparedAssistantTool';
+import { useNativeAssistantTool } from '../services/useNativeAssistantTool';
+import { reportAssistantWorkspaceProgress } from '../services/assistantWorkspaceClient';
 import {
   AlertCircle,
   CheckCircle2,
@@ -393,6 +396,13 @@ export default function AudioToMidiPanel() {
   const midiCleanupRef = useRef<(() => void) | null>(null);
   const midiAnimationRef = useRef<number | null>(null);
   const midiPlaybackTokenRef = useRef(0);
+  usePreparedAssistantTool('audio-tools', ({ command, files }) => {
+    if (command.args.tool !== 'audio_to_midi') return;
+    if (files[0]) setFile(files[0]);
+    const mode = command.args.parameters.mode;
+    setActiveTab(mode === 'basic-pitch' ? 'general' : 'specialized');
+    if (mode !== 'basic-pitch') setSelectedMode(mode);
+  });
 
   const engines = useMemo(() => {
     const statusMap = new Map((status?.engines || []).map(engine => [engine.id, engine]));
@@ -610,7 +620,7 @@ export default function AudioToMidiPanel() {
     if (nextFile) setProgress('已载入音频，选择模式后即可转 MIDI。');
   };
 
-  const handleConvert = async () => {
+  const handleConvert = async (options: { signal?: AbortSignal; assistant?: boolean } = {}) => {
     if (!file || !activeEngine) return;
     stopMidiPlayback(true);
     setConverting(true);
@@ -624,6 +634,7 @@ export default function AudioToMidiPanel() {
       const response = await fetch('/api/audio-to-midi/convert', {
         method: 'POST',
         body: formData,
+        signal: options.signal,
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
@@ -631,13 +642,33 @@ export default function AudioToMidiPanel() {
       }
       setResult(payload as MidiConversionResult);
       setProgress('MIDI 已生成，可以试听、对比或下载。');
+      return payload as MidiConversionResult;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '音频转 MIDI 失败。');
       setProgress('');
+      if (options.assistant) throw reason;
     } finally {
       setConverting(false);
     }
   };
+
+  useNativeAssistantTool(['audio_to_midi'], {
+    prepare: ({ command, files }) => {
+      if (converting) throw new Error('MIDI 功能正在处理其他素材。');
+      if (!files[0]) throw new Error('没有待转换音频。');
+      const mode = command.args.parameters.mode || 'basic-pitch';
+      if (!['basic-pitch', 'piano', 'drums', 'guitar', 'bass', 'strings', 'multitrack'].includes(mode)) throw new Error('未知 MIDI 转换模式。');
+      handleFile(files[0]);
+      setActiveTab(mode === 'basic-pitch' ? 'general' : 'specialized');
+      if (mode !== 'basic-pitch') setSelectedMode(mode);
+    },
+    run: async (_task, signal) => {
+      reportAssistantWorkspaceProgress('音频转 MIDI：上传并运行选定模型');
+      const result = await handleConvert({ signal, assistant: true });
+      if (!result?.midiUrl) throw new Error('MIDI 功能未返回文件。');
+      return { ...result, files: [{ url: result.midiUrl, name: result.midiFileName }] };
+    },
+  });
 
   const seekSource = (seconds: number) => {
     const audio = sourceAudioRef.current;

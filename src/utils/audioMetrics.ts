@@ -40,6 +40,7 @@ export interface AnalyzerResult {
     productionNotes?: string[];
   };
   semanticError?: string;
+  semanticSkipped?: boolean;
   chords: Array<{
     section: string;
     chord: string;

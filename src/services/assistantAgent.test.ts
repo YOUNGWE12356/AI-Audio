@@ -18,6 +18,43 @@ import { createAssistantWorkspaceOperationCache } from './assistantWorkspaceOper
 import { getAssistantMessages } from './assistantMessages';
 import type { AssistantJob } from './assistantAgentTypes';
 
+test('a direct separation command opens the real workspace and delivers its results without model planning', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'assistant-separation-'));
+  await writeFile(path.join(dir, 'vocals.wav'), 'actual-output');
+  const app = express();
+  app.use(express.json());
+  app.use('/uploads', express.static(dir));
+  app.use('/api/ai/assistant', createAssistantAgentRouter({ manifestDir: dir, uploadsDir: dir, ffmpegBinary: ffmpeg!, duration: async () => 1,
+    identity: () => 'test', modelTurn: async () => { throw new Error('direct command must not call the model'); } }));
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise<void>(resolve => server.once('listening', resolve));
+  const origin = `http://127.0.0.1:${(server.address() as any).port}/api/ai/assistant`;
+  const readJob = async (id: string) => (await fetch(`${origin}/jobs/${id}`)).json();
+  try {
+    for (const failure of [false, true]) {
+      const form = new FormData(); form.append('prompt', '拆分轨'); form.append('files', new Blob(['audio'], { type: 'audio/wav' }), 'source.wav');
+      let job = await (await fetch(`${origin}/jobs`, { method: 'POST', body: form })).json();
+      for (let i = 0; !job.workspaceCommand && i < 30; i++) job = await readJob(job.id);
+      assert.equal(job.workspaceCommand?.workspace, 'audio-tools');
+      assert.equal(job.workspaceCommand.action, 'separate');
+      assert.equal(job.workspaceCommand.args.source.name, 'source.wav');
+      const endpoint = `${origin}/jobs/${job.id}/workspace/${job.workspaceCommand.id}`;
+      const headers = { 'content-type': 'application/json' };
+      const clientId = '11111111-1111-4111-8111-111111111111';
+      const claim = await fetch(`${endpoint}/claim`, { method: 'POST', headers, body: JSON.stringify({ clientId }) });
+      assert.equal(claim.status, 200, JSON.stringify({ response: await claim.json(), job: await readJob(job.id) }));
+      await fetch(`${endpoint}/result`, { method: 'POST', headers, body: JSON.stringify({ clientId,
+        ...(failure ? { error: '模型推理失败：显存不足' } : { result: { files: [{ url: '/uploads/vocals.wav', name: 'source_人声.wav' }] } }) }) });
+      for (let i = 0; job.status === 'running' && i < 60; i++) job = await readJob(job.id);
+      assert.equal(job.status, failure ? 'failed' : 'completed');
+      assert.equal(job.events.some((event: any) => event.tool === 'engine_status'), false);
+      assert.equal(job.waitingFor, undefined, 'separation does not require video export review');
+      if (failure) assert.match(job.error, /显存不足/);
+      else assert.ok(job.deliverableIds.length > 0);
+    }
+  } finally { await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }); }
+});
+
 test('chat retains user instructions and follow-up replies after completion and legacy restore', () => {
   const job: AssistantJob = { id: 'chat', prompt: '给视频配乐\n保留原声', status: 'waiting',
     question: '使用哪种风格？', createdAt: '', updatedAt: '', assets: [], events: [] };

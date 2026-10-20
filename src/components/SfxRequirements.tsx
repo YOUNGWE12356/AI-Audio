@@ -4,6 +4,8 @@
  */
 
 import React, { useRef, useState, useEffect } from 'react';
+import { useNativeAssistantTool } from '../services/useNativeAssistantTool';
+import { reportAssistantWorkspaceProgress } from '../services/assistantWorkspaceClient';
 import { 
   Upload, 
   FileText, 
@@ -1156,7 +1158,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
   };
 
   // Generate or optimize the requirement table with the configured AI gateway.
-  const handleGenerate = async (mode: GenerateMode = 'replace') => {
+  const handleGenerate = async (mode: GenerateMode = 'replace', assistant = false) => {
     if (!TEMPLATE_INFO[templateType]) {
       setError('请先选择一个需求表模板。模板是必选项，文字描述和图片资料都只是可选补充。');
       return;
@@ -1288,17 +1290,56 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
         }
         submittedInputByTemplateRef.current[requestTemplateType] = currentInputText;
         setSuccess(true);
+        return { items: normalizeGeneratedRows(generatedItems, 1, requestTemplateType), templateType: requestTemplateType };
       } else {
         throw new Error('AI 未生成任何需求，请确认服装名和 ID 格式，或检查 AI 网关配置后重试。');
       }
     } catch (err: any) {
       console.error('Error generating SFX requirements:', err);
       setError(err.message || '生成音效需求表失败，请检查大模型调用状态并重试。');
+      if (assistant) throw err;
     } finally {
       clearInterval(interval);
       setLoading(false);
     }
   };
+
+  useNativeAssistantTool(['sound_requirements'], {
+    prepare: async ({ command, files }) => {
+      if (loading) throw new Error('需求表正在生成其他任务。');
+      if (!hasAiTextModel) throw new Error('AI 文本/视觉模型未配置。');
+      const args = command.args.parameters;
+      const template = args.templateType || 'game_sfx_general';
+      if (!TEMPLATE_INFO[template as TemplateType]) throw new Error('未知需求表模板。');
+      const image = files[0];
+      if (image && (!image.type.startsWith('image/') || image.size > MAX_REFERENCE_FILE_BYTES)) throw new Error('需求表参考须为 80MB 以内的图片。');
+      const base64 = image ? await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error('读取参考截图失败。'));
+        reader.readAsDataURL(image);
+      }) : null;
+      if (args.projectName) {
+        const project = PROJECT_OPTIONS.find(item => item.name === args.projectName || item.id === args.projectName);
+        if (!project) throw new Error('未知项目名称，未套用其他项目模板。');
+        setSelectedProject(project.id);
+      } else setSelectedProject('');
+      setInputText(args.inputText || '');
+      setTemplateType(template);
+      setScreenshot(image || null);
+      setScreenshotBase64(base64);
+      if (screenshotPreview) URL.revokeObjectURL(screenshotPreview);
+      setScreenshotPreview(image ? URL.createObjectURL(image) : null);
+    },
+    run: async (_task, signal) => {
+      signal.throwIfAborted();
+      reportAssistantWorkspaceProgress('音效需求表：根据素材和模板生成表格');
+      const result = await handleGenerate('replace', true);
+      signal.throwIfAborted();
+      if (!result?.items.length) throw new Error('需求表没有返回有效条目。');
+      return result;
+    },
+  });
 
   // Export to CSV UTF-8 with BOM
   const handleExportCSV = () => {

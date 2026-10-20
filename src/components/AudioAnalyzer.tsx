@@ -22,6 +22,8 @@ import {
 import { AUDIO_FILE_EXTENSION_REGEX, formatBytes, formatTime, type AnalyzerResult, type Confidence } from '../utils/audioMetrics';
 import { analyzeAudioFile } from '../services/audioAnalysisClient';
 import PointCostHint from './PointCostHint';
+import { useNativeAssistantTool } from '../services/useNativeAssistantTool';
+import { reportAssistantWorkspaceProgress } from '../services/assistantWorkspaceClient';
 export { estimateKey, estimateMusicalMode } from '../utils/audioMetrics';
 
 type AnalysisItemStatus = 'pending' | 'analyzing' | 'done' | 'error';
@@ -122,8 +124,11 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
     setError(null);
   };
 
-  const handleAnalyze = async () => {
-    if (!analysisItems.length || loading) return;
+  const handleAnalyze = async (options: { signal?: AbortSignal; semantic?: boolean; assistant?: boolean } = {}) => {
+    if (!analysisItems.length || loading) {
+      if (options.assistant) throw new Error(loading ? '分析器正在处理另一项任务。' : '没有可分析的音频。');
+      return [];
+    }
     setLoading(true);
     setError(null);
     setProgress(0);
@@ -140,9 +145,12 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
     const queueSnapshot = analysisItems;
     let finished = 0;
     let failed = 0;
+    const results: AnalyzerResult[] = [];
+    let failure: string | undefined;
 
     try {
       for (const item of queueSnapshot) {
+        options.signal?.throwIfAborted();
         setAnalysisItems(previous => previous.map(queueItem => (
           queueItem.id === item.id
             ? { ...queueItem, status: 'analyzing', progress: 12, error: undefined, result: undefined }
@@ -158,7 +166,11 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
         }, 260);
 
         try {
-          const nextResult = await analyzeAudioFile(item.file);
+          const nextResult = await analyzeAudioFile(item.file, {
+            signal: options.signal, semantic: options.semantic,
+            onStage: options.assistant ? stage => reportAssistantWorkspaceProgress(`${item.file.name}：${stage}`) : undefined,
+          });
+          results.push(nextResult);
           window.clearInterval(timer);
           finished += 1;
           setProgress(Math.round((finished / queueSnapshot.length) * 100));
@@ -173,6 +185,7 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
           window.clearInterval(timer);
           finished += 1;
           failed += 1;
+          failure = `${item.file.name}：${err?.message || '解码或分析失败'}`;
           setProgress(Math.round((finished / queueSnapshot.length) * 100));
           setAnalysisItems(previous => previous.map(queueItem => (
             queueItem.id === item.id
@@ -190,10 +203,27 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
       if (failed) {
         setError(`已完成 ${queueSnapshot.length - failed} 个音频，${failed} 个文件分析失败；请检查失败文件的格式或重新导出后再试。`);
       }
+      if (options.assistant && failure) throw new Error(failure);
+      return results;
     } finally {
       setLoading(false);
     }
   };
+
+  useNativeAssistantTool(['analyze_music_metrics', 'semantic_audio_analysis'], {
+    prepare: ({ files }) => {
+      if (loading) throw new Error('分析器正在处理另一项任务。');
+      if (!files.length || files.some(file => !isSupportedAudioFile(file))) throw new Error('请提供可分析的音频文件。');
+      handleFiles(files);
+    },
+    run: async ({ command }, signal) => {
+      const semantic = command.args.tool === 'semantic_audio_analysis';
+      const results = await handleAnalyze({ signal, semantic, assistant: true });
+      if (semantic && results.some(item => item.semanticError)) throw new Error(`GPT 解读失败，本地指标已保留：${results.find(item => item.semanticError)!.semanticError}`);
+      return { ...results[0], results, analysisBasis: 'metrics',
+        note: '使用音频分析页面实测；BPM、调性与音色倾向为信号估算，保留置信度。GPT 解读未直接听音。' };
+    },
+  });
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -209,7 +239,7 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
             <button
               type="button"
               disabled={!analysisItems.length || loading}
-              onClick={handleAnalyze}
+              onClick={() => void handleAnalyze()}
               className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-5 text-xs font-black text-white shadow-lg shadow-emerald-600/15 transition-all hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"
             >
               {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <BarChart3 className="h-4 w-4" />}
@@ -492,6 +522,8 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
                   </p>
                 ) : null}
               </div>
+            ) : result.semanticSkipped ? (
+              <p className="mt-4 text-xs leading-relaxed text-slate-500">本次测速/测调已完成本地检测，未调用 GPT。需要风格解读时可继续发出指令。</p>
             ) : (
               <div className="mt-4 rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-xs leading-relaxed text-red-700">
                 <span className="font-black">GPT 分析失败，以下仅保留本地检测结果：</span>

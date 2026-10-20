@@ -1,4 +1,6 @@
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { runSeparationWorkspace, type SeparationWorkspaceOperation } from '../services/assistantSeparationWorkspace';
+import { reportAssistantWorkspaceProgress } from '../services/assistantWorkspaceClient';
 import {
   AlertCircle,
   CheckCircle2,
@@ -66,6 +68,7 @@ type SeparationJob = {
 
 type MusicStemSeparationProps = {
   onSendToWorkstation: (files: File[]) => void;
+  assistantOperation?: SeparationWorkspaceOperation | null;
 };
 
 const ACTIVE_STATUSES = new Set(['queued', 'preparing', 'separating', 'analyzing', 'packaging', 'cancelling']);
@@ -204,7 +207,7 @@ const readApiError = async (response: Response) => {
   return String(body?.error || `请求失败（${response.status}）`);
 };
 
-export default function MusicStemSeparation({ onSendToWorkstation }: MusicStemSeparationProps) {
+export default function MusicStemSeparation({ onSendToWorkstation, assistantOperation }: MusicStemSeparationProps) {
   const [engine, setEngine] = useState<EngineStatus | null>(null);
   const [engineLoading, setEngineLoading] = useState(true);
   const [file, setFile] = useState<File | null>(null);
@@ -212,6 +215,9 @@ export default function MusicStemSeparation({ onSendToWorkstation }: MusicStemSe
   const [requestError, setRequestError] = useState('');
   const [dragActive, setDragActive] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [assistantStage, setAssistantStage] = useState('');
+  const [assistantRunning, setAssistantRunning] = useState(false);
+  const assistantCommandRef = useRef('');
   const [sendingToWorkstation, setSendingToWorkstation] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -239,7 +245,24 @@ export default function MusicStemSeparation({ onSendToWorkstation }: MusicStemSe
       .filter(stem => hasSolo ? soloed[stem.id] : !muted[stem.id])
       .map(stem => stem.id),
   ), [hasSolo, muted, soloed, stems]);
-  const isJobActive = Boolean(job && ACTIVE_STATUSES.has(job.status));
+  const isJobActive = assistantRunning || Boolean(job && ACTIVE_STATUSES.has(job.status));
+
+  useEffect(() => {
+    if (!assistantOperation || assistantCommandRef.current === assistantOperation.command.id) return;
+    assistantCommandRef.current = assistantOperation.command.id;
+    setAssistantRunning(true);
+    setRequestError('');
+    setJob(null);
+    void runSeparationWorkspace({
+      ...assistantOperation, storage: window.sessionStorage,
+      onFile: setFile, onJob: setJob,
+      onEngine: engine => { setEngine(engine); setEngineLoading(false); },
+      onProgress: message => { setAssistantStage(message); reportAssistantWorkspaceProgress(message); },
+    }).then(assistantOperation.resolve, error => {
+      setRequestError(error.message);
+      assistantOperation.reject(error);
+    }).finally(() => setAssistantRunning(false));
+  }, [assistantOperation]);
 
   const loadEngine = async () => {
     setEngineLoading(true);
@@ -257,6 +280,7 @@ export default function MusicStemSeparation({ onSendToWorkstation }: MusicStemSe
 
   useEffect(() => {
     void loadEngine();
+    if (assistantOperation) return;
     const restoredId = window.sessionStorage.getItem(RESTORED_JOB_KEY);
     if (!restoredId) return;
     void fetch(`/api/audio/music-separation/jobs/${encodeURIComponent(restoredId)}`)
@@ -264,7 +288,7 @@ export default function MusicStemSeparation({ onSendToWorkstation }: MusicStemSe
         if (!response.ok) throw new Error(await readApiError(response));
         return response.json() as Promise<SeparationJob>;
       })
-      .then(setJob)
+      .then(restored => { if (!assistantCommandRef.current) setJob(restored); })
       .catch(error => {
         window.sessionStorage.removeItem(RESTORED_JOB_KEY);
         setRequestError(error instanceof Error ? error.message : String(error));
@@ -272,7 +296,7 @@ export default function MusicStemSeparation({ onSendToWorkstation }: MusicStemSe
   }, []);
 
   useEffect(() => {
-    if (!job?.id || !isJobActive) return;
+    if (!job?.id || !isJobActive || assistantRunning) return;
     let disposed = false;
     let timer = 0;
     const poll = async () => {
@@ -311,7 +335,7 @@ export default function MusicStemSeparation({ onSendToWorkstation }: MusicStemSe
       disposed = true;
       window.clearTimeout(timer);
     };
-  }, [isJobActive, job?.id]);
+  }, [isJobActive, job?.id, assistantRunning]);
 
   useEffect(() => {
     if (!job?.id) return;
@@ -382,6 +406,7 @@ export default function MusicStemSeparation({ onSendToWorkstation }: MusicStemSe
   }, [audibleStemIds, duration, isPlaying, stems]);
 
   const setSelectedFile = (nextFile: File | null) => {
+    if (isJobActive) return;
     if (!nextFile) return;
     if (nextFile.size > 100 * 1024 * 1024) {
       setRequestError('文件超过 100MB 上传限制。');
@@ -400,9 +425,10 @@ export default function MusicStemSeparation({ onSendToWorkstation }: MusicStemSe
   };
 
   const startJob = async () => {
-    if (!file || !engine?.ready || submitting) return;
+    if (!file || !engine?.ready || submitting || isJobActive) return;
     setSubmitting(true);
     setRequestError('');
+    setAssistantStage('');
     try {
       const formData = new FormData();
       formData.append('media', file, file.name);
@@ -488,6 +514,7 @@ export default function MusicStemSeparation({ onSendToWorkstation }: MusicStemSe
     setJob(null);
     setFile(null);
     setRequestError('');
+    setAssistantStage('');
     window.sessionStorage.removeItem(RESTORED_JOB_KEY);
     if (inputRef.current) inputRef.current.value = '';
   };
@@ -508,7 +535,7 @@ export default function MusicStemSeparation({ onSendToWorkstation }: MusicStemSe
           ) : engine?.ready ? (
             <span className="flex items-center gap-2 text-emerald-700"><CheckCircle2 className="h-3.5 w-3.5" />{engine.gpuName || 'CUDA GPU'} 已就绪</span>
           ) : (
-            <span className="flex items-center gap-2 text-amber-700"><AlertCircle className="h-3.5 w-3.5" />本地模型未就绪</span>
+            <span className="flex items-center gap-2 text-amber-700"><AlertCircle className="h-3.5 w-3.5" />{engine?.error || !engine ? '运行环境检测异常' : '本地模型未就绪'}</span>
           )}
           <button
             type="button"
@@ -522,16 +549,18 @@ export default function MusicStemSeparation({ onSendToWorkstation }: MusicStemSe
         </div>
       </header>
 
+      {assistantStage && <p role="status" className={`rounded-lg border px-4 py-3 text-xs ${requestError || job?.status === 'failed' ? 'border-rose-200 bg-rose-50 text-rose-800' : 'border-emerald-200 bg-emerald-50 text-emerald-800'}`}>{assistantStage}</p>}
+
       {!engineLoading && !engine?.ready && (
         <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
           <div className="min-w-0">
             <p className="font-bold">
-              {!engine?.installed
+              {engine?.error || (!engine ? '运行环境检测失败，请重新检测。' : !engine.installed
                 ? '需要安装独立的本地分轨环境。'
                 : !engine.cudaAvailable
                   ? '当前环境没有检测到可用的 CUDA。'
-                  : '高质量 6 轨模型尚未缓存。'}
+                  : '高质量 6 轨模型尚未缓存。')}
             </p>
             <code className="mt-1 block overflow-x-auto whitespace-nowrap text-[10px] text-amber-800">
               powershell -ExecutionPolicy Bypass -File tools/music-separation/setup-music-separation.ps1
@@ -642,7 +671,7 @@ export default function MusicStemSeparation({ onSendToWorkstation }: MusicStemSe
               <button
                 type="button"
                 onClick={() => void startJob()}
-                disabled={!file || !engine?.ready || submitting}
+                disabled={!file || !engine?.ready || submitting || assistantRunning}
                 className="flex h-10 flex-1 items-center justify-center gap-2 rounded-lg bg-emerald-600 text-xs font-bold text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
               >
                 {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Workflow className="h-4 w-4" />}

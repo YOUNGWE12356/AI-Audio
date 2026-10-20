@@ -4,6 +4,7 @@
  */
 
 import React, { useRef, useState, useEffect } from 'react';
+import { usePreparedAssistantTool } from '../services/usePreparedAssistantTool';
 import { 
   Mic, 
   Loader2, 
@@ -682,6 +683,16 @@ export default function DubbingStudio({
   const [activeSubTab, setActiveSubTab] = useState<DubbingSubTab>('tts');
   const [visitedSubTabs, setVisitedSubTabs] = useState<Set<DubbingSubTab>>(() => new Set(['tts']));
   const [ttsInputMode, setTtsInputMode] = useState<'single' | 'batch'>('single');
+  const [preparedVoiceInput, setPreparedVoiceInput] = useState<{ id: string; tab: string; file?: File; language?: string } | null>(null);
+  usePreparedAssistantTool('dubbing-studio', ({ command, files }) => {
+    const tab = command.args.tab;
+    if (['tts', 'sts', 'convert', 'translate', 'stt'].includes(tab)) setActiveSubTab(tab);
+    setPreparedVoiceInput({ id: command.id, tab, file: files[0], language: command.args.parameters.targetLanguage || command.args.parameters.language });
+    if (command.args.tool === 'generate_speech_batch') {
+      setTtsInputMode('batch');
+      setBatchVoiceRawText((command.args.parameters.items || []).map((item: any) => item.text).join('\n'));
+    } else if (command.args.tool === 'generate_speech') setTtsInputMode('single');
+  });
   const [subNavWidth, setSubNavWidth] = useState(() => {
     if (typeof window === 'undefined') return DUBBING_SUBNAV_DEFAULT_WIDTH;
     const hasInitializedWidth = window.localStorage.getItem(DUBBING_SUBNAV_WIDTH_READY_KEY) === '1';
@@ -2954,8 +2965,8 @@ export default function DubbingStudio({
           {visitedSubTabs.has('sts') && (
             <div hidden={activeSubTab !== 'sts'}>
               <SpeechToSpeech
-                initialFile={assistantVoiceRequest?.mode === 'sts' ? assistantVoiceRequest.file : undefined}
-                assistantRequestId={assistantVoiceRequest?.mode === 'sts' ? assistantVoiceRequest.id : undefined}
+                initialFile={preparedVoiceInput?.tab === 'sts' ? preparedVoiceInput.file : assistantVoiceRequest?.mode === 'sts' ? assistantVoiceRequest.file : undefined}
+                assistantRequestId={preparedVoiceInput?.tab === 'sts' ? preparedVoiceInput.id : assistantVoiceRequest?.mode === 'sts' ? assistantVoiceRequest.id : undefined}
                 historyList={historyList}
                 setHistoryList={setHistoryList}
                 displayVoices={displayVoices}
@@ -2973,9 +2984,9 @@ export default function DubbingStudio({
           {visitedSubTabs.has('translate') && (
             <div hidden={activeSubTab !== 'translate'}>
               <CrossLanguageDubbing
-                initialFile={assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.file : undefined}
-                assistantRequestId={assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.id : undefined}
-                initialTargetLanguage={assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.language : undefined}
+                initialFile={preparedVoiceInput?.tab === 'translate' ? preparedVoiceInput.file : assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.file : undefined}
+                assistantRequestId={preparedVoiceInput?.tab === 'translate' ? preparedVoiceInput.id : assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.id : undefined}
+                initialTargetLanguage={preparedVoiceInput?.tab === 'translate' ? preparedVoiceInput.language : assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.language : undefined}
                 setHistoryList={setHistoryList}
                 onAudioPlay={() => {
                   if (standaloneVoiceAudioRef.current) {
@@ -2990,9 +3001,9 @@ export default function DubbingStudio({
             <div hidden={activeSubTab !== 'convert'} className="min-h-full">
               <VoiceConversion
                 displayVoices={displayVoices}
-                initialFile={assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.file : undefined}
-                assistantRequestId={assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.id : undefined}
-                initialTargetLanguage={assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.language : undefined}
+                initialFile={preparedVoiceInput?.tab === 'convert' ? preparedVoiceInput.file : assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.file : undefined}
+                assistantRequestId={preparedVoiceInput?.tab === 'convert' ? preparedVoiceInput.id : assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.id : undefined}
+                initialTargetLanguage={preparedVoiceInput?.tab === 'convert' ? preparedVoiceInput.language : assistantVoiceRequest?.mode === 'translate' ? assistantVoiceRequest.language : undefined}
                 setHistoryList={setHistoryList}
                 playingVoiceId={playingVoiceId}
                 handlePlayVoicePreview={handlePlayVoicePreview}
@@ -3008,8 +3019,8 @@ export default function DubbingStudio({
           {visitedSubTabs.has('stt') && (
             <div hidden={activeSubTab !== 'stt'}>
               <SpeechToText
-                initialFile={assistantVoiceRequest?.mode === 'stt' ? assistantVoiceRequest.file : undefined}
-                assistantRequestId={assistantVoiceRequest?.mode === 'stt' ? assistantVoiceRequest.id : undefined}
+                initialFile={preparedVoiceInput?.tab === 'stt' ? preparedVoiceInput.file : assistantVoiceRequest?.mode === 'stt' ? assistantVoiceRequest.file : undefined}
+                assistantRequestId={preparedVoiceInput?.tab === 'stt' ? preparedVoiceInput.id : assistantVoiceRequest?.mode === 'stt' ? assistantVoiceRequest.id : undefined}
               />
             </div>
           )}

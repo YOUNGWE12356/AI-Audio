@@ -331,6 +331,7 @@ export function createMusicSeparationRouter({
   const queue: string[] = [];
   let activeJobId: string | null = null;
   let cachedProbe: { value: EngineProbe; expiresAt: number } | null = null;
+  let pendingProbe: Promise<EngineProbe> | null = null;
 
   const toolDir = path.resolve(process.cwd(), 'tools', 'music-separation');
   const defaultPython = process.platform === 'win32'
@@ -556,7 +557,7 @@ export function createMusicSeparationRouter({
     canCancel: !TERMINAL_STATUSES.has(job.status),
   });
 
-  const runProbe = async (force = false): Promise<EngineProbe> => {
+  const performProbe = async (force = false): Promise<EngineProbe> => {
     if (!force && cachedProbe && cachedProbe.expiresAt > Date.now()) return cachedProbe.value;
     if (!fs.existsSync(pythonPath) || !fs.existsSync(runnerPath)) {
       const value: EngineProbe = {
@@ -574,7 +575,7 @@ export function createMusicSeparationRouter({
       execFile(
         pythonPath,
         [runnerPath, '--probe', '--models-dir', modelsDir],
-        { timeout: 30_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
+        { timeout: 60_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
         (error, stdout, stderr) => {
           const event = String(stdout || '')
             .split(/\r?\n/)
@@ -600,13 +601,19 @@ export function createMusicSeparationRouter({
             cudaAvailable: false,
             modelCached: false,
             ready: false,
-            error: trimProcessOutput(String(stderr || error?.message || '无法检测本地分轨环境。')),
+            error: `运行环境检测失败，请重试：${trimProcessOutput(String(stderr || error?.message || '检测进程没有返回结果。'))}`,
           });
         },
       );
     });
     cachedProbe = { value, expiresAt: Date.now() + 10_000 };
     return value;
+  };
+
+  const runProbe = (force = false): Promise<EngineProbe> => {
+    if (pendingProbe) return pendingProbe;
+    pendingProbe = performProbe(force).finally(() => { pendingProbe = null; });
+    return pendingProbe;
   };
 
   const runFfmpeg = (args: string[]) => new Promise<void>((resolve, reject) => {
@@ -622,7 +629,7 @@ export function createMusicSeparationRouter({
         reject(new Error(
           /ENOENT|not recognized|not found/i.test(`${error.message}\n${stderr}`)
             ? '本地 FFmpeg 不可用，无法提取待分轨音频。'
-            : `音频预处理失败：${trimProcessOutput(String(stderr || error.message)).split(/\r?\n/).slice(-1)[0]}`,
+            : `音频预处理失败：${trimProcessOutput(String(stderr || error.message)).split(/\r?\n/).filter(line => line.trim()).slice(-1)[0] || error.message}`,
         ));
       },
     );
@@ -824,6 +831,7 @@ export function createMusicSeparationRouter({
       await fs.promises.unlink(job.sourcePath).catch(() => undefined);
       if (job.cancelRequested) throw Object.assign(new Error('任务已取消。'), { code: 'JOB_CANCELLED' });
 
+      updateJob(job, { status: 'separating', stage: 'separating', progress: 10, message: '正在启动本地分轨模型' });
       const result = await runModel(job, normalizedInputPath, outputDir);
       if (job.cancelRequested) throw Object.assign(new Error('任务已取消。'), { code: 'JOB_CANCELLED' });
       const runnerStems = Array.isArray(result.stems) ? result.stems as RunnerStem[] : [];
@@ -884,6 +892,7 @@ export function createMusicSeparationRouter({
       });
     } catch (error) {
       const isCancelled = job.cancelRequested || (error as { code?: string })?.code === 'JOB_CANCELLED';
+      const failedStage = ({ preparing: '音频预处理', separating: '模型推理', analyzing: '轨道分析', packaging: '打包轨道' } as Record<string, string>)[job.stage] || '分轨处理';
       updateJob(job, isCancelled ? {
         status: 'cancelled',
         stage: 'cancelled',
@@ -892,8 +901,8 @@ export function createMusicSeparationRouter({
         error: undefined,
       } : {
         status: 'failed',
-        stage: 'failed',
-        message: '高质量分轨失败。',
+        stage: job.stage,
+        message: `${failedStage}失败。`,
         error: error instanceof Error ? error.message : String(error),
       });
       await fs.promises.unlink(job.sourcePath).catch(() => undefined);
@@ -927,9 +936,9 @@ export function createMusicSeparationRouter({
   });
   const upload = multer({ storage, limits: { fileSize: maxUploadBytes } });
 
-  router.get('/engine', async (_req, res, next) => {
+  router.get('/engine', async (req, res, next) => {
     try {
-      const probe = await runProbe();
+      const probe = await runProbe(req.query.refresh === '1');
       return res.json({
         ...probe,
         engine: 'bs-roformer-sw-local',
@@ -955,18 +964,25 @@ export function createMusicSeparationRouter({
       const submittedName = typeof req.body?.originalName === 'string' && req.body.originalName.trim()
         ? req.body.originalName
         : decodeMultipartFileName(req.file.originalname);
+      const operationId = typeof req.body?.assistantOperationId === 'string' && JOB_ID_PATTERN.test(req.body.assistantOperationId)
+        ? req.body.assistantOperationId : undefined;
+      const existingJob = operationId ? getJob(operationId) : undefined;
+      if (existingJob) {
+        await fs.promises.unlink(req.file.path).catch(() => undefined);
+        return res.status(202).json(publicJob(existingJob));
+      }
       const probe = await runProbe();
       if (!probe.ready) {
         await fs.promises.unlink(req.file.path).catch(() => undefined);
-        const reason = !probe.installed
+        const reason = probe.error || (!probe.installed
           ? '本地分轨环境尚未安装。'
           : !probe.cudaAvailable
             ? 'CUDA 不可用，当前高质量方案需要 NVIDIA GPU。'
-            : '高质量 6 轨模型尚未下载完成。';
+            : '高质量 6 轨模型尚未下载完成。');
         return res.status(503).json({ code: 'MUSIC_SEPARATION_NOT_READY', error: reason, engine: probe });
       }
 
-      const id = randomUUID();
+      const id = operationId || randomUUID();
       const directoryPath = path.resolve(uploadsDir, `music-stems-${id}`);
       if (!isPathInside(uploadsDir, directoryPath)) throw new Error('无法创建安全的分轨任务目录。');
       await fs.promises.mkdir(directoryPath, { recursive: true });

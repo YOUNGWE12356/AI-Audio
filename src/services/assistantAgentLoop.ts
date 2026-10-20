@@ -30,8 +30,14 @@ export async function runAssistantLoop(options: {
       if (!response.text) throw new Error('模型没有返回任务结果。');
       return { answer: response.text, model: response.model, failures };
     }
+    let failedStep = '';
     for (const [index, call] of calls.entries()) {
       options.signal.throwIfAborted();
+      if (failedStep) {
+        options.input.push({ type: 'function_call_output', call_id: call.call_id,
+          output: JSON.stringify({ completed: false, skipped: true, reason: `前一步 ${failedStep} 失败，须先根据真实错误修正或停止，不能继续依赖它的步骤。` }) });
+        continue;
+      }
       const tool = options.tools.find(item => item.name === call.name);
       options.event(call.name, 'running');
       let output: unknown;
@@ -43,6 +49,7 @@ export async function runAssistantLoop(options: {
       } catch (error) {
         options.signal.throwIfAborted();
         failures++;
+        failedStep = call.name;
         const message = error instanceof Error ? error.message : String(error);
         output = { error: message, completed: false };
         options.event(call.name, 'failed', message);

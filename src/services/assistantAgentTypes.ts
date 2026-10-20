@@ -35,8 +35,8 @@ export type AssistantJob = {
 
 export type AssistantWorkspaceCommand = {
   id: string;
-  workspace: 'video-soundtrack';
-  action: 'inspect' | 'load' | 'analyze' | 'edit_clips' | 'generate' | 'export';
+  workspace: 'video-soundtrack' | 'audio-tools' | 'dubbing-studio' | 'music-studio' | 'sfx-studio' | 'audio-director' | 'sfx-requirements' | 'sfx-library';
+  action: 'inspect' | 'load' | 'analyze' | 'edit_clips' | 'generate' | 'export' | 'separate' | 'run_tool';
   args: Record<string, any>;
   status: 'pending' | 'running' | 'completed' | 'failed';
   message: string;

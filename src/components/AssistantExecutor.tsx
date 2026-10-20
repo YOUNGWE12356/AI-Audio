@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalSto
 import { AlertCircle, Check, Download, Loader2, MessageSquarePlus, Minus, Plus, Sparkles, Square, Trash2, X } from 'lucide-react';
 import { getAssistantActivity } from '../services/assistantActivity';
 import { getAssistantMessages } from '../services/assistantMessages';
+import { ASSISTANT_WORKSPACE_NAMES } from '../services/assistantToolCatalog';
 import { getAssistantAutoNavigation } from '../utils/workspaceNavigation';
 import type { TabType } from '../types';
 import type { AssistantAsset } from '../services/assistantAgentTypes';
@@ -27,7 +28,7 @@ export default function AssistantExecutor({ embedded = false, onNavigate }: { em
   const messages = job ? getAssistantMessages(job) : [];
   const lastMessage = messages.at(-1);
   const lastEvent = job?.events.at(-1);
-  const resultAssets = (job && !job.workspaceCommand ? job.assets : [])
+  const resultAssets = (job && job.workspaceCommand?.workspace !== 'video-soundtrack' ? job.assets : [])
     .filter(asset => (asset.generated || job?.deliverableIds?.includes(asset.id)) && asset.size > 0);
   const scrollToLatest = () => {
     const chat = chatRef.current;
@@ -94,6 +95,20 @@ export default function AssistantExecutor({ embedded = false, onNavigate }: { em
     } catch (error) { setDownloadError(error instanceof Error ? error.message : '打开失败'); }
   };
   const showWorkspace = () => {
+    if (job?.workspaceCommand?.action === 'run_tool') {
+      if (job.workspaceCommand.workspace === 'audio-tools') {
+        sessionStorage.setItem('assistant_audio_tools_target', job.workspaceCommand.args.tab || 'workstation');
+        window.dispatchEvent(new CustomEvent('ai-audio:open-tool-page', { detail: job.workspaceCommand.args.tab }));
+      }
+      onNavigate(job.workspaceCommand.workspace);
+      return;
+    }
+    if (job?.workspaceCommand?.workspace === 'audio-tools') {
+      sessionStorage.setItem('assistant_audio_tools_target', 'music-separation');
+      onNavigate('audio-tools');
+      window.dispatchEvent(new Event('ai-audio:open-stem-separation'));
+      return;
+    }
     try {
       const project = job?.workspaceCommand?.result?.project;
       const saved = JSON.parse(localStorage.getItem('video_soundtrack_projects') || '[]');
@@ -155,7 +170,7 @@ export default function AssistantExecutor({ embedded = false, onNavigate }: { em
           </details>}
           {job.status !== 'completed' && job.answer && <p className="whitespace-pre-wrap text-xs leading-relaxed">{job.answer}</p>}
           {job.error && <p role="alert" className="whitespace-pre-wrap text-xs text-red-600">{job.error}</p>}
-          {job.workspaceCommand && <button onClick={showWorkspace} className="text-xs font-semibold text-emerald-700">查看视频声音制作中的工程与结果</button>}
+          {job.workspaceCommand && <button onClick={showWorkspace} className="text-xs font-semibold text-emerald-700">{job.workspaceCommand.action === 'run_tool' ? `查看${ASSISTANT_WORKSPACE_NAMES[job.workspaceCommand.workspace]}中的任务与结果` : job.workspaceCommand.workspace === 'audio-tools' ? '查看拆分分轨页面与结果' : '查看视频声音制作中的工程与结果'}</button>}
           {resultAssets.length > 0 && <details key={job.id} className="rounded-lg border border-slate-100 bg-white p-2">
             <summary className="cursor-pointer text-[11px] font-semibold text-emerald-700">查看生成文件（{resultAssets.length}）</summary>
             <div className="mt-2 max-h-48 space-y-2 overflow-y-auto overscroll-contain">

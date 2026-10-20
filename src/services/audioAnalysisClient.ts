@@ -84,6 +84,7 @@ const requestGlobalMusicAnalysis = async (
   file: File,
   buffer: AudioBuffer,
   localResult: AnalyzerResult,
+  signal?: AbortSignal,
 ) => {
   const formData = new FormData();
   formData.append('metadata', JSON.stringify({
@@ -109,7 +110,7 @@ const requestGlobalMusicAnalysis = async (
     method: 'POST',
     headers: { Accept: 'application/json' },
     body: formData,
-    signal: AbortSignal.timeout(150_000),
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(150_000)]) : AbortSignal.timeout(150_000),
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
@@ -122,11 +123,18 @@ const requestGlobalMusicAnalysis = async (
   } as NonNullable<AnalyzerResult['globalAnalysis']>;
 };
 
-export async function analyzeAudioFile(file: File): Promise<AnalyzerResult> {
+export async function analyzeAudioFile(file: File, options: { signal?: AbortSignal; semantic?: boolean; onStage?: (stage: string) => void } = {}): Promise<AnalyzerResult> {
+  options.signal?.throwIfAborted();
+  options.onStage?.('读取和解码音频');
   const buffer = await decodeAudioFile(file);
+  options.signal?.throwIfAborted();
+  options.onStage?.('计算 BPM、调性和音频指标');
   const localResult = analyzeDecodedAudio(buffer, file.name);
+  options.signal?.throwIfAborted();
+  if (options.semantic === false) return { ...localResult, semanticSkipped: true };
   try {
-    const globalAnalysis = await requestGlobalMusicAnalysis(file, buffer, localResult);
+    options.onStage?.('GPT 解读音频指标');
+    const globalAnalysis = await requestGlobalMusicAnalysis(file, buffer, localResult, options.signal);
     return {
       ...localResult,
       globalAnalysis,
@@ -135,6 +143,7 @@ export async function analyzeAudioFile(file: File): Promise<AnalyzerResult> {
       productionNotes: globalAnalysis.productionNotes?.length ? globalAnalysis.productionNotes : localResult.productionNotes,
     };
   } catch (error: any) {
+    options.signal?.throwIfAborted();
     return {
       ...localResult,
       semanticError: error?.name === 'TimeoutError' ? 'GPT 分析超时，请稍后重试。' : error?.message || 'GPT 分析失败，请稍后重试。',

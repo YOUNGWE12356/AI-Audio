@@ -29,14 +29,21 @@ import {
 } from 'lucide-react';
 import { 
   resampleAudioBuffer, 
-  encodeWav, 
-  encodeMp3 
+  encodeWav,
 } from '../services/audioEncoderService';
+import { encodeFactoryAudio } from '../services/audioFactoryEncoder';
 import { isolateAudio } from '../services/elevenLabsService';
 import AudioWorkstation from './AudioWorkstation';
 import AudioToMidiPanel from './AudioToMidiPanel';
 import type { AssistantAudioRequest } from './GlobalAssistant';
 import PointCostHint from './PointCostHint';
+import { useAssistantWorkspace, reportAssistantWorkspaceProgress } from '../services/assistantWorkspaceClient';
+import { useNativeAssistantTool } from '../services/useNativeAssistantTool';
+import { uploadNativeToolOutput } from '../services/assistantToolWorkspace';
+import { usePreparedAssistantTool } from '../services/usePreparedAssistantTool';
+import type { SeparationWorkspaceOperation } from '../services/assistantSeparationWorkspace';
+import { applyBatchRenameRules, getRenamePreviewOperations } from '../utils/batchRename';
+import type { RenameCaseMode, RenameOperation, RenameRules, RenameRuleType } from '../utils/batchRename';
 
 const AudioAnalyzer = React.lazy(() => import('./AudioAnalyzer'));
 const MusicStemSeparation = React.lazy(() => import('./MusicStemSeparation'));
@@ -69,28 +76,6 @@ interface FactoryLoudnessInfo {
 
 type FactoryAudioFormat = 'mp3' | 'wav' | 'ogg' | 'flac' | 'aac' | 'm4a';
 type FactoryChannelMode = 'mono' | 'stereo';
-
-type RenameRuleType = 'remove' | 'replace' | 'prefix' | 'suffix' | 'number' | 'case' | 'removeRange' | 'regexReplace';
-type RenameCaseMode = 'lower' | 'upper' | 'title';
-
-interface RenameOperation {
-  id: string;
-  type: RenameRuleType;
-  findText: string;
-  replaceText: string;
-  insertText?: string;
-  numberStart?: number;
-  numberPadding?: number;
-  numberSeparator?: string;
-  caseMode?: RenameCaseMode;
-  rangeStart?: number;
-  rangeCount?: number;
-}
-
-interface RenameRules {
-  operations: RenameOperation[];
-  normalizeFileName: boolean;
-}
 
 interface RenamePreviewItem {
   id: string;
@@ -165,38 +150,6 @@ const getFactoryMimeType = (format: FactoryAudioFormat) => {
   if (format === 'wav') return 'audio/wav';
   return 'application/octet-stream';
 };
-
-async function encodeFactoryAudioOnServer(
-  sourceBuffer: AudioBuffer,
-  sourceName: string,
-  options: {
-    format: FactoryAudioFormat;
-    sampleRate: number;
-    bitrate: number;
-    channelMode: FactoryChannelMode;
-  },
-): Promise<Blob> {
-  const wavBlob = encodeWav(sourceBuffer);
-  const formData = new FormData();
-  formData.append('media', wavBlob, `${sourceName.replace(/\.[^/.]+$/, '') || 'audio'}-factory-source.wav`);
-  formData.append('format', options.format);
-  formData.append('sampleRate', String(options.sampleRate));
-  formData.append('bitrate', `${options.bitrate}k`);
-  formData.append('channelMode', options.channelMode);
-
-  const response = await fetch('/api/audio/convert', {
-    method: 'POST',
-    body: formData,
-  });
-  if (!response.ok) {
-    const contentType = response.headers.get('content-type') || '';
-    const message = contentType.includes('application/json')
-      ? String((await response.json().catch(() => null))?.error || '')
-      : await response.text().catch(() => '');
-    throw new Error(message || `${options.format.toUpperCase()} 服务端转码失败（${response.status}）。`);
-  }
-  return response.blob();
-}
 
 async function decodeAudioWithFallback(file: File, arrayBuffer: ArrayBuffer, audioCtx: AudioContext): Promise<AudioBuffer> {
   const isVideo = file.type.startsWith('video/') || /\.(mp4|mov|mkv|avi|webm)$/i.test(file.name);
@@ -327,7 +280,33 @@ interface AudioToolsProps {
 }
 
 export default function AudioTools({ assistantAudioRequest = null, onAssistantTaskRunningChange }: AudioToolsProps) {
-  const [activeSubTab, setActiveSubTab] = useState<'workstation' | 'analysis' | 'factory' | 'midi' | 'renamer' | 'music-analysis-naming' | 'isolation' | 'music-separation'>('workstation');
+  const [activeSubTab, setActiveSubTab] = useState<'workstation' | 'analysis' | 'factory' | 'midi' | 'renamer' | 'music-analysis-naming' | 'isolation' | 'music-separation'>(() => {
+    const target = sessionStorage.getItem('assistant_audio_tools_target');
+    sessionStorage.removeItem('assistant_audio_tools_target');
+    return ['workstation', 'analysis', 'factory', 'midi', 'renamer', 'music-analysis-naming', 'isolation', 'music-separation'].includes(target || '')
+      ? target as 'workstation' | 'analysis' | 'factory' | 'midi' | 'renamer' | 'music-analysis-naming' | 'isolation' | 'music-separation' : 'workstation';
+  });
+  useEffect(() => {
+    const openSeparation = () => { sessionStorage.removeItem('assistant_audio_tools_target'); setActiveSubTab('music-separation'); };
+    const openTool = (event: Event) => {
+      const tab = (event as CustomEvent).detail;
+      if (['workstation', 'analysis', 'factory', 'midi', 'renamer', 'music-analysis-naming', 'isolation', 'music-separation'].includes(tab)) {
+        sessionStorage.removeItem('assistant_audio_tools_target'); setActiveSubTab(tab);
+      }
+    };
+    window.addEventListener('ai-audio:open-stem-separation', openSeparation);
+    window.addEventListener('ai-audio:open-tool-page', openTool);
+    return () => {
+      window.removeEventListener('ai-audio:open-stem-separation', openSeparation);
+      window.removeEventListener('ai-audio:open-tool-page', openTool);
+    };
+  }, []);
+  const [separationOperation, setSeparationOperation] = useState<SeparationWorkspaceOperation | null>(null);
+  useAssistantWorkspace('audio-tools', (command, signal) => {
+    if (command.action !== 'separate') return Promise.reject(new Error('不支持的音频页面操作。'));
+    setActiveSubTab('music-separation');
+    return new Promise((resolve, reject) => setSeparationOperation({ command, signal, resolve, reject }));
+  });
   const [isolationMode, setIsolationMode] = useState<'cloud' | 'local'>('cloud');
   const [localIsolationVisited, setLocalIsolationVisited] = useState(false);
   const [subNavWidth, setSubNavWidth] = useState(() => {
@@ -458,7 +437,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
     setIsolationStatus('已载入待处理音频文件，点击下方“开始提取人声”进行极速云端分离。');
   };
 
-  const handleIsolationSubmit = async () => {
+  const handleIsolationSubmit = async (assistant = false) => {
     if (!isolationFile) return;
 
     setIsolationLoading(true);
@@ -468,9 +447,10 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
     setIsolationProgress(20);
     setIsolationStatus('正在上传多媒体文件至 ElevenLabs 极速云端分离中枢...');
 
+    let interval: ReturnType<typeof setInterval> | undefined;
     try {
       // Show simulated progress intervals
-      const interval = setInterval(() => {
+      interval = setInterval(() => {
         setIsolationProgress((prev) => {
           if (prev < 85) return prev + 10;
           return prev;
@@ -486,6 +466,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
       const url = URL.createObjectURL(resultBlob);
       setIsolationAudioUrl(url);
       setIsolationBlob(resultBlob);
+      return resultBlob;
 
     } catch (err: any) {
       console.error(err);
@@ -493,7 +474,9 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
       setIsolationError(errMsg);
       setIsolationStatus(errMsg);
       setIsolationProgress(0);
+      if (assistant) throw new Error(errMsg);
     } finally {
+      clearInterval(interval);
       setIsolationLoading(false);
     }
   };
@@ -538,6 +521,24 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
   const [assistantAnalysisFiles, setAssistantAnalysisFiles] = useState<File[]>([]);
   const assistantFactorySubmitRef = useRef<string | null>(null);
   const assistantFactoryRunningRequestRef = useRef<string | null>(null);
+
+  usePreparedAssistantTool('audio-tools', ({ command, files }) => {
+    const tab = command.args.tab;
+    if (['factory', 'analysis', 'renamer', 'midi', 'isolation', 'workstation'].includes(tab)) setActiveSubTab(tab);
+    const args = command.args.parameters || {};
+    if (tab === 'factory') {
+      setFactoryFiles(files);
+      if (['wav', 'mp3', 'ogg'].includes(args.format)) setFactoryFormat(args.format);
+      setFactorySampleRate(args.sampleRate || 48000);
+      setFactoryBitrate(args.bitrate || 192);
+      setFactoryChannelMode(args.channels === 'mono' ? 'mono' : 'stereo');
+      setFactoryNormalizeEnabled(args.lufs !== undefined);
+      if (args.lufs !== undefined) setFactoryTargetLufs(args.lufs);
+    }
+    if (tab === 'renamer') setRenameFiles(files);
+    if (tab === 'analysis') setAssistantAnalysisFiles(files);
+    if (tab === 'isolation' && files[0]) setIsolationFile(files[0]);
+  });
 
   useEffect(() => {
     if (!assistantAudioRequest) return;
@@ -718,6 +719,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
   const [renameFiles, setRenameFiles] = useState<File[]>([]);
   const [renameRules, setRenameRules] = useState<RenameRules>(DEFAULT_RENAME_RULES);
   const [renameRuleHistory, setRenameRuleHistory] = useState<RenameRules[]>([]);
+  const [renamePreviewRuleId, setRenamePreviewRuleId] = useState<string | null>(null);
   const [renameManualNames, setRenameManualNames] = useState<Record<string, string>>({});
   const [renameDragActive, setRenameDragActive] = useState<boolean>(false);
   const [renameStatus, setRenameStatus] = useState<string>('');
@@ -775,6 +777,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
   const convertFactoryFile = async (
     file: File,
     onStepProgress: (stepProgress: number, message: string) => void,
+    signal?: AbortSignal,
   ): Promise<FactoryConversionResult> => {
     if (!['mp3', 'wav', 'ogg'].includes(factoryFormat)) {
       throw new Error(`${factoryFormat.toUpperCase()} 格式编码暂未接入，请先选择 MP3、WAV 或 OGG。`);
@@ -807,16 +810,13 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
     const outputBuffer = convertFactoryChannels(resampledBuffer, factoryChannelMode);
 
     onStepProgress(0.85, `正在封装为 ${factoryFormat.toUpperCase()}：${file.name}`);
-    const finalBlob = factoryFormat === 'wav'
-      ? encodeWav(outputBuffer)
-      : factoryFormat === 'ogg'
-        ? await encodeFactoryAudioOnServer(outputBuffer, file.name, {
-          format: factoryFormat,
-          sampleRate: factorySampleRate,
-          bitrate: factoryBitrate,
-          channelMode: factoryChannelMode,
-        })
-        : encodeMp3(outputBuffer, factoryBitrate);
+    const finalBlob = await encodeFactoryAudio(outputBuffer, file.name, {
+      format: factoryFormat as 'wav' | 'mp3' | 'ogg',
+      sampleRate: factorySampleRate,
+      bitrate: factoryBitrate,
+      channelMode: factoryChannelMode,
+      signal,
+    });
 
     return {
       id: `${file.name}-${file.size}-${file.lastModified}`,
@@ -842,7 +842,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
     setFactoryStatus('文件已载入格式工厂，请调整下方属性，然后点击“开始格式转换”。');
   };
 
-  const handleFactorySubmit = async () => {
+  const handleFactorySubmit = async (options: { signal?: AbortSignal; assistant?: boolean } = {}) => {
     if (!factoryFile) return;
     const assistantRequestId = assistantFactoryRunningRequestRef.current;
 
@@ -857,13 +857,15 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
       try {
         const nextResults: FactoryConversionResult[] = [];
         for (let index = 0; index < factoryFiles.length; index += 1) {
+          options.signal?.throwIfAborted();
           const file = factoryFiles[index];
           try {
             const result = await convertFactoryFile(file, (stepProgress, message) => {
               const overallProgress = Math.round(((index + stepProgress) / factoryFiles.length) * 100);
               setFactoryProgress(Math.min(99, Math.max(1, overallProgress)));
               setFactoryStatus(`[${index + 1}/${factoryFiles.length}] ${message}`);
-            });
+              if (options.assistant) reportAssistantWorkspaceProgress(`格式转换 ${overallProgress}%：${message}`);
+            }, options.signal);
             nextResults.push(result);
           } catch (err: any) {
             nextResults.push({
@@ -887,11 +889,14 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
             : `批量转换完成：成功 ${successCount} 个，失败 ${failedCount} 个。`,
         );
         setFactoryError(successCount === 0 ? '全部文件转换失败，请检查文件格式或浏览器解码支持。' : null);
+        if (options.assistant && failedCount) throw new Error(nextResults.filter(item => item.error).map(item => `${item.sourceName}：${item.error}`).join('；'));
+        return nextResults;
       } catch (err: any) {
         const errMsg = err?.message || '批量转换出错，请重新核对音频选项。';
         setFactoryError(errMsg);
         setFactoryStatus(errMsg);
         setFactoryProgress(0);
+        if (options.assistant) throw new Error(errMsg);
       } finally {
         setFactoryLoading(false);
         if (assistantRequestId) {
@@ -955,17 +960,13 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
       setFactoryStatus(`正在封装成指定格式: [${factoryFormat.toUpperCase()}] ...`);
 
       let finalBlob: Blob;
-      if (factoryFormat === 'wav') {
-        finalBlob = encodeWav(outputBuffer);
-      } else if (factoryFormat === 'mp3') {
-        // MP3
-        finalBlob = encodeMp3(outputBuffer, factoryBitrate);
-      } else if (factoryFormat === 'ogg') {
-        finalBlob = await encodeFactoryAudioOnServer(outputBuffer, factoryFile.name, {
+      if (factoryFormat === 'wav' || factoryFormat === 'mp3' || factoryFormat === 'ogg') {
+        finalBlob = await encodeFactoryAudio(outputBuffer, factoryFile.name, {
           format: factoryFormat,
           sampleRate: factorySampleRate,
           bitrate: factoryBitrate,
           channelMode: factoryChannelMode,
+          signal: options.signal,
         });
       } else {
         throw new Error(`${factoryFormat.toUpperCase()} 格式编码暂未接入，请先选择 MP3、WAV 或 OGG。`);
@@ -1064,20 +1065,62 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
     };
   };
 
-  const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-  const normalizeRenameText = (value: string): string => (
-    value
-      .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
-      .replace(/\s+/g, '_')
-      .replace(/_+/g, '_')
-      .replace(/^_+|_+$/g, '')
-  );
-
   const getRenameOperationLabel = (operation: RenameOperation) => {
     if (operation.type === 'remove') return `删除「${operation.findText || '未填写'}」`;
     return `把「${operation.findText || '未填写'}」替换成「${operation.replaceText || '空'}」`;
   };
+
+  useNativeAssistantTool(['process_audio'], {
+    prepare: ({ command, files }) => {
+      if (factoryLoading) throw new Error('格式工厂正在转换其他文件。');
+      const args = command.args.parameters || {};
+      const format = args.format || 'wav';
+      if (!['wav', 'mp3', 'ogg'].includes(format)) throw new Error('当前格式工厂支持 MP3、WAV 和 OGG。');
+      if (args.duration !== undefined || args.start || args.fadeIn || args.fadeOut || args.gainDb || args.pitchSemitones || args.denoise || (args.speed !== undefined && args.speed !== 1)) {
+        throw new Error('当前格式工厂不支持剪切、变速、移调或降噪，未忽略这些参数执行转换。');
+      }
+      if (!files.length) throw new Error('没有可转换的素材。');
+      setActiveSubTab('factory');
+      handleFactoryFilesChange(files);
+      setFactoryFormat(format);
+      setFactorySampleRate(args.sampleRate || 48000);
+      setFactoryBitrate(args.bitrate || 192);
+      setFactoryChannelMode(args.channels === 'mono' ? 'mono' : 'stereo');
+      setFactoryNormalizeEnabled(args.lufs !== undefined);
+      setFactoryTargetLufs(args.lufs ?? -16);
+      setFactoryPeakCeilingDb(-1);
+    },
+    run: async ({ command }, signal) => {
+      const results = await handleFactorySubmit({ signal, assistant: true });
+      signal.throwIfAborted();
+      if (!results?.length) throw new Error('转换未返回文件。');
+      reportAssistantWorkspaceProgress('格式转换：保存页面生成的文件');
+      const assets = [];
+      for (const result of results) {
+        if (!result.blob) throw new Error(result.error || '转换未返回有效音频。');
+        const name = `${command.args.parameters.name || result.sourceName.replace(/\.[^.]+$/, '')}.${factoryFormat}`;
+        assets.push(await uploadNativeToolOutput(command, result.blob, name, signal));
+      }
+      return { asset: assets[0], assets };
+    },
+  });
+
+  useNativeAssistantTool(['cloud_isolation'], {
+    prepare: ({ files }) => {
+      if (isolationLoading) throw new Error('云端人声分离正在处理其他素材。');
+      if (!files[0]) throw new Error('没有待分离音频。');
+      setActiveSubTab('isolation'); setIsolationMode('cloud');
+      handleIsolationFileChange(files[0]);
+    },
+    run: async ({ command, files }, signal) => {
+      reportAssistantWorkspaceProgress('云端人声分离：上传并提取人声');
+      const blob = await handleIsolationSubmit(true);
+      signal.throwIfAborted();
+      if (!blob) throw new Error('云端分离未返回音频。');
+      const asset = await uploadNativeToolOutput(command, blob, `${files[0].name.replace(/\.[^.]+$/, '')}_人声.wav`, signal);
+      return { asset, assets: [asset] };
+    },
+  });
 
   useEffect(() => {
     if (!assistantAudioRequest || assistantAudioRequest.task !== 'convert') return;
@@ -1130,10 +1173,6 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
     return '命名规则';
   };
 
-  const titleCaseRenameText = (value: string): string => (
-    value.replace(/(^|[\s_\-]+)([\p{L}\p{N}])/gu, (match, separator, char) => `${separator}${String(char).toUpperCase()}`)
-  );
-
   const commitRenameRules = React.useCallback((updater: (prev: RenameRules) => RenameRules) => {
     setRenameRules((prev) => {
       const next = updater(prev);
@@ -1147,12 +1186,14 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
       const [previous, ...rest] = history;
       if (!previous) return history;
       setRenameRules(previous);
+      setRenamePreviewRuleId(null);
       setRenameStatus('已撤回上一次命名规则修改，右侧预览已同步更新。');
       return rest;
     });
   }, []);
 
   const addRenameOperation = React.useCallback((type: RenameRuleType) => {
+    setRenamePreviewRuleId(null);
     commitRenameRules((prev) => ({
       ...prev,
       operations: [...prev.operations, createEnhancedRenameOperation(type)],
@@ -1175,61 +1216,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
     }));
   }, [commitRenameRules]);
 
-  const applyRenameRulesToBase = (sourceBase: string, fileIndex: number): string => {
-    let processedBase = sourceBase;
-
-    renameRules.operations.forEach((operation) => {
-      if (operation.type === 'remove') {
-        if (!operation.findText) return;
-        processedBase = processedBase.replace(new RegExp(escapeRegExp(operation.findText), 'g'), '');
-        return;
-      }
-      if (operation.type === 'replace') {
-        if (!operation.findText) return;
-        processedBase = processedBase.replace(new RegExp(escapeRegExp(operation.findText), 'g'), operation.replaceText);
-        return;
-      }
-      if (operation.type === 'regexReplace') {
-        if (!operation.findText) return;
-        try {
-          processedBase = processedBase.replace(new RegExp(operation.findText, 'g'), operation.replaceText);
-        } catch {
-          // Invalid regex is ignored so preview/export never crashes.
-        }
-        return;
-      }
-      if (operation.type === 'prefix') {
-        processedBase = `${operation.insertText || ''}${processedBase}`;
-        return;
-      }
-      if (operation.type === 'suffix') {
-        processedBase = `${processedBase}${operation.insertText || ''}`;
-        return;
-      }
-      if (operation.type === 'number') {
-        const start = Number.isFinite(operation.numberStart) ? Number(operation.numberStart) : 1;
-        const padding = Math.max(1, Math.min(8, Number(operation.numberPadding) || 3));
-        const separator = operation.numberSeparator ?? '_';
-        processedBase = `${processedBase}${separator}${String(start + fileIndex).padStart(padding, '0')}`;
-        return;
-      }
-      if (operation.type === 'case') {
-        if (operation.caseMode === 'upper') processedBase = processedBase.toUpperCase();
-        else if (operation.caseMode === 'title') processedBase = titleCaseRenameText(processedBase.toLowerCase());
-        else processedBase = processedBase.toLowerCase();
-        return;
-      }
-      if (operation.type === 'removeRange') {
-        const start = Math.max(1, Number(operation.rangeStart) || 1) - 1;
-        const count = Math.max(1, Number(operation.rangeCount) || 1);
-        processedBase = `${processedBase.slice(0, start)}${processedBase.slice(start + count)}`;
-      }
-    });
-
-    return renameRules.normalizeFileName
-      ? normalizeRenameText(processedBase) || 'renamed_audio'
-      : processedBase.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_') || 'renamed_audio';
-  };
+  const renamePreviewRuleIndex = renameRules.operations.findIndex(operation => operation.id === renamePreviewRuleId);
 
   const getRenameOutputRootName = (): string => {
     const relativePaths = renameFiles
@@ -1271,7 +1258,8 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
 
   const renamePreviewItems = React.useMemo<RenamePreviewItem[]>(() => {
     const usedPaths = new Set<string>();
-    return renameFiles.map((file) => {
+    const previewRules = { ...renameRules, operations: getRenamePreviewOperations(renameRules, renamePreviewRuleId) };
+    return renameFiles.map((file, fileIndex) => {
       const id = getRenameFileId(file);
       const sourceRelativePath = getFactoryFilePath(file).replace(/\\/g, '/').replace(/^\/+/, '');
       const sourceParts = sourceRelativePath.split('/').filter(Boolean);
@@ -1280,7 +1268,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
 
       const { base, extension } = splitFileName(sourceName);
       const manualName = renameManualNames[id]?.trim();
-      let outputName = manualName || `${applyRenameRulesToBase(base, renameFiles.indexOf(file))}${extension}`;
+      let outputName = manualName || `${applyBatchRenameRules(base, fileIndex, previewRules)}${extension}`;
       if (manualName && !splitFileName(manualName).extension) outputName = `${manualName}${extension}`;
       outputName = sanitizeArchiveName(outputName);
 
@@ -1300,7 +1288,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
         statusLabel: manualName ? '手动命名' : fixed ? '重名已修正' : changed ? '已改名' : '未变化',
       };
     });
-  }, [renameFiles, renameManualNames, renameRules]);
+  }, [renameFiles, renameManualNames, renameRules, renamePreviewRuleId]);
 
   const handleRenameFilesChange = (files: FileList | File[]) => {
     const selectedFiles = Array.from(files).filter(isRenameSupportedFile);
@@ -1749,6 +1737,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
           }
         >
           <MusicStemSeparation
+            assistantOperation={separationOperation}
             onSendToWorkstation={(files) => {
               setPendingWorkstationImport({
                 id: `music-stems-workstation-${Date.now()}`,
@@ -1875,7 +1864,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                     <div>
                       <span className="text-xs font-bold text-slate-700">命名规则</span>
                       <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
-                        默认不添加规则，文件名只做基础清理；需要时再添加“删除文本”或“替换文本”。
+                        先做基础清理，再按顺序执行规则；每条规则可预览执行到该步骤的结果。
                       </p>
                     </div>
                   </div>
@@ -1883,6 +1872,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                     type="button"
                     onClick={() => {
                       commitRenameRules(() => DEFAULT_RENAME_RULES);
+                      setRenamePreviewRuleId(null);
                       setRenameManualNames({});
                       setRenameStatus('已重置规则，右侧实时预览已恢复基础清理结果。');
                     }}
@@ -1941,6 +1931,8 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                     {renameRules.operations.map((operation, operationIndex) => (
                       <div
                         key={operation.id}
+                        role="group"
+                        aria-label={`命名规则 ${operationIndex + 1}`}
                         className="rounded-2xl border border-slate-200 bg-white p-3.5 space-y-3"
                       >
                         <div className="flex items-center justify-between gap-3">
@@ -2101,6 +2093,22 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                             </label>
                           </div>
                         )}
+                        <div className="flex justify-end border-t border-slate-100 pt-3">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setRenamePreviewRuleId(operation.id);
+                              setRenameStatus('');
+                            }}
+                            disabled={renameFiles.length === 0}
+                            aria-label={`生成预览：第 ${operationIndex + 1} 条规则`}
+                            aria-pressed={renamePreviewRuleId === operation.id}
+                            title="按顺序预览到此规则，包含前面的规则"
+                            className="rounded-xl bg-emerald-600 px-4 py-2 text-[11px] font-black text-white shadow-sm transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            生成预览
+                          </button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -2113,25 +2121,14 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                     onChange={(e) => commitRenameRules((prev) => ({ ...prev, normalizeFileName: e.target.checked }))}
                     className="accent-emerald-600"
                   />
-                  自动清理空格、重复下划线和非法字符
+                  规则执行前清理空格、重复下划线和非法字符
                 </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const changedCount = renamePreviewItems.filter((item) => item.status !== 'ready').length;
-                      setRenameStatus(`已生成预览：${renamePreviewItems.length} 个文件，${changedCount} 个将改名。右侧可实时查看并手动覆盖单个文件名。`);
-                    }}
-                    disabled={renamePreviewItems.length === 0}
-                    className="h-10 rounded-xl bg-emerald-600 text-[11px] font-black text-white shadow-sm transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    生成预览
-                  </button>
+                <div className="flex justify-end">
                   <button
                     type="button"
                     onClick={undoRenameRules}
                     disabled={renameRuleHistory.length === 0}
-                    className="h-10 rounded-xl border border-slate-200 bg-white text-[11px] font-black text-slate-600 transition-colors hover:bg-slate-50 hover:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="h-10 rounded-xl border border-slate-200 bg-white px-4 text-[11px] font-black text-slate-600 transition-colors hover:bg-slate-50 hover:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     撤回规则
                   </button>
@@ -2149,6 +2146,11 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                   <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
                     先预览，再导出。不会覆盖原文件。
                   </p>
+                  {renamePreviewRuleIndex >= 0 && (
+                    <p className="mt-1 text-[11px] font-semibold text-emerald-700" role="status">
+                      当前预览：执行至第 {renamePreviewRuleIndex + 1} 条规则，导出使用此结果。
+                    </p>
+                  )}
                 </div>
                 <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-black text-emerald-700 border border-emerald-100">
                   {renamePreviewItems.length} 个
@@ -2605,7 +2607,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
               <button
                 type="button"
                 disabled={!factoryFile || factoryLoading}
-                onClick={handleFactorySubmit}
+                onClick={() => void handleFactorySubmit()}
                 className="w-full h-11 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 text-white disabled:text-slate-400 font-bold text-xs rounded-xl shadow-lg shadow-emerald-600/15 disabled:shadow-none transition-all flex items-center justify-center gap-2 cursor-pointer border border-emerald-700/10"
               >
                 {factoryLoading ? (
@@ -2942,7 +2944,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
               <button
                 type="button"
                 disabled={!isolationFile || isolationLoading}
-                onClick={handleIsolationSubmit}
+                onClick={() => void handleIsolationSubmit()}
                 className="w-full h-11 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 text-white disabled:text-slate-400 font-bold text-xs rounded-xl shadow-lg shadow-emerald-600/15 disabled:shadow-none transition-all flex items-center justify-center gap-2 cursor-pointer border border-emerald-700/10"
               >
                 {isolationLoading ? (

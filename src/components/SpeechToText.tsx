@@ -32,6 +32,8 @@ import { motion, AnimatePresence } from 'motion/react';
 import { transcribeSpeech } from '../services/elevenLabsService';
 import { translateTextToLanguage } from '../services/aiService';
 import PointCostHint from './PointCostHint';
+import { useNativeAssistantTool } from '../services/useNativeAssistantTool';
+import { reportAssistantWorkspaceProgress } from '../services/assistantWorkspaceClient';
 
 interface TranscriptionHistoryItem {
   id: string;
@@ -228,7 +230,7 @@ export default function SpeechToText({ initialFile, assistantRequestId }: Speech
     }
   };
 
-  const handleTranscribe = async () => {
+  const handleTranscribe = async (options: { signal?: AbortSignal; assistant?: boolean; diarize?: boolean; numSpeakers?: number } = {}) => {
     if (!file) {
       setError('请先上传或录制需要转录的音频文件');
       return;
@@ -237,7 +239,7 @@ export default function SpeechToText({ initialFile, assistantRequestId }: Speech
     setLoading(true);
     setError(null);
     try {
-      const result = await transcribeSpeech(file, languageCode, tagAudioEvents);
+      const result = await transcribeSpeech(file, languageCode, tagAudioEvents, options);
       setTranscriptionResult(result);
       setTranslatedText('');
       setTranslationError(null);
@@ -254,13 +256,31 @@ export default function SpeechToText({ initialFile, assistantRequestId }: Speech
         };
         saveHistory([newHistoryItem, ...sttHistory]);
       }
+      return result;
     } catch (err: any) {
       console.error(err);
       setError(err.message || '转录失败，请检查网络或 API Key 状态。');
+      if (options.assistant) throw err;
     } finally {
       setLoading(false);
     }
   };
+
+  useNativeAssistantTool(['transcribe_speech'], {
+    prepare: ({ command, files }) => {
+      if (loading || isRecording) throw new Error('语音识别正在处理其他音频或录音。');
+      if (!files[0]) throw new Error('没有待识别音频。');
+      handleFileChange(files[0]);
+      setLanguageCode(command.args.parameters.languageCode || 'auto');
+      setTagAudioEvents(true);
+    },
+    run: async ({ command }, signal) => {
+      reportAssistantWorkspaceProgress('语音识别：上传音频并转录文字');
+      const result = await handleTranscribe({ signal, assistant: true, diarize: command.args.parameters.diarize, numSpeakers: command.args.parameters.numSpeakers });
+      if (!result) throw new Error('语音识别未返回结果。');
+      return result;
+    },
+  });
 
   const handleCopyText = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -506,7 +526,7 @@ export default function SpeechToText({ initialFile, assistantRequestId }: Speech
 
           <div className="flex justify-end"><PointCostHint kind="speech-to-text" file={file} /></div>
           <button
-            onClick={handleTranscribe}
+            onClick={() => void handleTranscribe()}
             disabled={loading || !file}
             className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 px-4 rounded-xl text-xs transition-all shadow-md hover:shadow-lg disabled:opacity-50 disabled:pointer-events-none cursor-pointer"
           >

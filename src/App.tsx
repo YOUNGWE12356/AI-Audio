@@ -73,6 +73,8 @@ const SfxLibrary = lazy(() => import('./components/SfxLibrary'));
 const SfxRequirements = lazy(() => import('./components/SfxRequirements'));
 const VideoSoundtrack = lazy(() => import('./components/VideoSoundtrack'));
 import GlobalAssistant, { AssistantAudioRequest, AssistantDirectorRequest, AssistantLibraryRequest, AssistantMusicRequest, AssistantRequirementsRequest, AssistantSfxRequest, AssistantVideoRequest, AssistantVoiceRequest } from './components/GlobalAssistant';
+import { uploadNativeToolOutput, type PreparedToolTask } from './services/assistantToolWorkspace';
+import { useNativeAssistantTool } from './services/useNativeAssistantTool';
 import { setAssistantWorkspaceNavigator } from './services/assistantWorkspaceClient';
 import { readWorkspaceTab, WORKSPACE_TAB_KEY } from './utils/workspaceNavigation';
 
@@ -335,6 +337,30 @@ export default function App() {
     setAssistantRequirementsRequest(request);
     setCurrentTab('sfx-requirements');
   }, []);
+
+  const prepareAssistantTool = ({ command, files: inputs }: PreparedToolTask) => {
+    const args = command.args.parameters || {};
+    if (command.workspace === 'music-studio') {
+      if (args.prompt || args.text) setStandaloneMusicPrompt(args.prompt || args.text);
+      if (args.duration !== undefined) setStandaloneMusicDuration(args.duration);
+      setStandaloneMusicType(args.instrumental === false ? 'vocal' : 'instrumental');
+      if (args.lyrics !== undefined) setStandaloneMusicLyrics(args.lyrics);
+    } else if (command.workspace === 'sfx-studio') {
+      if (args.prompt) setStandalonePrompt(args.prompt);
+      setStandaloneDurationMode(args.duration === undefined ? 'auto' : 'fixed');
+      if (args.duration !== undefined) setStandaloneDuration(args.duration);
+    } else if (command.workspace === 'dubbing-studio') {
+      if (args.text !== undefined) setStandaloneVoiceText(args.text);
+      if (args.language || args.targetLanguage) setStandaloneVoiceLang(args.language || args.targetLanguage);
+    } else if (command.workspace === 'audio-director') {
+      setRequirements(args.requirements || '');
+      if (args.target) setTarget(args.target);
+      if (inputs.length) setFiles(previous => {
+        previous.forEach(item => URL.revokeObjectURL(item.preview));
+        return inputs.map((file, index) => ({ id: `${command.id}-${index}`, file, preview: URL.createObjectURL(file), type: file.type }));
+      });
+    } else if (command.workspace === 'sfx-library' && args.query) setAssistantLibrarySearchQuery(args.query);
+  };
 
   const handleAssistantLibraryRequest = useCallback((request: AssistantLibraryRequest) => {
     setAssistantLibrarySearchQuery(request.searchQuery);
@@ -764,10 +790,11 @@ export default function App() {
   };
 
   // SFX generator handler
-  const handleStandaloneGenerate = async () => {
+  const handleStandaloneGenerate = async (assistant = false) => {
     if (standaloneGenerationInFlight.current) return;
     if (!hasElevenLabsKey) {
       setStandaloneError('ELEVENLABS_API_KEY 未配置，请前往设置页面或 Secrets 面板添加。');
+      if (assistant) throw new Error('音效生成：ELEVENLABS_API_KEY 未配置。');
       return;
     }
     if (!standalonePrompt.trim()) {
@@ -812,8 +839,11 @@ export default function App() {
       if (failed.length) {
         setStandaloneError(`${failed.join('；')}${succeeded.length ? '。成功版本已保留，可试听或下载。' : ''}`);
       }
+      if (assistant && failed.length) throw new Error(failed.join('；'));
+      return succeeded.map(result => result.status === 'fulfilled' ? { blob: result.blob, version: result.version } : null).filter(Boolean);
     } catch (err: any) {
       setStandaloneError(err.message || '生成失败，请重试');
+      if (assistant) throw err;
     } finally {
       standaloneGenerationInFlight.current = false;
       setStandaloneLoading(false);
@@ -836,9 +866,10 @@ export default function App() {
   }, [assistantSfxAutoRunId, standalonePrompt, standaloneLoading, updateAssistantTaskRunning]);
 
   // Standalone Music generator handler
-  const handleStandaloneMusicGenerate = async () => {
+  const handleStandaloneMusicGenerate = async (assistant = false) => {
     if (!hasElevenLabsKey) {
       setStandaloneMusicError('ELEVENLABS_API_KEY 未配置，请前往设置页面或 Secrets 面板添加。');
+      if (assistant) throw new Error('音乐生成：ELEVENLABS_API_KEY 未配置。');
       return;
     }
     if (!standaloneMusicPrompt.trim()) {
@@ -918,8 +949,10 @@ export default function App() {
           standaloneMusicAudioRef.current.play().catch(e => console.error(e));
         }
       }, 150);
+      return [optionA, optionB];
     } catch (err: any) {
       setStandaloneMusicError(err.message || '生成失败，请重试');
+      if (assistant) throw err;
     } finally {
       setStandaloneMusicLoading(false);
     }
@@ -941,7 +974,7 @@ export default function App() {
   }, [assistantMusicAutoRunId, standaloneMusicPrompt, standaloneMusicLoading, updateAssistantTaskRunning]);
 
   // AI Multimodal director planner handler
-  const onGenerate = async (scope: AudioDesignScope) => {
+  const onGenerate = async (scope: AudioDesignScope, assistant = false) => {
     if (analysisRunningRef.current) return;
 
     if (files.length === 0 && !requirements.trim()) {
@@ -951,6 +984,7 @@ export default function App() {
 
     if (!hasAiTextModel) {
       setError('AI 文本/视觉模型未配置，请在服务端配置 GPT 网关。');
+      if (assistant) throw new Error('AI 文本/视觉模型未配置。');
       return;
     }
 
@@ -1143,7 +1177,7 @@ export default function App() {
         })),
       };
       setHistoryList(prev => [newHistoryItem, ...prev]);
-
+      return res;
     } catch (err: any) {
       if (controller.signal.aborted) {
         setAnalysisStage('已取消本次分析。');
@@ -1152,6 +1186,7 @@ export default function App() {
         console.error('Director generation failed:', err);
         setError(err.message || '生成失败，请重新检查大模型状态。');
       }
+      if (assistant) throw err;
     } finally {
       if (analysisAbortRef.current === controller) {
         analysisAbortRef.current = null;
@@ -1160,6 +1195,52 @@ export default function App() {
       }
     }
   };
+
+  useNativeAssistantTool(['generate_music', 'generate_sound_effect', 'audio_design'], {
+    prepare: task => {
+      const args = task.command.args.parameters;
+      if (standaloneLoading || standaloneMusicLoading || analysisRunningRef.current) throw new Error('当前生成功能正在处理其他任务。');
+      if (task.command.args.tool === 'generate_music' && (!(args.duration >= 10) || args.duration > 60)) throw new Error('音乐页面当前支持 10–60 秒，未擅自改动请求时长。');
+      if (task.command.args.tool !== 'audio_design' && !args.prompt?.trim()) throw new Error('缺少生成描述。');
+      if (task.command.args.tool === 'audio_design' && !args.requirements?.trim() && !task.files.length) throw new Error('缺少设计要求或素材。');
+      prepareAssistantTool(task);
+      if (task.command.args.tool === 'audio_design') {
+        setTarget(args.target || { game: true, video: false, avatar: false, sunnyIsland: false, gift: false, activity: false });
+        setIsInstrumental(args.isInstrumental !== false);
+        if (!task.files.length) setFiles([]);
+      }
+      if (task.command.args.tool === 'generate_music') setStandaloneMusicLyrics(args.lyrics || '');
+    },
+    run: async ({ command }, signal) => {
+      signal.throwIfAborted();
+      if (command.args.tool === 'audio_design') {
+        const abort = () => analysisAbortRef.current?.abort();
+        signal.addEventListener('abort', abort, { once: true });
+        try {
+          const result = await onGenerate({ music: true, sfx: true }, true);
+          signal.throwIfAborted();
+          if (!result) throw new Error('设计功能没有返回结果，请查看页面错误。');
+          return result;
+        } finally { signal.removeEventListener('abort', abort); }
+      }
+      const assets = [];
+      if (command.args.tool === 'generate_music') {
+        const options = await handleStandaloneMusicGenerate(true);
+        signal.throwIfAborted();
+        if (!options?.length) throw new Error('音乐页面未返回生成结果。');
+        for (const option of options) {
+          const response = await fetch(option.url, { signal });
+          assets.push(await uploadNativeToolOutput(command, await response.blob(), `${command.args.parameters.name || '音乐'}_${option.id}.wav`, signal));
+        }
+      } else {
+        const results = await handleStandaloneGenerate(true);
+        signal.throwIfAborted();
+        if (!results?.length) throw new Error('音效页面未返回生成结果。');
+        for (const result of results) if (result) assets.push(await uploadNativeToolOutput(command, result.blob, `${command.args.parameters.name || '音效'}_${result.version}.wav`, signal));
+      }
+      return { assets, asset: assets[0] };
+    },
+  });
 
   const cancelAnalysis = () => {
     const controller = analysisAbortRef.current;

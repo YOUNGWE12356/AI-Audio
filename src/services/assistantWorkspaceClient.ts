@@ -1,8 +1,9 @@
 import { useEffect, useRef } from 'react';
 import type { TabType } from '../types';
 import type { AssistantWorkspaceCommand } from './assistantAgentTypes';
+import { runAssistantToolOperation } from './assistantToolWorkspace';
 
-type Handler = (command: AssistantWorkspaceCommand, signal: AbortSignal) => Promise<Record<string, any>>;
+type Handler = (command: AssistantWorkspaceCommand, signal: AbortSignal, context: { jobId: string; clientId: string }) => Promise<Record<string, any>>;
 const handlers = new Map<string, Handler>();
 let navigate: ((tab: TabType) => void) | undefined;
 let active: { id: string; controller: AbortController; endpoint: string; message: string } | undefined;
@@ -21,7 +22,7 @@ export function useAssistantWorkspace(workspace: string, handler: Handler) {
   const latest = useRef(handler);
   latest.current = handler;
   useEffect(() => {
-    const stable: Handler = (command, signal) => latest.current(command, signal);
+    const stable: Handler = (command, signal, context) => latest.current(command, signal, context);
     handlers.set(workspace, stable);
     return () => { if (handlers.get(workspace) === stable) handlers.delete(workspace); };
   }, [workspace]);
@@ -57,18 +58,29 @@ export async function runAssistantWorkspace(jobId: string, command: AssistantWor
     const operation = active;
     heartbeat = window.setInterval(() => { void sendHeartbeat(operation); }, 10000);
     const startedAt = Date.now();
-    while (!handlers.has(command.workspace)) {
+    const handlerKey = command.workspace;
+    while (command.action !== 'run_tool' && !handlers.has(handlerKey)) {
       controller.signal.throwIfAborted();
       if (Date.now() - startedAt > 45000) throw new Error('对应功能页面加载失败。');
       await new Promise(resolve => window.setTimeout(resolve, 100));
     }
     receipt = receipts.get(command.id);
     if (!receipt) {
-      const result = await handlers.get(command.workspace)!(command, controller.signal);
+      try { receipt = JSON.parse(sessionStorage.getItem(`assistant-native-receipt:${command.id}`) || 'null') || undefined; } catch { /* Ignore malformed local receipts. */ }
+    }
+    if (!receipt) {
+      const result = command.action === 'run_tool'
+        ? await runAssistantToolOperation({ command, signal: controller.signal, progress: reportAssistantWorkspaceProgress })
+        : await handlers.get(handlerKey)!(command, controller.signal, { jobId, clientId: clientId() });
       receipt = { result, clientId: clientId() };
       receipts.set(command.id, receipt);
+      if (command.action === 'run_tool') {
+        try { sessionStorage.setItem(`assistant-native-receipt:${command.id}`, JSON.stringify(receipt)); } catch { /* In-memory receipt still prevents repeating this action. */ }
+      }
     }
   } catch (error) {
+    // Retain completed page receipts when a response is lost.
+    if ((error as { reconnectable?: boolean })?.reconnectable && !controller.signal.aborted) return;
     receipt = { error: error instanceof Error ? error.message : String(error), result: (error as any)?.workspaceResult, clientId: clientId() };
     receipts.set(command.id, receipt);
   } finally {

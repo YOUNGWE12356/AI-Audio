@@ -8,9 +8,12 @@ import { buildSfxLibraryIndex, findSfxLibraryMatches } from './sfxLibraryIndex';
 import { analyzeDecodedAudio, AUDIO_FILE_EXTENSION_REGEX } from '../utils/audioMetrics';
 import { AUDIO_METRICS_MIME, createAudioEvidence } from '../utils/audioEvidence';
 import { readAssistantDocument } from './assistantDocument';
+import { NATIVE_ASSISTANT_TOOLS, canUseNativeAssistantTool } from './assistantToolCatalog';
+import { applyAssistantCompressionDefaults } from './assistantCompressionDefaults';
 
 type Args = Record<string, any>;
 export type AgentToolContext = {
+  taskPrompt?: string;
   assets: AssistantAsset[];
   signal: AbortSignal;
   request: (endpoint: string, body?: Args | FormData, method?: string, headers?: Record<string, string>) => Promise<any>;
@@ -25,7 +28,8 @@ export type AgentToolContext = {
   review?: (args: Args) => void;
   navigate: (tab: string) => void;
   progress?: (message: string) => void;
-  workspace?: (action: AssistantWorkspaceCommand['action'], args: Args) => Promise<any>;
+  workspace?: (action: AssistantWorkspaceCommand['action'], args: Args, workspace?: AssistantWorkspaceCommand['workspace']) => Promise<any>;
+  runInWorkspace?: (name: string, args: Args, execute: () => Promise<unknown>) => Promise<unknown>;
 };
 const str = { type: 'string' };
 const num = { type: 'number' };
@@ -218,7 +222,7 @@ export function createAssistantTools(c: AgentToolContext): AgentTool[] {
     ['change_voice', 'ElevenLabs声音转换，保留语言和表演。跨语言使用translate_dubbing。', '/api/ai/elevenlabs/speech-to-speech', { assetId: str, voiceId: str, voiceSource: str, publicOwnerId: str, voiceName: str }, ['assetId', 'voiceId'], { assetId: 'audio' }],
     ['translate_dubbing', '已有跨语种声音转换；Dubbing v2已暂停，禁止启用。', '/api/ai/elevenlabs/translate-dubbing', { assetId: str, voiceId: str, sourceLanguage: str, targetLanguage: str, timingMode: choice('natural', 'match', 'strict') }, ['assetId', 'voiceId', 'targetLanguage'], { assetId: 'audio' }],
     ['cloud_isolation', 'ElevenLabs云端人声分离。免费本地用local_separation。', '/api/ai/elevenlabs/audio-isolation', { assetId: str }, ['assetId'], { assetId: 'audio' }],
-    ['audio_to_midi', '调用已安装的通用/乐器专用本地MIDI模型。先查engine_status。', '/api/audio-to-midi/convert', { assetId: str, mode: choice('basic-pitch', 'piano', 'drums', 'guitar', 'bass', 'strings', 'multi') }, ['assetId', 'mode'], { assetId: 'media' }],
+    ['audio_to_midi', '调用已安装的通用/乐器专用本地MIDI模型。先查engine_status。', '/api/audio-to-midi/convert', { assetId: str, mode: choice('basic-pitch', 'piano', 'drums', 'guitar', 'bass', 'strings', 'multitrack') }, ['assetId', 'mode'], { assetId: 'media' }],
     ['clone_voice', '本地参考音色克隆，免费模型。先查就绪状态，text最多800字；referenceAssetId指定参考音频。', '/api/ai/local/voice-clone', { referenceAssetId: str, text: str, engine: choice('chatterbox', 'cosyvoice3', 'qwen3_tts'), language: str, referenceStart: num, referenceDuration: num }, ['referenceAssetId', 'text', 'engine'], { referenceAssetId: 'reference' }],
     ['local_voice_conversion', 'SeedVC本地声音转换，需源音频和参考音频。', '/api/ai/local/seed-vc/convert', { sourceAssetId: str, referenceAssetId: str, model: choice('v1', 'v2'), targetDuration: num }, ['sourceAssetId', 'referenceAssetId'], { sourceAssetId: 'source', referenceAssetId: 'reference' }],
   ] as const) {
@@ -238,9 +242,16 @@ export function createAssistantTools(c: AgentToolContext): AgentTool[] {
       for (const option of result.options || []) if (option.data?.audioUrl) assets.push(await c.register(option.data.audioUrl, `${path.parse(source.name).name}_${option.id}.wav`, true));
       return { ...result, assets };
     });
-  add('local_separation', '免费本地人声分离(vocals，输出纯人声和伴奏)或多轨分离(stems)。等待真实结果后返回全部文件。',
+  add('local_separation', '打开拆分分轨页面，载入素材并自动执行免费本地多轨分离(stems)或人声分离(vocals)。页面展示真实进度及错误，无需先检查engine_status。等待真实结果后返回全部文件。',
     { assetId: str, mode: choice('vocals', 'stems') }, ['assetId', 'mode'], async a => {
       const source = c.asset(a.assetId);
+      if (c.workspace) {
+        const result = await c.workspace('separate', { source, mode: a.mode }, 'audio-tools');
+        const assets = [];
+        for (const file of result.files || []) assets.push(await c.register(file.url, file.name, true));
+        if (!assets.length) throw new Error('分轨页面未返回可用的轨道文件。');
+        return { ...result, assets };
+      }
       const job = await multipart('/api/audio/music-separation/jobs', { ...a, originalName: source.name }, { assetId: 'media' });
       try {
         for (;;) {
@@ -260,7 +271,7 @@ export function createAssistantTools(c: AgentToolContext): AgentTool[] {
         throw error;
       }
     });
-  add('process_audio', '本地音频工厂/编辑：裁剪、格式转换、提取视频音轨、采样率、比特率、单/立体声、响度、音量、变速、移调、淡入淡出、降噪。多个处理可一次完成，源文件不覆盖。',
+  add('process_audio', '本地音频工厂/编辑：裁剪、格式转换、提取视频音轨、采样率、比特率、单/立体声、响度、音量、变速、移调、淡入淡出、降噪。音频压缩默认MP3、32000Hz、96kbps；用户指定其他参数时优先遵循。多个处理可一次完成，源文件不覆盖。',
     { assetId: str, name: str, format: choice('wav', 'mp3', 'ogg', 'flac', 'aac', 'm4a'), start: num, duration: num,
       sampleRate: num, bitrate: num, channels: choice('mono', 'stereo'), lufs: num, gainDb: num, speed: num, pitchSemitones: num, fadeIn: num, fadeOut: num, denoise: bool }, ['assetId', 'name'], async a => {
       const source = c.asset(a.assetId);
@@ -457,5 +468,23 @@ export function createAssistantTools(c: AgentToolContext): AgentTool[] {
     { summary: str, assetIds: strings }, ['summary', 'assetIds'], async a => {
       return c.finish(a.summary, a.assetIds) === false ? { waitingForReview: true, completed: false } : { completed: true };
     });
+  // Composite tools (for example batch speech) stay on their current page and
+  // execute their child operations there, rather than creating nested commands.
+  let pageExecutionDepth = 0;
+  for (const tool of tools) {
+    if (!c.runInWorkspace || !NATIVE_ASSISTANT_TOOLS.has(tool.name)) continue;
+    const execute = tool.execute;
+    tool.description += ' 页面支持的参数会自动打开原有功能界面、导入素材并执行原有操作；超出页面范围的高级处理沿用已有处理服务。取得真实结果后才进行后续步骤。';
+    tool.execute = args => {
+      if (pageExecutionDepth || !canUseNativeAssistantTool(tool.name, args)) return execute(args);
+      return c.runInWorkspace!(tool.name, args, async () => {
+        pageExecutionDepth++;
+        try { return await execute(args); } finally { pageExecutionDepth--; }
+      });
+    };
+  }
+  const processAudio = tools.find(tool => tool.name === 'process_audio')!;
+  const executeAudio = processAudio.execute;
+  processAudio.execute = args => executeAudio(applyAssistantCompressionDefaults(args, c.taskPrompt));
   return tools;
 }

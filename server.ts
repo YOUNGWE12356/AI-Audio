@@ -3306,7 +3306,7 @@ async function startServer() {
 
   const normalizeSampleRate = (value: unknown) => {
     const parsed = Number.parseInt(String(value), 10);
-    return [44100, 48000, 96000].includes(parsed) ? parsed : 48000;
+    return [8000, 16000, 22050, 24000, 32000, 44100, 48000, 96000].includes(parsed) ? parsed : 48000;
   };
 
   const normalizeAudioBitrate = (value: unknown) => {
