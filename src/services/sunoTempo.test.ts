@@ -1,6 +1,27 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { containsTimelineReference, formatSunoBpmRange, materializeAudioDesignResult } from './aiService';
+import { normalizeAudioDesignSfxSchemes } from '../utils/audioDesignNaming';
+
+test('audio design names use underscores in new and historical results without changing prose', () => {
+  const schemes = [{ title: '音效制作排程', items: [
+    { name: ' Soft UI Tap ', scene: 'UI 点击', logic: 'Layer soft taps', description: 'soft UI tap' },
+    { name: 'Fairy\t Page\u3000Transition', scene: '', logic: '', description: '' },
+    { name: 'Wish_Activation', scene: '', logic: '', description: '' },
+  ] }];
+  const normalized = normalizeAudioDesignSfxSchemes(schemes);
+  assert.deepEqual(normalized[0].items.map(item => item.name), [
+    'Soft_UI_Tap', 'Fairy_Page_Transition', 'Wish_Activation',
+  ]);
+  assert.equal(normalized[0].items[0].description, 'soft UI tap');
+  assert.equal(normalized[0].items[0].scene, 'UI 点击');
+  assert.equal(normalized[0].items[0].logic, 'Layer soft taps');
+  assert.equal(schemes[0].items[0].name, ' Soft UI Tap ');
+  const result = materializeAudioDesignResult({
+    sfxAnalysis: { summary: '', keyElements: [], pacing: '' }, sfxSchemes: schemes,
+  }, true, false, { music: false, sfx: true });
+  assert.deepEqual(result.sfxSchemes, normalized);
+});
 
 const gamePlan = {
   style: '阿拉伯马卡姆融合电影管弦',

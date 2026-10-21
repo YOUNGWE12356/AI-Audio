@@ -1,5 +1,6 @@
 import { generateAiContent, SchemaType, ThinkingLevel } from './aiGateway';
 import { setClientIdentityHeader } from './clientIdentity';
+import { normalizeAudioDesignSfxSchemes } from '../utils/audioDesignNaming';
 import { AUDIO_METRICS_MIME, AUDIO_EVIDENCE_RULES, validateAudioEvidence, type AudioMetricEvidence } from '../utils/audioEvidence';
 import { isBgmImportFileName, normalizeRequirementEngineeringNames, normalizeUcsImportFileName, normalizeUcsRequirementItems, UCS_CATALOG_PROMPT, UCS_CATALOG_VERSION } from './ucsNaming';
 
@@ -534,7 +535,7 @@ export const materializeAudioDesignResult = (
       ? raw.musicAnalysis
       : { mood: '', rhythm: '', suggestedInstruments: [], emotionalCurve: '' },
     videoMotionTempo: scope.music ? normalizeVideoMotionTempo(raw.videoMotionTempo) : undefined,
-    sfxSchemes: scope.sfx ? raw.sfxSchemes || [] : [],
+    sfxSchemes: scope.sfx ? normalizeAudioDesignSfxSchemes(raw.sfxSchemes || []) : [],
     bgmRecommendations,
   };
 };
@@ -935,6 +936,8 @@ export async function analyzeAudioDesign(
     4. 快速动作段落优先标记 Foley、撞击、转场和节奏卡点；安静段落标记氛围、留白和音乐动态。
     ` : ''}
     
+    ${analysisScope.sfx ? '【所有场景的音效命名要求】：sfxSchemes.items.name 使用简洁英文工程命名，单词之间一律用下划线 _ 连接，禁止空格、制表符和换行，例如 Soft_UI_Tap、Fairy_Page_Transition。此规则仅用于 name，scene、logic、description 保持自然语言书写。' : ''}
+
     ${target.video || target.avatar || target.gift || target.activity ? `
     【高精度影视级特别设计要求（最高优先级）】：
     由于本项目属于“影视广告 / Avatar / 礼物 / 活动”等需要精细画面判断的创作类型，本次请求在勾选音效时需要达到专业精度：

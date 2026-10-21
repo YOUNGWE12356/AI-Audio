@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Upload,
   FileText,
@@ -34,6 +34,7 @@ import { AudioDesignResult, AudioDesignScope } from '../services/aiService';
 import { generateSoundEffect, generateMusic } from '../services/elevenLabsService';
 import PointCostHint from './PointCostHint';
 import { isAudioFile, isPdfFile } from '../utils/mediaPreparation';
+import { normalizeAudioDesignSfxSchemes } from '../utils/audioDesignNaming';
 
 // Self-contained ElevenLabs Player for Demo Sound Effects inside table
 const ElevenLabsPlayer = ({
@@ -385,6 +386,11 @@ export default function AudioDirector({
     && videoFileCount > 0
     && (videoFileCount !== 1 || files.length !== 1);
   const hasSfxResult = Boolean(result?.sfxSchemes?.length);
+  // Include results created before naming normalization was introduced.
+  const sfxSchemes = useMemo(
+    () => normalizeAudioDesignSfxSchemes(result?.sfxSchemes || []),
+    [result?.sfxSchemes],
+  );
   const hasMusicResult = Boolean(result?.bgmRecommendations?.length);
 
   const toggleAnalysisScope = (kind: keyof AudioDesignScope) => {
@@ -956,7 +962,7 @@ export default function AudioDirector({
                   </div>
 
                   {/* Schemes tables */}
-                  {result.sfxSchemes.map((scheme, sidx) => (
+                  {sfxSchemes.map((scheme, sidx) => (
                     <div key={sidx} className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
                       <div className="px-5 py-4 bg-slate-50/50 border-b border-slate-200 flex items-center justify-between">
                         <h4 className="text-xs font-black text-slate-800">{scheme.title}</h4>
@@ -991,7 +997,7 @@ export default function AudioDirector({
                           <tbody className="divide-y divide-slate-200 text-[11px]">
                             {scheme.items.map((item, idx) => (
                               <tr key={idx} className="hover:bg-slate-50/60 transition-colors">
-                                <td className="py-3.5 px-4 font-mono font-bold text-emerald-700">{item.name}</td>
+                                <td className="min-w-[140px] w-[160px] py-3.5 px-4 font-mono font-bold text-emerald-700 [overflow-wrap:anywhere]">{item.name}</td>
                                 <td className="py-3.5 px-4 text-slate-700 leading-relaxed font-semibold">{item.scene}</td>
                                 <td className="py-3.5 px-4 text-slate-500 leading-relaxed">{item.logic}</td>
                                 <td className="py-3.5 px-4 text-slate-700 leading-relaxed">
