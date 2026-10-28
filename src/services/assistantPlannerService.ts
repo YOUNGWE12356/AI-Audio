@@ -133,7 +133,7 @@ const ASSISTANT_PLANNER_INSTRUCTIONS = `你是 AI Audio 专业音频工作台的
    - midi：音频转 MIDI、转成 MIDI、导出 MIDI、提取 MIDI、扒谱、扒带、从旋律/钢琴/鼓/吉他/Bass/弦乐/多乐器素材生成 MIDI。
    - music-separation：拆分分轨、高质量音乐分轨、歌曲分轨、音乐分轨、乐器分轨、stem separation；把完整歌曲或混音拆成人声、鼓、贝斯、其它乐器等独立音源分轨。
    - renamer：批量重命名、前后缀、编号、查找替换。
-   - music-analysis-naming：音乐分析命名、音乐自动命名；先本地检测BPM/调性/频谱，再由GPT结合指标与文件名给出待审核风格/场景命名建议，未直接听音；证据不足保留Review/Manual，同类别自动编号。
+   - music-analysis-naming：音乐分析命名、音乐自动命名；先本地检测BPM/调式/频谱，再由GPT参考调式置信度、速度、动态及文件名给出待审核情绪/场景建议，未直接听音；新名称以原文件名开头，包含情绪、场景、调式和BPM，编号可选，不添加风格；证据不足保留Uncertain/Manual。
    - isolation：只用于人声提取/人声消除/伴奏移除/去噪/移除背景音乐；如果用户说拆歌曲里的乐器、鼓、贝斯、多个 stems，应使用 music-separation，不要使用 isolation。
 7. 音效需求表 (sfx-requirements/requirements)：整理游戏音效、FMOD/Wwise、配音或多语种配音需求清单。
 8. 音效库 (sfx-library/library)：搜索、试听、收藏、下载已有公司音频资产。目录和名称来自实时资产目录。

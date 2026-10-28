@@ -43,16 +43,23 @@ test('naming associates shuffled GPT results with the original files and marks t
   globalThis.fetch = async (_url, options) => {
     const body = JSON.parse(String(options?.body));
     assert.match(body.instructions, /GPT 未直接听音/);
+    assert.match(body.instructions, /参考 musicalMode/);
+    assert.match(body.instructions, /不能机械地将大调等同快乐/);
+    assert.match(body.instructions, /不分析或返回风格/);
+    assert.equal(body.text.format.schema.properties.items.items.properties.style, undefined);
     assert.equal(JSON.parse(body.input).items.length, 2);
-    return Response.json({ output_text: JSON.stringify({ items: [1, 0].map(index => ({ index, style: 'Review', scene: 'Manual', mood: '不确定', namingCategory: 'invalid', confidence: '高', reason: '无明确线索' })) }) });
+    assert.equal(JSON.parse(body.input).items[0].audioMetrics.metrics.musicalMode.englishName, evidence.metrics.musicalMode.englishName);
+    return Response.json({ output_text: JSON.stringify({ items: [1, 0].map(index => ({ index, scene: 'Manual', mood: 'Dreamy Hopeful', namingCategory: 'invalid', confidence: '高', reason: '参考调式和动态，仍需复核' })) }) });
   };
   const result = await analyzeMusicNaming([{ audioMetrics: evidence }, { audioMetrics: { ...evidence, sourceName: 'second.wav' } }]);
   assert.deepEqual(result.items.map(i => i.index), [0, 1]);
-  assert.equal(result.items[0].confidence, '低'); assert.equal(result.items[0].namingCategory, 'Review_Manual');
+  assert.equal(result.items[0].confidence, '低'); assert.equal(result.items[0].namingCategory, 'Dreamy_Hopeful_Manual');
+  assert.equal('style' in result.items[0], false);
+  assert.equal(result.items[0].mood, 'Dreamy_Hopeful');
   assert.match(result.items[0].reason, /未直接听音/);
 }));
 test('naming rejects duplicate indexes, overlarge batches and bad evidence without silently dropping files', () => withGateway(async () => {
-  const item = { index: 0, style: 'Review', scene: 'Manual', mood: '', confidence: '低', reason: '' };
+  const item = { index: 0, scene: 'Manual', mood: 'Uncertain', confidence: '低', reason: '' };
   globalThis.fetch = async () => Response.json({ output_text: JSON.stringify({ items: [item, item] }) });
   await assert.rejects(analyzeMusicNaming([{ audioMetrics: evidence }, { audioMetrics: evidence }]), /索引/);
   await assert.rejects(analyzeMusicNaming(Array.from({ length: 11 }, () => ({ audioMetrics: evidence }))), /分批/);

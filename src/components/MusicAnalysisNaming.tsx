@@ -17,6 +17,7 @@ import {
   Upload,
 } from 'lucide-react';
 import PointCostHint from './PointCostHint';
+import { buildMusicOutputNames, type MusicNameFields } from '../utils/musicOutputNaming';
 
 type MusicNamingStatus = 'pending' | 'analyzing' | 'done' | 'error';
 type Confidence = '高' | '中' | '低';
@@ -31,16 +32,13 @@ interface MusicNamingItem {
   bpm?: number;
   keyName?: string;
   keyConfidence?: Confidence;
-  style?: string;
   scene?: string;
-  styleConfidence?: Confidence;
+  moodConfidence?: Confidence;
   sceneConfidence?: Confidence;
-  styleCandidates?: string[];
   sceneCandidates?: string[];
   semanticReason?: string;
   semanticModel?: string;
   audioMetrics?: AudioMetricEvidence;
-  energy?: string;
   mood?: string;
   bassPercent?: number;
   midPercent?: number;
@@ -54,27 +52,14 @@ interface MusicNamingItem {
 
 const AUDIO_FILE_EXTENSION_REGEX = /\.(mp3|wav|m4a|aac|ogg|oga|flac|webm|opus|aif|aiff|caf)$/i;
 
-const STYLE_OPTIONS = [
-  'Review',
-  'Epic',
-  'Battle',
-  'Casual',
-  'Healing',
-  'Mystery',
-  'Ambient',
-  'Electronic',
-  'Chinese',
-  'Cinematic',
-  'Orchestral',
-  'Rock',
-  'Piano',
-  'LoFi',
-  'SwingJazz',
-  'GypsyJazz',
-  'AcousticJazz',
-  'AcousticLounge',
-  'Jazz',
-];
+const MOOD_OPTIONS = ['Calm', 'Warm', 'Joyful', 'Hopeful', 'Dreamy', 'Melancholic', 'Tense', 'Mysterious', 'Energetic', 'Uncertain'];
+const NAME_FIELD_OPTIONS = [
+  ['includeSource', '原文件名'],
+  ['includeMood', '情绪'],
+  ['includeScene', '场景'],
+  ['includeKey', '调式'],
+  ['includeBpm', 'BPM'],
+] as const;
 const SCENE_OPTIONS = [
   'Manual',
   'Battle',
@@ -99,28 +84,6 @@ const SCENE_OPTIONS = [
 
 const normalizeTagToken = (value: string) => value.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '');
 
-const STYLE_ALIASES: Record<string, string> = {
-  swingjazz: 'SwingJazz',
-  swing: 'SwingJazz',
-  gypsyjazz: 'GypsyJazz',
-  acousticjazz: 'AcousticJazz',
-  acousticlounge: 'AcousticLounge',
-  casuallounge: 'AcousticLounge',
-  lounge: 'AcousticLounge',
-  jazz: 'Jazz',
-  boardgamejazz: 'SwingJazz',
-  tabletopjazz: 'SwingJazz',
-  chinese: 'Chinese',
-  oriental: 'Chinese',
-  guofeng: 'Chinese',
-  cinematic: 'Cinematic',
-  orchestral: 'Orchestral',
-  ambient: 'Ambient',
-  electronic: 'Electronic',
-  piano: 'Piano',
-  lofi: 'LoFi',
-};
-
 const SCENE_ALIASES: Record<string, string> = {
   boardgame: 'BoardGame',
   tabletop: 'Tabletop',
@@ -144,11 +107,6 @@ const SCENE_ALIASES: Record<string, string> = {
   explore: 'Explore',
 };
 
-const normalizeStyleLabel = (value: string) => {
-  if (STYLE_OPTIONS.includes(value)) return value;
-  return STYLE_ALIASES[normalizeTagToken(value)] || '';
-};
-
 const normalizeSceneLabel = (value: string) => {
   if (SCENE_OPTIONS.includes(value)) return value;
   return SCENE_ALIASES[normalizeTagToken(value)] || '';
@@ -167,33 +125,8 @@ const formatDuration = (seconds = 0) => {
   return `${minutes}:${rest}`;
 };
 
-const sanitizeFileNamePart = (value: string) => (
-  value
-    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
-    .replace(/[,，、\s]+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 80) || 'Music'
-);
-
-const sanitizeOutputFileName = (value: string, fallbackExtension: string) => {
-  const clean = value
-    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
-    .replace(/\s+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 180);
-  if (!clean) return '';
-  return /\.[A-Za-z0-9]{2,5}$/.test(clean) ? clean : `${clean}.${fallbackExtension}`;
-};
-
 const getFilePath = (file: File) => ((file as any).webkitRelativePath || file.name).replace(/\\/g, '/');
 const isAudioFile = (file: File) => file.type.startsWith('audio/') || AUDIO_FILE_EXTENSION_REGEX.test(file.name);
-const getExtension = (name: string) => {
-  const match = name.match(/\.([^.]+)$/);
-  return match ? match[1].toLowerCase() : 'wav';
-};
-
 const downloadBlob = (blob: Blob, fileName: string) => {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
@@ -209,13 +142,14 @@ const analyzeMusicFile = async (file: File) => {
   const audioMetrics = await extractLocalAudioEvidence(file);
   const { metrics } = audioMetrics;
   return { duration: audioMetrics.sourceDuration, bpm: metrics.bpm.value,
-    keyName: metrics.key.name, keyConfidence: metrics.key.confidence,
+    keyName: `${metrics.musicalMode.name.split(' ')[0]} ${metrics.musicalMode.englishName}`,
+    keyConfidence: metrics.musicalMode.confidence,
     bassPercent: metrics.audioProfile.bassPercent, midPercent: metrics.audioProfile.midPercent,
     highPercent: metrics.audioProfile.highPercent, rms: Math.pow(10, metrics.audioProfile.rmsDb / 20),
     audioMetrics };
 };
 
-type NamingResponseItem = { index: number; style: string; scene: string; mood: string;
+type NamingResponseItem = { index: number; scene: string; mood: string;
   namingCategory: string; confidence: Confidence; reason: string; model?: string; error?: string };
 const requestAudioSemanticMusicNaming = async (items: MusicNamingItem[]) => {
   const output: NamingResponseItem[] = [];
@@ -238,8 +172,8 @@ const requestAudioSemanticMusicNaming = async (items: MusicNamingItem[]) => {
       model = payload.model;
       output.push(...payload.items.map((item: NamingResponseItem) => ({ ...item, index: offset + item.index, model: payload.model })));
     } catch (error: any) {
-      output.push(...batch.map((_, index) => ({ index: offset + index, style: 'Review', scene: 'Manual', mood: '不确定',
-        namingCategory: 'Review_Manual', confidence: '低' as const, reason: '',
+      output.push(...batch.map((_, index) => ({ index: offset + index, scene: 'Manual', mood: 'Uncertain',
+        namingCategory: 'Uncertain_Manual', confidence: '低' as const, reason: '',
         error: error?.name === 'TimeoutError' ? 'GPT 命名分析超时，请重试。' : error?.message || 'GPT 命名分析失败。' })));
     }
   }
@@ -286,7 +220,11 @@ export default function MusicAnalysisNaming() {
   const [status, setStatus] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [startCode, setStartCode] = useState('001');
+  const [includeNumber, setIncludeNumber] = useState(true);
   const [numberSeparator, setNumberSeparator] = useState('_');
+  const [nameFields, setNameFields] = useState<MusicNameFields>({
+    includeSource: true, includeMood: true, includeScene: true, includeKey: true, includeBpm: true,
+  });
   const inputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -316,11 +254,10 @@ export default function MusicAnalysisNaming() {
 
   const clearGeneratedNaming = (item: MusicNamingItem): MusicNamingItem => ({
     ...item,
-    style: undefined,
+    mood: undefined,
     scene: undefined,
-    styleConfidence: undefined,
+    moodConfidence: undefined,
     sceneConfidence: undefined,
-    styleCandidates: undefined,
     sceneCandidates: undefined,
     semanticReason: undefined,
     semanticModel: undefined,
@@ -328,38 +265,10 @@ export default function MusicAnalysisNaming() {
     outputName: undefined,
   });
 
-  const buildOutputNames = (sourceItems: MusicNamingItem[]) => {
-    const counters = new Map<string, number>();
-    const cleanStartCode = startCode.replace(/\D/g, '') || '001';
-    const numberStart = Math.max(1, Number(cleanStartCode) || 1);
-    const numberPadding = Math.min(6, Math.max(1, cleanStartCode.length));
-    return sourceItems.map((item) => {
-      if (item.status !== 'done') {
-        return {
-          ...item,
-          categoryKey: undefined,
-          outputName: undefined,
-        };
-      }
-      const style = sanitizeFileNamePart(item.style || 'Music');
-      const scene = sanitizeFileNamePart(item.scene || 'Scene');
-      const key = sanitizeFileNamePart((item.keyName || 'UnknownKey').replace(/\s+/g, ''));
-      const bpm = Math.round(item.bpm || 0);
-      const categoryKey = `${style}_${scene}`;
-      const nextNumber = counters.get(categoryKey) ?? numberStart;
-      counters.set(categoryKey, nextNumber + 1);
-      const prefix = String(nextNumber).padStart(numberPadding, '0');
-      const automaticOutputName = `${prefix}${numberSeparator}${style}_${scene}_${key}_${bpm}BPM.${getExtension(item.file.name)}`;
-      const manualOutputName = sanitizeOutputFileName(item.manualOutputName || '', getExtension(item.file.name));
-      return {
-        ...item,
-        categoryKey,
-        outputName: manualOutputName || automaticOutputName,
-      };
-    });
-  };
-
-  const previewItems = useMemo(() => buildOutputNames(items), [items, numberSeparator, startCode]);
+  const previewItems = useMemo(
+    () => buildMusicOutputNames(items, { includeNumber, startCode, numberSeparator, ...nameFields }),
+    [items, includeNumber, numberSeparator, startCode, nameFields],
+  );
   const doneCount = previewItems.filter(item => item.status === 'done').length;
 
   const analyzeAll = async () => {
@@ -379,7 +288,7 @@ export default function MusicAnalysisNaming() {
       const target = nextItems[index];
       setStatus(`正在分析 ${index + 1}/${nextItems.length}：${target.file.name}`);
       nextItems = nextItems.map(item => item.id === target.id ? { ...item, status: 'analyzing', progress: 30 } : item);
-      setItems(buildOutputNames(nextItems));
+      setItems(nextItems);
       try {
         const result = await analyzeMusicFile(target.file);
         nextItems = nextItems.map(item => item.id === target.id ? {
@@ -396,11 +305,11 @@ export default function MusicAnalysisNaming() {
           error: reason?.message || '分析失败，请检查音频格式。',
         } : item);
       }
-      setItems(buildOutputNames(nextItems));
+      setItems(nextItems);
       await new Promise(resolve => setTimeout(resolve, 0));
     }
 
-    setItems(buildOutputNames(nextItems));
+    setItems(nextItems);
     const locallyAnalyzedItems = nextItems.filter(item => item.status === 'analyzing' && item.audioMetrics);
     if (locallyAnalyzedItems.length > 0) {
       try {
@@ -421,29 +330,21 @@ export default function MusicAnalysisNaming() {
               error: semantic?.error || 'GPT 未返回该音乐的命名建议。',
             };
           }
-          const normalizedStyle = normalizeStyleLabel(semantic.style);
           const normalizedScene = normalizeSceneLabel(semantic.scene);
-          const categoryParts = String(semantic.namingCategory || '')
-            .split(/[_\s/-]+/)
-            .filter(Boolean);
-          const categoryStyle = normalizedStyle || normalizeStyleLabel(categoryParts[0] || '');
-          const categoryScene = normalizedScene || normalizeSceneLabel(categoryParts.slice(1).join(' ') || categoryParts[1] || '');
           return {
             ...item,
             status: 'done',
             progress: 100,
-            style: categoryStyle || 'Review',
-            scene: categoryScene || 'Manual',
-            mood: semantic.mood || item.mood,
-            styleConfidence: semantic.confidence,
+            scene: normalizedScene || 'Manual',
+            mood: semantic.mood || 'Uncertain',
+            moodConfidence: semantic.confidence,
             sceneConfidence: semantic.confidence,
-            styleCandidates: [semantic.style, categoryStyle].filter(Boolean),
-            sceneCandidates: [semantic.scene, categoryScene].filter(Boolean),
+            sceneCandidates: [semantic.scene].filter(Boolean),
             semanticReason: semantic.reason,
             semanticModel: semantic.model || semanticResult.model,
           };
         });
-        setItems(buildOutputNames(nextItems));
+        setItems(nextItems);
         const semanticDoneCount = nextItems.filter(item => item.status === 'done').length;
         const failedCount = nextItems.filter(item => item.status === 'error').length;
         setStatus(`GPT 指标解读完成：${semanticDoneCount}/${nextItems.length} 个文件已生成命名建议；未直接听音。${failedCount ? ` ${failedCount} 个失败，可重新分析。` : ''}`);
@@ -452,11 +353,11 @@ export default function MusicAnalysisNaming() {
           ...item,
           status: 'error',
           progress: 0,
-          error: reason?.message || 'API 风格/场景分析失败。',
+          error: reason?.message || 'API 情绪/场景分析失败。',
         } : item);
-        setItems(buildOutputNames(nextItems));
-        setError(reason?.message || 'API 风格/场景分析失败。');
-        setStatus('本地 BPM/调式已完成，但风格/场景 API 分析失败；请配置 API 后重新分析。');
+        setItems(nextItems);
+        setError(reason?.message || 'API 情绪/场景分析失败。');
+        setStatus('本地 BPM/调式已完成，但情绪/场景 API 分析失败；请重新分析。');
       }
     } else {
       setStatus(`分析完成：0/${nextItems.length} 个文件已生成命名。`);
@@ -465,20 +366,18 @@ export default function MusicAnalysisNaming() {
   };
 
   const updateItem = (id: string, patch: Partial<MusicNamingItem>) => {
-    setItems(current => buildOutputNames(current.map(item => item.id === id ? { ...item, ...patch } : item)));
+    setItems(current => current.map(item => item.id === id ? { ...item, ...patch } : item));
   };
 
   const exportCsv = () => {
     const rows = [
-      ['原始路径', '新文件名', 'BPM', '调式', '风格建议', '场景建议', '能量', '情绪建议', '状态', '分析方式', '已检测秒数', '命名依据'],
+      ['原始路径', '新文件名', 'BPM', '调式', '场景建议', '情绪建议', '状态', '分析方式', '已检测秒数', '命名依据'],
       ...previewItems.map(item => [
         item.sourcePath,
         item.outputName || '',
         item.bpm ? String(Math.round(item.bpm)) : '',
         item.keyName || '',
-        item.style || '',
         item.scene || '',
-        item.energy || '',
         item.mood || '',
         item.status === 'done' ? '已命名' : item.status === 'error' ? (item.error || '分析失败') : '未分析',
         item.audioMetrics ? '本地指标 + GPT解读（未直接听音）' : '',
@@ -502,6 +401,9 @@ export default function MusicAnalysisNaming() {
         downloadBlob(exportableItems[0].file, exportableItems[0].outputName);
         setStatus(`已开始下载 ${exportableItems[0].outputName}。`);
         return;
+      }
+      if (new Set(exportableItems.map(item => item.outputName.toLowerCase())).size !== exportableItems.length) {
+        throw new Error('新文件名有重复，请修改名称或开启编号后再导出，避免文件被覆盖。');
       }
       const { default: JSZip } = await import('jszip');
       const zip = new JSZip();
@@ -530,18 +432,24 @@ export default function MusicAnalysisNaming() {
           <div>
             <h2 className="text-lg font-black text-slate-900">音乐分析命名</h2>
             <p className="mt-1 max-w-2xl text-xs leading-relaxed text-slate-500">
-              上传音乐后，本地检测 BPM、调式与频谱（最长前 5 分钟），再由 GPT 结合指标和文件名线索给出命名建议，未直接听音。缺少风格或场景证据时标记 Review / Manual，分类可手动修改。相同类别按序编号，默认从 001 开始。
+              本地检测 BPM、调式与频谱（最长前 5 分钟），由 GPT 参考调式、速度、动态和文件名推测情绪，未直接听音。新名称可选择包含原文件名、编号、情绪、场景、调式和 BPM；情绪与场景均可手动修改。
             </p>
           </div>
           <div className="grid grid-cols-2 gap-2 rounded-2xl border border-slate-100 bg-slate-50 p-2 text-[10px] font-bold text-slate-500">
+            <label className="col-span-2 flex items-center gap-2 text-xs text-slate-700">
+              <input type="checkbox" checked={includeNumber} onChange={event => setIncludeNumber(event.target.checked)} className="accent-emerald-600" />
+              添加编号
+            </label>
             <label className="space-y-1">
               <span>起始编号</span>
               <input
                 inputMode="numeric"
+                aria-label="起始编号"
+                disabled={!includeNumber}
                 value={startCode}
                 onChange={(event) => {
                   const nextCode = event.target.value.replace(/\D/g, '').slice(0, 6);
-                  setStartCode(nextCode || '001');
+                  setStartCode(nextCode);
                 }}
                 className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-800 outline-none focus:border-emerald-400"
               />
@@ -550,6 +458,8 @@ export default function MusicAnalysisNaming() {
               <span>分隔符</span>
               <input
                 value={numberSeparator}
+                aria-label="编号分隔符"
+                disabled={!includeNumber}
                 onChange={(event) => setNumberSeparator(event.target.value.slice(0, 3) || '_')}
                 className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-800 outline-none focus:border-emerald-400"
               />
@@ -631,41 +541,43 @@ export default function MusicAnalysisNaming() {
         </div>
 
         <div className="mt-5 flex flex-col gap-3 rounded-2xl border border-slate-100 bg-slate-50 p-4 md:flex-row md:items-center md:justify-between">
-          <div className="text-xs text-slate-500">
+          <div className="min-w-0 text-xs text-slate-500">
             <span className="font-black text-slate-800">{items.length}</span> 个文件 · 已生成 <span className="font-black text-emerald-700">{doneCount}</span> 个命名
             {error && <p className="mt-1 flex items-center gap-1 text-[11px] font-bold text-rose-600"><AlertCircle className="h-3.5 w-3.5" />{error}</p>}
             {status && <p role="status" className="mt-1 text-[11px] leading-relaxed text-slate-500">{status}</p>}
           </div>
-          <div className="flex flex-wrap items-end gap-2">
-            <div className="flex flex-col items-end gap-1.5">
+          <div className="max-w-full shrink-0 overflow-x-auto">
+            <div className="grid grid-cols-[max-content_max-content_max-content] items-center gap-x-2 gap-y-1.5">
               <button
                 type="button"
                 disabled={items.length === 0 || analyzing}
                 onClick={analyzeAll}
-                className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-black text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+                className="inline-flex h-9 items-center gap-2 whitespace-nowrap rounded-xl bg-emerald-600 px-4 py-2 text-xs font-black text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
               >
                 {analyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
                 {analyzing ? '分析中...' : '开始分析并命名'}
               </button>
-              <PointCostHint kind="token" />
+              <button
+                type="button"
+                disabled={doneCount === 0}
+                onClick={exportCsv}
+                className="h-9 whitespace-nowrap rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-black text-slate-600 shadow-sm hover:text-emerald-700 disabled:cursor-not-allowed disabled:text-slate-300"
+              >
+                导出 CSV
+              </button>
+              <button
+                type="button"
+                disabled={doneCount === 0 || exporting}
+                onClick={exportZip}
+                className="inline-flex h-9 items-center gap-2 whitespace-nowrap rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-2 text-xs font-black text-emerald-700 shadow-sm hover:bg-emerald-100 disabled:cursor-not-allowed disabled:text-slate-300"
+              >
+                {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                导出重命名文件
+              </button>
+              <div className="col-span-3">
+                <PointCostHint kind="token" />
+              </div>
             </div>
-            <button
-              type="button"
-              disabled={doneCount === 0}
-              onClick={exportCsv}
-              className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-black text-slate-600 shadow-sm hover:text-emerald-700 disabled:cursor-not-allowed disabled:text-slate-300"
-            >
-              导出 CSV
-            </button>
-            <button
-              type="button"
-              disabled={doneCount === 0 || exporting}
-              onClick={exportZip}
-              className="inline-flex items-center gap-2 rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-2 text-xs font-black text-emerald-700 shadow-sm hover:bg-emerald-100 disabled:cursor-not-allowed disabled:text-slate-300"
-            >
-              {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-              导出重命名文件
-            </button>
           </div>
         </div>
       </section>
@@ -675,36 +587,54 @@ export default function MusicAnalysisNaming() {
           <div>
             <h3 className="text-sm font-black text-slate-900">分析命名预览</h3>
             <p className="mt-1 text-[11px] text-slate-500">
-              AI 会先给建议；风格、场景和新文件名都可以手动改。风格/场景支持填写多个标签，用逗号或空格分隔。
+              按勾选内容组合新文件名，以原文件名、编号、情绪、场景、调式、BPM 为序；取消勾选不影响分析结果。
             </p>
           </div>
         </div>
+
+        <fieldset className="mb-4 rounded-2xl border border-slate-100 bg-slate-50 px-4 pb-3 pt-2">
+          <legend className="px-1 text-xs font-bold text-slate-700">新文件名包含</legend>
+          <div className="flex flex-wrap gap-x-5 gap-y-2">
+            {NAME_FIELD_OPTIONS.map(([field, label]) => (
+              <label key={field} className="flex items-center gap-2 text-xs font-bold text-slate-600">
+                <input
+                  type="checkbox"
+                  aria-label={`新文件名包含${label}`}
+                  checked={nameFields[field]}
+                  onChange={event => setNameFields(current => ({ ...current, [field]: event.target.checked }))}
+                  className="accent-emerald-600"
+                />
+                {label}
+              </label>
+            ))}
+          </div>
+          <p className="mt-2 text-[10px] leading-relaxed text-slate-400">勾选后即时更新预览与导出；全部取消且不添加编号时保留原文件名。手动修改的名称优先，可点击“恢复自动命名”应用勾选规则。</p>
+        </fieldset>
 
         {previewItems.length === 0 ? (
           <div className="flex min-h-[220px] flex-col items-center justify-center rounded-3xl border border-dashed border-slate-200 bg-slate-50/60 text-center">
             <Music2 className="mb-3 h-8 w-8 text-slate-300" />
             <p className="text-sm font-black text-slate-500">还没有待分析音乐</p>
-            <p className="mt-1 text-xs text-slate-400">上传后会在这里显示 BPM、调式、风格、场景和新文件名。</p>
+            <p className="mt-1 text-xs text-slate-400">上传后会在这里显示 BPM、调式、情绪、场景和新文件名。</p>
           </div>
         ) : (
           <div className="overflow-x-auto rounded-2xl border border-slate-100">
-            <datalist id="music-style-suggestions">
-              {STYLE_OPTIONS.map(option => <option key={option} value={option} />)}
+            <datalist id="music-mood-suggestions">
+              {MOOD_OPTIONS.map(option => <option key={option} value={option} />)}
             </datalist>
             <datalist id="music-scene-suggestions">
               {SCENE_OPTIONS.map(option => <option key={option} value={option} />)}
             </datalist>
-            <div className="grid min-w-[820px] grid-cols-[minmax(190px,1fr)_82px_82px_120px_120px_180px] gap-3 bg-slate-50 px-4 py-3 text-[10px] font-black uppercase tracking-wide text-slate-400">
+            <div className="grid min-w-[820px] grid-cols-[minmax(160px,1fr)_110px_120px_120px_240px] gap-3 bg-slate-50 px-4 py-3 text-[10px] font-black uppercase tracking-wide text-slate-400">
               <span className="pl-6">原文件</span>
               <span>BPM / 调式</span>
-              <span>能量情绪</span>
-              <span className="px-2">风格</span>
+              <span className="px-2">情绪建议</span>
               <span className="px-2">场景</span>
               <span className="px-3">新文件名</span>
             </div>
             <div className="divide-y divide-slate-100">
               {previewItems.map((item) => (
-                <div key={item.id} className="grid min-w-[820px] grid-cols-[minmax(190px,1fr)_82px_82px_120px_120px_180px] gap-3 px-4 py-3 text-xs">
+                <div key={item.id} className="grid min-w-[820px] grid-cols-[minmax(160px,1fr)_110px_120px_120px_240px] gap-3 px-4 py-3 text-xs">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <FileAudio className="h-4 w-4 shrink-0 text-emerald-600" />
@@ -724,25 +654,17 @@ export default function MusicAnalysisNaming() {
                       </>
                     )}
                   </div>
-                  <div className="text-slate-600">
-                    {item.status === 'done' ? (
-                      <>
-                        <p className="font-bold">{item.energy || '-'}</p>
-                        <p className="text-[10px] text-slate-400">{item.mood || '-'}</p>
-                      </>
-                    ) : (
-                      <span className="text-slate-300">—</span>
-                    )}
-                  </div>
                   <input
-                    value={item.status === 'done' ? (item.style || '') : ''}
+                    aria-label={`${item.file.name} 情绪`}
+                    value={item.status === 'done' ? (item.mood || '') : ''}
                     disabled={item.status !== 'done'}
-                    onChange={(event) => updateItem(item.id, { style: event.target.value })}
-                    list="music-style-suggestions"
-                    placeholder={item.status === 'done' ? '可填多个风格' : ''}
+                    onChange={(event) => updateItem(item.id, { mood: event.target.value })}
+                    list="music-mood-suggestions"
+                    placeholder={item.status === 'done' ? '可填多个情绪' : ''}
                     className="h-9 w-full rounded-xl border border-slate-200 bg-white px-2 text-xs font-bold text-slate-700 outline-none focus:border-emerald-400 disabled:bg-slate-50 disabled:text-slate-300"
                   />
                   <input
+                    aria-label={`${item.file.name} 场景`}
                     value={item.status === 'done' ? (item.scene || '') : ''}
                     disabled={item.status !== 'done'}
                     onChange={(event) => updateItem(item.id, { scene: event.target.value })}
@@ -752,11 +674,12 @@ export default function MusicAnalysisNaming() {
                   />
                   <div className="min-w-0">
                     {item.status === 'done' && (
-                      <p className="mb-1 truncate px-3 text-[10px] font-bold text-slate-400" title={`风格候选：${item.styleCandidates?.join(' / ') || '-'}；场景候选：${item.sceneCandidates?.join(' / ') || '-'}`}>
-                        风格{item.styleConfidence}置信 · 场景{item.sceneConfidence}置信
+                      <p className="mb-1 truncate px-3 text-[10px] font-bold text-slate-400" title={item.semanticReason}>
+                        情绪{item.moodConfidence}置信 · 场景{item.sceneConfidence}置信
                       </p>
                     )}
                     <input
+                      aria-label={`${item.file.name} 新文件名`}
                       value={item.status === 'done' ? (item.manualOutputName ?? item.outputName ?? '') : ''}
                       disabled={item.status !== 'done'}
                       onChange={(event) => updateItem(item.id, { manualOutputName: event.target.value })}
