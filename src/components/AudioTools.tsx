@@ -95,7 +95,7 @@ const FACTORY_LOUDNESS_PRESETS = [
   { label: 'JK 其他', value: -26.5, hint: '-25 ~ -28 LUFS', group: '导出' },
   { label: '酒馆质疑', value: -20, hint: '-20 LUFS', group: '导出' },
   { label: '酒馆出牌', value: -25, hint: '-25 LUFS', group: '导出' },
-  { label: '游戏 BGM 音乐', value: -21.5, hint: '-20 ~ -23 LUFS', group: '游戏' },
+  { label: '游戏配乐', value: -21.5, hint: '-20 ~ -23 LUFS', group: '游戏' },
   { label: '游戏环境氛围', value: -35, hint: '-30 ~ -40 LUFS', group: '游戏' },
   { label: '游戏音效', value: -25, hint: '-20 ~ -30 LUFS', group: '游戏' },
   { label: '游戏语音', value: -16.5, hint: '-15 ~ -18 LUFS', group: '游戏' },
