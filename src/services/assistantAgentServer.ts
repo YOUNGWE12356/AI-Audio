@@ -15,9 +15,11 @@ import { isDirectStemSeparationRequest } from './assistantSeparationIntent';
 import { ASSISTANT_TOOL_PAGES, ASSISTANT_WORKSPACE_NAMES } from './assistantToolCatalog';
 import { getDirectAssistantPlan } from './assistantDirectPlan';
 import { replaceAssistantManifest } from './assistantManifest';
+import { inspectAssistantTools } from './assistantCapabilities';
 
 const INSTRUCTIONS = `你是AI Audio软件的自主执行助手，使用工具完成用户整个任务，而非只分析或打开页面。
 先理解目标与输入文件，自己选择所需工具、拆解依赖并执行。一次指令可以涉及多模块、多文件、多语种、批量制作。
+任务开始及用户补充信息后会提供当前软件真实功能清单。先分析任务，检查清单中的功能、所在页面、参数限制及预设；需要细查可用inspect_tools搜索。优先选native-page操作，工具会实际打开页面、导入素材、填写控件并调用原有按钮逻辑，不是只在对话中给建议。不得把service-operation说成已操作页面。界面已经提供的响度等预设直接复用（例如礼物=-16 LUFS），不得反问用户该标准数值；确实没有的自定义标准才提问。用户补充或更正一个参数时保留原任务的其余要求，不得丢掉压缩等目标。
 已接入原生页面的工具会自动打开对应功能、导入素材和填写参数，然后执行该页面原有按钮的操作；不要另造聊天框或任务面板。按用户目标串联工具，使用前一步返回的真实assetId继续，不得猜测输出ID。辅助检查和保存报告无需切换页面。缺少必要输入才提问，不要要求用户确认每个正常步骤。测速、测调使用analyze_music_metrics。
 用户要求压缩音频/音乐/文件时，默认用process_audio输出MP3，sampleRate=32000、bitrate=96；同时调整响度也沿用此压缩预设。用户明确指定其他采样率、码率、格式或要求保留参数时优先遵循。仅打包ZIP不能当成音频压缩，普通格式转换也不自动套用压缩预设。
 工具返回真实成功结果后才进入依赖它的步骤。所有生成、分轨、转换、混音工具会等待制作完成再返回；正在制作不是缺少人工干预，不要要求用户自己等待后点击下一步。独立子任务也必须实际调用，不可只描述计划。
@@ -42,6 +44,7 @@ type StoredJob = {
   settleWorkspace?: (result: Record<string, any>, error?: string) => void;
 };
 const TOOL_LABELS: Record<string, string> = {
+  inspect_tools: '检查功能与页面预设',
   inspect_assets: '检查任务素材', read_document: '读取文档', engine_status: '检查服务状态', list_voices: '匹配可用人声',
   translate_text: '翻译台词', enhance_voice_text: '调整台词语气', generate_speech: '生成配音', generate_speech_batch: '批量制作配音',
   generate_music: '生成音乐', generate_sound_effect: '生成音效', generate_lyrics: '创作歌词', edit_lyrics: '修改歌词', music_prompt: '编写音乐提示词',
@@ -203,7 +206,7 @@ export function createAssistantAgentRouter(options: Options) {
       return { audioUrl: result.url, asset: result };
     };
     const context: AgentToolContext = {
-      taskPrompt: [...(state.job.messages || [])].reverse().find(message => message.role === 'user')?.content || state.job.prompt,
+      taskPrompt: getAssistantMessages(state.job).filter(message => message.role === 'user').map(message => message.content).join('\n') || state.job.prompt,
       assets: state.job.assets, signal, request, asset, filePath, register, save,
       ffmpeg: args => new Promise((resolve, reject) => {
         execFile(options.ffmpegBinary, args, { timeout: 30 * 60_000, maxBuffer: 8 * 1024 * 1024, signal, windowsHide: true }, (error, stdout, stderr) => {
@@ -221,7 +224,7 @@ export function createAssistantAgentRouter(options: Options) {
       finish: (summary, ids) => {
         if (!summary?.trim() || !Array.isArray(ids)) throw new Error('缺少交付说明。');
         ids.forEach(id => { const a = asset(id); if (!a.size) throw new Error('产物尚未完成。'); });
-        if (!state.job.events.some(e => e.status === 'completed' && !['inspect_assets', 'finish_task'].includes(e.tool || ''))) throw new Error('尚未实际执行工具。');
+        if (!state.job.events.some(e => e.status === 'completed' && !['inspect_assets', 'inspect_tools', 'finish_task'].includes(e.tool || ''))) throw new Error('尚未实际执行工具。');
         if (state.job.events.filter(event => event.tool !== 'finish_task').at(-1)?.status === 'failed') throw new Error('上一制作步骤失败，尚不能交付完成。');
         if (state.job.workspaceCommand?.workspace === 'video-soundtrack' && !(state.job.workspaceCommand.action === 'export' && state.job.workspaceCommand.status === 'completed')) {
           context.review!({});
@@ -386,6 +389,12 @@ export function createAssistantAgentRouter(options: Options) {
             return standalone(args);
           };
         }
+        event('inspect_tools', 'running');
+        const capabilities = inspectAssistantTools(tools);
+        // Refresh after follow-ups and restored jobs too. Keep this context separate
+        // from user input and never rely on the model remembering stale UI presets.
+        state.input.push({ role: 'developer', content: `当前软件可执行功能与页面预设（由注册代码读取）：${JSON.stringify(capabilities)}` });
+        event('inspect_tools', 'completed');
         const result = await runAssistantLoop({ input: state.input, tools, signal,
           turn: async (input, tools) => {
             const quota = await request('/api/usage/quota');

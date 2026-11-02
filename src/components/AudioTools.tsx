@@ -41,6 +41,7 @@ import { useAssistantWorkspace, reportAssistantWorkspaceProgress } from '../serv
 import { useNativeAssistantTool } from '../services/useNativeAssistantTool';
 import { uploadNativeToolOutput } from '../services/assistantToolWorkspace';
 import { usePreparedAssistantTool } from '../services/usePreparedAssistantTool';
+import { FACTORY_LOUDNESS_PRESETS } from '../services/audioFactoryPresets';
 import type { SeparationWorkspaceOperation } from '../services/assistantSeparationWorkspace';
 import { applyBatchRenameRules, getRenamePreviewOperations } from '../utils/batchRename';
 import type { RenameCaseMode, RenameOperation, RenameRules, RenameRuleType } from '../utils/batchRename';
@@ -87,19 +88,6 @@ interface RenamePreviewItem {
   status: 'ready' | 'changed' | 'duplicate-fixed' | 'manual';
   statusLabel: string;
 }
-
-const FACTORY_LOUDNESS_PRESETS = [
-  { label: 'Avatar 出场', value: -13.5, hint: '-12 ~ -15 LUFS', group: '导出' },
-  { label: '礼物', value: -16, hint: '-15 ~ -17 LUFS', group: '导出' },
-  { label: 'JK 击杀', value: -21.5, hint: '-20 ~ -23 LUFS', group: '导出' },
-  { label: 'JK 其他', value: -26.5, hint: '-25 ~ -28 LUFS', group: '导出' },
-  { label: '酒馆质疑', value: -20, hint: '-20 LUFS', group: '导出' },
-  { label: '酒馆出牌', value: -25, hint: '-25 LUFS', group: '导出' },
-  { label: '游戏配乐', value: -21.5, hint: '-20 ~ -23 LUFS', group: '游戏' },
-  { label: '游戏环境氛围', value: -35, hint: '-30 ~ -40 LUFS', group: '游戏' },
-  { label: '游戏音效', value: -25, hint: '-20 ~ -30 LUFS', group: '游戏' },
-  { label: '游戏语音', value: -16.5, hint: '-15 ~ -18 LUFS', group: '游戏' },
-];
 
 const MIN_ANALYSIS_DB = -80;
 const AUDIO_TOOLS_SUBNAV_MIN_WIDTH = 64;

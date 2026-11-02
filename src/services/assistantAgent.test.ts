@@ -229,8 +229,10 @@ test('refreshing a workspace reattaches to generation without a duplicate paid r
   app.use(createAssistantWorkspaceOperationCache(req => String(req.header('x-test-user') || 'one')));
   let generations = 0;
   let release!: () => void;
+  let markStarted!: () => void;
+  const started = new Promise<void>(resolve => { markStarted = resolve; });
   const pending = new Promise<void>(resolve => { release = resolve; });
-  app.post('/api/video/generate-clip', async (_req, res) => { generations++; await pending; res.json({ audioUrl: '/uploads/real.wav' }); });
+  app.post('/api/video/generate-clip', async (_req, res) => { generations++; markStarted(); await pending; res.json({ audioUrl: '/uploads/real.wav' }); });
   const server = app.listen(0, '127.0.0.1');
   await new Promise<void>(resolve => server.once('listening', resolve));
   try {
@@ -238,6 +240,7 @@ test('refreshing a workspace reattaches to generation without a duplicate paid r
     const url = `http://127.0.0.1:${port}/api/video/generate-clip`;
     const headers = { 'content-type': 'application/json', 'x-assistant-workspace-operation': '12345678-1234-1234-1234-123456789abc:clip_1' };
     const first = fetch(url, { method: 'POST', headers, body: JSON.stringify({ text: 'hello' }) });
+    await started; // Ensure the initial operation owns the key before racing reconnects.
     const reconnected = fetch(url, { method: 'POST', headers, body: JSON.stringify({ text: 'hello' }) });
     const changed = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ text: 'different' }) });
     assert.equal(changed.status, 409);

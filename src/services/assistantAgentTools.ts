@@ -10,6 +10,8 @@ import { AUDIO_METRICS_MIME, createAudioEvidence } from '../utils/audioEvidence'
 import { readAssistantDocument } from './assistantDocument';
 import { NATIVE_ASSISTANT_TOOLS, canUseNativeAssistantTool } from './assistantToolCatalog';
 import { applyAssistantCompressionDefaults } from './assistantCompressionDefaults';
+import { applyFactoryLoudnessPreset } from './audioFactoryPresets';
+import { inspectAssistantTools } from './assistantCapabilities';
 
 type Args = Record<string, any>;
 export type AgentToolContext = {
@@ -65,6 +67,8 @@ export function createAssistantTools(c: AgentToolContext): AgentTool[] {
   const add = (name: string, description: string, properties: Args, required: string[], execute: AgentTool['execute']) => {
     tools.push({ name, description, parameters: object(properties, required), execute });
   };
+  add('inspect_tools', '检查本软件实际注册的功能、所在页面、自动执行支持范围及页面内现有预设。分析任务时先查找匹配功能，再调用它；响度标准从这里读取，不要求用户重复提供已存在的数值。query可按任务、模块或工具名搜索；留空返回全部。',
+    { query: str }, [], async ({ query }) => inspectAssistantTools(tools, String(query || '')));
   const json = (name: string, description: string, endpoint: string, properties: Args, required: string[] = []) =>
     add(name, description, properties, required, args => c.request(endpoint, args));
   const multipart = async (endpoint: string, args: Args, fields: Record<string, string>) => {
@@ -273,7 +277,7 @@ export function createAssistantTools(c: AgentToolContext): AgentTool[] {
     });
   add('process_audio', '本地音频工厂/编辑：裁剪、格式转换、提取视频音轨、采样率、比特率、单/立体声、响度、音量、变速、移调、淡入淡出、降噪。音频压缩默认MP3、32000Hz、96kbps；用户指定其他参数时优先遵循。多个处理可一次完成，源文件不覆盖。',
     { assetId: str, name: str, format: choice('wav', 'mp3', 'ogg', 'flac', 'aac', 'm4a'), start: num, duration: num,
-      sampleRate: num, bitrate: num, channels: choice('mono', 'stereo'), lufs: num, gainDb: num, speed: num, pitchSemitones: num, fadeIn: num, fadeOut: num, denoise: bool }, ['assetId', 'name'], async a => {
+      sampleRate: num, bitrate: num, channels: choice('mono', 'stereo'), loudnessPreset: str, lufs: num, gainDb: num, speed: num, pitchSemitones: num, fadeIn: num, fadeOut: num, denoise: bool }, ['assetId', 'name'], async a => {
       const source = c.asset(a.assetId);
       const format = a.format || 'wav';
       if (!['wav', 'mp3', 'ogg', 'flac', 'aac', 'm4a'].includes(format)) throw new Error('未知音频格式。');
@@ -485,6 +489,6 @@ export function createAssistantTools(c: AgentToolContext): AgentTool[] {
   }
   const processAudio = tools.find(tool => tool.name === 'process_audio')!;
   const executeAudio = processAudio.execute;
-  processAudio.execute = args => executeAudio(applyAssistantCompressionDefaults(args, c.taskPrompt));
+  processAudio.execute = args => executeAudio(applyFactoryLoudnessPreset(applyAssistantCompressionDefaults(args, c.taskPrompt), c.taskPrompt));
   return tools;
 }

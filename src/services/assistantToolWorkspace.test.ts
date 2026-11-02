@@ -101,6 +101,12 @@ test('native output upload requires ownership and a claim, and next step receive
     duration: async () => 1, identity: req => req.get('x-test-owner') || 'test',
     modelTurn: async ({ input }) => {
       turns++;
+      if (turns === 1) {
+        const capabilityContext = input.find(item => item.role === 'developer' && item.content.includes('当前软件可执行功能'));
+        assert.ok(capabilityContext, 'planner must receive real software capabilities before selecting any action');
+        assert.match(capabilityContext.content, /礼物/);
+        assert.match(capabilityContext.content, /native-page/);
+      }
       const call = (name: string, args: any) => ({ model: 'test', text: '', output: [{ type: 'function_call', name, arguments: JSON.stringify(args), call_id: String(turns) }] });
       if (turns === 1) return call('generate_sound_effect', { prompt: '奖励音效', name: '奖励' });
       const previous = JSON.parse(input.at(-1).output);
