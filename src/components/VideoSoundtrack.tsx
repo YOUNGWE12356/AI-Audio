@@ -61,6 +61,10 @@ import {
   distributeManagedSfxClips,
   isAutoSfxTrackId,
 } from '../utils/sfxTrackLayout';
+import {
+  DETAILED_SFX_FRAME_INTERVAL_SECONDS,
+  getDetailedSfxFrameCount,
+} from '../utils/videoAnalysisDensity';
 
 const MAX_VIDEO_UPLOAD_BYTES = 100 * 1024 * 1024;
 const DEFAULT_DUBBING_VOICE_ID = '';
@@ -3693,6 +3697,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
   const selectedTrackVoice = selectedTrackVoiceId
     ? displayVoices.find(voice => voice.id === selectedTrackVoiceId)
     : undefined;
+  const selectedDubbingTrackHasVoice = Boolean(selectedTrackVoiceId);
   const activeVoiceRecommendationTrackId = selectedTrack?.id || selectedClipTrack?.id || '';
   const activeTrackVoiceRecommendations = activeVoiceRecommendationTrackId
     ? similarVoiceRecommendationsByTrackId[activeVoiceRecommendationTrackId]
@@ -5011,9 +5016,11 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
         setAnalysisStage('正在逐帧识别画面字幕并匹配每句时间...');
       } else if (selectedFile) {
         try {
-          setAnalysisStage('正在提取关键帧...');
+          const detailedSfxAnalysis = analysisSfxEnabled;
+          setAnalysisStage(detailedSfxAnalysis ? '正在密集提取音效画面...' : '正在提取关键帧...');
           keyframes = await extractVideoKeyframes(selectedFile, {
-            maxFrames: 6,
+            maxFrames: detailedSfxAnalysis ? getDetailedSfxFrameCount(videoDuration) : 6,
+            frameIntervalSeconds: detailedSfxAnalysis ? DETAILED_SFX_FRAME_INTERVAL_SECONDS : undefined,
             maxDimension: 512,
             jpegQuality: 0.68,
             signal: controller.signal,
@@ -5299,9 +5306,11 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
         setAnalysisStage('正在逐帧重新识别字幕及每句时间...');
       } else if (selectedFile) {
         try {
-          setAnalysisStage('正在提取关键画面...');
+          const detailedSfxAnalysis = trackId === 'sfx';
+          setAnalysisStage(detailedSfxAnalysis ? '正在密集提取音效画面...' : '正在提取关键画面...');
           keyframes = await extractVideoKeyframes(selectedFile, {
-            maxFrames: 6,
+            maxFrames: detailedSfxAnalysis ? getDetailedSfxFrameCount(videoDuration) : 6,
+            frameIntervalSeconds: detailedSfxAnalysis ? DETAILED_SFX_FRAME_INTERVAL_SECONDS : undefined,
             maxDimension: 512,
             jpegQuality: 0.68,
             signal: controller.signal,
@@ -5728,6 +5737,10 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
         duration: trackType === 'bgm' ? targetGenerationDuration : latestClip.duration,
         audioUrl: data.audioUrl,
         audioSource: 'generated',
+        generationSource: data.generationSource,
+        sourceTitle: data.sourceTitle,
+        sourceAuthor: data.sourceAuthor,
+        sourceUrl: data.sourceUrl,
         sourceAudioDuration,
         autoSpeed: nextAutoSpeed,
         speed: normalizeManualSpeed(latestClip.speed),
@@ -5749,6 +5762,10 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
           duration: trackType === 'bgm' ? targetGenerationDuration : c.duration,
           audioUrl: data.audioUrl,
           audioSource: 'generated',
+          generationSource: data.generationSource,
+          sourceTitle: data.sourceTitle,
+          sourceAuthor: data.sourceAuthor,
+          sourceUrl: data.sourceUrl,
           isGenerating: false,
           sourceAudioDuration,
           autoSpeed: trackType === 'dubbing'
@@ -5790,7 +5807,9 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                   ? `“${clip.name}”已按 ${nextAutoSpeed.toFixed(2)}x 自动匹配字幕时长。`
                   : trackType === 'bgm'
                     ? `“${clip.name}”已使用 ElevenLabs Music ${data.model || 'music_v2'} 生成，并匹配到视频结尾。`
-                    : `成功为“${clip.name}”合成 ${displayTypeLabel}！`,
+                    : data.generationSource === 'online-search'
+                      ? `“${clip.name}”已优先使用联网素材${data.sourceTitle ? `：${data.sourceTitle}` : ''}。`
+                      : `“${clip.name}”未找到可用联网素材，已自动使用 ElevenLabs 合成${displayTypeLabel}。`,
           type: voiceChangedDuringGeneration || timingChangedDuringGeneration || durationReadFailed
             ? 'info'
             : 'success'
@@ -5899,6 +5918,12 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
 
     const track = tracksRef.current.find(item => item.id === trackId);
     if (!track || track.type !== 'dubbing' || track.id === SPLIT_VOCAL_TRACK_ID) return;
+
+    if (!track.defaultVoiceId) {
+      setToast({ message: `请先为“${track.name}”选择人声，再进行整轨合成。`, type: 'info' });
+      window.setTimeout(() => setToast(null), 3_000);
+      return;
+    }
 
     const trackClips = clipsRef.current
       .filter(clip => clip.trackId === trackId && !isOriginalAudioClip(clip))
@@ -9151,7 +9176,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                           {selectedSfxTrackPendingClips.length > 0 && (
                             <div className="flex justify-end">
                               <PointCostHint
-                                kind="sound-effect"
+                                kind="timeline-sfx"
                                 durationSeconds={selectedSfxTrackPendingClips.reduce((total, clip) => total + clip.duration, 0)}
                                 className="text-amber-300"
                               />
@@ -9234,6 +9259,16 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                             </span>
                           </div>
 
+                          {!selectedDubbingTrackHasVoice && (
+                            <div
+                              data-testid={`dubbing-track-voice-required-${selectedTrack.id}`}
+                              className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[9px] leading-relaxed text-amber-200"
+                            >
+                              <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                              <span>请先在下方人声库中选择一个人声，选择后才能一键合成或重新生成整轨。</span>
+                            </div>
+                          )}
+
                           {selectedDubbingTrackJob && (
                             <div data-testid={`dubbing-track-generation-progress-${selectedTrack.id}`} className="space-y-1.5">
                               <div className="flex items-center justify-between text-[9px] font-bold text-purple-200">
@@ -9280,14 +9315,17 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                               onClick={() => void handleGenerateDubbingTrack(selectedTrack.id, 'pending')}
                               disabled={
                                 Boolean(dubbingTrackGenerationJob)
+                                || !selectedDubbingTrackHasVoice
                                 || selectedDubbingTrackClips.length === 0
                                 || selectedDubbingTrackPendingClips.length === 0
                                 || selectedDubbingTrackClips.some(clip => clip.isGenerating)
                               }
                               aria-label={`一键合成${selectedTrack.name}全部待处理片段`}
-                              title={selectedDubbingTrackPendingClips.length > 0
-                                ? `合成 ${selectedDubbingTrackPendingClips.length} 个未生成或需要更新的片段`
-                                : '本轨全部片段均已完成'}
+                              title={!selectedDubbingTrackHasVoice
+                                ? '请先选择轨道人声'
+                                : selectedDubbingTrackPendingClips.length > 0
+                                  ? `合成 ${selectedDubbingTrackPendingClips.length} 个未生成或需要更新的片段`
+                                  : '本轨全部片段均已完成'}
                               className="flex h-9 min-w-0 items-center justify-center gap-1.5 rounded-lg bg-purple-600 px-2 text-[10px] font-bold text-white shadow-sm shadow-purple-950/40 transition-colors hover:bg-purple-500 disabled:cursor-not-allowed disabled:opacity-45"
                             >
                               {selectedDubbingTrackJob?.mode === 'pending' ? (
@@ -9303,15 +9341,18 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                               onClick={() => handleRequestRegenerateDubbingTrack(selectedTrack.id)}
                               disabled={
                                 Boolean(dubbingTrackGenerationJob)
+                                || !selectedDubbingTrackHasVoice
                                 || selectedDubbingTrackClips.length === 0
                                 || selectedDubbingTrackClips.some(clip => clip.isGenerating)
                               }
                               aria-label={dubbingTrackRegenerationConfirmId === selectedTrack.id
                                 ? `确认重新生成${selectedTrack.name}全部片段`
                                 : `重新生成${selectedTrack.name}全部片段`}
-                              title={dubbingTrackRegenerationConfirmId === selectedTrack.id
-                                ? '再次点击后将替换本轨全部音频并产生新的模型用量'
-                                : '重新生成本轨全部配音片段，并替换现有音频'}
+                              title={!selectedDubbingTrackHasVoice
+                                ? '请先选择轨道人声'
+                                : dubbingTrackRegenerationConfirmId === selectedTrack.id
+                                  ? '再次点击后将替换本轨全部音频并产生新的模型用量'
+                                  : '重新生成本轨全部配音片段，并替换现有音频'}
                               className={`flex h-9 min-w-0 items-center justify-center gap-1.5 rounded-lg border px-2 text-[10px] font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
                                 dubbingTrackRegenerationConfirmId === selectedTrack.id
                                   ? 'border-amber-400/60 bg-amber-500/20 text-amber-200 hover:bg-amber-500/30'
@@ -10147,7 +10188,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
                       )}
                       {!selectedClipIsOriginalAudio && selectedClipTrack?.type === 'sfx' && (
                         <div className="mb-2 flex justify-end">
-                          <PointCostHint kind="sound-effect" durationSeconds={selectedClip.duration} />
+                          <PointCostHint kind="timeline-sfx" durationSeconds={selectedClip.duration} />
                         </div>
                       )}
                       {selectedClip.audioUrl ? (

@@ -6,24 +6,28 @@ export type PointCostKind =
   | 'tts-fast'
   | 'music'
   | 'sound-effect'
+  | 'timeline-sfx'
   | 'voice-changer'
   | 'audio-isolation'
   | 'speech-to-text'
   | 'dubbing-v2'
   | 'token'
-  | 'token-audio';
+  | 'token-audio'
+  | 'online-sfx';
 
 const RATE = {
   'tts-standard': { unit: 'character', value: 0.1, label: '100 分 / 千字符' },
   'tts-fast': { unit: 'character', value: 0.05, label: '50 分 / 千字符' },
   music: { unit: 'second', value: 2.5, label: '2.5 分 / 秒 / 版本' },
   'sound-effect': { unit: 'second', value: 2, label: '2 分 / 秒 / 版本' },
+  'timeline-sfx': { unit: 'second', value: 2, label: '优先联网 1 分 / 片段；未命中才按 2 分 / 秒使用 ElevenLabs' },
   'voice-changer': { unit: 'second', value: 2, label: '120 分 / 分钟 / 版本' },
   'audio-isolation': { unit: 'second', value: 2, label: '120 分 / 分钟' },
   'speech-to-text': { unit: 'second', value: 36 / 60, label: '36 分 / 分钟' },
   'dubbing-v2': { unit: 'second', value: 2204 / 60, label: '约 2,204 分 / 源分钟' },
   token: { unit: 'token', value: 0, label: '按 Token 结算，最低 1 分 / 次' },
   'token-audio': { unit: 'token', value: 0, label: '按 Token 结算；原生听音最低 10 分 / 次' },
+  'online-sfx': { unit: 'capture', value: 1, label: '搜索成功 1 分 / 批，每批最多 100 条' },
 } as const;
 
 const countCharacters = (text: string) => Array.from(text.trim()).length;
@@ -40,7 +44,7 @@ export const estimateCompanyPoints = ({
   outputs?: number;
 }) => {
   const rate = RATE[kind];
-  if (rate.unit === 'token') return null;
+  if (rate.unit === 'token' || rate.unit === 'capture') return null;
   const quantity = rate.unit === 'character' ? countCharacters(text) : durationSeconds;
   if (!quantity || !Number.isFinite(quantity)) return null;
   return Math.max(0.1, quantity * rate.value * Math.max(1, outputs));
@@ -103,7 +107,11 @@ export default function PointCostHint({
   const pendingLabel = rate.unit === 'character'
     ? '输入内容后显示预计积分'
     : '选择素材后显示预计积分';
-  const label = rate.unit === 'token'
+  const label = kind === 'timeline-sfx'
+    ? points === null
+      ? '优先联网 1 分 / 片段；未命中才使用 ElevenLabs'
+      : `优先联网 1 分 / 片段；未命中后预计 ${formatPoints(points)} 积分`
+    : rate.unit === 'token' || rate.unit === 'capture'
     ? rate.label
     : points === null
       ? `${pendingLabel}${outputLabel}`

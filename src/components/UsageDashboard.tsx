@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
-import { Ban, Bot, Check, ChevronDown, Coins, Cpu, Laptop, Minus, Pencil, Plus, RefreshCw, RotateCcw, ShieldCheck, Sparkles, TriangleAlert, Users, X } from 'lucide-react';
+import { Ban, Bot, Check, ChevronDown, Coins, Cpu, Globe, Laptop, Minus, Pencil, Plus, RefreshCw, RotateCcw, ShieldCheck, Sparkles, TriangleAlert, Users, X } from 'lucide-react';
 import {
   ElevenLabsQuotaSummary,
   ElevenLabsQuotaUser,
@@ -203,6 +203,7 @@ const PROVIDERS: Array<{
   { key: 'elevenLabs', label: 'ElevenLabs', icon: Coins, iconClass: 'bg-fuchsia-50 text-fuchsia-700' },
   { key: 'legacy', label: '历史 AI', icon: Sparkles, iconClass: 'bg-slate-50 text-slate-700' },
   { key: 'gpt', label: 'GPT', icon: Bot, iconClass: 'bg-emerald-50 text-emerald-700' },
+  { key: 'onlineSfx', label: '联网素材', icon: Globe, iconClass: 'bg-sky-50 text-sky-700' },
 ];
 
 const PERIOD_OPTIONS: Array<{ value: UsagePeriod; label: string }> = [
@@ -226,7 +227,10 @@ function ProviderSummary({
   };
 }) {
   const Icon = provider.icon;
-  const primaryValue = provider.key === 'elevenLabs' ? formatCredits(usage.credits) : formatInteger(usage.totalTokens);
+  const isPointProvider = provider.key === 'elevenLabs' || provider.key === 'onlineSfx';
+  const primaryValue = provider.key === 'elevenLabs'
+    ? formatCredits(usage.credits)
+    : provider.key === 'onlineSfx' ? formatCredits(usage.companyPoints) : formatInteger(usage.totalTokens);
   return (
     <div className="flex h-full min-h-[138px] flex-col rounded-lg border border-slate-200 bg-white p-4">
       <div className="flex items-center justify-between gap-3">
@@ -244,7 +248,7 @@ function ProviderSummary({
         </span>
       </div>
       <div className="mt-4">
-        <p className="text-[10px] text-slate-400">{provider.key === 'elevenLabs' ? '已消耗积分' : '总 Token'}</p>
+        <p className="text-[10px] text-slate-400">{isPointProvider ? '已消耗积分' : '总 Token'}</p>
         <p className="mt-1 font-mono text-2xl font-semibold text-slate-900">{primaryValue}</p>
       </div>
       {provider.key === 'elevenLabs' && billingCycle ? (
@@ -256,7 +260,7 @@ function ProviderSummary({
           <p className="mt-1 font-mono text-lg font-semibold text-fuchsia-950">{formatCredits(billingCycle.credits)}</p>
         </div>
       ) : null}
-      {provider.key !== 'elevenLabs' ? (
+      {!isPointProvider ? (
         <div className="mt-3 grid grid-cols-3 gap-2 border-t border-slate-100 pt-3 text-[10px]">
           <span className="text-slate-400">输入 <b className="block font-mono text-xs text-slate-700">{formatInteger(usage.inputTokens)}</b></span>
           <span className="text-slate-400">输出 <b className="block font-mono text-xs text-slate-700">{formatInteger(usage.outputTokens)}</b></span>
@@ -292,7 +296,9 @@ function ProviderSummary({
 }
 
 const providerLabel = (provider: UsageUser['details'][number]['provider']) => (
-  provider === 'elevenlabs' ? 'ElevenLabs' : provider === 'legacy' ? '历史 AI' : 'GPT'
+  provider === 'elevenlabs' ? 'ElevenLabs'
+    : provider === 'legacy' ? '历史 AI'
+      : provider === 'network' ? '联网素材' : 'GPT'
 );
 
 function MemberUsageTable({
@@ -443,10 +449,10 @@ function MemberUsageTable({
                                   <td className="py-2 text-right font-mono">{formatInteger(detail.requests)}</td>
                                   <td className="py-2 text-right font-mono">{formatBillingQuantity(detail.billingQuantity, detail.billingUnit)}</td>
                                   <td className="py-2 text-right font-mono">{detail.companyPoints > 0 ? formatCredits(detail.companyPoints) : '-'}</td>
-                                  <td className="py-2 text-right font-mono">{detail.provider === 'elevenlabs' ? '-' : formatInteger(detail.inputTokens)}</td>
-                                  <td className="py-2 text-right font-mono">{detail.provider === 'elevenlabs' ? '-' : formatInteger(detail.outputTokens)}</td>
-                                  <td className="py-2 text-right font-mono">{detail.provider === 'elevenlabs' ? '-' : formatInteger(detail.reasoningTokens)}</td>
-                                  <td className="py-2 text-right font-mono font-semibold text-slate-700">{detail.provider === 'elevenlabs' ? '-' : formatInteger(detail.totalTokens)}</td>
+                                  <td className="py-2 text-right font-mono">{detail.provider === 'elevenlabs' || detail.provider === 'network' ? '-' : formatInteger(detail.inputTokens)}</td>
+                                  <td className="py-2 text-right font-mono">{detail.provider === 'elevenlabs' || detail.provider === 'network' ? '-' : formatInteger(detail.outputTokens)}</td>
+                                  <td className="py-2 text-right font-mono">{detail.provider === 'elevenlabs' || detail.provider === 'network' ? '-' : formatInteger(detail.reasoningTokens)}</td>
+                                  <td className="py-2 text-right font-mono font-semibold text-slate-700">{detail.provider === 'elevenlabs' || detail.provider === 'network' ? '-' : formatInteger(detail.totalTokens)}</td>
                                 </tr>
                               ))}
                             </tbody>
@@ -480,7 +486,7 @@ function ModelUsageTable({ rows }: { rows: ModelUsageRow[] }) {
     <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
       <div className="flex flex-col gap-1 border-b border-slate-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <h3 className="text-xs font-bold text-slate-700">按模型统计</h3>
-        <p className="text-[10px] text-slate-400">ElevenLabs 按积分统计；GPT 和历史 AI 按总 Token 统计。</p>
+        <p className="text-[10px] text-slate-400">ElevenLabs 与联网素材按积分统计；GPT 和历史 AI 按总 Token 统计。</p>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[760px] text-left text-[11px]">
@@ -595,8 +601,10 @@ export default function UsageDashboard({
   const rows = useMemo(() => summary ? PROVIDERS.flatMap(provider => (
     summary.providers[provider.key].features.map(feature => ({ provider, feature }))
   )).sort((left, right) => {
-    const leftAmount = left.provider.key === 'elevenLabs' ? left.feature.credits : left.feature.totalTokens;
-    const rightAmount = right.provider.key === 'elevenLabs' ? right.feature.credits : right.feature.totalTokens;
+    const leftAmount = left.provider.key === 'elevenLabs' ? left.feature.credits
+      : left.provider.key === 'onlineSfx' ? left.feature.companyPoints : left.feature.totalTokens;
+    const rightAmount = right.provider.key === 'elevenLabs' ? right.feature.credits
+      : right.provider.key === 'onlineSfx' ? right.feature.companyPoints : right.feature.totalTokens;
     return rightAmount - leftAmount;
   }) : [], [summary]);
 
@@ -605,7 +613,7 @@ export default function UsageDashboard({
       provider,
       model: model.model,
       amount: model.amount,
-      unit: provider.key === 'elevenLabs' ? '积分' as const : 'Token' as const,
+      unit: provider.key === 'elevenLabs' || provider.key === 'onlineSfx' ? '积分' as const : 'Token' as const,
     }))
   )).sort((left, right) => right.amount - left.amount) : [], [summary]);
 
@@ -713,7 +721,7 @@ export default function UsageDashboard({
         </div>
       ) : summary ? (
         <>
-          <div className="mt-4 grid gap-3 lg:grid-cols-3">
+          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
             {PROVIDERS.map(provider => (
               <div key={provider.key} className="h-full">
                 <ProviderSummary
@@ -799,10 +807,10 @@ export default function UsageDashboard({
                       <td className="px-3 py-3 text-right font-mono">{formatBillingQuantity(feature.billingQuantity, feature.billingUnit)}</td>
                       <td className="px-3 py-3 text-right font-mono">{feature.companyPoints > 0 ? formatCredits(feature.companyPoints) : '-'}</td>
                       <td className="px-3 py-3 text-right font-mono">{provider.key === 'elevenLabs' ? formatCredits(feature.credits) : '-'}</td>
-                      <td className="px-3 py-3 text-right font-mono">{provider.key === 'elevenLabs' ? '-' : formatInteger(feature.inputTokens)}</td>
-                      <td className="px-3 py-3 text-right font-mono">{provider.key === 'elevenLabs' ? '-' : formatInteger(feature.outputTokens)}</td>
-                      <td className="px-3 py-3 text-right font-mono">{provider.key === 'elevenLabs' ? '-' : formatInteger(feature.reasoningTokens)}</td>
-                      <td className="px-4 py-3 text-right font-mono font-semibold text-slate-800">{provider.key === 'elevenLabs' ? '-' : formatInteger(feature.totalTokens)}</td>
+                      <td className="px-3 py-3 text-right font-mono">{provider.key === 'elevenLabs' || provider.key === 'onlineSfx' ? '-' : formatInteger(feature.inputTokens)}</td>
+                      <td className="px-3 py-3 text-right font-mono">{provider.key === 'elevenLabs' || provider.key === 'onlineSfx' ? '-' : formatInteger(feature.outputTokens)}</td>
+                      <td className="px-3 py-3 text-right font-mono">{provider.key === 'elevenLabs' || provider.key === 'onlineSfx' ? '-' : formatInteger(feature.reasoningTokens)}</td>
+                      <td className="px-4 py-3 text-right font-mono font-semibold text-slate-800">{provider.key === 'elevenLabs' || provider.key === 'onlineSfx' ? '-' : formatInteger(feature.totalTokens)}</td>
                     </tr>
                   ))}
                   {rows.length === 0 ? (

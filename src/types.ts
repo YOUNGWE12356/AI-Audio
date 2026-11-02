@@ -53,6 +53,10 @@ export interface TimelineClip {
   muted?: boolean; // Clip/event mute
   audioUrl?: string; // Generated or uploaded file URL
   audioSource?: 'generated' | 'uploaded';
+  generationSource?: 'online-search' | 'elevenlabs'; // Provider path used for generated SFX audio
+  sourceTitle?: string; // Original online sound title when generationSource is online-search
+  sourceAuthor?: string;
+  sourceUrl?: string;
   sourceOffset?: number; // Offset in the source audio file, used when a clip has been cut from a longer source
   fadeIn?: number; // Fade-in duration in seconds
   fadeOut?: number; // Fade-out duration in seconds

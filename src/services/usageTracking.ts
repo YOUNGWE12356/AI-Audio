@@ -1,5 +1,5 @@
 export type AiUsageEvent = {
-  provider: 'elevenlabs' | 'legacy' | 'gpt';
+  provider: 'elevenlabs' | 'legacy' | 'gpt' | 'network';
   model: string;
   inputTokens: number;
   outputTokens: number;

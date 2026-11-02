@@ -3,6 +3,7 @@ import { setClientIdentityHeader } from './clientIdentity';
 import { normalizeAudioDesignSfxSchemes } from '../utils/audioDesignNaming';
 import { AUDIO_METRICS_MIME, AUDIO_EVIDENCE_RULES, validateAudioEvidence, type AudioMetricEvidence } from '../utils/audioEvidence';
 import { isBgmImportFileName, normalizeRequirementEngineeringNames, normalizeUcsImportFileName, normalizeUcsRequirementItems, UCS_CATALOG_PROMPT, UCS_CATALOG_VERSION } from './ucsNaming';
+import { generateRequirementsInBackground } from './sfxRequirementsClient';
 
 const isBrowser = typeof window !== 'undefined';
 
@@ -1355,11 +1356,14 @@ const SUNNY_ISLAND_NAMING_GUIDE = `
 const extractSunnyIslandReferenceNames = async (
   Type: any,
   referenceFile: { data: string; mimeType: string },
+  signal?: AbortSignal,
 ): Promise<string[]> => {
   if (!referenceFile.mimeType.toLowerCase().startsWith('image/')) return [];
 
   try {
     const response = await generateAiContent({
+      timeoutMs: 240_000,
+      signal,
       contents: [{
         parts: [
           {
@@ -1475,6 +1479,7 @@ export async function generateSfxRequirements(
   templateType: 'game_sfx_general' | 'game_sfx_middleware' | 'voiceover_general' | 'voiceover_multilang',
   projectName: string | null = null,
   existingItems: ExistingSfxRequirementItem[] = [],
+  options: { onProgress?: (message: string) => void; signal?: AbortSignal } = {},
 ): Promise<{ items: any[]; sourceItemCount?: number }> {
   if (referenceFile && !/^(?:image|video)\//i.test(referenceFile.mimeType)) {
     throw Object.assign(new Error('音效需求表只支持图片/截图或视频参考，不支持音频参考。'), { status: 400 });
@@ -1494,13 +1499,13 @@ export async function generateSfxRequirements(
   }
 
   if (isBrowser) {
-    return postJson<{ items: any[]; sourceItemCount?: number }>('/api/ai/sfx-requirements', {
+    return generateRequirementsInBackground({
       inputText,
       screenshot: referenceFile,
       templateType,
       projectName,
       existingItems,
-    });
+    }, options.onProgress);
   }
 
   const { Type, ThinkingLevel } = getAI();
@@ -1693,7 +1698,7 @@ export async function generateSfxRequirements(
     `;
 
   const sunnyIslandReferenceNames = isSunnyIslandProject && referenceFile
-    ? await extractSunnyIslandReferenceNames(Type, referenceFile)
+    ? await extractSunnyIslandReferenceNames(Type, referenceFile, options.signal)
     : [];
   const sunnyIslandReferenceContext = sunnyIslandReferenceNames.length > 0
     ? `
@@ -1822,14 +1827,18 @@ export async function generateSfxRequirements(
   }
 
   for (let attempt = 0; attempt < (useUcsSfxNaming ? 2 : 1); attempt++) {
+    options.signal?.throwIfAborted();
+    options.onProgress?.(attempt ? '正在修正 UCS 分类并重新校验需求表。' : 'AI 正在识别素材并生成完整需求表，服务器仍在处理，请等待结果。');
     const response = await generateAiContent({
+      timeoutMs: 240_000,
+      signal: options.signal,
       contents: [{ parts: attempt === 0 ? parts : [
         ...parts,
         { text: '上次返回含无效 UCS CatID。请重新生成完整 JSON；每条 SFX 的 filename 格式必须为 Sfx_CatID_FXName，Sfx_ 后使用本提示中的真实 CatID。BGM/VO 不使用 CatID。' },
       ] }],
       config: {
         responseMimeType: "application/json",
-        maxOutputTokens: 12_288,
+        maxOutputTokens: 20_480,
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
         responseSchema: schema
       }
@@ -1844,6 +1853,7 @@ export async function generateSfxRequirements(
       console.error('需求表 JSON 解析失败:', { length: response.text.length, error });
       throw new Error("AI 返回的需求表结果过长或格式不完整，请减少需求数量后重试。");
     }
+    options.onProgress?.('AI 已返回结果，正在校验命名和表格内容。');
     const items = Array.isArray(parsed.items) ? parsed.items : [];
     const checked = useUcsSfxNaming
       ? normalizeUcsRequirementItems(items, templateType)

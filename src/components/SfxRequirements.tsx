@@ -256,15 +256,6 @@ const getUncoveredRequirementText = (currentText: string, existingRows: any[], t
   return uncoveredSegments.join('，');
 };
 
-const LOADING_STEPS = [
-  "AI 正在识别用户上传的参考文件与文字...",
-  "正在提取表格、画面或字幕线索...",
-  "正在应用专业音频工程规范重构文件名...",
-  "正在扩充细致、具体的声学材质与动效描述...",
-  "正在转换语境并生成多国台词对照...",
-  "正在为您进行高精度的排版排程，即将呈现..."
-];
-
 const MAX_REFERENCE_FILE_BYTES = 80 * 1024 * 1024;
 
 const isSupportedReferenceFile = (file: File) => (
@@ -726,7 +717,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
 
   // Loading & Error states
   const [loading, setLoading] = useState(false);
-  const [loadingStep, setLoadingStep] = useState(0);
+  const [loadingMessage, setLoadingMessage] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   const [successMessage, setSuccessMessage] = useState('已根据您的要求完美扩充并格式化。您可直接在下方表格中修改任何单元格！');
@@ -1118,12 +1109,12 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
 
   const extractVideoSubtitleVoRows = async (file: File) => {
     if (!file.type.startsWith('video/')) return [];
-    setLoadingStep(1);
+    setLoadingMessage('正在上传视频并准备识别画面字幕…');
     const [fileName, videoDuration] = await Promise.all([
       uploadRequirementVideoForSubtitleAnalysis(file),
       getVideoDurationFromFile(file),
     ]);
-    setLoadingStep(2);
+    setLoadingMessage('正在识别视频字幕和配音时间点…');
     const response = await fetch('/api/video/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1179,7 +1170,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
     setError(null);
     setSuccess(false);
     setActiveGenerateMode(mode);
-    setLoadingStep(0);
+    setLoadingMessage('正在准备需求表任务…');
     const requestTemplateType = templateType;
     const requestProject = selectedProject;
     const requestProjectName = selectedProjectName;
@@ -1202,11 +1193,6 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
       ? `继续添加模式：本次用户新补充的需求描述如下，请优先只根据这些新补充内容生成新行，不要重复当前表格已有需求。\n${appendAddedInputText}`
       : currentInputText;
 
-    // Start automated loading step simulator
-    const interval = setInterval(() => {
-      setLoadingStep(prev => (prev < LOADING_STEPS.length - 1 ? prev + 1 : prev));
-    }, 4500);
-
     try {
       let imageObj = null;
       if (requestReferenceBase64 && requestReferenceFile) {
@@ -1228,6 +1214,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
           requestTemplateType,
           requestProjectName,
           requestExistingItems,
+          { onProgress: setLoadingMessage },
         ),
         detectedVoRowsPromise,
       ]);
@@ -1300,7 +1287,6 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
       setError(err.message || '生成音效需求表失败，请检查大模型调用状态并重试。');
       if (assistant) throw err;
     } finally {
-      clearInterval(interval);
       setLoading(false);
     }
   };
@@ -1678,12 +1664,12 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
             </div>
             <div className="text-center space-y-1">
               <p className="text-sm font-bold text-slate-800">AI 音频设计师正在全力处理中</p>
-              <p className="text-[11px] text-emerald-600 font-mono tracking-wider animate-pulse">
-                {LOADING_STEPS[loadingStep]}
+              <p role="status" className="text-[11px] text-emerald-600 font-mono tracking-wider animate-pulse">
+                {loadingMessage}
               </p>
             </div>
             <p className="text-[10px] text-slate-400 max-w-sm text-center leading-relaxed">
-              AI 正在识别参考文件并整理需求。包含图片或表格时，处理可能需要一些时间。
+              后台任务处理中，页面会持续查询真实状态。短暂断线会自动重连，结果完成后自动填入表格。
             </p>
           </motion.div>
         )}

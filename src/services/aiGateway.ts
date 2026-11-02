@@ -27,7 +27,7 @@ type ResponseBody = {
 };
 type InputPart = { type: 'input_text'; text: string } | { type: 'input_image'; image_url: string };
 type CompatibleInput = { hasImage: boolean; input: string | Array<{ role: 'user'; content: InputPart[] }> };
-export type AiContentRequest = { contents: unknown; config?: Record<string, any>; model?: string };
+export type AiContentRequest = { contents: unknown; config?: Record<string, any>; model?: string; timeoutMs?: number; signal?: AbortSignal };
 export type AiContentResponse = { text: string; modelVersion: string };
 
 const trimTrailingSlashes = (value: string) => value.replace(/\/+$/, '');
@@ -178,7 +178,15 @@ export const generateAiContent = async (request: AiContentRequest): Promise<AiCo
   if (config.responseSchema) body.text = { format: { type: 'json_schema', name: 'ai_audio_response', strict: false,
     schema: normalizeSchema(config.responseSchema) } };
   const startedAt = Date.now();
-  const result = await requestGateway(gateway, body, 90_000);
+  const timeoutMs = request.timeoutMs ?? 90_000;
+  let result: ResponseBody;
+  try {
+    result = await requestGateway(gateway, body, timeoutMs, request.signal);
+  } catch (error: any) {
+    console.warn(`[ai-router] ${hasImage ? 'Vision' : 'Text'} request failed via ${gateway.provider} after ${Date.now() - startedAt}ms (${error?.name || 'Error'}, status=${error?.status || 'unknown'}).`);
+    if (error?.name === 'TimeoutError') throw Object.assign(new Error(`AI 网关超过 ${Math.round(timeoutMs / 1000)} 秒未返回结果，请稍后重试或减少单次需求数量。`), { status: 504 });
+    throw error;
+  }
   const text = extractText(result);
   if (!text) throw new Error('AI gateway returned no text output.');
   if (config.responseSchema) JSON.parse(text);

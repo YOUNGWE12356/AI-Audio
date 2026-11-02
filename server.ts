@@ -24,9 +24,22 @@ import { createAssistantWorkspaceOperationCache } from './src/services/assistant
 import { detectMediaAudioStream } from './src/services/mediaStreamProbe';
 import { resolveVideoMixAudioInputs } from './src/services/videoMixInputs';
 import { createMusicSeparationRouter } from './src/services/musicSeparationServer';
+import {
+  createOnlineSfxRouter,
+  findAndCaptureTimelineOnlineSfx,
+  recordTimelineOnlineSfxUsage,
+} from './src/services/onlineSfxServer';
+import { ONLINE_SFX_BATCH_COMPANY_POINTS } from './src/services/onlineSfxTypes';
 import { createMusicAnalysisRouter, isGptAudioAnalysisConfigured } from './src/services/musicAnalysisServer';
 import { analyzeMusicNaming } from './src/services/musicNamingAnalysis';
+import { createSfxRequirementsJobs } from './src/services/sfxRequirementsJobs';
 import { AUDIO_METRICS_MIME, validateAudioEvidence } from './src/utils/audioEvidence';
+import {
+  DETAILED_SFX_MAX_BASE64_LENGTH,
+  DETAILED_SFX_MAX_FRAMES,
+  getDetailedSfxClipLimit,
+  getDetailedSfxFrameCount,
+} from './src/utils/videoAnalysisDensity';
 import multer from 'multer';
 import {
   analyzeAudioDesign,
@@ -204,6 +217,7 @@ async function startServer() {
   };
   const resolveUsageFeature = (req: express.Request) => {
     const endpoint = req.path;
+    if (endpoint.includes('/sfx/online')) return 'AI 音效 · 联网搜索';
     if (endpoint.includes('/assistant/plan')) return '智能助手 · GPT 任务规划';
     if (endpoint.includes('/assistant/')) return '智能助手 · 自动任务执行';
     if (endpoint.includes('/audio-analysis/')) return '音频工具 · 音频分析';
@@ -455,7 +469,7 @@ async function startServer() {
           const event = JSON.parse(line) as Partial<StoredAiUsageEvent>;
           return event && typeof event.provider === 'string'
             ? [{
-                provider: ['elevenlabs', 'gpt'].includes(event.provider) ? event.provider as AiUsageEvent['provider'] : 'legacy',
+                provider: ['elevenlabs', 'gpt', 'network'].includes(event.provider) ? event.provider as AiUsageEvent['provider'] : 'legacy',
                 model: String(event.model || 'unknown'),
                 inputTokens: Number(event.inputTokens) || 0,
                 outputTokens: Number(event.outputTokens) || 0,
@@ -876,6 +890,8 @@ async function startServer() {
     ],
     (req, res, next) => {
       if (req.originalUrl.startsWith('/api/ai/assistant/') && (req.method === 'GET' || req.path.endsWith('/cancel'))) return next();
+      // Background requirements keep their own reservation until the job settles.
+      if (req.originalUrl.startsWith('/api/ai/sfx-requirements') && (req.method === 'GET' || req.body?.background === true)) return next();
       return requireElevenLabsQuota(() => 0.1)(req, res, next);
     },
   );
@@ -1848,6 +1864,22 @@ async function startServer() {
     return res.json({ success: true });
   }));
 
+  app.use('/api/sfx/online', createOnlineSfxRouter({
+    uploadsDir, ffmpeg: FFMPEG_BINARY,
+    owner: (req, res) => resolveUsageActor(req, res).userId,
+    reserve: (req, res, points) => {
+      const reservation = reserveElevenLabsQuota(resolveUsageActor(req, res), points);
+      if (!reservation.release) {
+        res.status(429).json({
+          code: 'COMPANY_POINTS_EXCEEDED',
+          error: `本月个人积分不足。成功采集一条联网试听需要 ${points} 积分，请联系管理员追加额度或项目池积分。`,
+          quota: reservation.quota,
+        });
+      }
+      return reservation.release;
+    },
+  }));
+
   // --- API Endpoints ---
 
   // HTML5 client bootstrapping and deployment diagnostics.
@@ -2147,7 +2179,9 @@ async function startServer() {
             identitySource: event.identitySource,
           });
         }
-        const primaryAmount = provider === 'elevenlabs' ? event.credits : event.totalTokens;
+        const primaryAmount = provider === 'elevenlabs'
+          ? event.credits
+          : provider === 'network' ? event.companyPoints || 0 : event.totalTokens;
         models.set(event.model, (models.get(event.model) || 0) + primaryAmount);
 
         const feature = features.get(event.feature) || {
@@ -2212,7 +2246,9 @@ async function startServer() {
         })).sort((left, right) => (
           provider === 'elevenlabs'
             ? right.credits - left.credits
-            : right.totalTokens - left.totalTokens
+            : provider === 'network'
+              ? right.companyPoints - left.companyPoints
+              : right.totalTokens - left.totalTokens
         )),
         daily: Array.from(daily.values()).sort((a, b) => a.date.localeCompare(b.date)),
       };
@@ -2243,6 +2279,7 @@ async function startServer() {
           isGptTextConfigured(),
           isGptCompanyPointPricingEnabled(),
         ),
+        onlineSfx: summarizeLocalProvider('network', true, true),
       },
     });
   }));
@@ -3884,7 +3921,10 @@ async function startServer() {
         if (!isPathInside(temporaryDirectory, framePath)) continue;
         const base64 = (await fs.promises.readFile(framePath)).toString('base64');
         totalEncodedLength += base64.length;
-        if (base64.length > 1_500_000 || totalEncodedLength > (options.subtitles ? 100_000_000 : 8_000_000)) {
+        const totalLengthLimit = options.subtitles
+          ? 100_000_000
+          : options.dense ? DETAILED_SFX_MAX_BASE64_LENGTH : 8_000_000;
+        if (base64.length > 1_500_000 || totalEncodedLength > totalLengthLimit) {
           throw Object.assign(new Error('服务器提取的关键帧数据过大。'), { status: 413 });
         }
         frames.push({
@@ -4537,11 +4577,14 @@ async function startServer() {
     return res.json({ text });
   }));
 
-  app.post('/api/ai/sfx-requirements', asyncRoute(async (req, res) => {
-    const { inputText = '', screenshot = null, templateType, projectName = null, existingItems = [] } = req.body || {};
+  const normalizeRequirementsInput = (body: any) => {
+    const { inputText = '', screenshot = null, templateType, projectName = null, existingItems = [] } = body || {};
     const allowedTemplates = ['game_sfx_general', 'game_sfx_middleware', 'voiceover_general', 'voiceover_multilang'];
     if (!allowedTemplates.includes(templateType)) {
-      return res.status(400).json({ error: 'Invalid templateType' });
+      throw Object.assign(new Error('Invalid templateType'), { status: 400 });
+    }
+    if (screenshot && (typeof screenshot.data !== 'string' || !screenshot.data || !/^(image|video)\//i.test(String(screenshot.mimeType)))) {
+      throw Object.assign(new Error('音效需求表只支持图片/截图或视频参考。'), { status: 400 });
     }
     const normalizedProjectName = typeof projectName === 'string' ? projectName.trim().slice(0, 80) : null;
     const normalizedExistingItems = Array.isArray(existingItems)
@@ -4555,13 +4598,25 @@ async function startServer() {
             : {}
         ))
       : [];
-    const result = await generateSfxRequirements(
-      String(inputText),
-      screenshot,
-      templateType,
-      normalizedProjectName || null,
-      normalizedExistingItems,
-    );
+    return { inputText: String(inputText), screenshot: screenshot ? { data: screenshot.data, mimeType: screenshot.mimeType } : null,
+      templateType, projectName: normalizedProjectName || null, existingItems: normalizedExistingItems };
+  };
+  app.use('/api/ai/sfx-requirements', createSfxRequirementsJobs({
+    directory: path.join(dataDir, 'sfx-requirements-jobs'),
+    identity: (req, res) => resolveUsageActor(req, res).userId,
+    normalize: normalizeRequirementsInput,
+    reserve: (req, res) => {
+      const reservation = reserveElevenLabsQuota(resolveUsageActor(req, res), 0.1);
+      if (!reservation.release) res.status(429).json({ code: 'COMPANY_POINTS_EXCEEDED', error: '个人积分不足，请联系管理员追加额度。', quota: reservation.quota });
+      return reservation.release;
+    },
+    run: (_req, res, work) => { void usageRequestContext.run(res.locals.aiUsageContext, work); },
+    execute: (input, onProgress, signal) => generateSfxRequirements(input.inputText, input.screenshot, input.templateType,
+      input.projectName, input.existingItems, { onProgress, signal }),
+  }));
+  app.post('/api/ai/sfx-requirements', asyncRoute(async (req, res) => {
+    const input = normalizeRequirementsInput(req.body);
+    const result = await generateSfxRequirements(input.inputText, input.screenshot, input.templateType, input.projectName, input.existingItems);
     return res.json(result);
   }));
 
@@ -6895,13 +6950,15 @@ async function startServer() {
       const dubbingEnabled = scopedAnalysisTrack === 'all'
         ? Boolean(requestedDubbingEnabled)
         : scopedAnalysisTrack === 'dubbing';
+      const analysisDurationSeconds = parseNumber(videoDuration, 30, 1, 3_600);
+      const sfxClipLimit = getDetailedSfxClipLimit(analysisDurationSeconds);
       
       const prompt = `你是一个顶级的多模态AI视频音效与配乐设计师。
 用户的制作要求（按此约束风格、场景、配器和时间点）：${String(userRequirements || '').slice(0, 30000)}
 请仅依据提供的关键帧画面及时间点，为视频生成“音效、配乐和配音时间轴清单 (JSON格式)”。不要声称听过原音轨或看过帧间画面。
 请提供以下轨道的元素（你可以根据视频画面的时间长度和事件，智能规划最合适的开始时间 startTime 和时长 duration，单位为秒）：
 ${bgmEnabled ? '1. 背景音乐轨 (bgm): 通常是一段大气合适的 background music，覆盖视频主要时间。' : ''}
-${sfxEnabled ? '2. 音效轨 (sfx): 根据视频中的关键动势、场景变化或特效出现，生成对应的短音效。' : ''}
+${sfxEnabled ? `2. 音效轨 (sfx): 逐帧细查所有可见且适合声音反馈的事件，包括角色动作与脚步、物体移动/落地/碰撞、攻击与受击、粒子和魔法特效、UI出现/点击/奖励反馈、镜头转场以及环境状态变化。按时间顺序逐项列出，不要为了精简而合并彼此独立的事件；只合并同一连续动作的重复帧。不得凭空编造画面中无法支持的事件。` : ''}
 配音字幕由独立的逐帧识别流程处理，本次只返回 bgm/sfx，禁止返回 dubbing 或把标题、拟声文字当成对白。
 
 返回的 JSON 必须包含一个 \`clips\` 数组，每项符合以下定义：
@@ -6920,7 +6977,7 @@ ${sfxEnabled ? '2. 音效轨 (sfx): 根据视频中的关键动势、场景变�
   lipSyncConfidence?: number (仅 dubbing，口型与字幕时间判断置信度，0 到 1),
   timingSource?: string (仅 dubbing，时间依据，如 "subtitle+lip"),
   startTime: number (在时间轴上的起始时间，单位为秒，必须大于等于 0 且小于视频时长),
-  duration: number (该音频块的时长，单位秒；BGM必须从0秒开始并覆盖完整视频，SFX通常为2-4s；Dubbing必须位于字幕硬边界内，高可信口型时使用口型交集，否则使用整段字幕)
+  duration: number (该音频块的时长，单位秒；BGM必须从0秒开始并覆盖完整视频；SFX按可见事件实际持续时间设置，瞬态反馈可为0.3-1.5s，连续动作或环境声可更长，不要统一填成2-4s；Dubbing必须位于字幕硬边界内，高可信口型时使用口型交集，否则使用整段字幕)
 }
 
 请确保 clips 数组中只包含启用的轨道类型：
@@ -6928,8 +6985,8 @@ ${sfxEnabled ? '2. 音效轨 (sfx): 根据视频中的关键动势、场景变�
 - sfxEnabled: ${sfxEnabled ? '开启' : '关闭'}
 - dubbingEnabled: 关闭（独立识别）
 
-视频总时长约为 ${parseNumber(videoDuration, 30, 1, 3_600).toFixed(1)} 秒。所有片段必须严格位于该时长内。
-为保证生成速度，请保持非配音结果精炼：BGM 最多 1 段、SFX 最多 8 段。配音不得抽样或截断，必须覆盖所有可辨识字幕变化。
+视频总时长约为 ${analysisDurationSeconds.toFixed(1)} 秒。所有片段必须严格位于该时长内。
+BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事件覆盖完整，再合并真正重复的连续事件。配音不得抽样或截断，必须覆盖所有可辨识字幕变化。
 
 请只返回符合 JSON 语法的纯数据，不要用 markdown 格式包裹，也不要带 \`\`\`json 开头。`;
 
@@ -6943,13 +7000,17 @@ ${sfxEnabled ? '2. 音效轨 (sfx): 根据视频中的关键动势、场景变�
         if (!fileName) return res.status(422).json({ error: "字幕配音分析需要服务器上的视频，请等待上传完成后重试。" });
         const subtitleFrames = await extractServerVideoKeyframes(fileName, videoDuration, { subtitles: true });
         subtitleClips = await analyzeVideoSubtitles(subtitleFrames, parseNumber(videoDuration, 30, 1, 3_600));
-        // Music/SFX planning needs broad visual context, not hundreds of OCR images.
-        analysisKeyframes = Array.from({ length: Math.min(6, subtitleFrames.length) }, (_, index) => (
-          subtitleFrames[Math.round(index * (subtitleFrames.length - 1) / Math.max(1, Math.min(6, subtitleFrames.length) - 1))]
+        const planningFrameCount = Math.min(
+          sfxEnabled ? getDetailedSfxFrameCount(analysisDurationSeconds) : 6,
+          subtitleFrames.length,
+        );
+        analysisKeyframes = Array.from({ length: planningFrameCount }, (_, index) => (
+          subtitleFrames[Math.round(index * (subtitleFrames.length - 1) / Math.max(1, planningFrameCount - 1))]
         ));
         analysisSource = "server-ffmpeg";
       } else if (Array.isArray(keyframes) && keyframes.length > 0) {
-        if (keyframes.length > 8) {
+        const maxAcceptedKeyframes = sfxEnabled ? DETAILED_SFX_MAX_FRAMES : 8;
+        if (keyframes.length > maxAcceptedKeyframes) {
           return res.status(400).json({ error: '关键帧数量过多，请重新分析。' });
         }
 
@@ -6964,7 +7025,8 @@ ${sfxEnabled ? '2. 音效轨 (sfx): 根据视频中的关键动势、场景变�
             base64: frame.base64,
           });
         }
-        if (totalBase64Length > 8_000_000) {
+        const totalBase64Limit = sfxEnabled ? DETAILED_SFX_MAX_BASE64_LENGTH : 8_000_000;
+        if (totalBase64Length > totalBase64Limit) {
           return res.status(413).json({ error: '关键帧总量过大，请降低视频分辨率后重试。' });
         }
       } else {
@@ -6972,7 +7034,10 @@ ${sfxEnabled ? '2. 音效轨 (sfx): 根据视频中的关键动势、场景变�
           return res.status(422).json({ error: '未收到视频关键帧，请重新选择视频后再分析。' });
         }
         console.log(`Client keyframe extraction unavailable; using safe FFmpeg fallback for ${fileName}.`);
-        analysisKeyframes = await extractServerVideoKeyframes(fileName, videoDuration);
+        analysisKeyframes = await extractServerVideoKeyframes(fileName, videoDuration, sfxEnabled ? {
+          dense: true,
+          frameCount: getDetailedSfxFrameCount(analysisDurationSeconds),
+        } : undefined);
         analysisSource = 'server-ffmpeg';
       }
 
@@ -7299,34 +7364,84 @@ ${sfxEnabled ? '2. 音效轨 (sfx): 根据视频中的关键动势、场景变�
     }
   });
 
-  // 8. Generate Timeline Clip Audio using ElevenLabs API
-  app.post('/api/video/generate-clip', requireElevenLabsQuota(req => {
-    const resolvedType = req.body?.trackType
-      || (req.body?.trackId === 'dubbing' ? 'dubbing' : req.body?.trackId === 'bgm' ? 'bgm' : 'sfx');
-    if (resolvedType === 'dubbing') {
-      return estimateTtsCompanyPoints(String(req.body?.text || ''));
-    }
-    if (resolvedType === 'bgm') {
-      return estimateTimedCompanyPoints(
-        parseNumber(req.body?.duration, 30, 3, 600),
-        COMPANY_POINTS.musicPerSecond,
-      );
-    }
-    return estimateTimedCompanyPoints(
-      parseNumber(req.body?.duration, 5, 0.5, 30),
-      COMPANY_POINTS.soundEffectPerSecond,
-    );
-  }), async (req, res) => {
+  // 8. Generate Timeline Clip Audio. SFX clips prefer a usable online preview
+  // and only consume ElevenLabs when search or capture cannot satisfy the clip.
+  app.post('/api/video/generate-clip', async (req, res) => {
+    let quotaRelease: (() => void) | undefined;
     try {
       const { prompt, trackId, trackType, text, voiceId, duration } = req.body;
       const qualityMode = normalizeElevenLabsQualityMode(req.body?.qualityMode);
       const isProQuality = qualityMode === 'pro';
-      
+      const resolvedType = trackType || (trackId === 'dubbing' ? 'dubbing' : trackId === 'bgm' ? 'bgm' : 'sfx');
+      const actor = resolveUsageActor(req, res);
+      const reserveQuota = (points: number) => {
+        const reservation = reserveElevenLabsQuota(actor, points);
+        if (!reservation.release) {
+          res.status(429).json({
+            code: 'COMPANY_POINTS_EXCEEDED',
+            error: `本月个人积分不足。已用 ${Math.ceil(reservation.quota.usedCredits)} / ${reservation.quota.limitCredits}，请联系管理员追加额度或项目池积分。`,
+            quota: reservation.quota,
+          });
+          return undefined;
+        }
+        return reservation.release;
+      };
+
+      let resolvedSfxPrompt = String(prompt || '').trim();
+      if (resolvedType === 'sfx') {
+        const onlineRelease = reserveQuota(ONLINE_SFX_BATCH_COMPANY_POINTS);
+        if (!onlineRelease) return;
+        try {
+          try {
+            resolvedSfxPrompt = await prepareSoundEffectPrompt(resolvedSfxPrompt);
+          } catch (translationError) {
+            console.warn('[timeline-sfx] Search prompt translation failed; trying the original prompt:', translationError);
+          }
+          const onlineQuery = resolvedSfxPrompt
+            .split(/[.;\n]/, 1)[0]
+            .replace(/\b(?:sound effects?|sfx|audio|high quality|cinematic)\b/gi, ' ')
+            .replace(/[^a-zA-Z0-9\s'-]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .split(' ')
+            .slice(0, 14)
+            .join(' ');
+          const onlineResult = await findAndCaptureTimelineOnlineSfx({
+            query: onlineQuery,
+            uploadsDir,
+            ffmpeg: FFMPEG_BINARY,
+            maxDurationSeconds: parseNumber(duration, 5, 0.5, 30),
+          });
+          if (onlineResult) {
+            recordTimelineOnlineSfxUsage();
+            return res.json({
+              audioUrl: onlineResult.audioUrl,
+              sourceAudioDuration: onlineResult.duration,
+              generationSource: 'online-search',
+              provider: onlineResult.source,
+              sourceTitle: onlineResult.title,
+              sourceAuthor: onlineResult.author,
+              sourceUrl: onlineResult.sourceUrl,
+              outputFormat: 'wav_48000_stereo',
+            });
+          }
+        } finally {
+          onlineRelease();
+        }
+      }
+
+      const requestedPoints = resolvedType === 'dubbing'
+        ? estimateTtsCompanyPoints(String(text || ''))
+        : resolvedType === 'bgm'
+          ? estimateTimedCompanyPoints(parseNumber(duration, 30, 3, 600), COMPANY_POINTS.musicPerSecond)
+          : estimateTimedCompanyPoints(parseNumber(duration, 5, 0.5, 30), COMPANY_POINTS.soundEffectPerSecond);
+      quotaRelease = reserveQuota(requestedPoints);
+      if (!quotaRelease) return;
+
       if (getElevenLabsApiKeys().length === 0) {
         return res.status(400).json({ error: 'ElevenLabs API Key is not configured on the server. Please configure it in Settings.' });
       }
-      
-      const resolvedType = trackType || (trackId === 'dubbing' ? 'dubbing' : trackId === 'bgm' ? 'bgm' : 'sfx');
+
       const cleanFilename = `el_${trackId}_${Date.now()}.${resolvedType === 'sfx' ? 'wav' : 'mp3'}`;
       const filePath = path.join(uploadsDir, cleanFilename);
       
@@ -7398,7 +7513,7 @@ ${sfxEnabled ? '2. 音效轨 (sfx): 根据视频中的关键动势、场景变�
         console.log(`ElevenLabs server SFX Gen: prompt="${prompt}" duration=${duration}`);
         
         const wavBlob = await generateSoundEffect(
-          prompt,
+          resolvedSfxPrompt,
           Math.min(30, Math.max(0.5, duration || 4)),
           { qualityMode },
         );
@@ -7415,6 +7530,7 @@ ${sfxEnabled ? '2. 音效轨 (sfx): 根据视频中的关键动势、场景变�
           requestedDuration: parseNumber(duration, 30, 3, 600),
         } : resolvedType === 'sfx' ? {
           provider: 'ElevenLabs Sound Effects',
+          generationSource: 'elevenlabs',
           model: ELEVENLABS_SOUND_MODEL,
           outputFormat: ELEVENLABS_SOUND_OUTPUT_FORMAT,
         } : {}),
@@ -7423,6 +7539,8 @@ ${sfxEnabled ? '2. 音效轨 (sfx): 根据视频中的关键动势、场景变�
     } catch (err: any) {
       console.error('Error generating clip:', err);
       return res.status(Number(err?.status) || 500).json({ error: err.message });
+    } finally {
+      quotaRelease?.();
     }
   });
 

@@ -22,6 +22,7 @@ export const isPdfFile = (file: Pick<File, 'name' | 'type'> | null | undefined) 
 
 interface ExtractVideoOptions {
   maxFrames?: number;
+  frameIntervalSeconds?: number;
   maxDimension?: number;
   jpegQuality?: number;
   signal?: AbortSignal;
@@ -149,6 +150,7 @@ export async function extractVideoKeyframes(
 ): Promise<VideoKeyframe[]> {
   const {
     maxFrames = 6,
+    frameIntervalSeconds,
     maxDimension = 512,
     jpegQuality = 0.68,
     signal,
@@ -167,10 +169,10 @@ export async function extractVideoKeyframes(
     throwIfAborted(signal);
 
     const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 10;
-    const frameCount = Math.max(3, Math.min(
-      maxFrames,
-      duration <= 30 ? 4 : duration <= 120 ? 6 : 8,
-    ));
+    const suggestedFrameCount = frameIntervalSeconds && frameIntervalSeconds > 0
+      ? Math.ceil(duration / frameIntervalSeconds)
+      : duration <= 30 ? 4 : duration <= 120 ? 6 : 8;
+    const frameCount = Math.max(3, Math.min(maxFrames, suggestedFrameCount));
     const sourceWidth = Math.max(1, video.videoWidth || 1280);
     const sourceHeight = Math.max(1, video.videoHeight || 720);
     const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));

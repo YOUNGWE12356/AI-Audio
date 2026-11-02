@@ -3,12 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useRef, useState } from 'react';
-import { Loader2, Play, Pause, Download, AlertCircle, Sparkles } from 'lucide-react';
+import React, { lazy, Suspense, useEffect, useState } from 'react';
+import { Loader2, AlertCircle, Sparkles } from 'lucide-react';
 import { HistoryItem } from '../types';
 import GeneratedAudioPlayer, { sanitizeAudioFileName } from './GeneratedAudioPlayer';
 import PointCostHint from './PointCostHint';
 import { requiresSoundEffectTranslation } from '../services/sfxPromptService';
+const OnlineSfxSearch = lazy(() => import('./OnlineSfxSearch'));
 
 interface PendingSfxOption {
   url: string;
@@ -53,32 +54,13 @@ export default function SfxStudio({
   pendingSfxOptions,
   setPendingSfxOptions,
 }: SfxStudioProps) {
+  const [mode, setMode] = useState<'generate' | 'online'>('generate');
+  const [onlineVisited, setOnlineVisited] = useState(false);
+  // Assistant requests still use the native generation surface even if the
+  // user last visited online search.
+  useEffect(() => { if (standaloneLoading) setMode('generate'); }, [standaloneLoading]);
   const [playingHistoryId, setPlayingHistoryId] = useState<string | null>(null);
   const [activeSfxOptionId, setActiveSfxOptionId] = useState<string | null>(null);
-  const historyAudioRefs = useRef<{ [key: string]: HTMLAudioElement | null }>({});
-
-  const getSfxDownloadExtension = (url: string) => {
-    if (url.startsWith('blob:')) return 'wav';
-    const match = url.split('?')[0].match(/\.([a-z0-9]+)$/i);
-    return match?.[1]?.toLowerCase() || 'wav';
-  };
-
-  const handleHistoryPlayPause = (id: string) => {
-    if (playingHistoryId && playingHistoryId !== id && historyAudioRefs.current[playingHistoryId]) {
-      historyAudioRefs.current[playingHistoryId]?.pause();
-    }
-
-    const audioObj = historyAudioRefs.current[id];
-    if (!audioObj) return;
-
-    if (playingHistoryId === id) {
-      audioObj.pause();
-      setPlayingHistoryId(null);
-    } else {
-      audioObj.play().catch(e => console.error(e));
-      setPlayingHistoryId(id);
-    }
-  };
 
   const sfxHistory = historyList.filter(item => item.type === 'sfx');
   const generatedVersionCount = Number(Boolean(pendingSfxOptions.optionA)) + Number(Boolean(pendingSfxOptions.optionB));
@@ -88,10 +70,20 @@ export default function SfxStudio({
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-6">
         <div>
           <h2 className="text-xl font-black text-slate-800">AI 音效</h2>
-          <p className="text-xs text-slate-500 mt-1">通过文字描述生成音效DEMO</p>
+          <p className="text-xs text-slate-500 mt-1">通过文字生成音效，或联网搜索试听素材</p>
         </div>
       </div>
 
+      <div role="tablist" aria-label="音效模式" className="inline-flex gap-1 rounded-xl border border-slate-200 bg-slate-100 p-1">
+        <button role="tab" aria-selected={mode === 'generate'} aria-controls="sfx-generate-panel" id="sfx-generate-tab" onClick={() => setMode('generate')}
+          className={`rounded-lg px-5 py-2.5 text-xs font-bold ${mode === 'generate' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>AI 生成模式</button>
+        <button role="tab" aria-selected={mode === 'online'} aria-controls="sfx-online-panel" id="sfx-online-tab" onClick={() => { setOnlineVisited(true); setMode('online'); }}
+          className={`rounded-lg px-5 py-2.5 text-xs font-bold ${mode === 'online' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>联网搜索模式</button>
+      </div>
+      {onlineVisited && <div role="tabpanel" id="sfx-online-panel" aria-labelledby="sfx-online-tab" hidden={mode !== 'online'}>
+        <Suspense fallback={<p className="text-xs text-slate-500">正在打开联网搜索…</p>}><OnlineSfxSearch /></Suspense>
+      </div>}
+      <div role="tabpanel" id="sfx-generate-panel" aria-labelledby="sfx-generate-tab" hidden={mode !== 'generate'}>
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         <div className="lg:col-span-7 space-y-5">
           <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-5 shadow-sm">
@@ -220,6 +212,7 @@ export default function SfxStudio({
                     activeId={activeSfxOptionId}
                     setActiveId={setActiveSfxOptionId}
                     editableTitle
+                    enableRangeDownload
                     downloadFileName={`${sanitizeAudioFileName(option.title, `generated_sfx_${id}`)}.wav`}
                     downloadLabel={`下载 WAV 音效（版本 ${id}）`}
                     onRename={(title) => {
@@ -243,50 +236,16 @@ export default function SfxStudio({
             {sfxHistory.length === 0 ? (
               <p className="text-slate-400 text-[10px] text-center py-6">暂无生成历史。成功生成的音效会自动显示在这里。</p>
             ) : (
-              <div className="space-y-2 max-h-64 overflow-y-auto pr-1 custom-scrollbar">
-                {sfxHistory.map((item) => {
-                  const isHistPlaying = playingHistoryId === item.id;
-                  return (
-                    <div key={item.id} className="p-3 bg-slate-50 border border-slate-200 hover:border-emerald-200 rounded-xl flex items-center justify-between gap-3 text-xs">
-                      <audio
-                        ref={el => { historyAudioRefs.current[item.id] = el; }}
-                        src={item.url}
-                        onEnded={() => setPlayingHistoryId(null)}
-                      />
-                      <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                        <button
-                          onClick={() => handleHistoryPlayPause(item.id)}
-                          className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 border transition-all ${
-                            isHistPlaying
-                              ? 'bg-emerald-600 text-white border-emerald-500'
-                              : 'bg-white text-slate-500 border-slate-200 hover:text-slate-905 hover:bg-slate-50'
-                          }`}
-                        >
-                          {isHistPlaying ? <Pause className="w-3.5 h-3.5 fill-current" /> : <Play className="w-3.5 h-3.5 fill-current ml-0.5" />}
-                        </button>
-                        <div className="min-w-0">
-                          <p className="font-bold text-slate-700 truncate text-[11px]">{item.title}</p>
-                          <p className="text-[9px] text-slate-400 truncate italic">"{item.prompt}"</p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <span className="text-[9px] text-slate-400 font-mono hidden sm:inline">{item.timestamp.split(' ')[1]}</span>
-                        <a
-                          href={item.url}
-                          download={`${sanitizeAudioFileName(item.title, item.id)}.${getSfxDownloadExtension(item.url)}`}
-                          className="p-1 hover:bg-emerald-50 hover:text-emerald-700 text-slate-400 rounded transition-colors"
-                          title="下载"
-                        >
-                          <Download className="w-3.5 h-3.5" />
-                        </a>
-                      </div>
-                    </div>
-                  );
-                })}
+              <div className="space-y-2 max-h-[36rem] overflow-y-auto pr-1 custom-scrollbar">
+                {sfxHistory.map(item => <GeneratedAudioPlayer key={item.id} id={`sfx-history-${item.id}`}
+                  url={item.url} title={item.title} prompt={item.prompt} meta={item.timestamp}
+                  activeId={playingHistoryId} setActiveId={setPlayingHistoryId} enableRangeDownload
+                  downloadFileName={`${sanitizeAudioFileName(item.title, item.id)}.wav`} />)}
               </div>
             )}
           </div>
         </div>
+      </div>
       </div>
     </div>
   );

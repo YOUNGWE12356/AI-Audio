@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { 
   Play, 
   Pause, 
@@ -30,9 +30,13 @@ import {
   Magnet,
   Gauge,
   Timer,
-  ChevronUp
+  ChevronUp,
+  Repeat
 } from 'lucide-react';
 import { encodeMp3, encodeWav, resampleAudioBuffer } from '../services/audioEncoderService';
+import { getClipPlaybackRegion, getSourceWaveform, resizeAudioClip } from '../utils/audioClipEditing';
+import { DEFAULT_TIMELINE_ZOOM, timelineTickStep, zoomTimelineAtPointer } from '../utils/timelineZoom';
+import { loopPlayhead, scheduleLoopPasses } from '../utils/workstationLoop';
 
 interface AudioClip {
   id: string;
@@ -41,6 +45,7 @@ interface AudioClip {
   duration: number;  // in seconds
   buffer: AudioBuffer;
   sourceBuffer?: AudioBuffer; // original/current base buffer used for non-cascading transpose
+  sourceOffset?: number; // visible event start within the full buffer, in source seconds
   color: string;     // Tailwind classes for bg/border
   fadeIn?: number;   // fade in duration in seconds
   fadeOut?: number;  // fade out duration in seconds
@@ -157,6 +162,10 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
 
   // Global Transport States
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [loopEnabled, setLoopEnabled] = useState(false);
+  const loopEnabledRef = useRef(false);
+  const loopDurationRef = useRef(0);
+  const loopTimerRef = useRef<number | null>(null);
   const [currentTime, setCurrentTime] = useState<number>(0); // Playhead in seconds
   const [selectedClip, setSelectedClip] = useState<{ trackId: string; clipId: string } | null>(null);
   const [isExporting, setIsExporting] = useState<boolean>(false);
@@ -206,7 +215,11 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
   const [panKnobDrag, setPanKnobDrag] = useState<{ trackId: string; startX: number; initialPan: number } | null>(null);
 
   // Timeline configuration
-  const ZOOM_PX_PER_SECOND = 20; // 1 second = 20 pixels
+  const [ZOOM_PX_PER_SECOND, setTimelineZoom] = useState(DEFAULT_TIMELINE_ZOOM);
+  const timelineScrollRef = useRef<HTMLDivElement>(null);
+  const timelineZoomRef = useRef(DEFAULT_TIMELINE_ZOOM);
+  const pendingZoomScrollRef = useRef<number | null>(null);
+  const [timelineViewport, setTimelineViewport] = useState({ left: 0, width: 1600 });
   const TIMELINE_MAX_SECONDS = 180; // default 3 minutes, expands dynamically
   const TIMELINE_CONTENT_WIDTH = TIMELINE_MAX_SECONDS * ZOOM_PX_PER_SECOND;
   const [timeSignatureBeatsRaw, timeSignatureUnitRaw] = timeSignature.split('/').map(Number);
@@ -522,11 +535,58 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
     clipId: string;
     edge: ResizeEdge;
     startX: number;
-    originalStartTime: number;
-    originalDuration: number;
-    originalBuffer: AudioBuffer;
-    originalPlaybackRate: number;
+    originalClip: AudioClip;
   } | null>(null);
+
+  const changeTimelineZoom = (nextZoom: number, pointerX: number) => {
+    const viewport = timelineScrollRef.current;
+    if (!viewport) return;
+    const next = zoomTimelineAtPointer(timelineZoomRef.current, nextZoom,
+      pendingZoomScrollRef.current ?? viewport.scrollLeft, pointerX, trackHeaderWidth);
+    if (next.zoom === timelineZoomRef.current) return;
+    timelineZoomRef.current = next.zoom;
+    pendingZoomScrollRef.current = next.scrollLeft;
+    setTimelineZoom(next.zoom);
+  };
+
+  useLayoutEffect(() => {
+    if (timelineScrollRef.current && pendingZoomScrollRef.current !== null) {
+      timelineScrollRef.current.scrollLeft = pendingZoomScrollRef.current;
+      pendingZoomScrollRef.current = null;
+    }
+  }, [ZOOM_PX_PER_SECOND]);
+
+  useEffect(() => {
+    const viewport = timelineScrollRef.current;
+    if (!viewport) return;
+    let frame = 0;
+    const update = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => setTimelineViewport({ left: viewport.scrollLeft, width: viewport.clientWidth }));
+    };
+    const observer = new ResizeObserver(update);
+    observer.observe(viewport);
+    viewport.addEventListener('scroll', update, { passive: true });
+    update();
+    return () => { observer.disconnect(); viewport.removeEventListener('scroll', update); cancelAnimationFrame(frame); };
+  }, []);
+
+  useEffect(() => {
+    const viewport = timelineScrollRef.current;
+    if (!viewport) return;
+    const onWheel = (event: WheelEvent) => {
+      if (!(event.target instanceof Element) || !event.target.closest('[data-workstation-timeline]')) return;
+      if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY) || !event.deltaY) return;
+      // A non-passive listener prevents the page from scrolling or browser zooming.
+      event.preventDefault();
+      if (resizeDrag || fadeDrag || draggingClip) return;
+      const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientHeight : 1);
+      const factor = Math.exp(-Math.max(-300, Math.min(300, delta)) * 0.002);
+      changeTimelineZoom(timelineZoomRef.current * factor, event.clientX - viewport.getBoundingClientRect().left);
+    };
+    viewport.addEventListener('wheel', onWheel, { passive: false });
+    return () => viewport.removeEventListener('wheel', onWheel);
+  }, [trackHeaderWidth, resizeDrag, fadeDrag, draggingClip]);
 
   const clampFade = (value: number, duration: number) => (
     Math.max(0, Math.min(duration / 2, value))
@@ -654,23 +714,25 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
     playheadTime: number,
     bpm: number = tempoBpm,
     signature: TimeSignature = timeSignature,
+    audioStart = ctx.currentTime,
+    projectEndTime = getProjectEndTime(),
+    replace = true,
   ) => {
-    stopMetronomePlayback();
+    if (replace) stopMetronomePlayback();
 
     const [rawBeatsPerBar, rawBeatUnit] = signature.split('/').map(Number);
     const scheduledBeatsPerBar = Number.isFinite(rawBeatsPerBar) ? rawBeatsPerBar : 4;
     const scheduledBeatUnit = Number.isFinite(rawBeatUnit) ? rawBeatUnit : 4;
     const scheduledBeatDuration = (60 / clampTempoBpm(bpm)) * (4 / scheduledBeatUnit);
     const firstBeatIndex = Math.max(0, Math.ceil((playheadTime - 0.001) / scheduledBeatDuration));
-    const projectEndTime = getProjectEndTime();
 
     for (
       let beatIndex = firstBeatIndex;
-      beatIndex * scheduledBeatDuration <= projectEndTime;
+      beatIndex * scheduledBeatDuration < projectEndTime;
       beatIndex += 1
     ) {
       const beatTimelineTime = beatIndex * scheduledBeatDuration;
-      const startAt = ctx.currentTime + Math.max(0, beatTimelineTime - playheadTime);
+      const startAt = audioStart + Math.max(0, beatTimelineTime - playheadTime);
       const isDownbeat = beatIndex % scheduledBeatsPerBar === 0;
       const oscillator = ctx.createOscillator();
       const clickGain = ctx.createGain();
@@ -684,18 +746,27 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
       oscillator.start(startAt);
       oscillator.stop(startAt + 0.05);
       activeMetronomeSourcesRef.current.push(oscillator);
+      oscillator.onended = () => {
+        oscillator.disconnect(); clickGain.disconnect();
+        activeMetronomeSourcesRef.current = activeMetronomeSourcesRef.current.filter(item => item !== oscillator);
+      };
     }
   };
 
   const getLivePlayheadTime = () => {
     if (!isPlayingRef.current || !audioCtxRef.current) return currentTime;
-    return playbackStartPlayheadRef.current + (
+    const time = playbackStartPlayheadRef.current + (
       audioCtxRef.current.currentTime - playbackStartTimeRef.current
     );
+    return loopEnabledRef.current ? loopPlayhead(time, loopDurationRef.current) : time;
   };
 
   const rescheduleActiveMetronome = (bpm: number, signature: TimeSignature) => {
     if (!isMetronomeEnabled || !isPlayingRef.current) return;
+    if (loopEnabledRef.current) {
+      startPlaybackAt(getLivePlayheadTime(), { bpm, signature });
+      return;
+    }
     const ctx = getAudioContext();
     scheduleMetronome(ctx, getLivePlayheadTime(), bpm, signature);
   };
@@ -704,6 +775,10 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
     const nextEnabled = !isMetronomeEnabled;
     setIsMetronomeEnabled(nextEnabled);
     if (!isPlayingRef.current) return;
+    if (loopEnabledRef.current) {
+      startPlaybackAt(getLivePlayheadTime(), { metronome: nextEnabled });
+      return;
+    }
     if (nextEnabled) {
       const ctx = getAudioContext();
       scheduleMetronome(ctx, getLivePlayheadTime());
@@ -738,7 +813,8 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
     clipGain: GainNode, 
     clip: AudioClip, 
     playheadTime: number, 
-    ctx: BaseAudioContext
+    ctx: BaseAudioContext,
+    audioStart = ctx.currentTime,
   ) => {
     const clipStart = clip.startTime;
     const clipEnd = clip.startTime + clip.duration;
@@ -748,11 +824,11 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
 
     // Helper to map absolute timeline time (s) to ctx.currentTime
     const getCtxTime = (timelineTime: number) => {
-      return ctx.currentTime + Math.max(0, timelineTime - playheadTime);
+      return audioStart + Math.max(0, timelineTime - playheadTime);
     };
 
     // Ensure default initial state at ctx.currentTime uses event gain.
-    clipGain.gain.setValueAtTime(baseGain, ctx.currentTime);
+    clipGain.gain.setValueAtTime(baseGain, audioStart);
 
     // Apply Fade In
     if (fadeIn > 0) {
@@ -769,7 +845,7 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
         const currentProgress = (playheadTime - clipStart) / fadeIn;
         const endCtxTime = getCtxTime(fadeInEnd);
         
-        clipGain.gain.setValueAtTime(currentProgress * baseGain, ctx.currentTime);
+        clipGain.gain.setValueAtTime(currentProgress * baseGain, audioStart);
         clipGain.gain.linearRampToValueAtTime(baseGain, endCtxTime);
       }
     }
@@ -790,7 +866,7 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
         const currentProgress = 1.0 - (playheadTime - fadeOutStart) / fadeOut;
         const endCtxTime = getCtxTime(clipEnd);
         
-        clipGain.gain.setValueAtTime(Math.max(0, currentProgress) * baseGain, ctx.currentTime);
+        clipGain.gain.setValueAtTime(Math.max(0, currentProgress) * baseGain, audioStart);
         clipGain.gain.linearRampToValueAtTime(0.0, endCtxTime);
       }
     }
@@ -803,6 +879,11 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
     
     const elapsed = audioCtxRef.current.currentTime - playbackStartTimeRef.current;
     const newTime = playbackStartPlayheadRef.current + elapsed;
+    if (loopEnabledRef.current && loopDurationRef.current > 0) {
+      setCurrentTime(loopPlayhead(newTime, loopDurationRef.current));
+      animationFrameRef.current = requestAnimationFrame(() => updatePlayheadPositionRef.current?.());
+      return;
+    }
     
     // Find absolute maximum time of all clips to auto-stop or wrap
     let maxClipTime = 10; // default check
@@ -826,6 +907,9 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
   // Stop playback and clean up source nodes
   const stopAllPlayback = () => {
     isPlayingRef.current = false;
+    if (loopTimerRef.current !== null) {
+      window.clearInterval(loopTimerRef.current); loopTimerRef.current = null;
+    }
     stopMetronomePlayback();
     activeSourcesRef.current.forEach(item => {
       try {
@@ -864,24 +948,27 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
   };
 
   // Play audio project
-  const handlePlay = () => {
-    if (isPlaying) {
-      handlePause();
-      return;
-    }
-
+  const startPlaybackAt = (requestedTime: number, settings: { bpm?: number; signature?: TimeSignature; metronome?: boolean } = {}) => {
     const ctx = getAudioContext();
     stopAllPlayback();
-
-    // Check solo constraints: if some track is soloed, only those play
-    const hasSolo = tracks.some(t => t.solo && !t.muted);
+    const snapshot = tracksRef.current;
+    const actualEnd = Math.max(0, ...snapshot.flatMap(track => track.clips.map(clip => clip.startTime + clip.duration)));
+    if (loopEnabledRef.current && actualEnd <= 0) { setIsPlaying(false); return; }
+    loopDurationRef.current = actualEnd;
+    const playhead = loopEnabledRef.current ? loopPlayhead(requestedTime, actualEnd) : requestedTime;
+    const metronome = settings.metronome ?? isMetronomeEnabled;
+    const bpm = settings.bpm ?? tempoBpm;
+    const signature = settings.signature ?? timeSignature;
 
     // Track play state in refs for precise timing mapping
     playbackStartTimeRef.current = ctx.currentTime;
-    playbackStartPlayheadRef.current = currentTime;
+    playbackStartPlayheadRef.current = playhead;
+    setCurrentTime(playhead);
 
-    // Schedule sources for each active track
-    tracks.forEach(track => {
+    const schedulePass = (passPlayhead: number, audioStart: number) => {
+    const passTracks = tracksRef.current;
+    const hasSolo = passTracks.some(track => track.solo && !track.muted);
+    passTracks.forEach(track => {
       // Skip muted tracks. If there are soloed tracks, skip non-soloed ones.
       if (track.muted) return;
       if (hasSolo && !track.solo) return;
@@ -893,22 +980,24 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
       trackPan.pan.value = track.pan / 100;
       trackGain.connect(trackPan);
       trackPan.connect(ctx.destination);
+      let remainingSources = 0;
+      const releaseTrack = () => { trackGain.disconnect(); trackPan.disconnect(); };
 
       track.clips.forEach(clip => {
         if (clip.muted) return;
         const clipEnd = clip.startTime + clip.duration;
         
         // Schedule if the clip falls after or around current playhead
-        if (clipEnd > currentTime) {
+        if (clipEnd > passPlayhead) {
           const source = ctx.createBufferSource();
           source.buffer = clip.buffer;
           const playbackRate = clampPlaybackRate(clip.playbackRate ?? 1);
-          source.playbackRate.setValueAtTime(playbackRate, ctx.currentTime);
+          source.playbackRate.setValueAtTime(playbackRate, audioStart);
 
           // Clip level gain node for fades + live mute gate.
           const clipGain = ctx.createGain();
           const clipMuteGain = ctx.createGain();
-          applyFadeEnvelope(clipGain, clip, currentTime, ctx);
+          applyFadeEnvelope(clipGain, clip, passPlayhead, ctx, audioStart);
           clipMuteGain.gain.value = clip.muted ? 0 : 1;
 
           source.connect(clipGain);
@@ -916,16 +1005,17 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
           clipMuteGain.connect(trackGain);
 
           // Calculate timing variables in seconds
-          const delay = Math.max(0, clip.startTime - currentTime);
-          const timelineOffset = Math.max(0, currentTime - clip.startTime);
-          const offset = Math.min(clip.buffer.duration, timelineOffset * playbackRate);
-          const duration = Math.min(
-            Math.max(0, clip.buffer.duration - offset),
-            Math.max(0, (clip.duration - timelineOffset) * playbackRate),
-          );
+          const { delay, offset, duration } = getClipPlaybackRegion(clip, passPlayhead);
 
           try {
-            source.start(ctx.currentTime + delay, offset, duration);
+            if (duration <= 0) { source.disconnect(); clipGain.disconnect(); clipMuteGain.disconnect(); return; }
+            source.start(audioStart + delay, offset, duration);
+            remainingSources++;
+            source.onended = () => {
+              source.disconnect(); clipGain.disconnect(); clipMuteGain.disconnect();
+              activeSourcesRef.current = activeSourcesRef.current.filter(item => item.source !== source);
+              if (--remainingSources === 0) releaseTrack();
+            };
             activeSourcesRef.current.push({
               source,
               trackId: track.id,
@@ -935,14 +1025,28 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
               clipMuteGainNode: clipMuteGain,
             });
           } catch (err) {
+            source.disconnect(); clipGain.disconnect(); clipMuteGain.disconnect();
             console.error('Error starting source:', err);
           }
         }
       });
+      if (remainingSources === 0) releaseTrack();
     });
 
-    if (isMetronomeEnabled) {
-      scheduleMetronome(ctx, currentTime);
+    if (metronome) {
+      scheduleMetronome(ctx, passPlayhead, bpm, signature, audioStart,
+        loopEnabledRef.current ? actualEnd : getProjectEndTime(), false);
+    }
+    };
+
+    schedulePass(playhead, playbackStartTimeRef.current);
+    if (loopEnabledRef.current) {
+      let nextStart = playbackStartTimeRef.current + actualEnd - playhead;
+      const scheduleAhead = () => {
+        nextStart = scheduleLoopPasses(ctx.currentTime, nextStart, actualEnd, schedulePass);
+      };
+      scheduleAhead();
+      loopTimerRef.current = window.setInterval(scheduleAhead, 25);
     }
 
     setIsPlaying(true);
@@ -950,10 +1054,26 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
     animationFrameRef.current = requestAnimationFrame(() => updatePlayheadPositionRef.current?.());
   };
 
+  const handlePlay = () => {
+    if (isPlayingRef.current) handlePause();
+    else startPlaybackAt(currentTime);
+  };
+
+  const handleToggleLoop = () => {
+    const wasPlaying = isPlayingRef.current;
+    const time = getLivePlayheadTime();
+    const next = !loopEnabledRef.current;
+    loopEnabledRef.current = next;
+    setLoopEnabled(next);
+    if (wasPlaying) startPlaybackAt(time);
+  };
+
   // Pause playback
   const handlePause = () => {
+    const time = getLivePlayheadTime();
     stopAllPlayback();
     setIsPlaying(false);
+    setCurrentTime(time);
   };
 
   // Stop playback and rewind to start
@@ -970,15 +1090,7 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
     const time = snapTime(Math.max(0, clickX / ZOOM_PX_PER_SECOND));
     
     if (isPlayingRef.current) {
-      stopAllPlayback();
-      setIsPlaying(false);
-      setCurrentTime(time);
-      playbackStartPlayheadRef.current = time;
-      
-      // We schedule a minor delay to restart smoothly
-      setTimeout(() => {
-        handlePlay();
-      }, 50);
+      startPlaybackAt(time);
     } else {
       setCurrentTime(time);
     }
@@ -1065,28 +1177,6 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
     }
   };
 
-  // Slices an AudioBuffer into a smaller AudioBuffer
-  const sliceAudioBuffer = (ctx: AudioContext, buffer: AudioBuffer, startSec: number, endSec: number): AudioBuffer => {
-    const sampleRate = buffer.sampleRate;
-    const startSample = Math.floor(startSec * sampleRate);
-    const endSample = Math.min(buffer.length, Math.ceil(endSec * sampleRate));
-    const frameCount = endSample - startSample;
-    
-    if (frameCount <= 0) {
-      return buffer; // fall back
-    }
-    
-    const newBuffer = ctx.createBuffer(buffer.numberOfChannels, frameCount, sampleRate);
-    for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
-      const origData = buffer.getChannelData(channel);
-      const newData = newBuffer.getChannelData(channel);
-      for (let i = 0; i < frameCount; i++) {
-        newData[i] = origData[startSample + i];
-      }
-    }
-    return newBuffer;
-  };
-
   const splitClipAtTime = (trackId: string, clipId: string, splitTime: number) => {
     const track = tracks.find(t => t.id === trackId);
     if (!track) return;
@@ -1096,47 +1186,41 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
 
     // Check if playhead is within clip boundaries
     if (splitTime > clip.startTime && splitTime < clip.startTime + clip.duration) {
-      const ctx = getAudioContext();
       const splitOffset = splitTime - clip.startTime; // offset inside clip
       const playbackRate = clampPlaybackRate(clip.playbackRate ?? 1);
       const bufferSplitOffset = splitOffset * playbackRate;
       
       try {
-        const buffer1 = sliceAudioBuffer(ctx, clip.buffer, 0, bufferSplitOffset);
-        const buffer2 = sliceAudioBuffer(ctx, clip.buffer, bufferSplitOffset, clip.buffer.duration);
-
         const clip1Id = `clip-${Date.now()}-a`;
         const clip2Id = `clip-${Date.now()}-b`;
 
         const clip1: AudioClip = {
+          ...clip,
           id: clip1Id,
           name: `${clip.name} (前)`,
           startTime: clip.startTime,
           duration: splitOffset,
-          buffer: buffer1,
-          sourceBuffer: buffer1,
+          sourceOffset: clip.sourceOffset ?? 0,
           color: clip.color,
           fadeIn: clip.fadeIn ? Math.min(clip.fadeIn, splitOffset) : 0,
           fadeOut: 0,
           gain: clip.gain ?? 100,
           muted: clip.muted,
-          transposeSemitones: 0,
           playbackRate
         };
 
         const clip2: AudioClip = {
+          ...clip,
           id: clip2Id,
           name: `${clip.name} (后)`,
           startTime: splitTime,
           duration: clip.duration - splitOffset,
-          buffer: buffer2,
-          sourceBuffer: buffer2,
+          sourceOffset: (clip.sourceOffset ?? 0) + bufferSplitOffset,
           color: clip.color,
           fadeIn: 0,
           fadeOut: clip.fadeOut ? Math.min(clip.fadeOut, clip.duration - splitOffset) : 0,
           gain: clip.gain ?? 100,
           muted: clip.muted,
-          transposeSemitones: 0,
           playbackRate
         };
 
@@ -1202,7 +1286,7 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
     const nextRate = clampPlaybackRate(value);
     setClipPlaybackRate(nextRate);
     updateSelectedClip(clip => {
-      const nextDuration = clip.buffer.duration / nextRate;
+      const nextDuration = clip.duration * clampPlaybackRate(clip.playbackRate ?? 1) / nextRate;
       return {
         ...clip,
         playbackRate: nextRate,
@@ -1494,6 +1578,7 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
         ...clip,
         buffer: reversedBuffer,
         sourceBuffer: reversedBuffer,
+        sourceOffset: Math.max(0, clip.buffer.duration - (clip.sourceOffset ?? 0) - clip.duration * clampPlaybackRate(clip.playbackRate ?? 1)),
         transposeSemitones: 0,
         name: `${clip.name} · Rev`
       };
@@ -1533,9 +1618,6 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
                       ...c,
                       buffer: transposedBuffer,
                       sourceBuffer,
-                      duration: transposedBuffer.duration / clampPlaybackRate(c.playbackRate ?? 1),
-                      fadeIn: clampFade(c.fadeIn || 0, transposedBuffer.duration / clampPlaybackRate(c.playbackRate ?? 1)),
-                      fadeOut: clampFade(c.fadeOut || 0, transposedBuffer.duration / clampPlaybackRate(c.playbackRate ?? 1)),
                       transposeSemitones: nextSemitones
                     }
                   : c
@@ -1602,6 +1684,7 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
           duration: item.buffer.duration,
           buffer: item.buffer,
           sourceBuffer: item.buffer,
+          sourceOffset: 0,
           color: CLIP_COLORS[trackIndex % CLIP_COLORS.length].bg,
           fadeIn: 0,
           fadeOut: 0,
@@ -1823,34 +1906,6 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
     await importAudioFiles(files, getDropPlacement(event));
   };
 
-  // Custom visual waveform SVG representation
-  const renderClipWaveform = (buffer: AudioBuffer): string => {
-    // Generate high-fidelity vertical line paths for a beautiful wave
-    const steps = 120;
-    const points: string[] = [];
-    const stepLength = Math.floor(buffer.length / steps);
-    const data = buffer.getChannelData(0);
-
-    for (let i = 0; i < steps; i++) {
-      let max = 0;
-      const index = i * stepLength;
-      // sample more frames for a detailed peak value
-      const sampleChunkSize = Math.min(stepLength, 150);
-      for (let j = 0; j < sampleChunkSize; j++) {
-        if (data[index + j]) {
-          max = Math.max(max, Math.abs(data[index + j]));
-        }
-      }
-      // Val from 4 to 90 (stays inside 100 vertical viewBox limit)
-      const val = Math.min(90, Math.max(4, max * 110));
-      const x = (i / steps) * 200; // Map perfectly to 200px viewBox width
-      const y1 = 50 - val / 2;
-      const y2 = 50 + val / 2;
-      points.push(`M ${x.toFixed(1)} ${y1.toFixed(1)} L ${x.toFixed(1)} ${y2.toFixed(1)}`);
-    }
-    return points.join(' ');
-  };
-
   // Drag Clip Handler - mouse down
   const onClipMouseDown = (
     e: React.MouseEvent, 
@@ -1948,10 +2003,7 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
       clipId,
       edge,
       startX: e.clientX,
-      originalStartTime: clip.startTime,
-      originalDuration: clip.duration,
-      originalBuffer: clip.buffer,
-      originalPlaybackRate: clampPlaybackRate(clip.playbackRate ?? 1)
+      originalClip: clip,
     });
   };
 
@@ -1998,39 +2050,16 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [fadeDrag, isPlaying]);
+  }, [fadeDrag, isPlaying, ZOOM_PX_PER_SECOND]);
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (!resizeDrag) return;
 
-      const ctx = getAudioContext();
       const rawDelta = (e.clientX - resizeDrag.startX) / ZOOM_PX_PER_SECOND;
-      let nextStart = resizeDrag.originalStartTime;
-      let nextDuration = resizeDrag.originalDuration;
-      let nextBuffer = resizeDrag.originalBuffer;
-
-      if (resizeDrag.edge === 'left') {
-        const trimStart = Math.max(0, Math.min(resizeDrag.originalDuration - 0.1, rawDelta));
-        nextStart = snapTime(resizeDrag.originalStartTime + trimStart);
-        const effectiveTrim = Math.max(0, nextStart - resizeDrag.originalStartTime);
-        nextDuration = Math.max(0.1, resizeDrag.originalDuration - effectiveTrim);
-        nextBuffer = sliceAudioBuffer(
-          ctx,
-          resizeDrag.originalBuffer,
-          effectiveTrim * resizeDrag.originalPlaybackRate,
-          resizeDrag.originalBuffer.duration,
-        );
-      } else {
-        const rawDuration = resizeDrag.originalDuration + Math.min(0, rawDelta);
-        nextDuration = Math.max(0.1, Math.min(resizeDrag.originalDuration, snapTime(rawDuration)));
-        nextBuffer = sliceAudioBuffer(
-          ctx,
-          resizeDrag.originalBuffer,
-          0,
-          nextDuration * resizeDrag.originalPlaybackRate,
-        );
-      }
+      const original = resizeDrag.originalClip;
+      const originalEdge = original.startTime + (resizeDrag.edge === 'right' ? original.duration : 0);
+      const resized = resizeAudioClip(original, resizeDrag.edge, snapTime(originalEdge + rawDelta));
 
       setTracks(prev => prev.map(track => (
         track.id !== resizeDrag.trackId
@@ -2041,11 +2070,11 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
                 clip.id === resizeDrag.clipId
                   ? {
                       ...clip,
-                      startTime: nextStart,
-                      duration: nextDuration,
-                      buffer: nextBuffer,
-                      fadeIn: clampFade(clip.fadeIn || 0, nextDuration),
-                      fadeOut: clampFade(clip.fadeOut || 0, nextDuration)
+                      startTime: resized.startTime,
+                      duration: resized.duration,
+                      sourceOffset: resized.sourceOffset,
+                      fadeIn: clampFade(original.fadeIn || 0, resized.duration),
+                      fadeOut: clampFade(original.fadeOut || 0, resized.duration)
                     }
                   : clip
               ))
@@ -2067,7 +2096,7 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [resizeDrag, isPlaying]);
+  }, [resizeDrag, snapEnabled, activeSnapStep, ZOOM_PX_PER_SECOND]);
 
   // Mouse move and drag implementation
   useEffect(() => {
@@ -2141,7 +2170,7 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [draggingClip, dragOverInfo, tracks, isPlaying]);
+  }, [draggingClip, dragOverInfo, tracks, isPlaying, ZOOM_PX_PER_SECOND]);
 
   // Mixed multitrack export down to offline context
   const handleExportMix = async () => {
@@ -2201,8 +2230,8 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
         source.connect(clipGain);
         clipGain.connect(trackGain);
 
-        // start physical offset
-        source.start(clip.startTime);
+        const region = getClipPlaybackRegion(clip);
+        if (region.duration > 0) source.start(region.delay, region.offset, region.duration);
       });
     });
 
@@ -2268,9 +2297,11 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
 
   // Generate ruler grid markings
   const rulerTicks: Array<{ id: string; time: number; label: string; major: boolean }> = [];
+  const visibleStart = Math.max(0, (timelineViewport.left - trackHeaderWidth - 100) / ZOOM_PX_PER_SECOND);
+  const visibleEnd = Math.min(TIMELINE_MAX_SECONDS, (timelineViewport.left + timelineViewport.width + 100) / ZOOM_PX_PER_SECOND);
   if (rulerMode === 'bars') {
-    const totalBeats = Math.ceil(TIMELINE_MAX_SECONDS / beatDurationSeconds);
-    for (let beatIndex = 0; beatIndex <= totalBeats; beatIndex += 1) {
+    const totalBeats = Math.ceil(visibleEnd / beatDurationSeconds);
+    for (let beatIndex = Math.floor(visibleStart / beatDurationSeconds); beatIndex <= totalBeats; beatIndex += 1) {
       const major = beatIndex % beatsPerBar === 0;
       const barNumber = Math.floor(beatIndex / beatsPerBar) + 1;
       rulerTicks.push({
@@ -2281,12 +2312,15 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
       });
     }
   } else {
-    for (let i = 0; i <= TIMELINE_MAX_SECONDS; i += 1) {
+    const majorStep = timelineTickStep(ZOOM_PX_PER_SECOND);
+    const minorStep = majorStep / 5;
+    for (let index = Math.floor(visibleStart / minorStep); index <= Math.ceil(visibleEnd / minorStep); index++) {
+      const time = Number((index * minorStep).toFixed(6));
       rulerTicks.push({
-        id: `time-${i}`,
-        time: i,
-        label: i % 5 === 0 ? `${i}s` : '',
-        major: i % 5 === 0,
+        id: `time-${index}`,
+        time,
+        label: index % 5 === 0 ? `${time}s` : '',
+        major: index % 5 === 0,
       });
     }
   }
@@ -2327,6 +2361,15 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <h2 className="truncate text-sm font-black tracking-tight text-zinc-100">DAW</h2>
+                <button
+                  type="button"
+                  aria-label="重置时间线缩放"
+                  title="波形上滚轮缩放；点击恢复 100%"
+                  onClick={() => changeTimelineZoom(DEFAULT_TIMELINE_ZOOM, trackHeaderWidth)}
+                  className="rounded border border-white/10 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 hover:text-emerald-300"
+                >
+                  {Math.round(ZOOM_PX_PER_SECOND / DEFAULT_TIMELINE_ZOOM * 100)}%
+                </button>
               </div>
             </div>
           </div>
@@ -2406,6 +2449,7 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
                   : 'border-emerald-300/80 bg-emerald-400 hover:bg-emerald-300 text-[#0b120d]'
               }`}
               title={isPlaying ? "暂停" : "播放"}
+              aria-label={isPlaying ? '暂停' : '播放'}
             >
               {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
             </button>
@@ -2414,8 +2458,17 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
               onClick={handleStop}
               className="flex h-9 w-9 items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.05] text-zinc-400 transition-all hover:bg-white/[0.09] hover:text-zinc-100 cursor-pointer"
               title="重置到起点"
+              aria-label="停止并回到起点"
             >
               <Square className="w-5 h-5 fill-current" />
+            </button>
+
+            <button type="button" onClick={handleToggleLoop} aria-label="LOOP 循环播放" aria-pressed={loopEnabled}
+              title={loopEnabled ? '关闭循环播放' : '循环播放：时间线起点至最后一个音频片段结束'}
+              className={`flex h-9 items-center justify-center gap-1 rounded-full border px-3 text-[10px] font-bold transition-all ${loopEnabled
+                ? 'border-emerald-300/80 bg-emerald-400 text-[#0b120d] hover:bg-emerald-300'
+                : 'border-white/[0.08] bg-white/[0.05] text-zinc-400 hover:bg-white/[0.09] hover:text-zinc-100'}`}>
+              <Repeat className="h-4 w-4" />LOOP
             </button>
 
             {/* Time Indicator */}
@@ -2585,6 +2638,8 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
 
         {/* Scrollable Tracks Area */}
         <div
+          ref={timelineScrollRef}
+          aria-label="音频时间线，滚轮缩放"
           className={`relative flex flex-col overflow-x-auto select-none bg-[#0a0b09] ${
             isWorkstationExpanded ? 'min-h-0 flex-1' : 'min-h-[320px]'
           }`}
@@ -2629,6 +2684,7 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
             {/* Scale markings container */}
             <div 
               onClick={handleRulerClick}
+              data-workstation-timeline
               className="relative h-full shrink-0 cursor-ew-resize bg-[#10110f]"
               style={{ width: `${TIMELINE_CONTENT_WIDTH}px` }}
             >
@@ -2819,6 +2875,7 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
                     {/* Track Wave Lane content */}
                     <div 
                       data-workstation-track-id={track.id}
+                      data-workstation-timeline
                       className={`relative shrink-0 bg-[#0c0d0b] duration-200 overflow-hidden ${
                         isDragOverTrack ? 'bg-white/[0.06] border-y border-emerald-500/20' : ''
                       }`}
@@ -2860,6 +2917,8 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
                         }
 
                         const widthPos = clip.duration * ZOOM_PX_PER_SECOND;
+                        const waveformRate = clampPlaybackRate(clip.playbackRate ?? 1);
+                        const waveform = getSourceWaveform(clip.buffer, ZOOM_PX_PER_SECOND / waveformRate);
                         const fadeInPx = clampFade(clip.fadeIn || 0, clip.duration) * ZOOM_PX_PER_SECOND;
                         const fadeOutPx = clampFade(clip.fadeOut || 0, clip.duration) * ZOOM_PX_PER_SECOND;
                         const envelopeStartX = Math.min(widthPos / 2, fadeInPx);
@@ -2884,15 +2943,20 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
                             }}
                           >
                             {/* Waveform graphic inside clip block */}
-                            <svg 
-                              viewBox="0 0 200 100" 
+                            <svg
+                              aria-label="音频波形"
+                              viewBox={`0 0 ${waveform.width} 100`}
                               preserveAspectRatio="none" 
-                              className="absolute inset-0 h-full w-full opacity-60 pointer-events-none"
+                              className="absolute top-0 h-full max-w-none opacity-60 pointer-events-none"
+                              style={{
+                                width: `${clip.buffer.duration * ZOOM_PX_PER_SECOND / waveformRate}px`,
+                                left: `${-(clip.sourceOffset ?? 0) / waveformRate * ZOOM_PX_PER_SECOND}px`,
+                              }}
                             >
                               <path 
-                                d={renderClipWaveform(clip.buffer)} 
+                                d={waveform.path}
                                 stroke="currentColor"
-                                strokeWidth="2.5"
+                                strokeWidth="1"
                                 strokeLinecap="round"
                               />
                             </svg>
@@ -2958,7 +3022,7 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
                               className={`absolute left-0 top-4 bottom-0 z-20 w-2 cursor-ew-resize bg-slate-950/0 transition-colors hover:bg-slate-950/25 ${
                                 resizeDrag?.clipId === clip.id && resizeDrag.edge === 'left' ? 'bg-sky-500/40' : ''
                               }`}
-                              title="裁剪事件左边缘"
+                              title="拖动裁剪左边缘，向外拖动可恢复原音频"
                               aria-label="裁剪事件左边缘"
                             />
 
@@ -2968,7 +3032,7 @@ export default function AudioWorkstation({ pendingImport = null, onPendingImport
                               className={`absolute right-0 top-4 bottom-0 z-20 w-2 cursor-ew-resize bg-slate-950/0 transition-colors hover:bg-slate-950/25 ${
                                 resizeDrag?.clipId === clip.id && resizeDrag.edge === 'right' ? 'bg-sky-500/40' : ''
                               }`}
-                              title="裁剪事件右边缘"
+                              title="拖动裁剪右边缘，向外拖动可恢复原音频"
                               aria-label="裁剪事件右边缘"
                             />
 

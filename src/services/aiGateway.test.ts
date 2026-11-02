@@ -57,3 +57,23 @@ test('unsupported audio fails without sending an invalid vision request', async 
     ] }] }), /未配置音频理解模型/);
   });
 });
+
+test('a long requirements request uses its own timeout and can still be cancelled', async () => {
+  await withTokenHub(async () => {
+    const originalTimeout = AbortSignal.timeout;
+    const timeouts: number[] = [];
+    AbortSignal.timeout = ms => { timeouts.push(ms); return originalTimeout(ms); };
+    try {
+      globalThis.fetch = async (_url, options) => {
+        options?.signal?.throwIfAborted();
+        return Response.json({ output_text: '{"items":[]}' });
+      };
+      await generateAiContent({ contents: 'Generate requirements', timeoutMs: 240_000 });
+      assert.deepEqual(timeouts, [240_000]);
+      const controller = new AbortController(); controller.abort();
+      await assert.rejects(generateAiContent({ contents: 'Generate requirements', timeoutMs: 240_000, signal: controller.signal }), { name: 'AbortError' });
+      globalThis.fetch = async () => { throw new DOMException('timeout', 'TimeoutError'); };
+      await assert.rejects(generateAiContent({ contents: 'Generate requirements', timeoutMs: 240_000 }), /240 秒未返回/);
+    } finally { AbortSignal.timeout = originalTimeout; }
+  });
+});
