@@ -20,7 +20,7 @@ const RATE = {
   'tts-fast': { unit: 'character', value: 0.05, label: '50 分 / 千字符' },
   music: { unit: 'second', value: 2.5, label: '2.5 分 / 秒 / 版本' },
   'sound-effect': { unit: 'second', value: 2, label: '2 分 / 秒 / 版本' },
-  'timeline-sfx': { unit: 'second', value: 2, label: '优先联网 1 分 / 片段；未命中才按 2 分 / 秒使用 ElevenLabs' },
+  'timeline-sfx': { unit: 'second', value: 2, label: '优先联网搜索 1 分 / 批；未命中才按 2 分 / 秒使用 ElevenLabs' },
   'voice-changer': { unit: 'second', value: 2, label: '120 分 / 分钟 / 版本' },
   'audio-isolation': { unit: 'second', value: 2, label: '120 分 / 分钟' },
   'speech-to-text': { unit: 'second', value: 36 / 60, label: '36 分 / 分钟' },
@@ -109,8 +109,8 @@ export default function PointCostHint({
     : '选择素材后显示预计积分';
   const label = kind === 'timeline-sfx'
     ? points === null
-      ? '优先联网 1 分 / 片段；未命中才使用 ElevenLabs'
-      : `优先联网 1 分 / 片段；未命中后预计 ${formatPoints(points)} 积分`
+      ? '优先联网搜索 1 分 / 批；单片段操作按 1 批计算'
+      : `优先联网搜索 1 分 / 批；未命中后预计 ${formatPoints(points)} 积分`
     : rate.unit === 'token' || rate.unit === 'capture'
     ? rate.label
     : points === null

@@ -5507,7 +5507,12 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
   // Single timeline clip generator using ElevenLabs API on the server
   const handleGenerateAudioClip = async (
     clipId: string,
-    options: { suppressToast?: boolean; forceRegenerate?: boolean; workspaceCommandId?: string } = {},
+    options: {
+      suppressToast?: boolean;
+      forceRegenerate?: boolean;
+      workspaceCommandId?: string;
+      onlineSfxBatchId?: string;
+    } = {},
   ): Promise<boolean> => {
     const { suppressToast = false, forceRegenerate = false } = options;
     const clip = clipsRef.current.find(c => c.id === clipId);
@@ -5693,6 +5698,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
           publicOwnerId: voiceMetadata.publicOwnerId,
           voiceName: voiceMetadata.voiceName,
           qualityMode: getElevenLabsQualityMode(),
+          onlineSfxBatchId: options.onlineSfxBatchId,
         })
       });
 
@@ -5880,6 +5886,8 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
 
     let completed = 0;
     let failed = 0;
+    const onlineSfxBatchId = `video-sfx-${globalThis.crypto?.randomUUID?.()
+      || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
     try {
       setToast({
         message: `正在生成“${track.name}”的 ${candidates.length} 个音效片段...`,
@@ -5887,7 +5895,10 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
       });
 
       for (const clip of candidates) {
-        const succeeded = await handleGenerateAudioClip(clip.id, { suppressToast: true });
+        const succeeded = await handleGenerateAudioClip(clip.id, {
+          suppressToast: true,
+          onlineSfxBatchId,
+        });
         if (succeeded) completed += 1;
         else failed += 1;
         setSfxTrackGenerationJob(current => current?.trackId === trackId
@@ -6046,10 +6057,12 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
 
     assistantAutoGenerationStartedRef.current = assistantVideoRequest.id;
     const runQueue = async () => {
+      const onlineSfxBatchId = `video-sfx-${globalThis.crypto?.randomUUID?.()
+        || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
       try {
         setToast({ message: `正在自动合成 ${pendingClipIds.length} 个视频声音片段...`, type: 'info' });
         for (const clipId of pendingClipIds) {
-          await handleGenerateAudioClip(clipId);
+          await handleGenerateAudioClip(clipId, { onlineSfxBatchId });
         }
         setToast({ message: '视频声音片段已按时间线自动合成完成，可继续试听和混音导出。', type: 'success' });
         window.setTimeout(() => setToast(null), 4_000);

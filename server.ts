@@ -25,6 +25,7 @@ import { detectMediaAudioStream } from './src/services/mediaStreamProbe';
 import { resolveVideoMixAudioInputs } from './src/services/videoMixInputs';
 import { createMusicSeparationRouter } from './src/services/musicSeparationServer';
 import {
+  createTimelineOnlineSfxBatchTracker,
   createOnlineSfxRouter,
   findAndCaptureTimelineOnlineSfx,
   recordTimelineOnlineSfxUsage,
@@ -588,6 +589,7 @@ async function startServer() {
   );
   const MAX_ELEVENLABS_ACCOUNT_CYCLE_CREDITS = 100_000_000;
   const activeElevenLabsQuotaReservations = new Map<string, number>();
+  const timelineOnlineSfxBatchTracker = createTimelineOnlineSfxBatchTracker();
 
   const readElevenLabsQuotaStore = (): ElevenLabsQuotaStore => {
     try {
@@ -7389,8 +7391,13 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
 
       let resolvedSfxPrompt = String(prompt || '').trim();
       if (resolvedType === 'sfx') {
-        const onlineRelease = reserveQuota(ONLINE_SFX_BATCH_COMPANY_POINTS);
-        if (!onlineRelease) return;
+        const requestedBatchId = normalizeIdentityText(req.body?.onlineSfxBatchId, 128);
+        const onlineSfxBatchId = /^[a-zA-Z0-9._:-]+$/.test(requestedBatchId) ? requestedBatchId : '';
+        const batchAlreadyBilled = timelineOnlineSfxBatchTracker.hasBeenBilled(actor.userId, onlineSfxBatchId);
+        const onlineRelease = batchAlreadyBilled
+          ? undefined
+          : reserveQuota(ONLINE_SFX_BATCH_COMPANY_POINTS);
+        if (!batchAlreadyBilled && !onlineRelease) return;
         try {
           try {
             resolvedSfxPrompt = await prepareSoundEffectPrompt(resolvedSfxPrompt);
@@ -7413,7 +7420,11 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
             maxDurationSeconds: parseNumber(duration, 5, 0.5, 30),
           });
           if (onlineResult) {
-            recordTimelineOnlineSfxUsage();
+            const chargedThisRequest = timelineOnlineSfxBatchTracker.markSuccessfulBatch(
+              actor.userId,
+              onlineSfxBatchId,
+            );
+            if (chargedThisRequest) recordTimelineOnlineSfxUsage();
             return res.json({
               audioUrl: onlineResult.audioUrl,
               sourceAudioDuration: onlineResult.duration,
@@ -7423,10 +7434,11 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
               sourceAuthor: onlineResult.author,
               sourceUrl: onlineResult.sourceUrl,
               outputFormat: 'wav_48000_stereo',
+              onlineSfxBatchCharged: chargedThisRequest,
             });
           }
         } finally {
-          onlineRelease();
+          onlineRelease?.();
         }
       }
 
