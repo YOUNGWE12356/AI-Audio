@@ -138,12 +138,11 @@ export default function Sidebar({ currentTab, setCurrentTab, isMobileOpen, onMob
         <div className={`flex min-w-0 flex-1 items-center ${variant === 'desktop' && isDesktopCompact ? 'justify-center gap-0' : 'gap-3'}`}>
           <img
             src={wpLogoUrl}
-            alt="AI Audio"
+            alt="T1 Ai Audio"
             className="h-9 w-9 shrink-0 rounded-xl object-contain shadow-lg shadow-emerald-500/10"
           />
           <div className={`min-w-0 flex-1 flex-col items-center text-center ${variant === 'desktop' && isDesktopCompact ? 'hidden' : 'flex'}`}>
-            <h1 className="max-w-full truncate text-sm font-bold tracking-tight text-slate-800">AI Audio</h1>
-            <p className="mt-1 max-w-full whitespace-nowrap text-[9px] font-semibold leading-none text-slate-500">高音甜 中音准 低音沉</p>
+            <h1 className="max-w-full truncate text-sm font-bold tracking-tight text-slate-800">T1 Ai Audio</h1>
           </div>
         </div>
         {variant === 'mobile' && (
