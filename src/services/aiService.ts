@@ -4,6 +4,8 @@ import { normalizeAudioDesignSfxSchemes } from '../utils/audioDesignNaming';
 import { AUDIO_METRICS_MIME, AUDIO_EVIDENCE_RULES, validateAudioEvidence, type AudioMetricEvidence } from '../utils/audioEvidence';
 import { isBgmImportFileName, normalizeRequirementEngineeringNames, normalizeUcsImportFileName, normalizeUcsRequirementItems, UCS_CATALOG_PROMPT, UCS_CATALOG_VERSION } from './ucsNaming';
 import { generateRequirementsInBackground } from './sfxRequirementsClient';
+import { generateAudioDesignInBackground } from './audioDesignJobsClient';
+import { AUDIO_DESIGN_MODEL_TIMEOUT_MS } from './audioDesignJobs';
 
 const isBrowser = typeof window !== 'undefined';
 
@@ -707,68 +709,11 @@ export async function analyzeAudioDesignVideo(
     throw new Error('该方法仅用于 HTML5 客户端上传视频。');
   }
 
-  return new Promise<AudioDesignResult>((resolve, reject) => {
-    if (options.signal?.aborted) {
-      reject(new Error('已取消本次分析。'));
-      return;
-    }
-
-    const request = new XMLHttpRequest();
-    const handleAbort = () => request.abort();
-    const cleanup = () => options.signal?.removeEventListener('abort', handleAbort);
-    options.signal?.addEventListener('abort', handleAbort, { once: true });
-
-    request.open('POST', '/api/ai/audio-design-video');
-    setClientIdentityHeader(request);
-    request.responseType = 'json';
-    request.timeout = 240_000;
-    request.upload.onprogress = (event) => {
-      if (!event.lengthComputable) return;
-      const percent = Math.min(100, Math.round((event.loaded / event.total) * 100));
-      options.onProgress?.(`正在上传原视频 ${percent}%...`);
-    };
-    request.upload.onload = () => {
-      if (options.analysisMode === 'fallback') {
-        options.onProgress?.('上传完成，服务器正在分析完整视频...');
-        return;
-      }
-
-      options.onProgress?.(target.avatar || target.gift
-        ? '上传完成，服务器会先压缩大视频，再进行短视频高精度分析...'
-        : '上传完成，服务器会先压缩大视频，再分析完整画面与声音...');
-    };
-    request.onload = () => {
-      cleanup();
-      const response = request.response || {};
-      if (request.status >= 200 && request.status < 300) {
-        resolve(response as AudioDesignResult);
-        return;
-      }
-      reject(new Error(response.error || `专业视频分析失败 (${request.status})`));
-    };
-    request.onerror = () => {
-      cleanup();
-      reject(new Error('视频上传失败，请检查网络后重试。'));
-    };
-    request.ontimeout = () => {
-      cleanup();
-      reject(new Error('专业视频分析超过 4 分钟，请缩短视频后重试。'));
-    };
-    request.onabort = () => {
-      cleanup();
-      reject(new Error('已取消本次分析。'));
-    };
-
-    const formData = new FormData();
-    formData.append('originalName', video.name);
-    formData.append('video', video, createAsciiVideoUploadName(video.name, video.type));
-    formData.append('requirements', requirements);
-    formData.append('target', JSON.stringify(target));
-    formData.append('isInstrumental', String(isInstrumental));
-    formData.append('analysisMode', options.analysisMode || 'professional');
-    formData.append('scope', JSON.stringify(normalizeAudioDesignScope(options.scope)));
-    request.send(formData);
-  });
+  const uploaded = await preuploadAudioDesignVideo(video, {
+    signal: options.signal, shortVideo: Boolean(target.avatar || target.gift),
+    onProgress: (_percent, message) => options.onProgress?.(message),
+  }).catch(error => { throw Object.assign(error, { preparationFailure: true }); });
+  return analyzeAudioDesignPreuploadedVideo(uploaded.uploadId, requirements, target, isInstrumental, options);
 }
 
 export async function analyzeAudioDesignPreuploadedVideo(
@@ -778,6 +723,7 @@ export async function analyzeAudioDesignPreuploadedVideo(
   isInstrumental: boolean,
   options: {
     signal?: AbortSignal;
+    onProgress?: (message: string) => void;
     analysisMode?: 'professional' | 'fallback';
     scope?: AudioDesignScope;
   } = {},
@@ -786,14 +732,14 @@ export async function analyzeAudioDesignPreuploadedVideo(
     throw new Error('该方法仅用于 HTML5 客户端分析预上传视频。');
   }
 
-  return postJson<AudioDesignResult>('/api/ai/audio-design-video-preuploaded', {
+  return generateAudioDesignInBackground({
     uploadId,
     requirements,
     target,
     isInstrumental,
     analysisMode: options.analysisMode || 'professional',
     scope: normalizeAudioDesignScope(options.scope),
-  }, { signal: options.signal, timeoutMs: 180_000 });
+  }, options);
 }
 
 export async function analyzeAudioDesign(
@@ -801,17 +747,17 @@ export async function analyzeAudioDesign(
   requirements: string,
   target: { game: boolean; video: boolean; avatar?: boolean; sunnyIsland?: boolean; gift?: boolean; activity?: boolean },
   isInstrumental: boolean,
-  options: { signal?: AbortSignal; scope?: AudioDesignScope } = {},
+  options: { signal?: AbortSignal; scope?: AudioDesignScope; onProgress?: (message: string) => void } = {},
 ): Promise<AudioDesignResult> {
   const analysisScope = normalizeAudioDesignScope(options.scope);
   if (isBrowser) {
-    return postJson<AudioDesignResult>('/api/ai/audio-design', {
+    return generateAudioDesignInBackground({
       files,
       requirements,
       target,
       isInstrumental,
       scope: analysisScope,
-    }, { signal: options.signal, timeoutMs: 180_000 });
+    }, options);
   }
 
   const audioEvidence = files.filter(file => file.mimeType === AUDIO_METRICS_MIME).map(file => validateAudioEvidence(file.audioMetrics));
@@ -878,99 +824,25 @@ export async function analyzeAudioDesign(
   }
 
   const prompt = `
-    你是一个顶级的音频设计师和视频分析专家。请深度分析上传的内容，并提供${target.gift ? '精炼且专业' : '极其详尽且专业'}的${scopeDescription}方案。
-    【本次输出范围（最高优先级）】：${scopeDescription}。${analysisScope.music ? '必须输出音乐分析与背景音乐方案。' : '不得输出任何音乐分析、配乐方案、音乐提示词或视频动作速度。'}${analysisScope.sfx ? '必须输出音效分析与音效制作排程。' : '不得输出任何音效分析或音效制作排程。'}
-    
-    分析要求：
-    1. **多文件逻辑**：有联系则综合分析，无联系则以第一张/段素材为主。
-    2. **双语字段边界**：除字段名带 English、标准英文调性 key、数字 bpm、时间码 timecode 及规范英文音效名 name 外，所有分析描述必须使用中文；所有 English 字段必须只写英文，不得夹杂中文。
-    ${analysisScope.sfx ? `3. **动作级SFX**：在 "scene" 字段标明具体时间点。\n    5. **无语音**：音效严禁出现人声对白。\n    6. **性能与精度平衡**：只保留最重要的 ${target.gift ? '3-5' : '6-10'} 个音效节点；字段描述保持专业但精炼，每段不超过 ${target.gift ? '40' : '100'} 个汉字，避免重复内容。` : ''}
-    ${analysisScope.music
-      ? (isGameTrack
-          ? '4. **双重BGM**：提供两个制作方向不同的整体风格方案，但两套都必须严格符合素材与补充需求的题材、情绪和玩法；差异只能来自曲风融合、核心配器或节奏处理，禁止为了制造差异而输出相反情绪。'
-          : '4. **双重BGM**：提供两个差异巨大的风格方案。')
-      : ''}
-    ${analysisScope.music ? `
-    **Suno 整曲创作要点（强制）**：每套配乐的 sunoDirection 必须填写中英同义的七组短语，每组中文不超过 24 字、英文不超过 10 个单词；只概括整首音乐，不复制视频时间码或逐秒剪辑指令。
-       - use/useEnglish：具体用途与画面。游戏写常驻、战斗、菜单或短演出等实际适用类型；其他场景写广告、礼物动效、活动页等实际用途，不要凭空套用游戏设定。
-       - moodEnergy/moodEnergyEnglish：玩家或观众的感受，以及能量保持稳定还是适度起伏。
-       - instrumentRoles/instrumentRolesEnglish：明确主奏、节奏、铺底各自的乐器或音色；没有鼓时如实写轻脉冲或无打击乐，不要编造。
-       - tempoFeel/tempoFeelEnglish：慢速、中速或快速的听感，与 bpm 字段一致；不要在此字段重复数字，Suno BPM 范围由系统生成。
-       - melodyMix/melodyMixEnglish：旋律突出或克制，以及是否给对白和音效留空间。
-       - formEnding/formEndingEnglish：整曲渐进、循环感和结尾方式；可写音乐段落类型，但不要写画面时间码或分秒进入指令。
-       - exclude/excludeEnglish：与本方案相关的 1-2 类不需要的乐器、音色或编排元素；纯音乐不得包含人声，带人声方案不要把所需人声写入排除项。
-    style/styleEnglish 必须写具体曲风或地域音乐传统，并与画面、七组要点及配器一致；不要仅写“史诗”“中东风”等宽泛标签。` : ''}
-    ${shouldAnalyzeMotionTempo ? `
-    **视频动作速度独立分析（最高优先级）**：videoMotionTempo 只分析视频画面中人物跳舞、上下抖动、摇晃、摆动、踏步等可见动作的重复周期，用于后续卡点配乐；它不是推荐音乐的速度，严禁从 bgmRecommendations.bpm 推导或为了匹配推荐曲风而修改。
-       - 跟踪同一人物或主体的重复动作，以一次完整动作循环对应一拍，结合多个循环间隔估算 primaryBpm 与稳定区间 bpmRangeMin/bpmRangeMax。
-       - 镜头切换、运镜、闪白和剪辑频率不是人物动作，不得计入动作 BPM；动作速度发生明显变化时写入 segments，并给出时间码、动作、局部 BPM 与可信度。
-       - alternateBpms 只填写可能成立的半速或倍速候选，最多 3 个；confidence 只能写“高”“中”“低”。analysisBasis 必须说明观察到的动作与周期依据，syncGuidance 说明实际卡点应对齐哪个动作相位。
-       - 若素材帧数、动作循环或可见范围不足以可靠估算，detected=false、primaryBpm=0、区间为 0、候选与分段为空，并如实说明限制；不得编造速度。
-    ` : ''}
-    ${analysisScope.music ? (isGameTrack ? `
-    7. **游戏配乐只做整体方案（最高优先级）**：游戏音轨不按视频时间、镜头或动作切分音乐。每个 bgmRecommendations 项只提供一套统一的整曲风格，不得输出 timelineDesign，不得在任何音乐字段中写时间码、段落时长、进入时机、剪辑点或先后顺序。
-    8. **整体配器双语同义（强制）**：instrumentation/instrumentationEnglish 用一句短语列出整首音乐最重要的 3-5 个核心乐器或音色，中英文必须语义等价。
-    9. **画面推荐依据（强制）**：visualRationale 用中文说明画面题材、色彩/空间、动作节奏、玩法氛围或用户补充需求如何共同指向该音乐风格；必须解释“为什么推荐这种音乐”，但不得写时间码、段落时长或先后顺序，长度 60-120 字。
-    10. **Suno 整体音乐词（强制）**：style/styleEnglish 用一句短语概括具体曲风与总体情绪，不得包含具体 BPM；单点推荐速度只写入 bpm 字段。系统会结合 sunoDirection 生成简短的整曲创作提示词和 BPM 范围，不复制视频剪辑时间线。
-    11. **游戏适配原则**：音乐应适合长时间播放和自然循环，保持统一氛围与稳定能量，避免依赖固定画面时长或一次性剧情转折。素材内容与“补充需求”是判断整体风格的最高依据；没有素材时完全以补充需求为准，不得输出与其题材或情绪相冲突的音乐。
-    ` : `
-    7. **单一配乐蓝图（强制）**：每个 bgmRecommendations 项是一套完全独立、闭环的方案，timelineDesign 负责分秒级音画分析。顶层 style、BPM、调性、人声方向及所有时间段必须互相一致，禁止把两套推荐交叉混用；系统会从同一方案汇总最终 Suno 整体音乐词。
-    8. **逐项双语同义（强制）**：style/styleEnglish，以及 timelineDesign 中每一组 emotion/emotionEnglish、instruments/instrumentsEnglish、description/descriptionEnglish 都必须语义等价。不得在英文项中新增中文方案没有的曲风、乐器、人声、情绪或时间节点。
-    9. **Suno 整体音乐词（强制）**：style/styleEnglish 必须用一句短语概括具体曲风和总体情绪，中文不超过 30 字、英文不超过 12 个单词，不得包含具体 BPM 或视频时间码。单点推荐速度只写入 bpm 字段。timelineDesign 的 instruments/instrumentsEnglish 只列该段使用的 1-4 个乐器或音色名称，进入时机、动态变化和剪辑配合统一写入 description/descriptionEnglish。系统将用整体曲风、sunoDirection、调性和人声方向生成简短的整曲 Suno 提示词，不会复制视频时间线。
-    10. **配乐段落长度与连续性（最高优先级）**：timelineDesign 是音乐段落设计，不是逐动作音效清单。必须根据视频实际时长、叙事段落、镜头群和显著情绪拐点自适应划分，不能为了增加细节而强行增加段数。常规每段约 5-8 秒；连续镜头或同一情绪可保持 8-15 秒；短于 5 秒只允许用于视频首尾余量，或真正重要的转场、关键动作与强烈情绪变化。相邻段若情绪与核心配器相近必须合并，严禁连续出现大量 2-3 秒段落。高频画面采样只用于识别动作与 SFX，不代表 BGM 要以相同颗粒度切段；微小动作、卡点和瞬时声音写入 SFX 或当前段 description，不得据此更换整段音乐情绪。时间线必须从开头到结尾连续覆盖、无空隙、无重叠。
-    11. **画面分析与方案分工**：musicAnalysis.emotionalCurve 只描述画面本身的客观情绪走势；每套音乐如何响应画面，必须分别写进该方案的 timelineDesign，不能用全局情绪曲线代替。
-    `) : ''}
-    ${analysisScope.music ? '12. **调性格式（强制）**：key 必须使用标准英文“音名 + major/minor”格式，例如 "D minor"、"F# major"，不得写“小调/大调”或只写音名。' : ''}
-    ${analysisScope.music
-      ? (isInstrumental
-          ? `13. **纯音乐硬约束（强制）**：style、instrumentation${includeMusicTimeline ? ' 和 timelineDesign' : ''} 的全部中英文字段中不得出现人声、女声、男声、童声、吟唱、合唱、呼喊、歌唱、歌词、说唱及 vocal/voice/choir/chant/singer/lyrics/rap/singing/humming 等元素；不要输出 vocalInfo 或 lyrics。`
-          : isGameTrack
-            ? '13. **人声方案约束**：vocalDirection/vocalDirectionEnglish 只用一句短语描述整首歌曲统一的人声类型、音色与唱法，不得写时间码、进入时机或分段安排；不要输出 vocalInfo 或 lyrics。'
-            : '13. **人声方案约束**：vocalDirection/vocalDirectionEnglish 只用一句短语描述整首歌曲统一的人声类型、音色与唱法，不得写时间码或进入时机；人声何时进入只写在对应 timelineDesign 时间段中，中英文必须同义。')
-      : ''}
-
-    ${analysisScope.music && files.some(file => Boolean(file.fileUri)) && includeMusicTimeline ? `
-    【原生视频精细分析要求】：
-    1. 必须从 00:00 开始覆盖到视频结束，结合画面运动、镜头剪辑和原始音轨进行判断。
-    2. 识别关键镜头群、叙事阶段、情绪和音乐能量的明显转折，并使用“MM:SS-MM:SS”标出开始与结束时间；普通切镜和细小动作不应单独拆成配乐段落。
-    3. timelineDesign 必须按真实视频顺序连续覆盖，不得只根据少数代表画面概括全片。
-    4. 快速动作段落优先标记 Foley、撞击、转场和节奏卡点；安静段落标记氛围、留白和音乐动态。
-    ` : ''}
-    
-    ${analysisScope.sfx ? '【所有场景的音效命名要求】：sfxSchemes.items.name 使用简洁英文工程命名，单词之间一律用下划线 _ 连接，禁止空格、制表符和换行，例如 Soft_UI_Tap、Fairy_Page_Transition。此规则仅用于 name，scene、logic、description 保持自然语言书写。' : ''}
-
-    ${target.video || target.avatar || target.gift || target.activity ? `
-    【高精度影视级特别设计要求（最高优先级）】：
-    由于本项目属于“影视广告 / Avatar / 礼物 / 活动”等需要精细画面判断的创作类型，本次请求在勾选音效时需要达到专业精度：
-    ${analysisScope.sfx ? `1. **音效命名细致化 (name)**：
-       - 所有生成的音效命名（name）必须采用统一且高精度的英文规范命名（如: sfx_foley_footstep_wood_01, sfx_ambient_wind_howl_loop_02, sfx_scifi_laser_shot_03），禁止使用模糊词，应区分出类型、材质、道具、变化序号等。
-    2. **动作场景及时间码精准化 (scene)**：
-       - 所有音效的出现场景和动作必须包含极度精准的时间码段（如: '00:01.5 - 00:03.2'、'0-5s' 或 '00:12 - 00:15'），并在 scene 字段中清晰阐述该时刻画面的微观动势（如：“特写镜头主角推门、门轴干涩吱呀声；0.5s时门板撞击墙壁”）。
-    ` : ''}
-    ${analysisScope.music ? `3. **分秒级音乐细致设计文案 (timelineDesign)**：
-       - 每个配乐推荐（bgmRecommendations）必须在 timelineDesign 字段中附带一套按视频实际内容自适应的配乐段落设计，不设固定段数。通常每段约 5-8 秒；同一情绪可更长，只有重要转折可更短，并避免连续 2-3 秒换一次音乐情绪：
-         - "timecode": 连续时间段，例如 24 秒视频可规划为 '0-6s', '6-13s', '13-20s', '20-24s'；末段可因视频结束而短于 5 秒。实际边界必须服从视频内容，不能照抄示例。
-         - "instruments" / "instrumentsEnglish": 该时间段乐器配置的中英文同义表述。
-         - "emotion" / "emotionEnglish": 该时间段画面情绪的中英文同义表述。
-         - "description" / "descriptionEnglish": 具体编排、声学变化及剪辑配合方式的中英文同义表述；英文需简洁，且不得增添中文没有的元素。
-    ` : ''}
-    ` : isGameTrack ? `
-    【游戏音轨整体音乐要求】：
-    ${analysisScope.sfx ? '音效节点可根据素材动作标记具体触发时机。' : ''}
-    ${analysisScope.music ? `1. 背景音乐只做整局统一风格，不得按素材时间拆分。
-    2. bgmRecommendations 不输出 timelineDesign；只输出 style/styleEnglish、instrumentation/instrumentationEnglish、visualRationale、bpm、key 与统一人声方向。
-    3. visualRationale 必须针对上传画面或补充需求解释推荐逻辑，说明这种音乐如何匹配画面气质、玩法情绪和长时间循环体验。` : ''}
-    ` : `
-    【通用场景设计要求】：
-    ${analysisScope.music ? '即使不是纯影视广告，也请在 bgmRecommendations 的 timelineDesign 中按素材实际叙事和情绪拐点自适应设计音乐段落，不设固定段数。常规段落约 5-8 秒，同一情绪可延长；避免连续 2-3 秒切换情绪，并写明各段的情感表达和主导乐器。' : '根据素材内容提取最重要的音效节点并生成音效制作排程。'}
-    `}
-
-    ${additionalSpecialInstructions}
-
-    目标方向：${targetDesc}
-    补充需求：${requirements}
-    ${audioEvidence.length ? `【音频参考的证据边界，优先于其他分析要求】：${AUDIO_EVIDENCE_RULES}\n音效只能给出待验证的创意方向，不可声称识别到原音频事件。仅有音频指标时，不可声称观察到画面、动作或确定原曲风格。` : ''}
-    ${analysisScope.music ? `音乐类型：${isInstrumental ? "纯音乐（Instrumental）" : "带有人声的歌曲"}` : ''}
+你是音频设计师。根据参考素材与补充需求直接输出符合 JSON Schema 的制作方案，不写推理过程；相关素材综合分析，无关素材以第一份为主。
+范围：${scopeDescription}。${analysisScope.music ? '必须有音乐分析和两套配乐方案。' : '禁止输出音乐分析、配乐或动作测速。'}${analysisScope.sfx ? '必须有音效分析及一套制作排程。' : '禁止输出音效分析或排程。'}
+除 English 字段、标准英文 key、数字 bpm、时间码、英文音效 name 外，一律中文。中英字段逐项同义，英文不得额外增添元素。分析文字每项一两句，不重复画面描述；普通字段不超过 50 个汉字，英文简洁等义。
+${analysisScope.sfx ? `音效：仅保留真实可见的 ${target.gift ? '3-5' : '6-10'} 个关键触发点；连续动作合并，不凑数量。scene 写准确时间范围及动作；description 写声音制作要点，logic 写音画对应依据。name 为具体类型、材质/道具与变化序号组成的英文下划线工程名，例如 sfx_foley_footstep_wood_01，禁止空格。严禁对白。` : ''}
+${analysisScope.music ? `
+音乐：两套方向须符合素材题材与用户需求，差异来自曲风、核心配器或节奏，不得为了差异制造相反情绪。每套方案独立闭环，style、BPM、key、配器和段落互相一致。style/styleEnglish 为具体曲风与情绪短语（中文≤30字、英文≤12词），不写 BPM 或时间码。key 为标准英文音名+major/minor，例如 D minor。
+sunoDirection 用七组中英同义短语概括整曲，每组中文≤24字、英文≤10词，不复制画面时间码或剪辑指令：
+use：实际用途与画面；moodEnergy：感受与能量走势；instrumentRoles：主奏、节奏、铺底的乐器；tempoFeel：与 bpm 一致的快慢听感，不重复数字；melodyMix：旋律强弱及对白/音效留白；formEnding：整曲结构、循环和收尾；exclude：不需要的1-2类音色或编排。无鼓时如实写无鼓，不编造。
+${isGameTrack ? '游戏/活动只做适合长时间循环的统一整曲，不输出 timelineDesign，不在音乐字段写时间码或先后指令。instrumentation 双语列3-5个核心乐器；visualRationale 用60-120字解释画面、玩法或用户需求为何对应该曲风。' : 'timelineDesign 按真实叙事/显著情绪拐点划段，连续覆盖全片，无空隙重叠。通常每段5-8秒，稳定镜头可8-15秒；相似情绪与配器必须合并，微小动作/普通切镜不换段，严禁连续2-3秒换情绪。每段写timecode、emotion、1-4个instruments及简洁description（编排/动态/音画配合），后3项中英同义。musicAnalysis.emotionalCurve只写客观画面情绪，两套配乐各自响应写在各自时间线。'}
+${isInstrumental ? '纯音乐：style、instrumentation、timelineDesign不含人声、吟唱、合唱、呼喊、歌词或vocal/voice/choir/chant等。不得输出vocalInfo、lyrics或vocalDirection。' : 'vocalDirection双语一句描述整曲人声类型、音色与唱法，不写时间码；如有时间线，人声进入时机只写对应段落。不输出vocalInfo或lyrics。'}
+` : ''}
+${shouldAnalyzeMotionTempo ? `
+videoMotionTempo 独立分析可见主体的重复动作周期（完整循环为一拍），绝不能从推荐配乐BPM推导。运镜、切镜、闪白不计动作拍。给primaryBpm、稳定区间、最多3个半/倍速候选、可信度(高/中/低)、周期依据与对齐相位；变速时才写segments。画面采样不足以测出动作周期时detected=false、BPM与区间为0、候选和segments为空，如实说明限制，禁止猜数。
+` : ''}
+${additionalSpecialInstructions}
+目标：${targetDesc}
+补充需求：${requirements}
+${audioEvidence.length ? `音频证据边界（优先）：${AUDIO_EVIDENCE_RULES}\n音效仅为待验证创意，不得声称识别到原音频事件；只有指标时不得声称观察到画面、动作或确定曲风。` : ''}
+${analysisScope.music ? `音乐类型：${isInstrumental ? '纯音乐（Instrumental）' : '带人声歌曲'}` : ''}
   `;
 
   const usesNativeVideo = files.some(file => Boolean(file.fileUri));
@@ -1004,11 +876,17 @@ export async function analyzeAudioDesign(
   }
 
   const { Type, ThinkingLevel } = getAI();
+  options.signal?.throwIfAborted();
+  const modelStartedAt = Date.now();
+  console.info(`[audio-design] model-start images=${files.filter(file => file.mimeType.startsWith('image/')).length} promptChars=${prompt.length} scope=${scopeDescription}`);
+  options.onProgress?.('画面已准备好，模型正在生成设计方案（最多 90 秒，超时自动停止）…');
   const response = await generateAiContent({
     contents: [{ parts }],
+    timeoutMs: AUDIO_DESIGN_MODEL_TIMEOUT_MS,
+    signal: options.signal,
     config: {
       responseMimeType: "application/json",
-      maxOutputTokens: target.gift ? 8_192 : analysisScope.music && analysisScope.sfx ? 16_384 : 10_240,
+      maxOutputTokens: analysisScope.music && analysisScope.sfx ? 8_192 : 6_144,
       thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
       responseSchema: {
         type: Type.OBJECT,
@@ -1078,6 +956,7 @@ export async function analyzeAudioDesign(
             } } : {}),
             ...(analysisScope.sfx ? { sfxSchemes: {
               type: Type.ARRAY,
+              minItems: 1, maxItems: 1,
               items: {
                 type: Type.OBJECT,
                 required: ["title", "items"],
@@ -1101,6 +980,7 @@ export async function analyzeAudioDesign(
             } } : {}),
             ...(analysisScope.music ? { bgmRecommendations: {
               type: Type.ARRAY,
+              minItems: 2, maxItems: 2,
               items: {
                 type: Type.OBJECT,
                 required: [
@@ -1110,8 +990,7 @@ export async function analyzeAudioDesign(
                   ...(isGameTrack ? ["instrumentation", "instrumentationEnglish", "visualRationale"] : []),
                   "bpm",
                   "key",
-                  "vocalDirection",
-                  "vocalDirectionEnglish",
+                  ...(!isInstrumental ? ["vocalDirection", "vocalDirectionEnglish"] : []),
                   ...(!isGameTrack ? ["timelineDesign"] : [])
                 ],
                 properties: {
@@ -1147,35 +1026,8 @@ export async function analyzeAudioDesign(
                   visualRationale: { type: Type.STRING },
                   bpm: { type: Type.INTEGER },
                   key: { type: Type.STRING },
-                  vocalDirection: { type: Type.STRING },
-                  vocalDirectionEnglish: { type: Type.STRING },
-                  vocalInfo: {
-                    type: Type.OBJECT,
-                    properties: {
-                      type: { type: Type.STRING },
-                      gender: { type: Type.STRING },
-                      age: { type: Type.STRING },
-                      characteristics: { type: Type.STRING },
-                      mood: { type: Type.STRING },
-                      singingStyle: { type: Type.STRING }
-                    }
-                  },
-                  lyrics: {
-                    type: Type.OBJECT,
-                    properties: {
-                      content: {
-                        type: Type.ARRAY,
-                        items: {
-                          type: Type.OBJECT,
-                          properties: {
-                            section: { type: Type.STRING },
-                            text: { type: Type.STRING }
-                          }
-                        }
-                      }
-                    }
-                  },
-                  timelineDesign: {
+                  ...(!isInstrumental ? { vocalDirection: { type: Type.STRING }, vocalDirectionEnglish: { type: Type.STRING } } : {}),
+                  ...(includeMusicTimeline ? { timelineDesign: {
                     type: Type.ARRAY,
                     items: {
                       type: Type.OBJECT,
@@ -1198,7 +1050,7 @@ export async function analyzeAudioDesign(
                         descriptionEnglish: { type: Type.STRING }
                       }
                     }
-                  }
+                  } } : {})
                 }
               }
             } } : {})
@@ -1219,7 +1071,13 @@ export async function analyzeAudioDesign(
     throw new Error("AI 返回的数据格式有误，请重试");
   }
 
+  options.signal?.throwIfAborted();
+  console.info(`[audio-design] model-complete elapsedMs=${Date.now() - modelStartedAt} resultChars=${response.text.length}`);
+  options.onProgress?.('模型已返回，正在校验音效排程和配乐方案…');
   const result = materializeAudioDesignResult(rawResult, isInstrumental, includeMusicTimeline, analysisScope);
+  if ((analysisScope.music && !result.bgmRecommendations?.length) || (analysisScope.sfx && !result.sfxSchemes?.some(scheme => scheme.items?.length))) {
+    throw new Error('模型未返回所选范围的有效设计方案，请调整需求后重试。');
+  }
   if (audioEvidence.length) result.audioAnalysisSources = audioEvidence.map(e => ({ sourceName: e.sourceName,
     sourceDuration: e.sourceDuration, analyzedSeconds: e.analyzedSeconds, method: 'local-metrics-gpt', model: response.modelVersion }));
   return result;

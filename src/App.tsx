@@ -1080,6 +1080,7 @@ export default function App() {
                 signal: controller.signal,
                 analysisMode: 'professional',
                 scope,
+                onProgress: setAnalysisStage,
               },
             );
           } else {
@@ -1098,6 +1099,9 @@ export default function App() {
           }
         } catch (videoAnalysisError) {
           if (controller.signal.aborted) throw videoAnalysisError;
+          // Only recover preparation/upload failures. A submitted model task must
+          // never silently start another paid inference through the fallback path.
+          if (!(videoAnalysisError as any)?.preparationFailure) throw videoAnalysisError;
           console.warn('Full video analysis failed; falling back to server keyframes:', videoAnalysisError);
           const fileData = await prepareFilesWithServerVideoKeyframes('完整视频处理失败，正在改用关键帧继续分析');
           setAnalysisStage('正在用服务器关键帧生成音频方案...');
@@ -1106,37 +1110,52 @@ export default function App() {
             requirements,
             target,
             isInstrumental,
-            { signal: controller.signal, scope },
+            { signal: controller.signal, scope, onProgress: setAnalysisStage },
           );
         }
       } else {
-        // Fast mode reduces videos to compact keyframes and resizes images.
-        let fileData: AudioDesignMedia[] | null = null;
-        try {
-          fileData = hasLargeVideo
-            ? await prepareFilesWithServerVideoKeyframes('视频超过 50MB，正在使用服务器轻量关键帧分析')
-            : await prepareFilesForAnalysis(files.map(item => item.file), {
-                signal: controller.signal,
-                onProgress: setAnalysisStage,
-              });
-        } catch (prepareError) {
-          if (videoFiles.length === 0 || controller.signal.aborted) {
-            throw prepareError;
+        // Reuse the video already uploaded during selection. Previously music-
+        // only analysis uploaded the same large file a second time for keyframes.
+        const readyUploadId = canUseSingleVideoPreupload
+          ? await waitForReadyPreupload(videoFiles[0])
+          : null;
+        if (readyUploadId) {
+          try {
+            res = await analyzeAudioDesignPreuploadedVideo(readyUploadId, requirements, target, isInstrumental,
+              { signal: controller.signal, scope, onProgress: setAnalysisStage });
+          } catch (preuploadError) {
+            if (controller.signal.aborted || !(preuploadError as any)?.preparationFailure) throw preuploadError;
+          }
+        }
+        if (!res) {
+          // Fast mode reduces videos to compact keyframes and resizes images.
+          let fileData: AudioDesignMedia[] | null = null;
+          try {
+            fileData = hasLargeVideo
+              ? await prepareFilesWithServerVideoKeyframes('视频超过 50MB，正在使用服务器轻量关键帧分析')
+              : await prepareFilesForAnalysis(files.map(item => item.file), {
+                  signal: controller.signal,
+                  onProgress: setAnalysisStage,
+                });
+          } catch (prepareError) {
+            if (videoFiles.length === 0 || controller.signal.aborted) {
+              throw prepareError;
+            }
+
+            console.warn('Local video keyframe extraction failed; falling back to server keyframes:', prepareError);
+            fileData = await prepareFilesWithServerVideoKeyframes('浏览器抽帧失败');
           }
 
-          console.warn('Local video keyframe extraction failed; falling back to server keyframes:', prepareError);
-          fileData = await prepareFilesWithServerVideoKeyframes('浏览器抽帧失败');
-        }
-
-        if (fileData) {
-          setAnalysisStage('素材已准备好，正在请求 GPT 生成音频方案...');
-          res = await analyzeAudioDesign(
-            fileData,
-            requirements,
-            target,
-            isInstrumental,
-            { signal: controller.signal, scope },
-          );
+          if (fileData) {
+            setAnalysisStage('素材已准备好，正在请求 GPT 生成音频方案...');
+            res = await analyzeAudioDesign(
+              fileData,
+              requirements,
+              target,
+              isInstrumental,
+              { signal: controller.signal, scope, onProgress: setAnalysisStage },
+            );
+          }
         }
       }
       

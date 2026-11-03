@@ -34,6 +34,8 @@ import { ONLINE_SFX_BATCH_COMPANY_POINTS } from './src/services/onlineSfxTypes';
 import { createMusicAnalysisRouter, isGptAudioAnalysisConfigured } from './src/services/musicAnalysisServer';
 import { analyzeMusicNaming } from './src/services/musicNamingAnalysis';
 import { createSfxRequirementsJobs } from './src/services/sfxRequirementsJobs';
+import { createAudioDesignJobs } from './src/services/audioDesignJobsServer';
+import { selectAudioDesignFrames } from './src/services/audioDesignJobs';
 import { AUDIO_METRICS_MIME, validateAudioEvidence } from './src/utils/audioEvidence';
 import {
   DETAILED_SFX_MAX_BASE64_LENGTH,
@@ -894,6 +896,8 @@ async function startServer() {
       if (req.originalUrl.startsWith('/api/ai/assistant/') && (req.method === 'GET' || req.path.endsWith('/cancel'))) return next();
       // Background requirements keep their own reservation until the job settles.
       if (req.originalUrl.startsWith('/api/ai/sfx-requirements') && (req.method === 'GET' || req.body?.background === true)) return next();
+      // Design jobs reserve once for their entire lifetime, including reconnects.
+      if (req.originalUrl.split('?')[0].match(/^\/api\/ai\/audio-design\/jobs(?:\/|$)/)) return next();
       return requireElevenLabsQuota(() => 0.1)(req, res, next);
     },
   );
@@ -2468,6 +2472,7 @@ async function startServer() {
     uploadId: string;
     localFileName: string;
     keyframes: Array<{ timestamp: number; base64: string }>;
+    duration: number;
     mimeType: string;
     displayName: string;
     expiresAt: number;
@@ -4336,17 +4341,17 @@ async function startServer() {
 
   app.use('/api/ai/audio-analysis', createMusicAnalysisRouter());
 
-  app.post('/api/ai/audio-design', asyncRoute(async (req, res) => {
-    const { files, requirements = '', target = {}, isInstrumental = true, scope } = req.body || {};
+  const normalizeAudioDesignInput = (body: any, maxFiles = 16) => {
+    const { files, requirements = '', target = {}, isInstrumental = true, scope } = body || {};
     if (!Array.isArray(files)) {
-      return res.status(400).json({ error: 'files must be an array' });
+      throw Object.assign(new Error('files must be an array'), { status: 400 });
     }
-    if (files.length > 16) {
-      return res.status(400).json({ error: '素材切片数量过多，请减少文件后重试。' });
+    if (files.length > maxFiles) {
+      throw Object.assign(new Error('素材切片数量过多，请减少文件后重试。'), { status: 400 });
     }
     if (files.some((file: any) => !file || file.fileUri || typeof file.mimeType !== 'string'
       || (file.mimeType !== AUDIO_METRICS_MIME && typeof file.data !== 'string'))) {
-      return res.status(400).json({ error: '快速模式素材格式无效。' });
+      throw Object.assign(new Error('快速模式素材格式无效。'), { status: 400 });
     }
     for (const file of files) {
       if (file.mimeType === AUDIO_METRICS_MIME) file.audioMetrics = validateAudioEvidence(file.audioMetrics);
@@ -4359,14 +4364,40 @@ async function startServer() {
       return total + Math.max(0, Math.floor((base64.length * 3) / 4) - paddingBytes);
     }, 0);
     if (decodedLength > MAX_INLINE_MEDIA_BYTES) {
-      return res.status(413).json({ error: '素材总量过大，请减少文件数量或压缩素材。' });
+      throw Object.assign(new Error('素材总量过大，请减少文件数量或压缩素材。'), { status: 413 });
     }
-    const result = await analyzeAudioDesign(files, String(requirements), target, Boolean(isInstrumental), { scope });
+    return { files, requirements: String(requirements), target: target || {}, isInstrumental: Boolean(isInstrumental), scope };
+  };
+  app.use('/api/ai/audio-design/jobs', createAudioDesignJobs({
+    directory: path.join(dataDir, 'audio-design-jobs'),
+    identity: (req, res) => resolveUsageActor(req, res).userId,
+    normalize: body => {
+      if (!body.uploadId) return normalizeAudioDesignInput(body);
+      const cached = audioDesignVideoPreuploads.get(String(body.uploadId));
+      if (!cached || cached.expiresAt <= Date.now()) throw Object.assign(new Error('预上传视频已失效，请重新选择视频后分析。'), { status: 410 });
+      const frames = selectAudioDesignFrames(cached.keyframes, cached.duration, body.scope?.music === true && body.scope?.sfx === false);
+      return normalizeAudioDesignInput({ ...body, files: frames.map(frame => ({
+        data: `data:image/jpeg;base64,${frame.base64}`, mimeType: 'image/jpeg',
+        label: `视频 ${cached.displayName}，全长 ${cached.duration} 秒，时间 ${frame.timestamp} 秒`, videoMetadata: { startOffset: `${frame.timestamp}s` },
+      })) }, 32);
+    },
+    reserve: (req, res) => {
+      const reservation = reserveElevenLabsQuota(resolveUsageActor(req, res), 0.1);
+      if (!reservation.release) res.status(429).json({ code: 'COMPANY_POINTS_EXCEEDED', error: '个人积分不足，请联系管理员追加额度。', quota: reservation.quota });
+      return reservation.release;
+    },
+    run: (_req, res, work) => { void usageRequestContext.run(res.locals.aiUsageContext, work); },
+    execute: (input, onProgress, signal) => analyzeAudioDesign(input.files, input.requirements, input.target, input.isInstrumental, { scope: input.scope, signal, onProgress }),
+  }));
+  app.post('/api/ai/audio-design', asyncRoute(async (req, res) => {
+    const input = normalizeAudioDesignInput(req.body);
+    const result = await analyzeAudioDesign(input.files, input.requirements, input.target, input.isInstrumental, { scope: input.scope });
     return res.json(result);
   }));
 
   app.post(
     '/api/ai/audio-design-video-keyframes',
+    (_req, res, next) => { res.locals.mediaStartedAt = Date.now(); next(); },
     upload.single('video'),
     asyncRoute(async (req, res) => {
       if (!req.file) {
@@ -4383,13 +4414,16 @@ async function startServer() {
           return res.status(415).json({ error: '关键帧回退分析只支持视频文件。' });
         }
 
+        const processingStartedAt = Date.now();
         const duration = await getMediaDurationSeconds(uploadedPath).catch(() => 30);
         const frames = await extractServerVideoKeyframes(req.file.filename, duration, { dense: false });
+        console.info(`[audio-design] keyframes uploadMs=${processingStartedAt - res.locals.mediaStartedAt} prepareMs=${Date.now() - processingStartedAt} frames=${frames.length} bytes=${req.file.size}`);
         return res.json({
           frames: frames.map((frame, index) => ({
             data: `data:image/jpeg;base64,${frame.base64}`,
             mimeType: 'image/jpeg',
             label: `服务器关键帧：${normalizeUploadDisplayName(req.body?.originalName, req.file?.originalname)} ${index + 1}/${frames.length}，时间 ${frame.timestamp} 秒`,
+            videoMetadata: { startOffset: `${frame.timestamp}s` },
           })),
         });
       } finally {
@@ -4400,6 +4434,7 @@ async function startServer() {
 
   app.post(
     '/api/ai/audio-design-video-preupload',
+    (_req, res, next) => { res.locals.mediaStartedAt = Date.now(); next(); },
     upload.single('video'),
     asyncRoute(async (req, res) => {
       if (!req.file) {
@@ -4425,16 +4460,19 @@ async function startServer() {
           req.file.originalname,
         );
         if (!isGptTextConfigured()) return res.status(503).json({ error: 'AI 文本/视觉网关尚未配置。' });
+        const processingStartedAt = Date.now();
         const duration = await getMediaDurationSeconds(uploadedPath).catch(() => 30);
         const keyframes = await extractServerVideoKeyframes(req.file.filename, duration, {
           frameCount: req.body?.shortVideo === 'true' ? 16 : 24,
         });
+        console.info(`[audio-design] preupload uploadMs=${processingStartedAt - res.locals.mediaStartedAt} prepareMs=${Date.now() - processingStartedAt} frames=${keyframes.length} bytes=${req.file.size}`);
         const uploadId = randomUUID();
         const expiresAt = Date.now() + AUDIO_DESIGN_PREUPLOAD_TTL_MS;
         audioDesignVideoPreuploads.set(uploadId, {
           uploadId,
           localFileName: req.file.filename,
           keyframes,
+          duration,
           mimeType: req.file.mimetype,
           displayName: originalDisplayName,
           expiresAt,

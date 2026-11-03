@@ -135,13 +135,13 @@ export default function Sidebar({ currentTab, setCurrentTab, isMobileOpen, onMob
     <>
       {/* Brand Logo */}
       <div className={`${variant === 'desktop' && isDesktopCompact ? 'px-3 py-5 justify-center' : 'px-6 py-6'} border-b border-slate-100 flex items-center gap-3`}>
-        <div className={`flex min-w-0 flex-1 items-center ${variant === 'desktop' && isDesktopCompact ? 'justify-center gap-0' : 'gap-3'}`}>
+        <div className={`flex min-w-0 flex-1 items-center ${variant === 'desktop' && isDesktopCompact ? 'justify-center gap-0' : 'gap-2'}`}>
           <img
             src={wpLogoUrl}
             alt="T1 Ai Audio"
             className="h-9 w-9 shrink-0 rounded-xl object-contain shadow-lg shadow-emerald-500/10"
           />
-          <div className={`min-w-0 flex-1 flex-col items-center text-center ${variant === 'desktop' && isDesktopCompact ? 'hidden' : 'flex'}`}>
+          <div className={`min-w-0 flex-1 flex-col items-start text-left ${variant === 'desktop' && isDesktopCompact ? 'hidden' : 'flex'}`}>
             <h1 className="max-w-full truncate text-sm font-bold tracking-tight text-slate-800">T1 Ai Audio</h1>
           </div>
         </div>

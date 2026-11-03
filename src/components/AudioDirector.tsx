@@ -867,7 +867,8 @@ export default function AudioDirector({
               <Loader2 className="w-10 h-10 text-emerald-600 animate-spin" />
               <div className="space-y-1">
                 <p className="text-sm font-bold text-slate-800">多模态大模型正在协同创作中</p>
-                <p className="text-xs text-slate-500">{analysisStage}</p>
+                <p role="status" className="text-xs text-slate-500">{analysisStage}</p>
+                <p className="text-[10px] text-slate-400">分析最多等待 90 秒；短暂断线查询同一任务，不会重新生成。</p>
               </div>
             </div>
           )}
