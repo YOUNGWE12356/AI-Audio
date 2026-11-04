@@ -4,7 +4,7 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Download, Loader2, Pause, Play, X } from 'lucide-react';
+import { Check, Download, Loader2, Pause, Play, X } from 'lucide-react';
 import { exportDownloadAudio, startAudioRangePreview, type AudioDownloadRange, type AudioRangePlayback } from '../services/audioRangeExport';
 
 export const formatGeneratedAudioTime = (seconds?: number | null) => {
@@ -62,6 +62,11 @@ interface GeneratedAudioPlayerProps {
   onRename?: (title: string) => void;
   onClear?: () => void;
   stopEventName?: string;
+  onConfirm?: (blob: Blob, range: AudioDownloadRange) => Promise<void> | void;
+  onSelectionChange?: (range: AudioDownloadRange | null) => void;
+  hideDownloads?: boolean;
+  initialRange?: AudioDownloadRange | null;
+  onDecoded?: (duration: number) => void;
 }
 
 export default function GeneratedAudioPlayer({
@@ -83,6 +88,11 @@ export default function GeneratedAudioPlayer({
   onRename,
   onClear,
   stopEventName = 'generated-audio-player-stop-others',
+  onConfirm,
+  onSelectionChange,
+  hideDownloads = false,
+  initialRange = null,
+  onDecoded,
 }: GeneratedAudioPlayerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -91,7 +101,13 @@ export default function GeneratedAudioPlayer({
   const previewContextRef = useRef<AudioContext | null>(null);
   const previewRequestRef = useRef(0);
   const [decodeStatus, setDecodeStatus] = useState<'loading' | 'ready' | 'error'>('loading');
-  const [selection, setSelection] = useState<AudioDownloadRange | null>(null);
+  const [selection, setSelection] = useState<AudioDownloadRange | null>(initialRange);
+  const initialRangeRef = useRef(initialRange);
+  const selectionCallback = useRef(onSelectionChange);
+  selectionCallback.current = onSelectionChange;
+  const decodedCallback = useRef(onDecoded);
+  decodedCallback.current = onDecoded;
+  useEffect(() => { selectionCallback.current?.(selection); }, [selection, url]);
   const dragRef = useRef<{ pointerId: number; anchor: number; initialX: number; moved: boolean; previous: AudioDownloadRange | null; edge?: 'start' | 'end' } | null>(null);
   const [exporting, setExporting] = useState<'wav' | 'mp3' | null>(null);
   const [exportError, setExportError] = useState('');
@@ -174,7 +190,7 @@ export default function GeneratedAudioPlayer({
     setBars(fallbackBars);
     decodedRef.current = null;
     setDecodeStatus('loading');
-    setSelection(null);
+    setSelection(initialRangeRef.current);
     setExporting(null);
     setExportError('');
     setCurrentTime(0);
@@ -222,6 +238,7 @@ export default function GeneratedAudioPlayer({
           setDecodeStatus('ready');
           setBars(normalizedBars);
           setDuration(audioBuffer.duration || durationHint || 0);
+          decodedCallback.current?.(audioBuffer.duration);
         }
       } catch (error) {
         if (!cancelled) {
@@ -419,6 +436,22 @@ export default function GeneratedAudioPlayer({
     return `calc(${ratio * 100}% + ${12 - 24 * ratio}px)`;
   };
 
+  const confirmRange = async () => {
+    const source = decodedRef.current;
+    if (!source || !onConfirm || exportController.current) return;
+    const controller = new AbortController(); exportController.current = controller;
+    setExporting('wav'); setExportError('');
+    try {
+      const blob = await exportDownloadAudio(source, selection, 'wav', title, controller.signal);
+      controller.signal.throwIfAborted();
+      await onConfirm(blob, selection || { start: 0, end: source.duration });
+    } catch (error: any) {
+      if (!controller.signal.aborted) setExportError(error.message || '确认剪辑失败，请重试。');
+    } finally {
+      if (exportController.current === controller) { exportController.current = null; if (!controller.signal.aborted) setExporting(null); }
+    }
+  };
+
   return (
     <div ref={containerRef} className="rounded-2xl border border-slate-200 bg-slate-50/80 p-4 space-y-3 shadow-sm">
       <audio
@@ -567,7 +600,7 @@ export default function GeneratedAudioPlayer({
       </div>
 
       {enableRangeDownload ? <div className="space-y-2">
-        <p className="text-[10px] text-slate-500">{decodeStatus === 'loading' ? '正在读取波形…' : '在波形上拖动框选下载范围，拖动两端可调整；不框选则下载完整音频。'}</p>
+        <p className="text-[10px] text-slate-500">{decodeStatus === 'loading' ? '正在读取波形…' : onConfirm ? '在波形上拖动框选保留范围，两端可来回调整；试听满意后确认剪辑。未框选时保留完整音频。' : '在波形上拖动框选下载范围，拖动两端可调整；不框选则下载完整音频。'}</p>
         <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-600">
           <label className="flex items-center gap-1">起点（秒）<input aria-label="下载起点（秒）" type="number" step="0.01" min="0" max={safeDuration}
             disabled={decodeStatus !== 'ready' || !!exporting} value={Number((selection?.start || 0).toFixed(2))}
@@ -578,13 +611,17 @@ export default function GeneratedAudioPlayer({
           <span>{selection ? `已选 ${(selection.end - selection.start).toFixed(2)} 秒` : '完整音频'}</span>
           {selection && <button type="button" disabled={!!exporting} onClick={() => { stopRangePreview(); if (audioRef.current) audioRef.current.currentTime = currentTime; setSelection(null); }} className="text-emerald-700 underline">取消选区</button>}
         </div>
-        <div className="grid grid-cols-2 gap-2">
+        {onConfirm && <button type="button" onClick={() => void confirmRange()}
+          disabled={decodeStatus !== 'ready' || !!exporting || !!dragRef.current}
+          className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-xs font-bold text-white disabled:opacity-40">
+          {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}{exporting ? '正在确认…' : '确认剪辑'}</button>}
+        {!hideDownloads && <div className="grid grid-cols-2 gap-2">
           {(['wav', 'mp3'] as const).map(format => <button key={format} type="button" disabled={decodeStatus !== 'ready' || !!exporting || !!dragRef.current || !!(selection && selection.end - selection.start < 0.01)}
             onClick={() => void downloadRange(format)} className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white py-2 text-[10px] font-bold text-slate-700 hover:bg-emerald-50 hover:text-emerald-700 disabled:opacity-40">
             {exporting === format ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
             {exporting === format ? '正在导出…' : `下载${selection ? '选区' : '完整'} ${format.toUpperCase()}`}
           </button>)}
-        </div>
+        </div>}
         {exportError && <p role="alert" className="text-[10px] text-red-600">{exportError}</p>}
       </div> : <a
         href={url}

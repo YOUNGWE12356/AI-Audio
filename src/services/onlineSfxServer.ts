@@ -10,11 +10,13 @@ import {
   ONLINE_SFX_BATCH_COMPANY_POINTS,
   ONLINE_SFX_MAX_RESULTS,
   ONLINE_SFX_PRICING_VERSION,
-  ONLINE_SFX_SOURCE_PAGES_PER_BATCH,
+  ONLINE_SFX_SOURCES,
   onlineSfxSearchUrl,
   type OnlineSfxItem,
+  type OnlineSfxSourceStatus,
 } from './onlineSfxTypes';
 import { recordAiUsage } from './usageTracking';
+import { createOnlineSfxRelevanceMatcher } from './onlineSfxRelevance';
 
 const runFile = promisify(execFile);
 const PREVIEW_HOST = 'public-assets.content-platform.envatousercontent.com';
@@ -30,7 +32,7 @@ const decodeHtml = (value: string) => value.replace(/&(?:amp|quot|apos|lt|gt|#39
 export function recordOnlineSfxBatchUsage() {
   recordAiUsage({
     provider: 'network',
-    model: 'envato-preview-search',
+    model: 'multi-source-preview-search',
     inputTokens: 0,
     outputTokens: 0,
     reasoningTokens: 0,
@@ -46,7 +48,7 @@ export function recordOnlineSfxBatchUsage() {
 export function recordTimelineOnlineSfxUsage() {
   recordAiUsage({
     provider: 'network',
-    model: 'envato-preview-timeline',
+    model: 'multi-source-preview-timeline',
     inputTokens: 0,
     outputTokens: 0,
     reasoningTokens: 0,
@@ -127,8 +129,11 @@ export async function removeOrphanedOnlineSfxFiles(uploadsDir: string, createdBe
 export function allowedPreviewUrl(value: string) {
   try {
     const url = new URL(value);
-    return url.protocol === 'https:' && url.hostname === PREVIEW_HOST && !url.port
-      && !url.username && !url.password && /\/preview\.(?:mp3|m4a)$/.test(url.pathname);
+    if (url.protocol !== 'https:' || url.port || url.username || url.password) return false;
+    return (url.hostname === PREVIEW_HOST && /\/preview\.(?:mp3|m4a)$/.test(url.pathname))
+      || (url.hostname === 'prosoundeffects.blob.core.windows.net' && /^\/library\/mp3\/.+\.mp3$/.test(url.pathname))
+      || (url.hostname === 'audiocdn.epidemicsound.com' && /^\/lqmp3\/[A-Za-z0-9]+\.mp3$/.test(url.pathname))
+      || (url.hostname === 'assets.mixkit.co' && /^\/active_storage\/sfx\/\d+\/\d+-preview\.mp3$/.test(url.pathname));
   } catch { return false; }
 }
 
@@ -146,13 +151,255 @@ export function parseEnvatoSearch(html: string, limit = ONLINE_SFX_MAX_RESULTS):
     if (!title || !href || !previewUrl) continue;
     const sourceUrl = new URL(decodeHtml(href), 'https://elements.envato.com');
     const preview = decodeHtml(previewUrl);
-    if (sourceUrl.origin !== 'https://elements.envato.com' || !allowedPreviewUrl(preview) || seen.has(sourceUrl.href)) continue;
+    if (sourceUrl.origin !== 'https://elements.envato.com' || !allowedPreviewUrl(preview)
+      || new URL(preview).hostname !== PREVIEW_HOST || seen.has(sourceUrl.href)) continue;
     seen.add(sourceUrl.href);
     items.push({ title: decodeHtml(title), author: decodeHtml(card.match(/href="\/user\/([^/]+)\/sound-effects"/)?.[1] || ''),
       source: 'Envato Elements', sourceUrl: sourceUrl.href, previewUrl: preview });
     if (items.length === limit) break;
   }
   return items;
+}
+
+const attribute = (tag: string, name: string) => decodeHtml(tag.match(new RegExp(`\\b${name}="([^"]*)"`))?.[1] || '');
+
+export function parsePseSearch(json: string): Candidate[] {
+  const payload = JSON.parse(json);
+  if (!Array.isArray(payload?.result)) throw fail('PSE 搜索数据格式已变化。');
+  return payload.result.flatMap((item: any): Candidate[] => {
+    // The catalog also supports third-party collections; only use the PSE store.
+    if (item?.source !== 'PSE' || typeof item?.description !== 'string'
+      || typeof item?.filename !== 'string' || typeof item?.mp3Url !== 'string'
+      || !allowedPreviewUrl(item.mp3Url) || new URL(item.mp3Url).hostname !== 'prosoundeffects.blob.core.windows.net') return [];
+    return [{ title: item.description, author: typeof item.artist === 'string' ? item.artist : '',
+      source: 'Pro Sound Effects', sourceUrl: onlineSfxSearchUrl('pse', item.filename), previewUrl: item.mp3Url }];
+  });
+}
+
+export function parseEpidemicSearch(flight: string): Candidate[] {
+  // Parse only the public search action's JSON result, never homepage/Flight
+  // recommendations. No JS evaluation or reference resolution is needed.
+  for (const line of flight.split('\n')) {
+    const json = line.match(/^[\da-f]+:(\{.*\})$/)?.[1];
+    if (!json) continue;
+    let result: any;
+    try { result = JSON.parse(json); } catch { continue; }
+    if (!Array.isArray(result?.tracks) || !Number.isFinite(result?.meta?.totalHits)) continue;
+    return result.tracks.flatMap((track: any): Candidate[] => {
+      const previewUrl = track?.stems?.full?.lqMp3Url;
+      if (track?.isSfx !== true || typeof track?.title !== 'string'
+        || typeof track?.kosmosId !== 'string' || !/^[a-f0-9-]{36}$/.test(track.kosmosId)
+        || track.pathname !== `/sound-effects/tracks/${track.kosmosId}/`
+        || typeof previewUrl !== 'string' || !allowedPreviewUrl(previewUrl)
+        || new URL(previewUrl).hostname !== 'audiocdn.epidemicsound.com') return [];
+      return [{ title: track.title, author: '', source: 'Epidemic Sound',
+        sourceUrl: `https://www.epidemicsound.com${track.pathname}`, previewUrl }];
+    });
+  }
+  throw fail('Epidemic 搜索接口已变化或暂不可用。');
+}
+
+const epidemicActions = new WeakMap<typeof fetch, { until: number; promise: Promise<string> }>();
+async function epidemicSearchAction(signal: AbortSignal, fetcher: typeof fetch) {
+  const cached = epidemicActions.get(fetcher);
+  if (cached && cached.until > Date.now()) return cached.promise;
+  const promise = (async () => {
+    const { data } = await boundedFetch('https://www.epidemicsound.com/sound-effects/', 3 * 1024 * 1024, signal, fetcher);
+    const script = [...data.toString('utf8').matchAll(/<script\b[^>]*src="([^"]+)"/g)]
+      .map(match => match[1]).find(url => /^https:\/\/www\.epidemicsound\.com\/staticfiles\/public-pages\/_next\/static\/chunks\/app\/[^?#]+\/sound-effects\/page-[\w-]+\.js$/.test(url));
+    if (!script) throw fail('Epidemic 搜索页面结构已变化。');
+    const { data: chunk } = await boundedFetch(script, 1024 * 1024, signal, fetcher);
+    const action = chunk.toString('utf8').match(/createServerReference\)\("([a-f0-9]{40,64})"[^;]{0,200}"fetchSfxTracks"/)
+      || chunk.toString('utf8').match(/createServerReference\("([a-f0-9]{40,64})"[^;]{0,200}"fetchSfxTracks"/);
+    if (!action) throw fail('Epidemic 搜索接口已变化。');
+    return action[1];
+  })();
+  const entry = { until: Date.now() + 10 * 60_000, promise };
+  epidemicActions.set(fetcher, entry);
+  try { return await promise; } catch (error) {
+    if (epidemicActions.get(fetcher) === entry) epidemicActions.delete(fetcher);
+    throw error;
+  }
+}
+
+export function parseMixkitSearch(html: string): Candidate[] {
+  const items: Candidate[] = [];
+  // Category pages contain real matching cards; never use the generic homepage.
+  if (!/<h1\b[^>]*>\s*Free\s+[^<]+\s+Sound Effects\s*<\/h1>/i.test(html)) return items;
+  for (const card of html.split(/class="item-grid__item"/).slice(1)) {
+    const player = card.match(/<div\b[^>]*\bdata-audio-player-preview-url-value="[^"]+"[^>]*>/)?.[0];
+    if (!player || attribute(player, 'data-audio-player-item-type-value') !== 'sfx') continue;
+    const id = attribute(player, 'data-audio-player-item-id-value');
+    const previewUrl = attribute(player, 'data-audio-player-preview-url-value');
+    const title = decodeHtml(card.match(/<h2\b[^>]*class="item-grid-card__title"[^>]*>\s*([^<]+)<\/h2>/)?.[1]?.trim() || '');
+    if (!/^\d+$/.test(id) || !title || !allowedPreviewUrl(previewUrl)
+      || previewUrl !== `https://assets.mixkit.co/active_storage/sfx/${id}/${id}-preview.mp3`) continue;
+    items.push({ title, author: '', source: 'Mixkit', sourceUrl: `https://mixkit.co/free-sound-effects/download/${id}/`, previewUrl });
+  }
+  return items;
+}
+
+const MIXKIT_CATEGORIES = new Set(('transition blow cinematic glitch impact slide spin stomp sweep swish swoosh thud whip whoosh woosh zoom '
+  + 'nature ambience beach desert fire forest jungle morning mountain night rain rivers sea storm thunder water waterfall waves wind wood splash ocean lightning '
+  + 'technology bleep buzzer camera click clock keyboard drone electricity error interface laptop light radio rewind robot static tones tv type typewriter ding '
+  + 'funny fart laugh cartoon happy notification alarm alerts beep phone animals bird cat chicken cow crickets dog farm horse insect lion monkey mouse roar wolf pig '
+  + 'transport airport bike boat bus engine car flying helicopter motorcycle ship siren skateboard tractor traffic train tram truck human applause baby breathe children '
+  + 'clapping cough crowd cry eat falling footsteps gasp heartbeat hum hurt kiss moan party scream voices yawn teeth sad sneeze terror jump cheer walk run warfare battle '
+  + 'bomb explosion fight gun hit rocket sword war boom crash instrument bass bell brass chimes choir cymbal drum flute guitar horn music orchestra rock synth violins '
+  + 'whistle tap piano lifestyle appliances bar bathroom bedroom church city cleaning cooking doorbell doors drink emergency food garden hall hospital kitchen office '
+  + 'restaurant school supermarket sweeping game arcade asteroid athletics ball basketball boxing casino goal golf lose monster player punch sports toy win correct laser '
+  + 'wrong shot scary balloon break bubbles coin construction countdown cute fairy festive fireworks intro key halloween lock magic metal movie page paper police pop '
+  + 'sparkle spell squeak tools write horror money glass wow drop sci-fi game-over video-game race-car car-horn').split(' '));
+const MIXKIT_ALIASES: Record<string, string> = { door: 'doors', footstep: 'footsteps', birds: 'bird', dogs: 'dog',
+  cats: 'cat', wooshes: 'whoosh', footsteps: 'footsteps', laughter: 'laugh', windstorm: 'wind' };
+
+export function mixkitSearchCategories(query: string) {
+  const words = query.toLowerCase().match(/[a-z0-9]+/g) || [];
+  const phrases = [words.join('-'), ...words.map((word, index) => words.slice(index, index + 2).join('-')), ...words];
+  return [...new Set(phrases.map(word => MIXKIT_ALIASES[word] || word).filter(word => MIXKIT_CATEGORIES.has(word)))].slice(0, 2);
+}
+
+const SEARCH_SOURCES = [
+  { id: 'envato', name: 'Envato Elements', pages: 3, parse: parseEnvatoSearch },
+  { id: 'pse', name: 'Pro Sound Effects', pages: 1, parse: parsePseSearch },
+  // Public Epidemic search exposes ten results, without public pagination.
+  { id: 'epidemic', name: 'Epidemic Sound', pages: 1, parse: parseEpidemicSearch },
+  { id: 'mixkit', name: 'Mixkit', pages: 1, parse: parseMixkitSearch },
+] as const;
+type SourceState = { page: number; completed: Set<number>; buffer: Candidate[]; seen: Set<string>; exhausted: boolean };
+export function createOnlineSfxSearchState() {
+  return SEARCH_SOURCES.map((): SourceState => ({ page: 1, completed: new Set(), buffer: [], seen: new Set(), exhausted: false }));
+}
+
+/** 50% primary, 50% shared alternates; unused capacity flows to available sources. */
+export function mixOnlineSfxCandidates(pools: Candidate[][], limit: number): Candidate[] {
+  const picked = pools.map(() => [] as Candidate[]);
+  const seen = new Set<string>();
+  const take = (index: number) => {
+    while (pools[index].length) {
+      const candidate = pools[index].shift()!;
+      if (seen.has(candidate.sourceUrl)) continue;
+      seen.add(candidate.sourceUrl); picked[index].push(candidate); return true;
+    }
+    return false;
+  };
+  const primaryTarget = Math.ceil(limit / 2);
+  for (let count = 0; count < primaryTarget && pools[0]?.length; count++) take(0);
+  let total = seen.size;
+  while (total < limit) {
+    let changed = false;
+    for (let index = 1; index < pools.length && total < limit; index++) {
+      if (take(index)) { total++; changed = true; }
+    }
+    if (!changed) break;
+  }
+  while (seen.size < limit) {
+    let changed = false;
+    for (let index = 0; index < pools.length && seen.size < limit; index++) changed = take(index) || changed;
+    if (!changed) break;
+  }
+  // Interleave the selected pools, so the first screen also shows alternate sites.
+  const result: Candidate[] = [];
+  while (picked.some(pool => pool.length)) {
+    if (picked[0]?.length) result.push(picked[0].shift()!);
+    for (let index = 1; index < picked.length; index++) {
+      if (picked[index].length) result.push(picked[index].shift()!);
+      if (picked[0]?.length) result.push(picked[0].shift()!);
+    }
+  }
+  return result;
+}
+
+export async function searchOnlineSfxSources(options: {
+  query: string; state?: ReturnType<typeof createOnlineSfxSearchState>; limit?: number;
+  excluded?: Set<string>; fetcher?: typeof fetch;
+  cooldowns?: Map<string, number>;
+}) {
+  const state = options.state || createOnlineSfxSearchState();
+  const limit = Math.min(ONLINE_SFX_MAX_RESULTS, Math.max(1, options.limit || ONLINE_SFX_MAX_RESULTS));
+  const excluded = options.excluded || new Set<string>();
+  const relevance = createOnlineSfxRelevanceMatcher(options.query);
+  const categories = mixkitSearchCategories(options.query);
+  const unavailable = new Set<string>();
+  const attempted = SEARCH_SOURCES.map(() => new Set<number>());
+  const deadline = AbortSignal.timeout(16_000);
+  const fill = async (index: number, count: number) => {
+    const source = SEARCH_SOURCES[index], stream = state[index];
+    if (stream.exhausted || deadline.aborted) return;
+    if ((options.cooldowns?.get(source.id) || 0) > Date.now()) { unavailable.add(source.id); return; }
+    if (source.id === 'epidemic' && stream.page > 1) { stream.exhausted = true; return; }
+    if (source.id === 'mixkit' && !categories.length) { stream.exhausted = true; return; }
+    const pages = Array.from({ length: Math.max(0, 51 - stream.page) }, (_, i) => stream.page + i)
+      .filter(page => !stream.completed.has(page) && !attempted[index].has(page)).slice(0, count);
+    if (!pages.length) { if (stream.page > 50) stream.exhausted = true; return; }
+    pages.forEach(page => attempted[index].add(page));
+    const responses = await Promise.allSettled(pages.map(async page => {
+      const queries = source.id === 'mixkit' ? categories : [options.query];
+      const results = await Promise.allSettled(queries.map(async query => {
+        const signal = AbortSignal.any([deadline, AbortSignal.timeout(6_000)]);
+        const fetcher = options.fetcher || fetch;
+        let url = onlineSfxSearchUrl(source.id, query, page);
+        let request: Pick<RequestInit, 'method' | 'body' | 'headers'> = {};
+        if (source.id === 'pse') {
+          url = 'https://api.prosoundeffects.com/v2/Search/sounds';
+          request = { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ keywords: [query], pageIndex: page, pageSize: 50 }) };
+        } else if (source.id === 'epidemic') {
+          const action = await epidemicSearchAction(signal, fetcher);
+          request = { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=UTF-8', 'Next-Action': action, Accept: 'text/x-component' },
+            body: JSON.stringify([{ filter: { term: query }, locale: 'en', sort: 'relevance' }]) };
+        }
+        const { data } = await boundedFetch(url, 3 * 1024 * 1024, signal, fetcher, request);
+        const html = data.toString('utf8');
+        const parsed = source.parse(html);
+        if (!parsed.length && /captcha|just a moment|access denied|verify you are human/i.test(html)) throw fail('来源网站要求验证。');
+        return parsed;
+      }));
+      const fulfilled = results.filter(result => result.status === 'fulfilled');
+      if (!fulfilled.length) throw fail('来源搜索暂不可用。');
+      return fulfilled.flatMap(result => result.value);
+    }));
+    let newCandidates = 0;
+    // Advance only through successful consecutive pages; failed pages are retried
+    // on a later batch, with deduplication covering any later page fetched here.
+    for (let i = 0; i < responses.length; i++) {
+      const response = responses[i];
+      if (response.status !== 'fulfilled') continue;
+      stream.completed.add(pages[i]);
+      while (stream.completed.delete(stream.page)) stream.page++;
+      for (const candidate of response.value) {
+        if (stream.seen.has(candidate.sourceUrl)) continue;
+        stream.seen.add(candidate.sourceUrl);
+        newCandidates++;
+        if (!excluded.has(candidate.sourceUrl) && relevance(candidate.title) > 0) stream.buffer.push(candidate);
+      }
+    }
+    if (responses.every(response => response.status === 'rejected')) {
+      unavailable.add(source.id);
+      if (source.id === 'epidemic') epidemicActions.delete(options.fetcher || fetch);
+      options.cooldowns?.set(source.id, Date.now() + 60_000);
+    } else if (stream.page > pages[pages.length - 1] && responses.every(response => response.status === 'fulfilled'
+      && (response.value.length === 0 || (source.id === 'mixkit' && !newCandidates)))) stream.exhausted = true;
+  };
+  for (const stream of state) stream.buffer = stream.buffer.filter(candidate => !excluded.has(candidate.sourceUrl) && relevance(candidate.title) > 0);
+  await Promise.all(SEARCH_SOURCES.map((source, index) => state[index].buffer.length < Math.ceil(limit * (index === 0 ? 0.5 : 0.5 / (SEARCH_SOURCES.length - 1)))
+    ? fill(index, source.pages) : Promise.resolve()));
+  // Backups are already queried in parallel. Fetch extra pages only if the total
+  // is short; an unavailable primary never blocks successful alternate results.
+  const totalAvailable = state.reduce((sum, stream) => sum + stream.buffer.length, 0);
+  const alternateAvailable = state.slice(1).reduce((sum, stream) => sum + stream.buffer.length, 0);
+  const totalShort = totalAvailable < limit;
+  const alternatesShort = alternateAvailable < Math.floor(limit / 2);
+  if ((totalShort || alternatesShort) && !deadline.aborted) {
+    await Promise.all(SEARCH_SOURCES.map((source, index) => unavailable.has(source.id) || (!totalShort && index === 0)
+      ? Promise.resolve() : fill(index, 2)));
+  }
+  for (const stream of state) stream.buffer.sort((a, b) => relevance(b.title) - relevance(a.title));
+  const items = mixOnlineSfxCandidates(state.map(stream => stream.buffer), limit);
+  const sources: OnlineSfxSourceStatus[] = SEARCH_SOURCES.map(source => ({ source: source.name,
+    count: items.filter(item => item.source === source.name).length, unavailable: unavailable.has(source.id) }));
+  sources.push({ source: 'Pond5', count: 0, unavailable: true, reason: '网站验证限制，待官方接口接入' });
+  return { items, sources };
 }
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -163,6 +410,7 @@ export async function boundedFetch(
   limit: number,
   signal: AbortSignal,
   fetcher: typeof fetch = fetch,
+  request: Pick<RequestInit, 'method' | 'body' | 'headers'> = {},
 ) {
   const initial = new URL(url);
   let current = initial;
@@ -172,7 +420,7 @@ export async function boundedFetch(
       let connectionError: unknown;
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
-          response = await fetcher(current, { signal, redirect: 'manual' });
+          response = await fetcher(current, { ...request, signal, redirect: 'manual' });
           connectionError = undefined;
           break;
         } catch (error: any) {
@@ -191,6 +439,9 @@ export async function boundedFetch(
       const next = new URL(location, current);
       if (next.protocol !== 'https:' || next.origin !== initial.origin || next.username || next.password) {
         throw fail('来源网站返回了不安全的跳转。');
+      }
+      if (request.method === 'POST' && response.status !== 307 && response.status !== 308) {
+        throw fail('来源搜索接口发生跳转，请稍后重试。');
       }
       current = next;
     }
@@ -263,13 +514,8 @@ export async function findAndCaptureTimelineOnlineSfx(options: {
   const fetcher = options.fetcher || fetch;
   let candidates: Candidate[];
   try {
-    const { data } = await boundedFetch(
-      onlineSfxSearchUrl('envato', query),
-      3 * 1024 * 1024,
-      AbortSignal.timeout(12_000),
-      fetcher,
-    );
-    candidates = rankTimelineCandidates(parseEnvatoSearch(data.toString('utf8'), 8), query).slice(0, 3);
+    const result = await searchOnlineSfxSources({ query, limit: 12, fetcher });
+    candidates = rankTimelineCandidates(result.items, query).slice(0, 3);
   } catch (error) {
     console.warn('[timeline-sfx] Online search unavailable; using ElevenLabs fallback:', error);
     return null;
@@ -354,6 +600,8 @@ export function createOnlineSfxRouter(options: {
     pending?: Promise<unknown>; captured?: unknown; fileName?: string; discarded?: boolean };
   const tickets = new Map<string, Ticket>();
   const searches = new Map<string, number>();
+  const sessions = new Map<string, { query: string; nextPage: number; at: number; state: ReturnType<typeof createOnlineSfxSearchState> }>();
+  const cooldowns = new Map<string, number>();
   let searching = 0, capturing = 0;
 
   const removeTicketFiles = async (ticket: Ticket) => {
@@ -386,6 +634,7 @@ export function createOnlineSfxRouter(options: {
       .filter(([, ticket]) => Date.now() - ticket.at > TTL)
       .map(([id, ticket]) => discardTicket(id, ticket)));
     for (const [id, at] of searches) if (Date.now() - at > 60_000) searches.delete(id);
+    for (const [id, session] of sessions) if (Date.now() - session.at > TTL) sessions.delete(id);
   };
 
   const orphanCutoff = Date.now();
@@ -397,6 +646,7 @@ export function createOnlineSfxRouter(options: {
     try {
       const owner = options.owner(req, res);
       if (!owner || owner === 'unknown') return res.status(401).json({ error: '无法识别当前会话。' });
+      sessions.delete(owner);
       void cleanupOwner(owner).catch(error => {
         console.warn('Failed to remove online sound previews after page close:', error);
       });
@@ -423,7 +673,7 @@ export function createOnlineSfxRouter(options: {
           if (typeof value !== 'string') continue;
           try {
             const url = new URL(value);
-            if (url.origin === 'https://elements.envato.com') excluded.add(url.href);
+            if (ONLINE_SFX_SOURCES.some(source => source.searchable && new URL(source.url).origin === url.origin)) excluded.add(url.href);
           } catch { /* Ignore malformed client-side history entries. */ }
         }
       }
@@ -442,31 +692,21 @@ export function createOnlineSfxRouter(options: {
       searches.set(owner, Date.now()); searching++;
       const started = Date.now();
       try {
-        const sourcePages = Array.from({ length: ONLINE_SFX_SOURCE_PAGES_PER_BATCH }, (_, index) => page + index);
-        const pages = await Promise.all(sourcePages.map(async sourcePage => {
-          const { data } = await boundedFetch(
-            onlineSfxSearchUrl('envato', query, sourcePage),
-            3 * 1024 * 1024,
-            AbortSignal.timeout(20_000),
-          );
-          return data.toString('utf8');
-        }));
-        const candidates: Candidate[] = [];
-        const seenCandidates = new Set<string>();
-        for (const html of pages) {
-          for (const candidate of parseEnvatoSearch(html, ONLINE_SFX_MAX_RESULTS)) {
-            if (excluded.has(candidate.sourceUrl) || seenCandidates.has(candidate.sourceUrl)) continue;
-            seenCandidates.add(candidate.sourceUrl);
-            candidates.push(candidate);
-            if (candidates.length === ONLINE_SFX_MAX_RESULTS) break;
-          }
-          if (candidates.length === ONLINE_SFX_MAX_RESULTS) break;
+        let session = sessions.get(owner);
+        if (page === 1) {
+          session = { query, nextPage: 1, at: Date.now(), state: createOnlineSfxSearchState() };
+          sessions.set(owner, session);
+          while (sessions.size > 64) sessions.delete(sessions.keys().next().value!);
         }
+        if (!session || session.query !== query || session.nextPage !== page) {
+          return res.status(409).json({ error: '搜索批次已过期，请刷新后重新搜索。' });
+        }
+        session.at = Date.now();
+        const { items: candidates, sources } = await searchOnlineSfxSources({ query, state: session.state, excluded, cooldowns });
+        if (!candidates.length && sources.every(source => source.unavailable)) throw fail('所有音效来源暂不可用，请稍后重试。');
+        session.nextPage = page + 1;
         if (!candidates.length) {
-          if (pages.some(html => /captcha|just a moment|access denied|verify you are human/i.test(html))) {
-            throw fail('来源网站要求验证，请打开来源页面处理。');
-          }
-          return res.json({ items: [], page, nextPage: page + ONLINE_SFX_SOURCE_PAGES_PER_BATCH, elapsedMs: Date.now() - started,
+          return res.json({ items: [], sources, page, nextPage: session.nextPage, elapsedMs: Date.now() - started,
             message: page > 1
               ? '当前关键词暂时没有更多未展示的音效，请换一个关键词再试。'
               : '没有找到可采集的试听，请换用简短英文关键词或打开来源搜索。' });
@@ -477,10 +717,10 @@ export function createOnlineSfxRouter(options: {
           return item;
         });
         recordOnlineSfxBatchUsage();
-        return res.json({ items, page, nextPage: page + ONLINE_SFX_SOURCE_PAGES_PER_BATCH, elapsedMs: Date.now() - started });
+        return res.json({ items, sources, page, nextPage: session.nextPage, elapsedMs: Date.now() - started });
       } finally { searching--; }
     } catch (error: any) {
-      return res.status(error.status || 502).json({ error: error.name === 'TimeoutError' ? '来源搜索超过 20 秒，请稍后重试。' : error.message });
+      return res.status(error.status || 502).json({ error: error.name === 'TimeoutError' ? '来源搜索超时，请稍后重试。' : error.message });
     } finally { releaseReservation?.(); }
   });
   router.post('/capture', async (req, res) => {

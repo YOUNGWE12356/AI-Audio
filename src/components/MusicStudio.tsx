@@ -20,6 +20,7 @@ import { generateLyricsFromMusicStyle, translateToEnglish } from '../services/ai
 import type { PendingMusicOption } from '../App';
 import GeneratedAudioPlayer from './GeneratedAudioPlayer';
 import PointCostHint from './PointCostHint';
+import MusicVisualPromptInput from './MusicVisualPromptInput';
 
 const formatMusicTime = (seconds: number) => {
   if (!Number.isFinite(seconds) || seconds <= 0) return '0:00';
@@ -357,6 +358,7 @@ export default function MusicStudio({
   const [isPlaying, setIsPlaying] = useState(false);
   const [playingHistoryId, setPlayingHistoryId] = useState<string | null>(null);
   const [isTranslating, setIsTranslating] = useState(false);
+  const [isAnalyzingVisual, setIsAnalyzingVisual] = useState(false);
   const [isGeneratingLyrics, setIsGeneratingLyrics] = useState(false);
   const [lyricsGenerationError, setLyricsGenerationError] = useState<string | null>(null);
   const [activeMusicOptionId, setActiveMusicOptionId] = useState<string | null>(null);
@@ -440,13 +442,16 @@ export default function MusicStudio({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         <div className="lg:col-span-7 space-y-5">
           <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-5 shadow-sm">
+            <MusicVisualPromptInput prompt={standaloneMusicPrompt} duration={standaloneMusicDuration}
+              instrumental={standaloneMusicType === 'instrumental'} disabled={standaloneMusicLoading || isTranslating || isGeneratingLyrics}
+              onPrompt={setStandaloneMusicPrompt} onBusy={setIsAnalyzingVisual} />
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <label className="text-xs font-bold text-slate-700 block uppercase tracking-wider">配乐风格与情感描述</label>
+                <label htmlFor="music-style-prompt" className="text-xs font-bold text-slate-700 block uppercase tracking-wider">配乐风格与情感描述</label>
                 <button
                   type="button"
                   onClick={handleTranslate}
-                  disabled={isTranslating || !standaloneMusicPrompt.trim()}
+                  disabled={isAnalyzingVisual || isTranslating || !standaloneMusicPrompt.trim()}
                   className="text-[10px] text-emerald-600 hover:text-emerald-700 disabled:text-slate-400 font-bold flex items-center gap-1.5 transition-all bg-emerald-50 hover:bg-emerald-100 disabled:bg-slate-50 px-2.5 py-1 rounded-lg border border-emerald-200/50 disabled:border-slate-200 cursor-pointer"
                 >
                   {isTranslating ? (
@@ -463,6 +468,8 @@ export default function MusicStudio({
                 </button>
               </div>
               <textarea
+                id="music-style-prompt"
+                disabled={isAnalyzingVisual}
                 value={standaloneMusicPrompt}
                 onChange={(e) => setStandaloneMusicPrompt(e.target.value)}
                 placeholder="例如：温馨悠扬的木吉他，伴随轻缓的钢琴和微风声，适合温馨生活日常 VLOG..."
@@ -477,6 +484,7 @@ export default function MusicStudio({
                   <button
                     key={idx}
                     type="button"
+                    disabled={isAnalyzingVisual}
                     onClick={() => setStandaloneMusicPrompt(item.prompt)}
                     className="text-[10px] bg-slate-50 hover:bg-emerald-50 border border-slate-200 hover:border-emerald-300 text-slate-600 hover:text-emerald-700 px-3 py-1.5 rounded-xl transition-all font-semibold"
                   >
@@ -495,6 +503,7 @@ export default function MusicStudio({
                 <div className="flex items-center gap-4">
                   <input
                     type="range"
+                    disabled={isAnalyzingVisual}
                     min="10"
                     max="60"
                     step="5"
@@ -512,6 +521,7 @@ export default function MusicStudio({
                   <button
                     type="button"
                     onClick={() => setStandaloneMusicType('instrumental')}
+                    disabled={isAnalyzingVisual}
                     className={`py-1.5 px-3 rounded-lg text-xs font-bold transition-all ${
                       standaloneMusicType === 'instrumental'
                         ? 'bg-emerald-600 text-white shadow-sm'
@@ -523,6 +533,7 @@ export default function MusicStudio({
                   <button
                     type="button"
                     onClick={() => setStandaloneMusicType('vocal')}
+                    disabled={isAnalyzingVisual}
                     className={`py-1.5 px-3 rounded-lg text-xs font-bold transition-all ${
                       standaloneMusicType === 'vocal'
                         ? 'bg-emerald-600 text-white shadow-sm'
@@ -544,7 +555,7 @@ export default function MusicStudio({
                   <button
                     type="button"
                     onClick={handleGenerateLyrics}
-                    disabled={isGeneratingLyrics || !standaloneMusicPrompt.trim()}
+                    disabled={isAnalyzingVisual || isGeneratingLyrics || !standaloneMusicPrompt.trim()}
                     className="text-[10px] text-emerald-600 hover:text-emerald-700 disabled:text-slate-400 font-bold flex items-center gap-1.5 transition-all bg-emerald-50 hover:bg-emerald-100 disabled:bg-slate-50 px-2.5 py-1 rounded-lg border border-emerald-200/50 disabled:border-slate-200 cursor-pointer"
                     title={!standaloneMusicPrompt.trim() ? '请先输入配乐风格与情感描述' : '根据当前风格描述生成歌词'}
                   >
@@ -595,7 +606,7 @@ export default function MusicStudio({
             </div>
             <button
               onClick={handleStandaloneMusicGenerate}
-              disabled={standaloneMusicLoading || !standaloneMusicPrompt.trim()}
+              disabled={isAnalyzingVisual || standaloneMusicLoading || !standaloneMusicPrompt.trim()}
               className="w-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-bold py-3.5 rounded-xl text-xs tracking-wider uppercase transition-all shadow-md shadow-emerald-600/10 disabled:opacity-50 flex items-center justify-center gap-2 cursor-pointer"
             >
               {standaloneMusicLoading ? (

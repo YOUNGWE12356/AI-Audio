@@ -31,8 +31,10 @@ import {
   recordTimelineOnlineSfxUsage,
 } from './src/services/onlineSfxServer';
 import { ONLINE_SFX_BATCH_COMPANY_POINTS } from './src/services/onlineSfxTypes';
+import { createSfxBatchRouter } from './src/services/sfxBatchServer';
 import { createMusicAnalysisRouter, isGptAudioAnalysisConfigured } from './src/services/musicAnalysisServer';
 import { analyzeMusicNaming } from './src/services/musicNamingAnalysis';
+import { createMusicVisualPromptRouter } from './src/services/musicVisualPrompt';
 import { createSfxRequirementsJobs } from './src/services/sfxRequirementsJobs';
 import { createAudioDesignJobs } from './src/services/audioDesignJobsServer';
 import { selectAudioDesignFrames } from './src/services/audioDesignJobs';
@@ -221,12 +223,14 @@ async function startServer() {
   const resolveUsageFeature = (req: express.Request) => {
     const endpoint = req.path;
     if (endpoint.includes('/sfx/online')) return 'AI 音效 · 联网搜索';
+    if (endpoint.includes('/sfx-batch')) return 'AI 音效 · 批量制作';
     if (endpoint.includes('/assistant/plan')) return '智能助手 · GPT 任务规划';
     if (endpoint.includes('/assistant/')) return '智能助手 · 自动任务执行';
     if (endpoint.includes('/audio-analysis/')) return '音频工具 · 音频分析';
     if (endpoint.includes('/music-analysis-naming')) return '音频工具 · 音乐分析命名';
     if (endpoint.includes('/audio-design')) return 'AI 音频设计';
     if (endpoint.includes('/regenerate-lyrics') || endpoint.includes('/generate-lyrics')) return 'AI 音乐 · 歌词生成';
+    if (endpoint.includes('/music-prompt/from-visual')) return 'AI 音乐 · 画面配乐分析';
     if (endpoint.includes('/music-prompt')) return 'AI 音乐 · 提示词优化';
     if (endpoint.includes('/sfx-requirements')) return '音效需求表';
     if (endpoint.includes('/batch-voice-image-ocr')) return 'AI 配音 · 台词图片识别';
@@ -1884,6 +1888,18 @@ async function startServer() {
       }
       return reservation.release;
     },
+  }));
+
+  app.use('/api/ai/sfx-batch', createSfxBatchRouter({
+    uploadsDir, jobsDir: path.join(dataDir, 'sfx-batch-jobs'), ffmpeg: FFMPEG_BINARY,
+    owner: (req, res) => resolveUsageActor(req, res).userId,
+    reserve: (req, res, points) => {
+      const reservation = reserveElevenLabsQuota(resolveUsageActor(req, res), points);
+      if (!reservation.release) res.status(429).json({ code: 'COMPANY_POINTS_EXCEEDED',
+        error: '个人积分不足，请联系管理员追加额度。', quota: reservation.quota });
+      return reservation.release;
+    },
+    run: (_req, res, work) => { void usageRequestContext.run(res.locals.aiUsageContext, work); },
   }));
 
   // --- API Endpoints ---
@@ -4695,6 +4711,7 @@ async function startServer() {
     return res.json({ text });
   }));
 
+  app.use('/api/ai/music-prompt', createMusicVisualPromptRouter());
   app.post('/api/ai/music-prompt', asyncRoute(async (req, res) => {
     const text = String(req.body?.text || '').trim();
     if (!text) return res.status(400).json({ error: '请先输入配乐风格与情感描述。' });

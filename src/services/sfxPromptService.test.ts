@@ -4,6 +4,7 @@ import { prepareSoundEffectPrompt } from './sfxPromptService';
 import { generateSoundEffect } from './elevenLabsService';
 import { setAiUsageRecorder, type AiUsageEvent } from './usageTracking';
 import { generateSoundEffectVersions, type SoundEffectVersionResult } from './sfxGeneration';
+import { createBatchSfxRequest } from './sfxBatch';
 
 const originalFetch = globalThis.fetch;
 const envKeys = ['OPENAI_API_KEY', 'ARK_API_KEY', 'TOKENHUB_API_KEY', 'ELEVENLABS_API_KEY',
@@ -67,6 +68,15 @@ test('search keyword annotation no longer replaces the complete sound descriptio
   assert.equal(calls[0].body.text, prompt);
   assert.equal(calls[0].body.prompt_influence, 0.3);
   assert.equal('duration_seconds' in calls[0].body, false);
+});
+
+test('batch generation uses its short English field and never calls description translation', async () => {
+  mockTransport();
+  const row = { searchQuery: 'card flip', duration: 0.6, description: '纸牌快速翻面，无音乐无人声', scene: '游戏第13秒', keywords: '卡牌，翻面' };
+  const request = createBatchSfxRequest(row, 'generate');
+  await generateSoundEffect(request.body.text!, request.body.duration, { qualityMode: 'standard' });
+  assert.equal(calls.length, 1); assert.equal(calls[0].body.text, 'card flip');
+  assert.ok(calls[0].url.includes('elevenlabs.io')); assert.deepEqual(usage.map(event => event.provider), ['elevenlabs']);
 });
 
 test('Chinese timeline/direct calls use sound-specific translation before generation and record both providers', async () => {

@@ -2198,14 +2198,21 @@ export async function createEnglishMusicPromptForElevenLabs(
   const normalizedText = text.trim();
   if (!normalizedText) return '';
 
+  // Whole-track production directions need enough room to retain every field.
+  const structuredMusicPrompt = /(?:用途\s*[:：]|\bUse\s*:)/i.test(normalizedText)
+    && /(?:配器\s*[:：]|\bInstruments\s*:)/i.test(normalizedText)
+    && /(?:结构\s*[/／]\s*结尾\s*[:：]|\bForm\s*\/\s*ending\s*:)/i.test(normalizedText);
+
   if (isBrowser) {
     try {
       const result = await postJson<{ text: string }>('/api/ai/music-prompt', {
         text: normalizedText,
         instrumental: options.instrumental !== false,
-      }, { timeoutMs: 8_000 });
+      }, { timeoutMs: structuredMusicPrompt ? 60_000 : 8_000 });
+      if (structuredMusicPrompt && !result.text?.trim()) throw new Error('英文配乐提示词为空，请重试。');
       return result.text || createLocalEnglishMusicPromptFallback(normalizedText, options);
     } catch (err) {
+      if (structuredMusicPrompt) throw err;
       console.info('Music prompt API rewrite failed, using local fallback:', err);
       return createLocalEnglishMusicPromptFallback(normalizedText, options);
     }
@@ -2222,7 +2229,8 @@ export async function createEnglishMusicPromptForElevenLabs(
 4. 保留否定需求和限制，例如“不要鼓/无鼓”必须写成 no drums, no percussion。
 5. 不要模仿具体歌手、真实人物或受版权保护的作品。
 6. ${options.instrumental === false ? '可以描述原创人声歌曲风格。' : '必须明确是 instrumental background music, no vocals, no speech, no lyrics。'}
-7. 控制在 45 个英文词以内。
+7. ${structuredMusicPrompt ? '这是一份整曲制作方向，忠实翻译所有字段，约90～160个英文词，不为压缩字数删除要求。按 Use; Style; Mood/energy; Instruments; Tempo; Key; Melody/mix; Form/ending; Vocals（仅有此项时）; Avoid 的分项短语格式输出。完整保留 BPM 范围、调性、乐器分工、旋律与混音留白、结构和结尾、循环要求以及所有排除项；不新增乐器或改变情绪，不加入时间码。' : '控制在 45 个英文词以内。'}
+${structuredMusicPrompt ? '8. 音乐总时长由界面“期望生成时长”的独立接口参数控制；不输出或补充总时长，原文如有“30秒”“三十秒”“30-second”等总时长说明，翻译时省略。保留 BPM、拍号及其他音乐速度信息。' : ''}
 
 用户需求：${normalizedText}`;
 
@@ -2233,9 +2241,13 @@ export async function createEnglishMusicPromptForElevenLabs(
       }
     });
 
+    if (structuredMusicPrompt && (!response.text?.trim() || /[\u4e00-\u9fff]/.test(response.text))) {
+      throw new Error('英文配乐提示词转换失败，请重试。');
+    }
     return response.text ? response.text.trim() : normalizedText;
   } catch (err) {
     console.error("Music prompt rewrite failed:", err);
+    if (structuredMusicPrompt) throw err;
     return createLocalEnglishMusicPromptFallback(normalizedText, options);
   }
 }

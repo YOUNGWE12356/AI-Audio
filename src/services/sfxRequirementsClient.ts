@@ -27,8 +27,9 @@ const pendingKey = (value: string) => {
 export async function waitForRequirementsJob(
   initial: RequirementsJobState,
   onProgress?: (message: string) => void,
-  options: { pollMs?: number; maxWaitMs?: number } = {},
+  options: { pollMs?: number; maxWaitMs?: number; endpoint?: string } = {},
 ) {
+  const jobEndpoint = options.endpoint || endpoint;
   const deadline = Date.now() + (options.maxWaitMs ?? 12 * 60 * 1000);
   let job = initial;
   while (true) {
@@ -42,7 +43,7 @@ export async function waitForRequirementsJob(
     if (Date.now() >= deadline) throw new Error('暂未取到需求表结果，后台任务已保留。请使用相同素材再次点击生成以继续查询，不会重复提交。');
     await pause(options.pollMs ?? 2000);
     try {
-      const response = await fetch(`${endpoint}/jobs/${encodeURIComponent(job.id)}`, { method: 'GET', cache: 'no-store', signal: AbortSignal.timeout(15_000) });
+      const response = await fetch(`${jobEndpoint}/jobs/${encodeURIComponent(job.id)}`, { method: 'GET', cache: 'no-store', signal: AbortSignal.timeout(15_000) });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
         if (response.status < 500) throw Object.assign(new Error(payload.error || '无法读取需求表任务。'), { terminal: true });
@@ -56,9 +57,10 @@ export async function waitForRequirementsJob(
   }
 }
 
-export async function generateRequirementsInBackground(body: unknown, onProgress?: (message: string) => void) {
+export async function generateRequirementsInBackground(body: unknown, onProgress?: (message: string) => void, options: { endpoint?: string } = {}) {
+  const jobEndpoint = options.endpoint || endpoint;
   const payload = JSON.stringify(body);
-  const storageKey = `ai-audio.requirements.pending.${pendingKey(getClientId() + payload)}`;
+  const storageKey = `ai-audio.requirements.pending.${pendingKey(jobEndpoint + getClientId() + payload)}`;
   let requestId: string = typeof crypto?.randomUUID === 'function'
     ? crypto.randomUUID() : `requirements-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   try {
@@ -71,7 +73,7 @@ export async function generateRequirementsInBackground(body: unknown, onProgress
   onProgress?.('正在提交后台任务，复杂截图和表格可以继续等待，不会在 90 秒时中断。');
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      const response = await fetch(jobEndpoint, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({ ...JSON.parse(payload), background: true, requestId }), signal: AbortSignal.timeout(30_000) });
       const result = await response.json();
       if (!response.ok) throw Object.assign(new Error(result.error || '需求表任务提交失败。'), { terminal: response.status < 500 });
@@ -85,7 +87,7 @@ export async function generateRequirementsInBackground(body: unknown, onProgress
     }
   }
   try {
-    const result = await waitForRequirementsJob(job!, onProgress);
+    const result = await waitForRequirementsJob(job!, onProgress, { endpoint: jobEndpoint });
     clearPending();
     window.dispatchEvent(new Event('ai-audio:usage-updated'));
     return result;

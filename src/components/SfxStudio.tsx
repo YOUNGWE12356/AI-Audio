@@ -10,6 +10,7 @@ import GeneratedAudioPlayer, { sanitizeAudioFileName } from './GeneratedAudioPla
 import PointCostHint from './PointCostHint';
 import { requiresSoundEffectTranslation } from '../services/sfxPromptService';
 const OnlineSfxSearch = lazy(() => import('./OnlineSfxSearch'));
+const BatchSfxStudio = lazy(() => import('./BatchSfxStudio'));
 
 interface PendingSfxOption {
   url: string;
@@ -54,8 +55,9 @@ export default function SfxStudio({
   pendingSfxOptions,
   setPendingSfxOptions,
 }: SfxStudioProps) {
-  const [mode, setMode] = useState<'generate' | 'online'>('generate');
-  const [onlineVisited, setOnlineVisited] = useState(false);
+  const [mode, setMode] = useState<'generate' | 'online' | 'batch'>('online');
+  const [onlineVisited, setOnlineVisited] = useState(true);
+  const [batchVisited, setBatchVisited] = useState(false);
   // Assistant requests still use the native generation surface even if the
   // user last visited online search.
   useEffect(() => { if (standaloneLoading) setMode('generate'); }, [standaloneLoading]);
@@ -66,11 +68,11 @@ export default function SfxStudio({
   const generatedVersionCount = Number(Boolean(pendingSfxOptions.optionA)) + Number(Boolean(pendingSfxOptions.optionB));
 
   return (
-    <div id="sfxstudio-view" className="flex-1 p-6 space-y-6 max-w-6xl mx-auto w-full">
+    <div id="sfxstudio-view" className={`flex-1 p-6 space-y-6 mx-auto w-full ${mode === 'batch' ? 'max-w-[1800px]' : 'max-w-6xl'}`}>
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-6">
         <div>
           <h2 className="text-xl font-black text-slate-800">AI 音效</h2>
-          <p className="text-xs text-slate-500 mt-1">通过文字生成音效，或联网搜索试听素材</p>
+          <p className="text-xs text-slate-500 mt-1">搜索试听素材，或通过文字生成音效</p>
         </div>
       </div>
 
@@ -78,10 +80,15 @@ export default function SfxStudio({
         <button role="tab" aria-selected={mode === 'generate'} aria-controls="sfx-generate-panel" id="sfx-generate-tab" onClick={() => setMode('generate')}
           className={`rounded-lg px-5 py-2.5 text-xs font-bold ${mode === 'generate' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>AI 生成模式</button>
         <button role="tab" aria-selected={mode === 'online'} aria-controls="sfx-online-panel" id="sfx-online-tab" onClick={() => { setOnlineVisited(true); setMode('online'); }}
-          className={`rounded-lg px-5 py-2.5 text-xs font-bold ${mode === 'online' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>联网搜索模式</button>
+          className={`rounded-lg px-5 py-2.5 text-xs font-bold ${mode === 'online' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>搜索模式</button>
+        <button role="tab" aria-selected={mode === 'batch'} aria-controls="sfx-batch-panel" id="sfx-batch-tab" onClick={() => { setBatchVisited(true); setMode('batch'); }}
+          className={`rounded-lg px-5 py-2.5 text-xs font-bold ${mode === 'batch' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>批量制作</button>
       </div>
+      {batchVisited && <div role="tabpanel" id="sfx-batch-panel" aria-labelledby="sfx-batch-tab" hidden={mode !== 'batch'}>
+        <Suspense fallback={<p className="text-xs text-slate-500">正在打开批量制作…</p>}><BatchSfxStudio /></Suspense>
+      </div>}
       {onlineVisited && <div role="tabpanel" id="sfx-online-panel" aria-labelledby="sfx-online-tab" hidden={mode !== 'online'}>
-        <Suspense fallback={<p className="text-xs text-slate-500">正在打开联网搜索…</p>}><OnlineSfxSearch /></Suspense>
+        <Suspense fallback={<p className="text-xs text-slate-500">正在打开搜索…</p>}><OnlineSfxSearch /></Suspense>
       </div>}
       <div role="tabpanel" id="sfx-generate-panel" aria-labelledby="sfx-generate-tab" hidden={mode !== 'generate'}>
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
@@ -239,7 +246,7 @@ export default function SfxStudio({
               <div className="space-y-2 max-h-[36rem] overflow-y-auto pr-1 custom-scrollbar">
                 {sfxHistory.map(item => <GeneratedAudioPlayer key={item.id} id={`sfx-history-${item.id}`}
                   url={item.url} title={item.title} prompt={item.prompt} meta={item.timestamp}
-                  activeId={playingHistoryId} setActiveId={setPlayingHistoryId} enableRangeDownload
+                  activeId={playingHistoryId} setActiveId={setPlayingHistoryId} enableRangeDownload deferDecode
                   downloadFileName={`${sanitizeAudioFileName(item.title, item.id)}.wav`} />)}
               </div>
             )}
