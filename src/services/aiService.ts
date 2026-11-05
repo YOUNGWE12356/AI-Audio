@@ -569,6 +569,8 @@ export async function extractAudioDesignVideoKeyframes(
   options: {
     signal?: AbortSignal;
     onProgress?: (message: string) => void;
+    sfxBatch?: boolean;
+    videoRange?: { start: number; end: number };
   } = {},
 ): Promise<AudioDesignMedia[]> {
   if (!isBrowser) {
@@ -622,6 +624,11 @@ export async function extractAudioDesignVideoKeyframes(
 
     const formData = new FormData();
     formData.append('originalName', video.name);
+    if (options.videoRange) {
+      formData.append('analysisMode', 'sfx-batch-range');
+      formData.append('rangeStart', String(options.videoRange.start));
+      formData.append('rangeEnd', String(options.videoRange.end));
+    } else if (options.sfxBatch) formData.append('analysisMode', 'sfx-batch');
     formData.append('video', video, createAsciiVideoUploadName(video.name, video.type));
     request.send(formData);
   });

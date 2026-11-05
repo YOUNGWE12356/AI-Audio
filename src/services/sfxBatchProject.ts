@@ -8,7 +8,10 @@ export type BatchVersion = {
 export type BatchRow = SfxBatchRequirement & {
   selected: boolean; versions: BatchVersion[]; activeVersionId?: string; confirmedVersionId?: string;
   status: string; error?: string; excludedSources: string[];
+  videoId?: string; placedVersionId?: string;
+  rangeReviewParentId?: string; rangeReviewFingerprint?: string;
 };
+export type BatchVideoAsset = { id: string; file: File };
 export const batchId = () => globalThis.crypto?.randomUUID?.() || `batch-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 export function confirmedVersion(row: BatchRow) { return row.versions.find(v => v.id === row.confirmedVersionId && v.confirmedBlob); }
 export function sameBatchRange(a?: AudioDownloadRange | null, b?: AudioDownloadRange | null, duration = 0) {
@@ -47,6 +50,40 @@ export async function saveBatchProject(rows: BatchRow[]) {
       const tx = db.transaction('project', 'readwrite');
       tx.objectStore('project').put(rows.map(row => ({ ...row, versions: row.versions.map(v => ({ ...v,
         url: v.url?.startsWith('blob:') ? undefined : v.url })) })), 'current');
+      tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error);
+    });
+  } finally { db.close(); }
+}
+export async function loadBatchVideo(): Promise<BatchVideoAsset | null> {
+  const db = await open();
+  try {
+    return await new Promise((resolve, reject) => {
+      const req = db.transaction('project').objectStore('project').get('video');
+      req.onsuccess = () => resolve(req.result?.file instanceof Blob ? req.result : null);
+      req.onerror = () => reject(req.error);
+    });
+  } finally { db.close(); }
+}
+export async function saveBatchVideo(video: BatchVideoAsset | null) {
+  const db = await open();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction('project', 'readwrite');
+      if (video) tx.objectStore('project').put(video, 'video');
+      else tx.objectStore('project').delete('video');
+      tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error);
+    });
+  } finally { db.close(); }
+}
+
+export async function clearBatchWorkspace() {
+  const db = await open();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction('project', 'readwrite');
+      const store = tx.objectStore('project');
+      store.delete('current');
+      store.delete('video');
       tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error);
     });
   } finally { db.close(); }

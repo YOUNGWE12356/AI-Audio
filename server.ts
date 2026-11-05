@@ -32,6 +32,7 @@ import {
 } from './src/services/onlineSfxServer';
 import { ONLINE_SFX_BATCH_COMPANY_POINTS } from './src/services/onlineSfxTypes';
 import { createSfxBatchRouter } from './src/services/sfxBatchServer';
+import { batchVideoFrameCount, batchRangeFrameCount, SFX_BATCH_VIDEO_MAX_DIMENSION } from './src/services/sfxBatchVideoAnalysis';
 import { createMusicAnalysisRouter, isGptAudioAnalysisConfigured } from './src/services/musicAnalysisServer';
 import { analyzeMusicNaming } from './src/services/musicNamingAnalysis';
 import { createMusicVisualPromptRouter } from './src/services/musicVisualPrompt';
@@ -3851,18 +3852,19 @@ async function startServer() {
   const extractServerVideoKeyframes = async (
     fileName: unknown,
     requestedDuration: unknown,
-    options: { dense?: boolean; frameCount?: number; subtitles?: boolean } = {},
+    options: { dense?: boolean; frameCount?: number; subtitles?: boolean; maxDimension?: number; sfxBatch?: boolean; range?: { start: number; end: number } } = {},
   ): Promise<Array<{ timestamp: number; base64: string }>> => {
     const { videoPath } = await resolveValidatedUploadedVideo(fileName);
 
-    const duration = parseNumber(requestedDuration, 30, 1, 3_600);
+    const sourceDuration = parseNumber(requestedDuration, 30, 1, 3_600);
+    const duration = options.range ? options.range.end - options.range.start : sourceDuration;
     if (options.subtitles && duration > MAX_SUBTITLE_VIDEO_SECONDS) {
       throw Object.assign(new Error('逐条字幕同步目前支持 5 分钟以内的视频，请分段后分析。'), { status: 422 });
     }
     const frameCount = options.subtitles ? Math.ceil(duration / SUBTITLE_SAMPLE_INTERVAL) : options.frameCount ?? (options.dense
       ? Math.min(48, Math.max(12, Math.ceil(duration)))
       : 6);
-    const firstTimestamp = options.subtitles ? 0 : duration / (frameCount * 2);
+    const firstTimestamp = options.subtitles ? 0 : (options.range?.start ?? 0) + duration / (frameCount * 2);
     const temporaryDirectory = await fs.promises.mkdtemp(path.join(uploadsDir, '.video-analysis-'));
     if (!isPathInside(uploadsDir, temporaryDirectory)) {
       await safeRemoveDirectory(temporaryDirectory);
@@ -3874,7 +3876,7 @@ async function startServer() {
       const subtitleFrameTimestamps: number[] = [];
       const filter = options.subtitles
         ? `setpts=PTS-STARTPTS,select='isnan(prev_selected_t)+gte(t-prev_selected_t,${SUBTITLE_SAMPLE_INTERVAL})',scale=1280:1280:force_original_aspect_ratio=decrease,showinfo`
-        : `fps=${frameCount}/${duration.toFixed(3)},scale=512:512:force_original_aspect_ratio=decrease`;
+        : `fps=${frameCount}/${duration.toFixed(3)},scale=${options.maxDimension ?? 512}:${options.maxDimension ?? 512}:force_original_aspect_ratio=decrease`;
       await new Promise<void>((resolve, reject) => {
         execFile(
           FFMPEG_BINARY,
@@ -3883,6 +3885,7 @@ async function startServer() {
             '-loglevel', options.subtitles ? 'info' : 'error',
             '-ss', firstTimestamp.toFixed(3),
             '-i', videoPath,
+            ...(options.range ? ['-t', String(Math.max(0.001, options.range.end - firstTimestamp))] : []),
             '-an',
             '-sn',
             '-vf', filter,
@@ -3944,7 +3947,7 @@ async function startServer() {
         if (!isPathInside(temporaryDirectory, framePath)) continue;
         const base64 = (await fs.promises.readFile(framePath)).toString('base64');
         totalEncodedLength += base64.length;
-        const totalLengthLimit = options.subtitles
+        const totalLengthLimit = options.sfxBatch ? 16_777_216 : options.subtitles
           ? 100_000_000
           : options.dense ? DETAILED_SFX_MAX_BASE64_LENGTH : 8_000_000;
         if (base64.length > 1_500_000 || totalEncodedLength > totalLengthLimit) {
@@ -3952,7 +3955,7 @@ async function startServer() {
         }
         frames.push({
           timestamp: Number(Math.min(
-            Math.max(0, duration - 0.05),
+            Math.max(0, (options.range?.end ?? duration) - Math.min(0.05, duration / 4)),
             options.subtitles ? subtitleFrameTimestamps[index] : firstTimestamp + index * duration / frameCount,
           ).toFixed(3)),
           base64,
@@ -4432,7 +4435,17 @@ async function startServer() {
 
         const processingStartedAt = Date.now();
         const duration = await getMediaDurationSeconds(uploadedPath).catch(() => 30);
-        const frames = await extractServerVideoKeyframes(req.file.filename, duration, { dense: false });
+        const range = req.body?.analysisMode === 'sfx-batch-range'
+          ? { start: Number(req.body.rangeStart), end: Number(req.body.rangeEnd) } : undefined;
+        let rangeFrames: number | undefined;
+        if (range) {
+          try { rangeFrames = batchRangeFrameCount(range.start, range.end, duration); }
+          catch (error) { throw Object.assign(error as Error, { status: 400 }); }
+        }
+        const frames = await extractServerVideoKeyframes(req.file.filename, duration, range
+          ? { frameCount: rangeFrames, range, maxDimension: SFX_BATCH_VIDEO_MAX_DIMENSION, sfxBatch: true }
+          : req.body?.analysisMode === 'sfx-batch'
+            ? { frameCount: batchVideoFrameCount(duration), maxDimension: SFX_BATCH_VIDEO_MAX_DIMENSION, sfxBatch: true } : { dense: false });
         console.info(`[audio-design] keyframes uploadMs=${processingStartedAt - res.locals.mediaStartedAt} prepareMs=${Date.now() - processingStartedAt} frames=${frames.length} bytes=${req.file.size}`);
         return res.json({
           frames: frames.map((frame, index) => ({

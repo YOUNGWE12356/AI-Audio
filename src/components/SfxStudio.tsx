@@ -21,6 +21,7 @@ interface PendingSfxOption {
   duration: number;
 }
 interface SfxStudioProps {
+  active?: boolean;
   standalonePrompt: string;
   setStandalonePrompt: (prompt: string) => void;
   standaloneDuration: number;
@@ -42,6 +43,7 @@ interface SfxStudioProps {
 }
 
 export default function SfxStudio({
+  active = true,
   standalonePrompt,
   setStandalonePrompt,
   standaloneDuration,
@@ -85,7 +87,7 @@ export default function SfxStudio({
           className={`rounded-lg px-5 py-2.5 text-xs font-bold ${mode === 'batch' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>批量制作</button>
       </div>
       {batchVisited && <div role="tabpanel" id="sfx-batch-panel" aria-labelledby="sfx-batch-tab" hidden={mode !== 'batch'}>
-        <Suspense fallback={<p className="text-xs text-slate-500">正在打开批量制作…</p>}><BatchSfxStudio /></Suspense>
+        <Suspense fallback={<p className="text-xs text-slate-500">正在打开批量制作…</p>}><BatchSfxStudio active={active && mode === 'batch'} /></Suspense>
       </div>}
       {onlineVisited && <div role="tabpanel" id="sfx-online-panel" aria-labelledby="sfx-online-tab" hidden={mode !== 'online'}>
         <Suspense fallback={<p className="text-xs text-slate-500">正在打开搜索…</p>}><OnlineSfxSearch /></Suspense>

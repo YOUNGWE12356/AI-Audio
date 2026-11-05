@@ -63,8 +63,11 @@ interface GeneratedAudioPlayerProps {
   onClear?: () => void;
   stopEventName?: string;
   onConfirm?: (blob: Blob, range: AudioDownloadRange) => Promise<void> | void;
+  confirmLabel?: string;
+  confirmationHint?: string;
   onSelectionChange?: (range: AudioDownloadRange | null) => void;
   hideDownloads?: boolean;
+  compact?: boolean;
   initialRange?: AudioDownloadRange | null;
   onDecoded?: (duration: number) => void;
 }
@@ -89,8 +92,11 @@ export default function GeneratedAudioPlayer({
   onClear,
   stopEventName = 'generated-audio-player-stop-others',
   onConfirm,
+  confirmLabel = '确认剪辑',
+  confirmationHint = '在波形上拖动框选保留范围，两端可来回调整；试听满意后确认剪辑。未框选时保留完整音频。',
   onSelectionChange,
   hideDownloads = false,
+  compact = false,
   initialRange = null,
   onDecoded,
 }: GeneratedAudioPlayerProps) {
@@ -453,7 +459,7 @@ export default function GeneratedAudioPlayer({
   };
 
   return (
-    <div ref={containerRef} className="rounded-2xl border border-slate-200 bg-slate-50/80 p-4 space-y-3 shadow-sm">
+    <div ref={containerRef} className={`rounded-2xl border border-slate-200 bg-slate-50/80 ${compact ? 'p-2 space-y-2' : 'p-4 space-y-3 shadow-sm'}`}>
       <audio
         ref={audioRef}
         src={url}
@@ -480,7 +486,7 @@ export default function GeneratedAudioPlayer({
         }}
       />
 
-      <div className="flex items-start justify-between gap-3">
+      <div className={compact ? 'sr-only' : 'flex items-start justify-between gap-3'}>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             {titleBadge && (
@@ -523,7 +529,7 @@ export default function GeneratedAudioPlayer({
         )}
       </div>
 
-      <div className="flex items-center gap-3 rounded-[1.4rem] border border-slate-200 bg-white p-3 shadow-sm shadow-slate-200/60">
+      <div className={`flex items-center border border-slate-200 bg-white ${compact ? 'gap-2 rounded-xl p-2' : 'gap-3 rounded-[1.4rem] p-3 shadow-sm shadow-slate-200/60'}`}>
         <button
           type="button"
           onClick={togglePlay}
@@ -550,7 +556,7 @@ export default function GeneratedAudioPlayer({
           onPointerMove={movePointer}
           onPointerUp={event => endPointer(event)}
           onPointerCancel={event => endPointer(event, true)}
-          className={`group relative h-20 min-w-0 flex-1 select-none overflow-hidden rounded-2xl border border-slate-100 bg-gradient-to-b from-white to-slate-50 px-3 py-2 ${enableRangeDownload ? 'touch-none cursor-crosshair' : 'cursor-pointer'}`}
+          className={`group relative ${compact ? 'h-14' : 'h-20'} min-w-0 flex-1 select-none overflow-hidden rounded-2xl border border-slate-100 bg-gradient-to-b from-white to-slate-50 px-3 py-2 ${enableRangeDownload ? 'touch-none cursor-crosshair' : 'cursor-pointer'}`}
         >
           <div className="pointer-events-none absolute left-3 right-3 top-1/2 h-px -translate-y-1/2 bg-slate-200" />
           <svg
@@ -600,7 +606,7 @@ export default function GeneratedAudioPlayer({
       </div>
 
       {enableRangeDownload ? <div className="space-y-2">
-        <p className="text-[10px] text-slate-500">{decodeStatus === 'loading' ? '正在读取波形…' : onConfirm ? '在波形上拖动框选保留范围，两端可来回调整；试听满意后确认剪辑。未框选时保留完整音频。' : '在波形上拖动框选下载范围，拖动两端可调整；不框选则下载完整音频。'}</p>
+        {(!compact || decodeStatus === 'loading') && <p className="text-[10px] text-slate-500">{decodeStatus === 'loading' ? '正在读取波形…' : onConfirm ? confirmationHint : '在波形上拖动框选下载范围，拖动两端可调整；不框选则下载完整音频。'}</p>}
         <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-600">
           <label className="flex items-center gap-1">起点（秒）<input aria-label="下载起点（秒）" type="number" step="0.01" min="0" max={safeDuration}
             disabled={decodeStatus !== 'ready' || !!exporting} value={Number((selection?.start || 0).toFixed(2))}
@@ -614,7 +620,7 @@ export default function GeneratedAudioPlayer({
         {onConfirm && <button type="button" onClick={() => void confirmRange()}
           disabled={decodeStatus !== 'ready' || !!exporting || !!dragRef.current}
           className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-xs font-bold text-white disabled:opacity-40">
-          {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}{exporting ? '正在确认…' : '确认剪辑'}</button>}
+          {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}{exporting ? '正在确认…' : confirmLabel}</button>}
         {!hideDownloads && <div className="grid grid-cols-2 gap-2">
           {(['wav', 'mp3'] as const).map(format => <button key={format} type="button" disabled={decodeStatus !== 'ready' || !!exporting || !!dragRef.current || !!(selection && selection.end - selection.start < 0.01)}
             onClick={() => void downloadRange(format)} className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white py-2 text-[10px] font-bold text-slate-700 hover:bg-emerald-50 hover:text-emerald-700 disabled:opacity-40">

@@ -5,7 +5,7 @@ export interface RequirementsJobState {
   status: 'running' | 'completed' | 'failed';
   message: string;
   createdAt: number;
-  result?: { items: any[]; sourceItemCount?: number };
+  result?: { items: any[]; sourceItemCount?: number; excludedItems?: Array<{ name: string; reason: string }> };
   error?: string;
 }
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
@@ -57,7 +57,7 @@ export async function waitForRequirementsJob(
   }
 }
 
-export async function generateRequirementsInBackground(body: unknown, onProgress?: (message: string) => void, options: { endpoint?: string } = {}) {
+export async function generateRequirementsInBackground(body: unknown, onProgress?: (message: string) => void, options: { endpoint?: string; maxWaitMs?: number } = {}) {
   const jobEndpoint = options.endpoint || endpoint;
   const payload = JSON.stringify(body);
   const storageKey = `ai-audio.requirements.pending.${pendingKey(jobEndpoint + getClientId() + payload)}`;
@@ -87,7 +87,7 @@ export async function generateRequirementsInBackground(body: unknown, onProgress
     }
   }
   try {
-    const result = await waitForRequirementsJob(job!, onProgress, { endpoint: jobEndpoint });
+    const result = await waitForRequirementsJob(job!, onProgress, { endpoint: jobEndpoint, maxWaitMs: options.maxWaitMs });
     clearPending();
     window.dispatchEvent(new Event('ai-audio:usage-updated'));
     return result;

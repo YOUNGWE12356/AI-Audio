@@ -22,6 +22,11 @@ export const isPdfFile = (file: Pick<File, 'name' | 'type'> | null | undefined) 
 
 interface ExtractVideoOptions {
   maxFrames?: number;
+  minFrames?: number;
+  includeBoundaries?: boolean;
+  requireCompleteCoverage?: boolean;
+  startTime?: number;
+  endTime?: number;
   frameIntervalSeconds?: number;
   maxDimension?: number;
   jpegQuality?: number;
@@ -134,7 +139,13 @@ const seekVideo = (video: HTMLVideoElement, timestamp: number, signal?: AbortSig
       secondAnimationFrameId = window.requestAnimationFrame(() => finish());
     });
   };
-  const handleSeeked = () => waitForDecodedFrame();
+  const handleSeeked = () => {
+    // A paused/offscreen video may never present another compositor frame.
+    // seeked plus HAVE_CURRENT_DATA already guarantees a decoded current frame;
+    // waiting for requestVideoFrameCallback here can deadlock background tabs.
+    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) finish();
+    else waitForDecodedFrame();
+  };
   const handleError = () => finish(new Error('读取视频画面失败'));
   const handleAbort = () => finish(new DOMException('分析已取消', 'AbortError'));
 
@@ -144,12 +155,35 @@ const seekVideo = (video: HTMLVideoElement, timestamp: number, signal?: AbortSig
   video.currentTime = timestamp;
 });
 
+export async function extractVideoFrameAtTime(file: File, time: number): Promise<VideoKeyframe> {
+  const video = document.createElement('video'), url = URL.createObjectURL(file);
+  video.preload = 'auto'; video.muted = true; video.playsInline = true; video.src = url;
+  try {
+    await waitForVideoMetadata(video);
+    if (!Number.isFinite(time) || time < 0 || time >= video.duration) throw new Error('点位超出视频时长，请先调整点位。');
+    // Seek away from the initial position so a zero-second point also decodes.
+    if (time === 0) await seekVideo(video, Math.min(0.01, video.duration / 2));
+    await seekVideo(video, time);
+    const scale = Math.min(1, 1280 / Math.max(video.videoWidth, video.videoHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(2, Math.round(video.videoWidth * scale)); canvas.height = Math.max(2, Math.round(video.videoHeight * scale));
+    const context = canvas.getContext('2d'); if (!context) throw new Error('无法读取视频帧。');
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return { timestamp: time, base64: canvas.toDataURL('image/jpeg', 0.82).split(',')[1] };
+  } finally { video.pause(); video.removeAttribute('src'); video.load(); URL.revokeObjectURL(url); }
+}
+
 export async function extractVideoKeyframes(
   file: File,
   options: ExtractVideoOptions = {},
 ): Promise<VideoKeyframe[]> {
   const {
     maxFrames = 6,
+    minFrames = 3,
+    includeBoundaries = false,
+    requireCompleteCoverage = false,
+    startTime = 0,
+    endTime,
     frameIntervalSeconds,
     maxDimension = 512,
     jpegQuality = 0.68,
@@ -168,11 +202,16 @@ export async function extractVideoKeyframes(
     await waitForVideoMetadata(video, signal);
     throwIfAborted(signal);
 
-    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 10;
+    const sourceDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 10;
+    const rangeEnd = endTime ?? sourceDuration;
+    if (!Number.isFinite(startTime) || !Number.isFinite(rangeEnd) || startTime < 0 || rangeEnd <= startTime || rangeEnd > sourceDuration + 0.001) {
+      throw new Error('视频分析范围超出视频时长，请重新选择范围。');
+    }
+    const duration = Math.min(rangeEnd, sourceDuration) - startTime;
     const suggestedFrameCount = frameIntervalSeconds && frameIntervalSeconds > 0
-      ? Math.ceil(duration / frameIntervalSeconds)
+      ? Math.ceil(duration / frameIntervalSeconds) + (includeBoundaries ? 1 : 0)
       : duration <= 30 ? 4 : duration <= 120 ? 6 : 8;
-    const frameCount = Math.max(3, Math.min(maxFrames, suggestedFrameCount));
+    const frameCount = Math.max(3, Math.min(maxFrames, Math.max(minFrames, suggestedFrameCount)));
     const sourceWidth = Math.max(1, video.videoWidth || 1280);
     const sourceHeight = Math.max(1, video.videoHeight || 720);
     const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
@@ -185,9 +224,11 @@ export async function extractVideoKeyframes(
     const keyframes: VideoKeyframe[] = [];
     for (let index = 0; index < frameCount; index += 1) {
       throwIfAborted(signal);
+      const firstTime = startTime + Math.min(0.01, duration / 4);
+      const lastTime = Math.max(firstTime, startTime + duration - Math.min(0.05, duration / 4));
       const timestamp = Math.min(
-        Math.max(0, ((index + 0.5) / frameCount) * duration),
-        Math.max(0, duration - 0.05),
+        Math.max(startTime, includeBoundaries ? firstTime + index / (frameCount - 1) * (lastTime - firstTime) : startTime + ((index + 0.5) / frameCount) * duration),
+        startTime + duration - Math.min(0.05, duration / 4),
       );
 
       try {
@@ -197,12 +238,12 @@ export async function extractVideoKeyframes(
         const base64 = dataUrl.split(',')[1];
         if (base64) {
           keyframes.push({
-            timestamp: Number(timestamp.toFixed(1)),
+            timestamp: Number(timestamp.toFixed(includeBoundaries ? 3 : 1)),
             base64,
           });
         }
       } catch (error) {
-        if (signal?.aborted) throw error;
+        if (signal?.aborted || requireCompleteCoverage) throw error;
       } finally {
         // Keep the UI moving even when an individual seek/decode is skipped.
         onProgress?.(index + 1, frameCount);

@@ -29,7 +29,7 @@ test('batch normalization keeps event detail, safe filenames and rejects malform
   const result = normalizeBatchRequirements([requirement]);
   assert.equal(result[0].name, 'Door_Open'); assert.equal(result[0].description, requirement.description);
   assert.equal(result[0].scene, '第5秒开门');
-  for (const invalid of [null, Array(101).fill(requirement), [{ ...requirement, duration: 31 }], [{ ...requirement, duration: NaN }], [{ ...requirement, description: '' }], [{ ...requirement, searchQuery: 'playing card place pile' }]]) assert.throws(() => normalizeBatchRequirements(invalid));
+  for (const invalid of [null, Array(301).fill(requirement), [{ ...requirement, duration: 31 }], [{ ...requirement, duration: NaN }], [{ ...requirement, description: '' }], [{ ...requirement, searchQuery: 'playing card place pile' }]]) assert.throws(() => normalizeBatchRequirements(invalid));
   assert.equal(batchFileStem(' ../声音 : 测试 .wav '), '声音_测试');
   assert.deepEqual(uniqueBatchFileNames(['Door Open', 'door_open', 'Door_Open_2', 'Door Open']), ['Door_Open.wav', 'door_open_2.wav', 'Door_Open_2_2.wav', 'Door_Open_3.wav']);
 });
@@ -73,14 +73,17 @@ test('batch AI analysis validates input and retains structured results through t
   assert.throws(() => normalizeSfxBatchInput({ text: 'a'.repeat(80001) }), /过长/);
   assert.throws(() => normalizeSfxBatchInput({ sourceType: 'image', files: [{ mimeType: 'image/png', data: 'invalid' }] }));
   const input = normalizeSfxBatchInput({ text: '原表:Door Open,2.5秒', instructions: '严格按表' });
+  const inventory = { isRequirementList: true, sourceItemCount: 1, rows: [{ rowNumber: 1, name: 'Door Open', rawText: 'Door Open,2.5秒', kind: 'sfx', reason: '' }] };
+  const isInventory = (options: any) => JSON.stringify(options.contents).includes('这是需求表逐行盘点');
   let prompt = '';
   const result = await analyzeSfxBatch(input, undefined, (async options => {
+    if (isInventory(options)) return { text: JSON.stringify(inventory) };
     prompt = JSON.stringify(options.contents);
-    return { text: JSON.stringify({ items: [requirement] }) };
+    return { text: JSON.stringify({ items: [{ ...requirement, sourceRowId: 'row-1' }] }) };
   }) as any);
   assert.equal(result.items[0].name, 'Door_Open'); assert.match(prompt, /原表/); assert.match(prompt, /searchQuery/); assert.match(prompt, /必须仅有1～2个核心英文单词/);
   await assert.rejects(analyzeSfxBatch(input, undefined, (async () => ({ text: '{"items":[' })) as any), /不完整/);
-  await assert.rejects(analyzeSfxBatch(input, undefined, (async () => ({ text: JSON.stringify({ items: [{ ...requirement, duration: 90 }] }) })) as any), /时长/);
+  await assert.rejects(analyzeSfxBatch(input, undefined, (async options => ({ text: JSON.stringify(isInventory(options) ? inventory : { items: [{ ...requirement, duration: 90, sourceRowId: 'row-1' }] }) })) as any), /时长/);
 });
 test('batch polling uses its own endpoint without touching the requirements-table jobs', async () => {
   const original = globalThis.fetch;
@@ -94,7 +97,9 @@ test('screenshot and timestamped video frames reach vision analysis as image inp
     const input = normalizeSfxBatchInput({ sourceType, files: [{ data, mimeType: 'image/png', label: '视频画面 5.00 秒' }] });
     await analyzeSfxBatch(input, undefined, (async options => {
       const prompt = JSON.stringify(options.contents);
-      assert.ok(prompt.includes(data)); assert.match(prompt, /5.00 秒/); assert.match(prompt, /只分析画面/);
+      assert.ok(prompt.includes(data)); assert.match(prompt, /5.00 秒/);
+      if (prompt.includes('这是需求表逐行盘点')) return { text: '{"isRequirementList":false,"sourceItemCount":0,"rows":[]}' };
+      assert.match(prompt, /只分析画面/);
       return { text: '{"items":[]}' };
     }) as any);
   }

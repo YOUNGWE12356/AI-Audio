@@ -5,9 +5,9 @@ const invalid = (message: string, status = 400) => Object.assign(new Error(messa
 const MAX_BYTES = 12 * 1024 * 1024;
 export const MAX_MUSIC_VISUAL_FRAMES = 8;
 
-export function normalizeMusicVisualInput(body: any) {
-  if (!Array.isArray(body?.files) || !body.files.length || body.files.length > MAX_MUSIC_VISUAL_FRAMES) {
-    throw invalid('请选择图片或视频，单次最多分析 8 张画面。');
+export function normalizeMusicVisualInput(body: any, maxFrames = MAX_MUSIC_VISUAL_FRAMES) {
+  if (!Array.isArray(body?.files) || !body.files.length || body.files.length > maxFrames) {
+    throw invalid(`请选择图片或视频，单次最多分析 ${maxFrames} 张画面。`);
   }
   if (body.sourceType !== 'image' && body.sourceType !== 'video') throw invalid('只支持图片或视频画面分析。');
   if (body.sourceType === 'image' && body.files.length !== 1) throw invalid('每次请选择一张图片。');

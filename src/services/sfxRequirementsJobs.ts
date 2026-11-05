@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 
-type Result = { items: any[]; sourceItemCount?: number };
+type Result = { items: any[]; sourceItemCount?: number; excludedItems?: Array<{ name: string; reason: string }> };
 type Job = {
   id: string; owner: string; requestId: string; fingerprint: string;
   status: 'running' | 'completed' | 'failed'; message: string;
@@ -19,6 +19,7 @@ export function createSfxRequirementsJobs(options: {
   reserve: (req: express.Request, res: express.Response) => (() => void) | null;
   run: (req: express.Request, res: express.Response, work: () => Promise<void>) => void;
   execute: (input: any, progress: (message: string) => void, signal: AbortSignal) => Promise<Result>;
+  maxJobMs?: number;
 }) {
   const router = express.Router();
   const jobs = new Map<string, Job>();
@@ -82,7 +83,7 @@ export function createSfxRequirementsJobs(options: {
       jobs.set(job.id, job);
       options.run(req, res, async () => {
         const controller = new AbortController();
-        const deadline = setTimeout(() => controller.abort(), MAX_JOB_MS);
+        const deadline = setTimeout(() => controller.abort(), options.maxJobMs ?? MAX_JOB_MS);
         const startedAt = Date.now();
         try {
           job.result = await options.execute(input, message => {

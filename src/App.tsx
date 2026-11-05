@@ -1518,6 +1518,7 @@ export default function App() {
             {visitedTabs.has('sfx-studio') && (
               <section hidden={currentTab !== 'sfx-studio'} className="min-h-full">
                 <SfxStudio
+                  active={currentTab === 'sfx-studio'}
                   standalonePrompt={standalonePrompt}
                   setStandalonePrompt={setStandalonePrompt}
                   standaloneDuration={standaloneDuration}
