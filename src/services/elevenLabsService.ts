@@ -1,3 +1,4 @@
+import { logEvent } from './safeLogging';
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
@@ -243,7 +244,6 @@ export const getElevenLabsApiKeys = () => {
     process.env.ELEVENLABS_API_KEY,
     process.env.ELEVENLABS_FALLBACK_API_KEY,
     process.env.ELEVENLABS_API_KEYS,
-    process.env.VITE_ELEVENLABS_API_KEY,
   ];
   const seen = new Set<string>();
   return rawValues
@@ -295,14 +295,14 @@ export const withElevenLabsApiKey = async <T,>(
   for (let index = 0; index < apiKeys.length; index += 1) {
     try {
       if (index > 0) {
-        console.warn(`${operationLabel}: retrying with ElevenLabs fallback API key #${index + 1}.`);
+        logEvent('src/services/elevenLabsService.ts:297', 'warn');
       }
       return await task(apiKeys[index], index);
     } catch (error: any) {
       lastError = error;
       const message = String(error?.message || error || '');
       if ((isElevenLabsQuotaErrorMessage(message) || isElevenLabsVoiceNotFoundMessage(message)) && index < apiKeys.length - 1) {
-        console.warn(`${operationLabel}: ElevenLabs key #${index + 1} cannot complete this request; trying next key.`);
+        logEvent('src/services/elevenLabsService.ts:304', 'warn');
         continue;
       }
       throw new Error(formatElevenLabsErrorMessage(message));
@@ -358,7 +358,7 @@ export async function generateSoundEffect(text: string, duration?: number, optio
   const sfxPrompt = await prepareSoundEffectPrompt(text);
   const isProQuality = isElevenLabsProQualityMode(qualityMode);
 
-  console.log("Generating sound effect with English prompt:", sfxPrompt);
+  logEvent('src/services/elevenLabsService.ts:360', 'info');
 
   const requestBody = {
     model_id: ELEVENLABS_SOUND_MODEL,
@@ -447,10 +447,7 @@ export async function generateMusic(
         : `${proQualityPrefix}AI Music, complete song with expressive vocals and lyrics, vocal track, full mix: ${cleanText}`);
   const limitedMusicPrompt = musicPrompt.slice(0, 4100);
 
-  console.log(
-    `Generating music with ElevenLabs Music API (model=${ELEVENLABS_MUSIC_MODEL}, format=${ELEVENLABS_MUSIC_OUTPUT_FORMAT}, instrumental=${isInstrumental}, duration=${normalizedDurationSeconds}s):`,
-    limitedMusicPrompt,
-  );
+  logEvent('src/services/elevenLabsService.ts:449', 'info');
 
   return withElevenLabsApiKey('ElevenLabs music generation', async (apiKey) => {
     const response = await fetch(
@@ -521,7 +518,7 @@ export async function generateVoice(
     });
   }
 
-  console.log(`Generating TTS Voice with ID ${voiceId} for text:`, text.substring(0, 30));
+  logEvent('src/services/elevenLabsService.ts:523', 'info');
 
   // Prefer Eleven v4 for quality, while keeping the established models as automatic fallbacks.
   const modelsToTry = ELEVENLABS_TTS_MODELS;
@@ -564,7 +561,7 @@ export async function generateVoice(
           }
 
           const errorMessage = await getElevenLabsErrorMessage(response);
-          console.warn(`Model ${modelId} failed:`, errorMessage);
+          logEvent('src/services/elevenLabsService.ts:566', 'warn');
           lastError = new Error(errorMessage);
 
           if (isElevenLabsQuotaErrorMessage(errorMessage)) {
@@ -576,7 +573,7 @@ export async function generateVoice(
             break;
           }
         } catch (err: any) {
-          console.warn(`Exception with model ${modelId}:`, err);
+          logEvent('src/services/elevenLabsService.ts:578', 'warn', err);
           lastError = err;
           if (isElevenLabsQuotaErrorMessage(String(err?.message || err || ''))) {
             throw err;
@@ -594,7 +591,7 @@ export async function generateVoice(
   const isVoiceNotFoundError = lastError && (lastError.message.toLowerCase().includes("not found") || lastError.message.toLowerCase().includes("voice_id"));
   const guaranteedFallbackVoiceId: string = '';
   if (isVoiceNotFoundError && guaranteedFallbackVoiceId && voiceId !== guaranteedFallbackVoiceId) {
-    console.warn(`Voice ID '${voiceId}' or model failed. Retrying with guaranteed default voice (${guaranteedFallbackVoiceId}) and eleven_multilingual_v2...`);
+    logEvent('src/services/elevenLabsService.ts:596', 'warn');
     
     try {
       return await withElevenLabsApiKey('ElevenLabs TTS fallback voice generation', async (apiKey) => {
@@ -737,7 +734,7 @@ async function fetchSharedVoiceLibrary(apiKey: string): Promise<ElevenLabsVoice[
     });
 
     if (!response.ok) {
-      console.warn(`Failed to fetch ElevenLabs shared voices (${category}/${sort}):`, response.statusText);
+      logEvent('src/services/elevenLabsService.ts:739', 'warn');
       return [];
     }
 
@@ -785,7 +782,7 @@ export async function fetchAvailableVoices(): Promise<ElevenLabsVoice[]> {
         const data = await myVoicesResponse.json();
         myVoices = Array.isArray(data.voices) ? data.voices.map(normalizeMyVoice) : [];
       } else {
-        console.warn(`Failed to fetch ElevenLabs account voices for configured key #${index + 1}:`, myVoicesResponse.statusText);
+        logEvent('src/services/elevenLabsService.ts:787', 'warn');
       }
 
       if (libraryVoices.length > 0 || myVoices.length > 0) {
@@ -800,13 +797,13 @@ export async function fetchAvailableVoices(): Promise<ElevenLabsVoice[]> {
         }
       });
       if (!response.ok) {
-        console.warn(`Failed to fetch ElevenLabs voices for configured key #${index + 1}:`, response.statusText);
+        logEvent('src/services/elevenLabsService.ts:802', 'warn');
         return [];
       }
       const data = await response.json();
       return Array.isArray(data.voices) ? data.voices.map(normalizeMyVoice) : [];
     } catch (err) {
-      console.error(`Error fetching ElevenLabs voices for configured key #${index + 1}:`, err);
+      logEvent('src/services/elevenLabsService.ts:808', 'error', err);
       return [];
     }
   }));

@@ -57,6 +57,7 @@ export const installClientIdentity = () => {
     new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
     headers.set(CLIENT_ID_HEADER, getClientId());
     return nativeFetch(input, { ...init, headers }).then((response) => {
+      if (response.status === 401) window.location.assign('/auth/login');
       try {
         const rawUrl = input instanceof Request ? input.url : String(input);
         const url = new URL(rawUrl, window.location.origin);

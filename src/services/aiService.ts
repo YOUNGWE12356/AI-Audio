@@ -1,3 +1,4 @@
+import { logEvent } from './safeLogging';
 import { generateAiContent, SchemaType, ThinkingLevel } from './aiGateway';
 import { setClientIdentityHeader } from './clientIdentity';
 import { normalizeAudioDesignSfxSchemes } from '../utils/audioDesignNaming';
@@ -1074,12 +1075,12 @@ ${analysisScope.music ? `音乐类型：${isInstrumental ? '纯音乐（Instrume
   try {
     rawResult = JSON.parse(response.text) as RawAudioDesignResult;
   } catch (e) {
-    console.error("JSON 解析失败:", response.text);
+    logEvent('src/services/aiService.ts:1077', 'error');
     throw new Error("AI 返回的数据格式有误，请重试");
   }
 
   options.signal?.throwIfAborted();
-  console.info(`[audio-design] model-complete elapsedMs=${Date.now() - modelStartedAt} resultChars=${response.text.length}`);
+  logEvent('src/services/aiService.ts:1082', 'info');
   options.onProgress?.('模型已返回，正在校验音效排程和配乐方案…');
   const result = materializeAudioDesignResult(rawResult, isInstrumental, includeMusicTimeline, analysisScope);
   if ((analysisScope.music && !result.bgmRecommendations?.length) || (analysisScope.sfx && !result.sfxSchemes?.some(scheme => scheme.items?.length))) {
@@ -1259,7 +1260,7 @@ const extractSunnyIslandReferenceNames = async (
       ? parsed.names.filter((name: unknown): name is string => typeof name === 'string' && Boolean(name.trim())).slice(0, 200)
       : [];
   } catch (error) {
-    console.warn('Sunny Island reference-name OCR skipped:', error);
+    logEvent('src/services/aiService.ts:1262', 'warn', error);
     return [];
   }
 };
@@ -1715,7 +1716,7 @@ export async function generateSfxRequirements(
     try {
       parsed = JSON.parse(response.text);
     } catch (error) {
-      console.error('需求表 JSON 解析失败:', { length: response.text.length, error });
+      logEvent('src/services/aiService.ts:1718', 'error');
       throw new Error("AI 返回的需求表结果过长或格式不完整，请减少需求数量后重试。");
     }
     options.onProgress?.('AI 已返回结果，正在校验命名和表格内容。');
@@ -1886,7 +1887,7 @@ export async function translateToEnglish(text: string): Promise<string> {
 
     return response.text ? response.text.trim() : text.trim();
   } catch (err) {
-    console.error("Translation to English failed:", err);
+    logEvent('src/services/aiService.ts:1889', 'error', err);
     return text.trim();
   }
 }
@@ -2063,7 +2064,7 @@ export async function enhanceVoicePromptForElevenV4(
         language: options.language || '',
       }, { timeoutMs: 20_000 });
     } catch (error) {
-      console.info('Voice v4 enhancement API failed, using local fallback:', error);
+      logEvent('voice-enhancement.fallback', 'info', error);
       return createLocalVoiceExpressionEnhancementFallback(normalizedText);
     }
   }
@@ -2109,7 +2110,7 @@ ${normalizedText}`;
 
     return parseVoiceExpressionEnhancementResponse(String(response.text || ''), normalizedText);
   } catch (error) {
-    console.error('Voice v4 prompt enhancement failed:', error);
+    logEvent('src/services/aiService.ts:2112', 'error', error);
     return createLocalVoiceExpressionEnhancementFallback(normalizedText);
   }
 }
@@ -2220,7 +2221,7 @@ export async function createEnglishMusicPromptForElevenLabs(
       return result.text || createLocalEnglishMusicPromptFallback(normalizedText, options);
     } catch (err) {
       if (structuredMusicPrompt) throw err;
-      console.info('Music prompt API rewrite failed, using local fallback:', err);
+      logEvent('music-prompt.fallback', 'info', err);
       return createLocalEnglishMusicPromptFallback(normalizedText, options);
     }
   }
@@ -2253,7 +2254,7 @@ ${structuredMusicPrompt ? '8. 音乐总时长由界面“期望生成时长”�
     }
     return response.text ? response.text.trim() : normalizedText;
   } catch (err) {
-    console.error("Music prompt rewrite failed:", err);
+    logEvent('src/services/aiService.ts:2256', 'error', err);
     if (structuredMusicPrompt) throw err;
     return createLocalEnglishMusicPromptFallback(normalizedText, options);
   }
@@ -2322,7 +2323,7 @@ ${normalizedText}`;
     }
     return translatedText;
   } catch (err) {
-    console.error("Target-language translation failed:", err);
+    logEvent('src/services/aiService.ts:2325', 'error', err);
     throw err instanceof Error
       ? err
       : new Error(`翻译成${normalizedTargetLanguage}失败，请稍后重试。`);
@@ -2381,7 +2382,7 @@ export async function extractBatchVoiceTextFromImage(
       .replace(/```$/i, '')
       .trim();
   } catch (err) {
-    console.error('Batch voice image OCR failed:', err);
+    logEvent('src/services/aiService.ts:2384', 'error', err);
     throw err instanceof Error
       ? err
       : new Error('截图识别失败，请换更清晰的图片或手动粘贴文字。');
@@ -2443,7 +2444,7 @@ ${JSON.stringify(simplifiedVoices, null, 2)}
     
     return simplifiedVoices[0]?.id || '';
   } catch (err) {
-    console.error("AI voice matching failed, falling back:", err);
+    logEvent('src/services/aiService.ts:2446', 'error', err);
     return voices[0]?.id || '';
   }
 }

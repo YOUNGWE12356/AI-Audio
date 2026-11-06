@@ -1,6 +1,6 @@
 import type { AiUsageEvent } from './usageTracking';
 
-export type UsageIdentitySource = 'feishu' | 'device' | 'unknown';
+export type UsageIdentitySource = 'feishu' | 'account' | 'device' | 'unknown';
 
 export type StoredAiUsageEvent = AiUsageEvent & {
   timestamp: string;

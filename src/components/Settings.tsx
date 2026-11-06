@@ -29,6 +29,15 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
   const [blacklistLoading, setBlacklistLoading] = useState(false);
   const [blacklistUpdatingUserId, setBlacklistUpdatingUserId] = useState<string | null>(null);
   const [blacklistFeedback, setBlacklistFeedback] = useState<string | null>(null);
+  const [logoutError, setLogoutError] = useState('');
+  const handleLogout = async () => {
+    setLogoutError('');
+    try {
+      const response = await fetch('/auth/logout', { method: 'POST' });
+      if (!response.ok) throw new Error('退出失败，请重试。');
+      window.location.assign('/auth/login');
+    } catch { setLogoutError('退出失败，请重试。'); }
+  };
 
   useEffect(() => {
     if (!isAuthorized) return;
@@ -153,6 +162,8 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
           </div>
           <h1 className="mt-4 text-lg font-bold text-slate-900">设置访问验证</h1>
           <p className="mt-1 text-xs leading-5 text-slate-500">输入管理密码后才能查看用量统计和系统设置。</p>
+          <button type="button" onClick={handleLogout} className="mt-3 text-sm text-slate-600">退出登录</button>
+          {logoutError && <p role="alert">{logoutError}</p>}
 
           <label className="mt-5 block text-[11px] font-semibold text-slate-600" htmlFor="settings-admin-password">
             管理密码

@@ -1,8 +1,9 @@
+import { uploadDirectory, type UploadDirectory } from './serverSecurity';
 import express from 'express';
 import multer from 'multer';
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { generateGptToolTurn, type AssistantModelItem } from './aiGateway';
@@ -60,7 +61,7 @@ const TOOL_LABELS: Record<string, string> = {
   review_before_export: '制作就绪，等待试听',
 };
 type Options = {
-  uploadsDir: string;
+  uploadsDir: UploadDirectory;
   manifestDir?: string;
   ffmpegBinary: string;
   identity: (req: express.Request, res: express.Response) => string;
@@ -98,11 +99,8 @@ export function createAssistantAgentRouter(options: Options) {
   };
   const ownerOf = (req: express.Request, res: express.Response) => {
     const actor = options.identity(req, res);
-    if (actor && actor !== 'unknown') return actor;
-    const cookie = /(?:^|;\s*)ai_audio_assistant=([a-f0-9-]{36})(?:;|$)/i.exec(req.headers.cookie || '')?.[1];
-    const id = cookie || randomUUID();
-    if (!cookie) res.append('Set-Cookie', `ai_audio_assistant=${id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`);
-    return `session:${createHash('sha256').update(id).digest('hex')}`;
+    if (!actor || actor === 'unknown') throw Object.assign(new Error('Authentication required'), { status: 401 });
+    return actor;
   };
   const lookup = (req: express.Request, res: express.Response) => {
     const id = String(req.params.id || '');
@@ -126,18 +124,24 @@ export function createAssistantAgentRouter(options: Options) {
     }
     return state.owner === ownerOf(req, res) ? state : undefined;
   };
-  const storage = multer.diskStorage({ destination: options.uploadsDir, filename: (_req, file, cb) => {
+  const storage = multer.diskStorage({ destination: (_req, _file, cb) => cb(null, uploadDirectory(options.uploadsDir)), filename: (_req, file, cb) => {
     const ext = path.extname(file.originalname).replace(/[^.a-zA-Z0-9]/g, '').slice(0, 12);
     cb(null, `assistant_${randomUUID()}${ext}`);
   } });
-  const upload = multer({ storage, limits: { fileSize: 100 * 1024 * 1024, files: 40, fields: 8, fieldSize: 200_000 } });
+  const upload = multer({ storage, fileFilter: (_req, file, cb) => {
+    const allowed = /\.(?:wav|mp3|m4a|aac|ogg|opus|flac|aiff?|mp4|m4v|mov|mkv|webm|png|jpe?g|webp|txt|md|csv|json|pdf|zip|mid)$/i.test(file.originalname);
+    if (!allowed) return cb(Object.assign(new Error('Unsupported upload type'), { status: 415 }));
+    cb(null, true);
+  }, limits: { fileSize: 100 * 1024 * 1024, files: 40, fields: 8, fieldSize: 200_000 } });
 
   const launch = (state: StoredJob, req: express.Request) => {
     const headers: Record<string, string> = {};
-    for (const key of ['cookie', 'x-ai-audio-client-id', 'authorization']) {
+    for (const key of ['cookie', 'origin']) {
       const value = req.headers[key];
       if (typeof value === 'string') headers[key] = value;
     }
+    const configuredCallback = process.env.FEISHU_REDIRECT_URI || process.env.LARK_REDIRECT_URI;
+    headers.origin = process.env.APP_ORIGIN || (configuredCallback ? new URL(configuredCallback).origin : `http://localhost:${process.env.PORT || '3000'}`);
     const origin = `http://127.0.0.1:${req.socket.localPort}`;
     const signal = state.controller.signal;
     const asset = (id: string) => {
@@ -145,7 +149,7 @@ export function createAssistantAgentRouter(options: Options) {
       if (!result) throw new Error(`文件ID不存在：${id}`);
       return result;
     };
-    const filePath = (a: AssistantAsset) => resolveAssistantUpload(options.uploadsDir, a.url);
+    const filePath = (a: AssistantAsset) => resolveAssistantUpload(uploadDirectory(options.uploadsDir), a.url);
     const register = async (url: string, name: string, generated = false): Promise<AssistantAsset> => {
       if (!url.startsWith('/uploads/')) {
         // Only app-owned download routes are allowed. Never forward credentials to external URLs.
@@ -154,8 +158,8 @@ export function createAssistantAgentRouter(options: Options) {
         if (!response.ok) throw new Error(`读取产物失败 (${response.status})`);
         return save(Buffer.from(await response.arrayBuffer()), name, response.headers.get('content-type') || undefined, generated);
       }
-      const diskPath = resolveAssistantUpload(options.uploadsDir, url);
-      if (path.dirname(diskPath) !== path.resolve(options.uploadsDir)) {
+      const diskPath = resolveAssistantUpload(uploadDirectory(options.uploadsDir), url);
+      if (path.dirname(diskPath) !== path.resolve(uploadDirectory(options.uploadsDir))) {
         return save(await fs.promises.readFile(diskPath), name, mimeFor(name), generated);
       }
       const stat = await fs.promises.stat(diskPath);
@@ -170,7 +174,7 @@ export function createAssistantAgentRouter(options: Options) {
     const save = async (data: Buffer, name: string, mimeType?: string, generated = true): Promise<AssistantAsset> => {
       const filename = `assistant_${randomUUID()}${path.extname(safeAgentName(name))}`;
       const url = `/uploads/${filename}`;
-      await fs.promises.writeFile(resolveAssistantUpload(options.uploadsDir, url), data);
+      await fs.promises.writeFile(resolveAssistantUpload(uploadDirectory(options.uploadsDir), url), data);
       if (!data.length) return { id: randomUUID(), name: safeAgentName(name), url, mimeType: mimeType || mimeFor(name), size: 0, generated };
       const result = await register(url, name, generated);
       if (mimeType) result.mimeType = mimeType;
@@ -446,7 +450,7 @@ export function createAssistantAgentRouter(options: Options) {
         if (prior) {
           messages = getAssistantMessages(prior.job);
           previousInput = prior.input.length ? [...prior.input] : [{ role: 'user', content: JSON.stringify({ previousTask: prior.job.prompt, previousResult: prior.job.answer, error: prior.job.error }) }];
-          for (const a of prior.job.assets) if (fs.existsSync(resolveAssistantUpload(options.uploadsDir, a.url))) assets.push(a);
+          for (const a of prior.job.assets) if (fs.existsSync(resolveAssistantUpload(uploadDirectory(options.uploadsDir), a.url))) assets.push(a);
         }
       }
       const job: AssistantJob = { id: randomUUID(), prompt, messages: [...messages, { id: randomUUID(), role: 'user', content: prompt }], status: 'running', createdAt: now, updatedAt: now, assets, events: [] };
@@ -552,7 +556,7 @@ export function createAssistantAgentRouter(options: Options) {
     const state = lookup(req, res);
     const asset = state?.job.assets.find(item => item.id === req.params.assetId);
     if (!asset) return res.status(404).json({ error: '文件不存在。' });
-    return res.download(resolveAssistantUpload(options.uploadsDir, asset.url), asset.name);
+    return res.download(resolveAssistantUpload(uploadDirectory(options.uploadsDir), asset.url), asset.name);
   });
   return router;
 }

@@ -1,3 +1,4 @@
+import { logEvent } from './safeLogging';
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -95,7 +96,7 @@ export function createAudioDesignJobs<Input>(options: {
           job.message = job.error!;
         } finally {
           clearTimeout(deadline); controllers.delete(job.id); release(); job.updatedAt = Date.now();
-          try { persist(job); } catch (error) { console.error('[audio-design] Failed to save task:', error); }
+          try { persist(job); } catch (error) { logEvent('src/services/audioDesignJobsServer.ts:98', 'error', error); }
           console.info(`[audio-design] job=${job.id} status=${job.status} elapsedMs=${Date.now() - job.createdAt}`);
         }
       });

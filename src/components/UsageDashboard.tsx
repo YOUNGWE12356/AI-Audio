@@ -119,7 +119,7 @@ function QuotaManagement({
                       <div className="min-w-0">
                         <p className="font-semibold text-slate-800">{user.displayName}</p>
                         <p className="mt-0.5 text-[9px] text-slate-400">
-                          {user.identitySource === 'feishu' ? (user.department || '飞书成员') : '设备身份'}
+                          {user.identitySource === 'feishu' ? (user.department || '飞书成员') : user.identitySource === 'account' ? '账号身份' : '历史设备身份'}
                           {user.bonusCredits > 0 ? ` · 已追加 ${formatInteger(user.bonusCredits)}` : ''}
                           {user.bonusCredits < 0 ? ` · 已减少 ${formatInteger(Math.abs(user.bonusCredits))}` : ''}
                           {user.recommendTierUpgrade ? ' · 连续两月加额，建议升档' : ''}
@@ -352,7 +352,7 @@ function MemberUsageTable({
               const isExpanded = expandedUserId === user.userId;
               const sourceLabel = user.identitySource === 'feishu'
                 ? (user.department || '飞书认证')
-                : user.identitySource === 'device' ? '待飞书登录' : '历史未识别';
+                : user.identitySource === 'account' ? '账号认证' : user.identitySource === 'device' ? '历史设备身份' : '历史未识别';
               const memberIps = user.ipAddresses || [];
               const blockedIpCount = memberIps.reduce(
                 (count, ip) => count + (blacklistedIpSet.has(ip) ? 1 : 0),

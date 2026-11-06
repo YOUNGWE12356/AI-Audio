@@ -1,3 +1,4 @@
+import { logEvent } from './src/services/safeLogging';
 import 'dotenv/config';
 import express from 'express';
 import path from 'path';
@@ -5,7 +6,7 @@ import fs from 'fs';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { isIP } from 'node:net';
-import { exec, execFile } from 'child_process';
+import { execFile } from 'child_process';
 import { createServer as createViteServer } from 'vite';
 import JSZip from 'jszip';
 import { createSfxArchiveStream, downloadContentDisposition, safeDownloadFileName } from './src/services/sfxLibraryDownload';
@@ -48,6 +49,7 @@ import {
   getDetailedSfxFrameCount,
 } from './src/utils/videoAnalysisDensity';
 import multer from 'multer';
+import { createServerSecurity, currentUploadDirectory, currentUserId, privateDownload, logSafeError, publicError } from './src/services/serverSecurity';
 import {
   analyzeAudioDesign,
   generateSfxRequirements,
@@ -121,6 +123,19 @@ async function startServer() {
   app.disable('x-powered-by');
 
   const dataDir = path.join(process.cwd(), 'data');
+  const privateUploadsRoot = path.join(dataDir, 'private-uploads');
+  const security = createServerSecurity({ privateRoot: privateUploadsRoot });
+  const getUploadsDir = currentUploadDirectory;
+  app.use((_req, res, next) => { res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'same-origin'); next(); });
+  app.get('/healthz', (_req, res) => res.json({ ok: true }));
+  app.use('/auth', security.router);
+  app.use('/api/auth', security.router);
+  app.use(security.authenticate);
+  app.use(security.resourceLimits);
+  app.use((req, res, next) => {
+    if (/(?:^|\/)(?:server\.(?:cjs|ts)(?:\.map)?|\.env(?:\.[^/]*)?|\.git)(?:\/|$)/i.test(req.path)) return res.status(404).end();
+    next();
+  });
   const accessBlacklistPath = path.join(dataDir, 'access-blacklist.json');
   const normalizeIpAddress = (value: unknown) => {
     if (typeof value !== 'string') return '';
@@ -181,46 +196,9 @@ async function startServer() {
   );
   const resolveUsageActor = (req: express.Request, res: express.Response): UsageActor => {
     const ipAddress = getRequestIpAddress(req);
-    // A future Feishu auth middleware should set this server-verified value before this middleware.
-    // Client-provided headers are never treated as authenticated Feishu identity.
-    const feishuUser = res.locals.feishuUser as {
-      openId?: unknown;
-      displayName?: unknown;
-      department?: unknown;
-    } | undefined;
-    const feishuOpenId = normalizeIdentityText(feishuUser?.openId, 128);
-    if (feishuOpenId) {
-      return {
-        userId: `feishu:${feishuOpenId}`,
-        displayName: normalizeIdentityText(feishuUser?.displayName, 80) || '飞书用户',
-        department: normalizeIdentityText(feishuUser?.department, 80),
-        identitySource: 'feishu',
-        ipAddress,
-      };
-    }
-
-    const headerValue = Array.isArray(req.headers['x-ai-audio-client-id'])
-      ? req.headers['x-ai-audio-client-id'][0]
-      : req.headers['x-ai-audio-client-id'];
-    const clientId = normalizeIdentityText(headerValue, 128);
-    if (clientId && /^[a-zA-Z0-9._:-]+$/.test(clientId)) {
-      const suffix = clientId.replace(/[^a-zA-Z0-9]/g, '').slice(-8).toUpperCase();
-      return {
-        userId: `device:${clientId}`,
-        displayName: `设备 ${suffix || '未命名'}`,
-        department: '',
-        identitySource: 'device',
-        ipAddress,
-      };
-    }
-
-    return {
-      userId: 'unknown',
-      displayName: '历史未识别用户',
-      department: '',
-      identitySource: 'unknown',
-      ipAddress,
-    };
+    const user = res.locals.authUser as { id: string; displayName: string; identitySource: 'feishu' | 'account' };
+    if (!user?.id) throw Object.assign(new Error('Authentication required'), { status: 401 });
+    return { userId: user.id, displayName: user.displayName, department: '', identitySource: user.identitySource, ipAddress };
   };
   const resolveUsageFeature = (req: express.Request) => {
     const endpoint = req.path;
@@ -274,7 +252,6 @@ async function startServer() {
   });
 
   // Directories paths
-  const uploadsDir = path.join(process.cwd(), 'uploads');
   // Keep the private sound library outside the application upload directory so
   // application cleanup or deployment cannot remove company audio assets.
   const libraryDir = process.env.SFX_LIBRARY_DIR
@@ -284,12 +261,9 @@ async function startServer() {
   const libraryTempDir = path.join(libraryDir, 'temp');
   const sfxLibraryAdminPassword = String(
     process.env.SFX_LIBRARY_ADMIN_PASSWORD
-      || process.env.VITE_SFX_LIBRARY_ADMIN_PASSWORD
       || '',
   ).trim();
-  const sfxLibraryAdminSessions = new Map<string, number>();
   const sfxLibraryEventClients = new Set<express.Response>();
-  const SFX_LIBRARY_ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
   let sfxLibraryRevision = Date.now();
   const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
   const MAX_INLINE_MEDIA_BYTES = 24 * 1024 * 1024;
@@ -419,9 +393,7 @@ async function startServer() {
   if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
   }
-  if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir, { recursive: true });
-  }
+  fs.mkdirSync(privateUploadsRoot, { recursive: true, mode: 0o700 });
   for (const directory of [libraryDir, libraryOriginalsDir, libraryTempDir]) {
     if (!fs.existsSync(directory)) fs.mkdirSync(directory, { recursive: true });
   }
@@ -499,7 +471,7 @@ async function startServer() {
                 userId: String(event.userId || 'unknown'),
                 displayName: String(event.displayName || '历史未识别用户'),
                 department: String(event.department || ''),
-                identitySource: ['feishu', 'device'].includes(String(event.identitySource))
+                identitySource: ['feishu', 'account', 'device'].includes(String(event.identitySource))
                   ? event.identitySource as UsageIdentitySource
                   : 'unknown',
                 ipAddress: normalizeIpAddress(event.ipAddress),
@@ -615,7 +587,7 @@ async function startServer() {
               periodKey,
               userId,
               displayName: normalizeIdentityText(allocation.displayName, 80) || userId,
-              identitySource: ['feishu', 'device'].includes(String(allocation.identitySource))
+              identitySource: ['feishu', 'account', 'device'].includes(String(allocation.identitySource))
                 ? allocation.identitySource as UsageIdentitySource
                 : 'unknown',
               bonusCredits: Math.min(
@@ -658,7 +630,7 @@ async function startServer() {
             return [{
               userId,
               displayName: normalizeIdentityText(profile.displayName, 80) || userId,
-              identitySource: ['feishu', 'device'].includes(String(profile.identitySource))
+              identitySource: ['feishu', 'account', 'device'].includes(String(profile.identitySource))
                 ? profile.identitySource as UsageIdentitySource
                 : 'unknown',
               tier: profile.tier === 'professional' ? 'professional' : 'basic',
@@ -967,14 +939,14 @@ async function startServer() {
   const safeUnlink = async (filePath?: string) => {
     if (!filePath) return;
     await fs.promises.unlink(filePath).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== 'ENOENT') console.warn(`Failed to remove temporary file ${filePath}:`, error);
+      if (error.code !== 'ENOENT') logEvent('server.ts:940', 'warn', error);
     });
   };
 
   const safeRemoveDirectory = async (directoryPath?: string) => {
-    if (!directoryPath || !isPathInside(uploadsDir, directoryPath)) return;
+    if (!directoryPath || !isPathInside(getUploadsDir(), directoryPath)) return;
     await fs.promises.rm(directoryPath, { recursive: true, force: true }).catch((error) => {
-      console.warn(`Failed to remove temporary directory ${directoryPath}:`, error);
+      logEvent('server.ts:947', 'warn', error);
     });
   };
 
@@ -985,7 +957,7 @@ async function startServer() {
     let removedBytes = 0;
 
     const visitDirectory = async (directoryPath: string, removeEmptyDirectory: boolean): Promise<void> => {
-      if (!isPathInside(path.dirname(directoryPath), directoryPath) && path.resolve(directoryPath) !== path.resolve(uploadsDir)) {
+      if (!isPathInside(path.dirname(directoryPath), directoryPath) && path.resolve(directoryPath) !== path.resolve(privateUploadsRoot)) {
         return;
       }
 
@@ -993,13 +965,13 @@ async function startServer() {
       try {
         entries = await fs.promises.readdir(directoryPath, { withFileTypes: true });
       } catch (error: any) {
-        if (error?.code !== 'ENOENT') console.warn(`Failed to scan upload directory ${directoryPath}:`, error);
+        if (error?.code !== 'ENOENT') logEvent('server.ts:966', 'warn', error);
         return;
       }
 
       await Promise.all(entries.map(async (entry) => {
         const entryPath = path.resolve(directoryPath, entry.name);
-        if (!isPathInside(uploadsDir, entryPath)) return;
+        if (!isPathInside(privateUploadsRoot, entryPath)) return;
         if (entry.isDirectory()) {
           await visitDirectory(entryPath, true);
           return;
@@ -1015,7 +987,7 @@ async function startServer() {
           removedFiles += 1;
           removedBytes += stat.size;
         } catch (error: any) {
-          if (error?.code !== 'ENOENT') console.warn(`Failed to remove expired upload ${entryPath}:`, error);
+          if (error?.code !== 'ENOENT') logEvent('server.ts:988', 'warn', error);
         }
       }));
 
@@ -1027,7 +999,7 @@ async function startServer() {
       }
     };
 
-    await visitDirectory(uploadsDir, false);
+    await visitDirectory(privateUploadsRoot, false);
     if (removedFiles > 0) {
       console.log(`[uploads-cleanup] Removed ${removedFiles} expired file(s), ${(removedBytes / 1024 / 1024).toFixed(1)} MB; retention=${UPLOADS_RETENTION_DAYS}d.`);
     }
@@ -1036,12 +1008,12 @@ async function startServer() {
   if (UPLOADS_CLEANUP_ENABLED) {
     setTimeout(() => {
       void cleanupExpiredUploads().catch((error) => {
-        console.warn('[uploads-cleanup] Initial cleanup failed:', error);
+        logEvent('server.ts:1009', 'warn', error);
       });
     }, 30_000);
     setInterval(() => {
       void cleanupExpiredUploads().catch((error) => {
-        console.warn('[uploads-cleanup] Scheduled cleanup failed:', error);
+        logEvent('server.ts:1014', 'warn', error);
       });
     }, UPLOADS_CLEANUP_INTERVAL_MS);
   }
@@ -1091,26 +1063,7 @@ async function startServer() {
       && timingSafeEqual(actualBuffer, expectedBuffer);
   };
 
-  const getSfxLibraryAdminToken = (req: express.Request) => {
-    const authorization = String(req.headers.authorization || '');
-    return authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
-  };
-
-  const hasValidSfxLibraryAdminSession = (req: express.Request) => {
-    const token = getSfxLibraryAdminToken(req);
-    if (!token) return false;
-    const expiresAt = sfxLibraryAdminSessions.get(token) || 0;
-    if (expiresAt <= Date.now()) {
-      sfxLibraryAdminSessions.delete(token);
-      return false;
-    }
-    return true;
-  };
-
-  const requireSfxLibraryAdmin: express.RequestHandler = (req, res, next) => {
-    if (hasValidSfxLibraryAdminSession(req)) return next();
-    return res.status(401).json({ error: '需要有效的管理权限。' });
-  };
+  const requireSfxLibraryAdmin = security.requireAdmin;
 
   app.get('/api/access/blacklist', requireSfxLibraryAdmin, (_req, res) => {
     return res.json({ ips: Array.from(accessBlacklist).sort() });
@@ -1320,7 +1273,7 @@ async function startServer() {
         if (Array.isArray(parsed)) categories = parsed;
       }
     } catch (error) {
-      console.warn('Unable to parse library categories; rebuilding a readable index:', error);
+      logEvent('server.ts:1275', 'warn', error);
     }
     try {
       if (fs.existsSync(soundsFile)) {
@@ -1328,7 +1281,7 @@ async function startServer() {
         if (Array.isArray(parsed)) sounds = parsed;
       }
     } catch (error) {
-      console.error('Unable to parse library sounds:', error);
+      logEvent('server.ts:1283', 'error', error);
       throw new Error('音效库清单无法读取，请检查 sounds.json。');
     }
 
@@ -1343,7 +1296,7 @@ async function startServer() {
   try {
     loadAndRepairLibraryMetadata();
   } catch (error) {
-    console.warn('Unable to repair library metadata:', error);
+    logEvent('server.ts:1298', 'warn', error);
   }
 
   type AudioAssetSource = 'uploaded' | 'generated' | 'external' | 'library';
@@ -1363,7 +1316,7 @@ async function startServer() {
       const parsed = JSON.parse(content);
       return Array.isArray(parsed) ? parsed : [];
     } catch (err) {
-      console.error('Error reading indexed sounds:', err);
+      logEvent('server.ts:1318', 'error', err);
       return [];
     }
   };
@@ -1482,31 +1435,18 @@ async function startServer() {
 
   const getIndexedAudioAssets = () => readSfxSounds().map(toIndexedAudioAsset);
 
-  // Serve uploaded files statically
-  app.use('/uploads', express.static(uploadsDir));
+  // Resolve downloads only within the authenticated account’s private storage.
+  app.get('/uploads/*', (req, res, next) => privateDownload(getUploadsDir(), String(req.params[0] || ''), res, next));
   app.get('/favicon.ico', (_req, res) => res.status(204).end());
 
   app.post('/api/sfx/admin/login', (req, res) => {
-    if (!sfxLibraryAdminPassword) {
-      return res.status(503).json({ error: '服务器尚未配置音效库管理密码。' });
-    }
-    const password = typeof req.body?.password === 'string' ? req.body.password : '';
-    if (!secretsMatch(password, sfxLibraryAdminPassword)) {
-      return res.status(401).json({ error: '管理密码错误。' });
-    }
-    const token = randomUUID();
-    const expiresAt = Date.now() + SFX_LIBRARY_ADMIN_SESSION_TTL_MS;
-    sfxLibraryAdminSessions.set(token, expiresAt);
-    return res.json({ authorized: true, token, expiresAt });
+    const result = security.elevateAdmin(req, req.body?.password);
+    if (result.status !== 200) return res.status(result.status).json({ error: publicError(result.status) });
+    return res.json({ authorized: true, expiresAt: result.expiresAt });
   });
-
-  app.get('/api/sfx/admin/session', (req, res) => {
-    return res.json({ authorized: hasValidSfxLibraryAdminSession(req) });
-  });
-
+  app.get('/api/sfx/admin/session', (req, res) => res.json({ authorized: security.isAdmin(req) }));
   app.post('/api/sfx/admin/logout', (req, res) => {
-    const token = getSfxLibraryAdminToken(req);
-    if (token) sfxLibraryAdminSessions.delete(token);
+    security.revokeAdmin(req);
     return res.json({ success: true });
   });
 
@@ -1700,7 +1640,7 @@ async function startServer() {
 
       const revision = notifySfxLibraryChanged('folder-deleted');
       await fs.promises.rm(trashDirectory, { recursive: true, force: true }).catch((cleanupError) => {
-        console.warn(`Failed to purge deleted library files from ${trashDirectory}:`, cleanupError);
+        logEvent('server.ts:1642', 'warn', cleanupError);
       });
       return res.json({
         success: true,
@@ -1714,7 +1654,7 @@ async function startServer() {
       for (const moved of movedFiles.reverse()) {
         if (!fs.existsSync(moved.trash)) continue;
         await fs.promises.rename(moved.trash, moved.source).catch((restoreError) => {
-          console.error(`Failed to restore library file ${moved.source}:`, restoreError);
+          logEvent('server.ts:1656', 'error', restoreError);
         });
       }
       await fs.promises.rm(trashDirectory, { recursive: true, force: true }).catch(() => undefined);
@@ -1843,7 +1783,7 @@ async function startServer() {
     res.setHeader('Cache-Control', 'no-store');
     const stream = createSfxArchiveStream(files as NonNullable<(typeof files)[number]>[]);
     stream.on('error', error => {
-      console.error('SFX archive stream failed:', error);
+      logEvent('server.ts:1785', 'error', error);
       res.destroy(error);
     });
     res.on('close', () => stream.destroy());
@@ -1879,7 +1819,7 @@ async function startServer() {
   }));
 
   app.use('/api/sfx/online', createOnlineSfxRouter({
-    uploadsDir, ffmpeg: FFMPEG_BINARY,
+    uploadsDir: getUploadsDir, ffmpeg: FFMPEG_BINARY,
     owner: (req, res) => resolveUsageActor(req, res).userId,
     reserve: (req, res, points) => {
       const reservation = reserveElevenLabsQuota(resolveUsageActor(req, res), points);
@@ -1895,7 +1835,7 @@ async function startServer() {
   }));
 
   app.use('/api/ai/sfx-batch', createSfxBatchRouter({
-    uploadsDir, jobsDir: path.join(dataDir, 'sfx-batch-jobs'), ffmpeg: FFMPEG_BINARY,
+    uploadsDir: getUploadsDir, jobsDir: path.join(dataDir, 'sfx-batch-jobs'), ffmpeg: FFMPEG_BINARY,
     owner: (req, res) => resolveUsageActor(req, res).userId,
     reserve: (req, res, points) => {
       const reservation = reserveElevenLabsQuota(resolveUsageActor(req, res), points);
@@ -2329,7 +2269,7 @@ async function startServer() {
     try {
       return res.json(loadAndRepairLibraryMetadata().categories);
     } catch (err: any) {
-      console.error('Error reading categories:', err);
+      logEvent('server.ts:2271', 'error', err);
       return res.status(500).json({ error: err.message });
     }
   });
@@ -2351,7 +2291,7 @@ async function startServer() {
       const revision = notifySfxLibraryChanged('categories-updated');
       return res.json({ success: true, revision });
     } catch (err: any) {
-      console.error('Error saving categories:', err);
+      logEvent('server.ts:2293', 'error', err);
       return res.status(500).json({ error: err.message });
     }
   });
@@ -2363,7 +2303,7 @@ async function startServer() {
       const repaired = loadAndRepairLibraryMetadata();
       return res.json(repaired.sounds);
     } catch (err: any) {
-      console.error('Error reading sounds:', err);
+      logEvent('server.ts:2305', 'error', err);
       return res.status(500).json({ error: err.message });
     }
   });
@@ -2385,7 +2325,7 @@ async function startServer() {
       const revision = notifySfxLibraryChanged('sounds-updated');
       return res.json({ success: true, revision });
     } catch (err: any) {
-      console.error('Error saving sounds:', err);
+      logEvent('server.ts:2327', 'error', err);
       return res.status(500).json({ error: err.message });
     }
   });
@@ -2432,7 +2372,7 @@ async function startServer() {
         indexedAt: new Date().toISOString(),
       });
     } catch (err: any) {
-      console.error('Error searching audio assets:', err);
+      logEvent('server.ts:2374', 'error', err);
       return res.status(500).json({ error: err.message || 'Failed to search audio assets' });
     }
   });
@@ -2441,7 +2381,7 @@ async function startServer() {
     try {
       return res.json(getAudioAssetStats(getIndexedAudioAssets()));
     } catch (err: any) {
-      console.error('Error reading audio asset stats:', err);
+      logEvent('server.ts:2383', 'error', err);
       return res.status(500).json({ error: err.message || 'Failed to read audio asset stats' });
     }
   });
@@ -2455,7 +2395,7 @@ async function startServer() {
         stats: getAudioAssetStats(assets),
       });
     } catch (err: any) {
-      console.error('Error refreshing audio asset index:', err);
+      logEvent('server.ts:2397', 'error', err);
       return res.status(500).json({ error: err.message || 'Failed to refresh audio asset index' });
     }
   });
@@ -2466,7 +2406,7 @@ async function startServer() {
       if (!asset) return res.status(404).json({ error: 'Audio asset not found' });
       return res.json(asset);
     } catch (err: any) {
-      console.error('Error reading audio asset:', err);
+      logEvent('server.ts:2408', 'error', err);
       return res.status(500).json({ error: err.message || 'Failed to read audio asset' });
     }
   });
@@ -2474,7 +2414,7 @@ async function startServer() {
   // Configure multer disk storage for multipart/form-data
   const storage = multer.diskStorage({
     destination: (req, file, cb) => {
-      cb(null, uploadsDir);
+      cb(null, getUploadsDir());
     },
     filename: (req, file, cb) => {
       const ext = getSafeUploadExtension(file.originalname, file.mimetype, '.wav');
@@ -2489,6 +2429,8 @@ async function startServer() {
   });
 
   type AudioDesignVideoPreupload = {
+    owner: string;
+    directory: string;
     uploadId: string;
     localFileName: string;
     keyframes: Array<{ timestamp: number; base64: string }>;
@@ -2502,8 +2444,8 @@ async function startServer() {
 
   const deleteVideoPreupload = async (entry?: AudioDesignVideoPreupload) => {
     if (!entry) return;
-    const localPath = path.resolve(uploadsDir, entry.localFileName);
-    if (isPathInside(uploadsDir, localPath)) await safeUnlink(localPath);
+    const localPath = path.resolve(entry.directory, entry.localFileName);
+    if (isPathInside(entry.directory, localPath)) await safeUnlink(localPath);
   };
 
   const cleanupExpiredAudioDesignPreuploads = async () => {
@@ -2527,12 +2469,12 @@ async function startServer() {
 
   app.use(createAssistantWorkspaceOperationCache((req, res) => resolveUsageActor(req, res).userId));
   app.use('/api/ai/assistant', createAssistantAgentRouter({
-    uploadsDir, ffmpegBinary: FFMPEG_BINARY, duration: filePath => getMediaDurationSeconds(filePath),
+    uploadsDir: getUploadsDir, ffmpegBinary: FFMPEG_BINARY, duration: filePath => getMediaDurationSeconds(filePath),
     identity: (req, res) => resolveUsageActor(req, res).userId,
   }));
 
   app.use('/api/audio/music-separation', createMusicSeparationRouter({
-    uploadsDir,
+    uploadsDir: getUploadsDir,
     ffmpegBinary: FFMPEG_BINARY,
     maxUploadBytes: MAX_UPLOAD_BYTES,
   }));
@@ -2548,8 +2490,8 @@ async function startServer() {
     }
 
     const inputPath = req.file.path;
-    const outputPath = path.resolve(uploadsDir, `audio-decode-${randomUUID()}.wav`);
-    if (!isPathInside(uploadsDir, outputPath)) {
+    const outputPath = path.resolve(getUploadsDir(), `audio-decode-${randomUUID()}.wav`);
+    if (!isPathInside(getUploadsDir(), outputPath)) {
       await safeUnlink(inputPath);
       throw Object.assign(new Error('音轨临时输出路径无效。'), { status: 500 });
     }
@@ -2611,8 +2553,8 @@ async function startServer() {
         : format === 'aac'
           ? 'audio/aac'
           : 'audio/mpeg';
-    const outputPath = path.resolve(uploadsDir, `audio-convert-${randomUUID()}${outputExtension}`);
-    if (!isPathInside(uploadsDir, outputPath)) {
+    const outputPath = path.resolve(getUploadsDir(), `audio-convert-${randomUUID()}${outputExtension}`);
+    if (!isPathInside(getUploadsDir(), outputPath)) {
       await safeUnlink(inputPath);
       throw Object.assign(new Error('音频转换临时输出路径无效。'), { status: 500 });
     }
@@ -2957,12 +2899,12 @@ async function startServer() {
     }
 
     const jobId = randomUUID();
-    const temporaryDirectory = await fs.promises.mkdtemp(path.join(uploadsDir, `.audio-to-midi-${jobId}-`));
+    const temporaryDirectory = await fs.promises.mkdtemp(path.join(getUploadsDir(), `.audio-to-midi-${jobId}-`));
     const sourcePath = path.resolve(req.file.path);
     const inputWavPath = path.resolve(temporaryDirectory, 'input.wav');
     const outputFileName = makeAudioToMidiOutputName(req.file.originalname || req.file.filename, mode);
-    const outputMidiPath = path.resolve(uploadsDir, outputFileName);
-    if (![temporaryDirectory, inputWavPath].every(filePath => isPathInside(uploadsDir, filePath)) || !isPathInside(uploadsDir, outputMidiPath)) {
+    const outputMidiPath = path.resolve(getUploadsDir(), outputFileName);
+    if (![temporaryDirectory, inputWavPath].every(filePath => isPathInside(getUploadsDir(), filePath)) || !isPathInside(getUploadsDir(), outputMidiPath)) {
       await Promise.all([safeUnlink(req.file.path), safeRemoveDirectory(temporaryDirectory)]);
       throw Object.assign(new Error('MIDI 临时路径无效。'), { status: 500 });
     }
@@ -3076,7 +3018,7 @@ async function startServer() {
         return;
       }
 
-      console.warn(`ElevenLabs shared voice sync skipped for configured key #${index + 1}:`, message || response.status);
+      logEvent('server.ts:3020', 'warn');
     }));
   };
 
@@ -3164,8 +3106,8 @@ async function startServer() {
     }
 
     const previewFileName = `preview_${safeName.base}_h264.mp4`;
-    const previewPath = path.resolve(uploadsDir, previewFileName);
-    if (!isPathInside(uploadsDir, previewPath)) {
+    const previewPath = path.resolve(getUploadsDir(), previewFileName);
+    if (!isPathInside(getUploadsDir(), previewPath)) {
       throw Object.assign(new Error('Invalid preview video path.'), { status: 500 });
     }
 
@@ -3286,7 +3228,7 @@ async function startServer() {
       ['-y', '-i', inputPath, '-filter:a', buildTranslatedDubbingAtempoFilter(tempo), '-vn', '-codec:a', 'libmp3lame', '-b:a', '192k', outputPath],
       (error) => {
         if (error) {
-          console.warn('Failed to time-stretch translated dubbing audio; using natural timing:', error);
+          logEvent('server.ts:3230', 'warn', error);
           resolve({ stretched: false, speedRatio: 1 });
           return;
         }
@@ -3344,7 +3286,7 @@ async function startServer() {
               recoveredClips.push(clip);
             }
           } catch (clipParseError) {
-            console.warn('Skipping one malformed recovered video-analysis clip:', clipParseError);
+            logEvent('server.ts:3288', 'warn', clipParseError);
           }
           objectStart = -1;
         }
@@ -3470,12 +3412,7 @@ async function startServer() {
         // shows a short message, but the full arguments are essential when
         // diagnosing platform-specific FFmpeg failures (especially Windows
         // path and in-place output errors).
-        console.error('[ffmpeg] command failed', {
-          binary: FFMPEG_BINARY,
-          args,
-          message: error.message,
-          stderr: String(stderr || ''),
-        });
+        logEvent('server.ts:3414', 'error');
         const ffmpegUnavailable = /ffmpeg.*(?:not recognized|not found)|ENOENT/i.test(`${error.message}\n${stderr}`);
         reject(Object.assign(
           new Error(ffmpegUnavailable
@@ -3659,8 +3596,8 @@ async function startServer() {
     },
   ) => {
     const candidates = getDemucsCommandCandidates();
-    const demucsOutputRoot = path.resolve(uploadsDir, `${baseName}_demucs`);
-    if (!isPathInside(uploadsDir, demucsOutputRoot)) {
+    const demucsOutputRoot = path.resolve(getUploadsDir(), `${baseName}_demucs`);
+    if (!isPathInside(getUploadsDir(), demucsOutputRoot)) {
       throw Object.assign(new Error('Unable to create a safe Demucs working directory.'), { status: 500 });
     }
 
@@ -3710,7 +3647,7 @@ async function startServer() {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         errors.push(`${candidate.label}: ${message}`);
-        console.warn(`Demucs separation candidate failed (${candidate.label}); trying fallback:`, error);
+        logEvent('server.ts:3654', 'warn', error);
       }
     }
 
@@ -3827,8 +3764,8 @@ async function startServer() {
       throw Object.assign(new Error('服务器视频文件名无效，请重新上传视频。'), { status: 400 });
     }
 
-    const videoPath = path.resolve(uploadsDir, fileName);
-    if (!isPathInside(uploadsDir, videoPath)) {
+    const videoPath = path.resolve(getUploadsDir(), fileName);
+    if (!isPathInside(getUploadsDir(), videoPath)) {
       throw Object.assign(new Error('服务器视频路径无效。'), { status: 400 });
     }
 
@@ -3868,8 +3805,8 @@ async function startServer() {
       ? Math.min(48, Math.max(12, Math.ceil(duration)))
       : 6);
     const firstTimestamp = options.subtitles ? 0 : (options.range?.start ?? 0) + duration / (frameCount * 2);
-    const temporaryDirectory = await fs.promises.mkdtemp(path.join(uploadsDir, '.video-analysis-'));
-    if (!isPathInside(uploadsDir, temporaryDirectory)) {
+    const temporaryDirectory = await fs.promises.mkdtemp(path.join(getUploadsDir(), '.video-analysis-'));
+    if (!isPathInside(getUploadsDir(), temporaryDirectory)) {
       await safeRemoveDirectory(temporaryDirectory);
       throw Object.assign(new Error('无法创建安全的视频分析目录。'), { status: 500 });
     }
@@ -4024,8 +3961,8 @@ async function startServer() {
       throw Object.assign(new Error('仅支持使用音频片段匹配相似声音。'), { status: 415 });
     }
 
-    const filePath = path.resolve(uploadsDir, fileName);
-    if (!isPathInside(uploadsDir, filePath) || !fs.existsSync(filePath)) {
+    const filePath = path.resolve(getUploadsDir(), fileName);
+    if (!isPathInside(getUploadsDir(), filePath) || !fs.existsSync(filePath)) {
       throw Object.assign(new Error('找不到拆分出来的人声音频文件，请重新拆分后再试。'), { status: 404 });
     }
 
@@ -4078,8 +4015,8 @@ async function startServer() {
       throw Object.assign(new Error('仅支持从音频/视频素材中抽取片段。'), { status: 415 });
     }
 
-    const filePath = path.resolve(uploadsDir, fileName);
-    if (!isPathInside(uploadsDir, filePath) || !fs.existsSync(filePath)) {
+    const filePath = path.resolve(getUploadsDir(), fileName);
+    if (!isPathInside(getUploadsDir(), filePath) || !fs.existsSync(filePath)) {
       throw Object.assign(new Error('找不到片段源文件，请重新上传或重新拆分后再试。'), { status: 404 });
     }
     const stat = fs.statSync(filePath);
@@ -4252,7 +4189,7 @@ async function startServer() {
       }
       return { gender: 'unknown' as const, confidence: 0.35, medianF0 };
     } catch (error) {
-      console.warn('Acoustic gender estimation failed:', error);
+      logEvent('server.ts:4196', 'warn', error);
       return { gender: 'unknown' as const, confidence: 0, medianF0: 0 };
     }
   };
@@ -4396,7 +4333,7 @@ async function startServer() {
     normalize: body => {
       if (!body.uploadId) return normalizeAudioDesignInput(body);
       const cached = audioDesignVideoPreuploads.get(String(body.uploadId));
-      if (!cached || cached.expiresAt <= Date.now()) throw Object.assign(new Error('预上传视频已失效，请重新选择视频后分析。'), { status: 410 });
+      if (!cached || cached.owner !== currentUserId() || cached.expiresAt <= Date.now()) throw Object.assign(new Error('预上传视频已失效，请重新选择视频后分析。'), { status: 410 });
       const frames = selectAudioDesignFrames(cached.keyframes, cached.duration, body.scope?.music === true && body.scope?.sfx === false);
       return normalizeAudioDesignInput({ ...body, files: frames.map(frame => ({
         data: `data:image/jpeg;base64,${frame.base64}`, mimeType: 'image/jpeg',
@@ -4427,7 +4364,7 @@ async function startServer() {
       }
 
       const uploadedPath = path.resolve(req.file.path);
-      const uploadsRoot = `${path.resolve(uploadsDir)}${path.sep}`;
+      const uploadsRoot = `${path.resolve(getUploadsDir())}${path.sep}`;
       try {
         if (!uploadedPath.startsWith(uploadsRoot)) {
           return res.status(400).json({ error: '视频临时路径无效。' });
@@ -4474,7 +4411,7 @@ async function startServer() {
       }
 
       const uploadedPath = path.resolve(req.file.path);
-      const uploadsRoot = `${path.resolve(uploadsDir)}${path.sep}`;
+      const uploadsRoot = `${path.resolve(getUploadsDir())}${path.sep}`;
       let cacheStored = false;
 
       try {
@@ -4501,6 +4438,7 @@ async function startServer() {
         const uploadId = randomUUID();
         const expiresAt = Date.now() + AUDIO_DESIGN_PREUPLOAD_TTL_MS;
         audioDesignVideoPreuploads.set(uploadId, {
+          owner: currentUserId(), directory: getUploadsDir(),
           uploadId,
           localFileName: req.file.filename,
           keyframes,
@@ -4537,7 +4475,7 @@ async function startServer() {
     }
 
     const cachedVideo = audioDesignVideoPreuploads.get(uploadId);
-    if (!cachedVideo) {
+    if (!cachedVideo || cachedVideo.owner !== currentUserId()) {
       return res.status(404).json({ error: '预上传视频已失效，请重新选择视频后再分析。' });
     }
     if (cachedVideo.expiresAt <= Date.now()) {
@@ -4581,7 +4519,7 @@ async function startServer() {
       }
 
       const uploadedPath = path.resolve(req.file.path);
-      const uploadsRoot = `${path.resolve(uploadsDir)}${path.sep}`;
+      const uploadsRoot = `${path.resolve(getUploadsDir())}${path.sep}`;
       try {
         if (!uploadedPath.startsWith(uploadsRoot)) {
           return res.status(400).json({ error: '视频临时路径无效。' });
@@ -4809,7 +4747,7 @@ async function startServer() {
       });
       acousticGender = await estimateReferenceVoiceGender(filePath);
     } catch (inputError) {
-      console.warn('Similar voice matching input/audio analysis failed; using metadata fallback:', inputError);
+      logEvent('server.ts:4754', 'warn', inputError);
       const fallbackRecommendations = localVoiceMatchFallback(normalizedVoices, fallbackGender, matchingKeywords);
       return res.json({
         sourceDescription: '参考音频暂时无法完整解析，已先根据声音库标签和关键词给出保守推荐。',
@@ -4843,8 +4781,8 @@ async function startServer() {
     const speed = parseNumber(req.body?.speed, 1, 0.25, 4);
     const readDuration = Number(Math.max(0.05, duration * speed).toFixed(3));
     const outputFileName = `clip_extract_${randomUUID()}.wav`;
-    const outputPath = path.resolve(uploadsDir, outputFileName);
-    if (!isPathInside(uploadsDir, outputPath)) {
+    const outputPath = path.resolve(getUploadsDir(), outputFileName);
+    if (!isPathInside(getUploadsDir(), outputPath)) {
       throw Object.assign(new Error('片段输出路径无效。'), { status: 500 });
     }
 
@@ -5297,19 +5235,19 @@ async function startServer() {
     const timelineSourceExt = timelineSourceFile
       ? getSafeUploadExtension(timelineSourceFile.originalname, timelineSourceFile.mimetype, '.wav')
       : '.wav';
-    const sourcePath = path.resolve(uploadsDir, `seed_vc_source_${jobId}${sourceExt}`);
-    const referencePath = path.resolve(uploadsDir, `seed_vc_reference_${jobId}${referenceExt}`);
-    const timelineSourcePath = path.resolve(uploadsDir, `seed_vc_timeline_source_${jobId}${timelineSourceExt}`);
+    const sourcePath = path.resolve(getUploadsDir(), `seed_vc_source_${jobId}${sourceExt}`);
+    const referencePath = path.resolve(getUploadsDir(), `seed_vc_reference_${jobId}${referenceExt}`);
+    const timelineSourcePath = path.resolve(getUploadsDir(), `seed_vc_timeline_source_${jobId}${timelineSourceExt}`);
     // Keep normalized files separate from uploaded files.  When an upload is
     // already a WAV, using the same path for input and output makes FFmpeg
     // fail with "FFmpeg cannot edit existing files in-place" on Windows.
-    const sourceWavPath = path.resolve(uploadsDir, `seed_vc_source_${jobId}_normalized.wav`);
-    const referenceWavPath = path.resolve(uploadsDir, `seed_vc_reference_${jobId}_normalized.wav`);
-    const timelineSourceWavPath = path.resolve(uploadsDir, `seed_vc_timeline_source_${jobId}_normalized.wav`);
-    const rawOutputPath = path.resolve(uploadsDir, `seed_vc_raw_${jobId}.wav`);
+    const sourceWavPath = path.resolve(getUploadsDir(), `seed_vc_source_${jobId}_normalized.wav`);
+    const referenceWavPath = path.resolve(getUploadsDir(), `seed_vc_reference_${jobId}_normalized.wav`);
+    const timelineSourceWavPath = path.resolve(getUploadsDir(), `seed_vc_timeline_source_${jobId}_normalized.wav`);
+    const rawOutputPath = path.resolve(getUploadsDir(), `seed_vc_raw_${jobId}.wav`);
     const outputFileName = `seed_vc_converted_${jobId}.wav`;
-    const outputPath = path.resolve(uploadsDir, outputFileName);
-    if (![sourcePath, referencePath, timelineSourcePath, sourceWavPath, referenceWavPath, timelineSourceWavPath, rawOutputPath, outputPath].every(filePath => isPathInside(uploadsDir, filePath))) {
+    const outputPath = path.resolve(getUploadsDir(), outputFileName);
+    if (![sourcePath, referencePath, timelineSourcePath, sourceWavPath, referenceWavPath, timelineSourceWavPath, rawOutputPath, outputPath].every(filePath => isPathInside(getUploadsDir(), filePath))) {
       throw Object.assign(new Error('Seed-VC 文件路径无效。'), { status: 500 });
     }
     fs.writeFileSync(sourcePath, sourceFile.buffer);
@@ -5470,11 +5408,11 @@ async function startServer() {
 
     const sourceExtension = getSafeUploadExtension(req.file.originalname, req.file.mimetype, '.wav');
     const jobId = randomUUID();
-    const sourcePath = path.resolve(uploadsDir, `local_clone_source_${jobId}${sourceExtension}`);
-    const referencePath = path.resolve(uploadsDir, `local_clone_reference_${jobId}.wav`);
+    const sourcePath = path.resolve(getUploadsDir(), `local_clone_source_${jobId}${sourceExtension}`);
+    const referencePath = path.resolve(getUploadsDir(), `local_clone_reference_${jobId}.wav`);
     const outputFileName = `local_voice_clone_${jobId}.wav`;
-    const outputPath = path.resolve(uploadsDir, outputFileName);
-    if (![sourcePath, referencePath, outputPath].every(filePath => isPathInside(uploadsDir, filePath))) {
+    const outputPath = path.resolve(getUploadsDir(), outputFileName);
+    if (![sourcePath, referencePath, outputPath].every(filePath => isPathInside(getUploadsDir(), filePath))) {
       throw Object.assign(new Error('本地声音克隆输出路径无效。'), { status: 500 });
     }
 
@@ -5665,8 +5603,8 @@ async function startServer() {
 
     const sourceExtension = getSafeUploadExtension(req.file.originalname, req.file.mimetype, '.wav');
     const jobId = randomUUID();
-    const sourcePath = path.resolve(uploadsDir, `local_multi_source_${jobId}${sourceExtension}`);
-    const manifestPath = path.resolve(uploadsDir, `local_multi_manifest_${jobId}.json`);
+    const sourcePath = path.resolve(getUploadsDir(), `local_multi_source_${jobId}${sourceExtension}`);
+    const manifestPath = path.resolve(getUploadsDir(), `local_multi_manifest_${jobId}.json`);
     const temporaryPaths: string[] = [sourcePath, manifestPath];
     const outputPaths: string[] = [];
     fs.writeFileSync(sourcePath, req.file.buffer);
@@ -5774,7 +5712,7 @@ async function startServer() {
         }
         if (ranges.length === 0) throw Object.assign(new Error(`角色 ${profileId} 没有可用参考音。`), { status: 400 });
 
-        const referencePath = path.resolve(uploadsDir, `local_multi_reference_${jobId}_${profileIndex}.wav`);
+        const referencePath = path.resolve(getUploadsDir(), `local_multi_reference_${jobId}_${profileIndex}.wav`);
         temporaryPaths.push(referencePath);
         const splitFilter = ranges.length > 1
           ? `[0:a]asplit=${ranges.length}${ranges.map((_range, index) => `[s${index}]`).join('')}`
@@ -5839,7 +5777,7 @@ async function startServer() {
           const segmentEnd = Number(segment.end);
           const segmentDuration = segmentEnd - segmentStart;
           if (!segmentId || !Number.isFinite(segmentStart) || !Number.isFinite(segmentEnd) || segmentDuration < 2.5) continue;
-          const segmentReferencePath = path.resolve(uploadsDir, `local_multi_segment_reference_${jobId}_${segmentId.replace(/[^a-zA-Z0-9_-]/g, '_')}.wav`);
+          const segmentReferencePath = path.resolve(getUploadsDir(), `local_multi_segment_reference_${jobId}_${segmentId.replace(/[^a-zA-Z0-9_-]/g, '_')}.wav`);
           temporaryPaths.push(segmentReferencePath);
           try {
             await runFfmpegFile([
@@ -5919,7 +5857,7 @@ async function startServer() {
           droppedEventCount += 1;
           continue;
         }
-        const eventPath = path.resolve(uploadsDir, `local_multi_event_${jobId}_${eventIndex}.wav`);
+        const eventPath = path.resolve(getUploadsDir(), `local_multi_event_${jobId}_${eventIndex}.wav`);
         temporaryPaths.push(eventPath);
         const fadeDuration = Math.min(isLaughter ? 0.16 : 0.05, duration / 4);
         try {
@@ -5950,7 +5888,7 @@ async function startServer() {
           const profileReferencePath = referencePaths.get(String(segment.speakerId || ''));
           const referencePath = segmentReferencePaths.get(String(segment.id || '')) || profileReferencePath;
           if (!referencePath) throw Object.assign(new Error(`第 ${segmentIndex + 1} 段台词没有对应角色参考音。`), { status: 400 });
-          const rawPath = path.resolve(uploadsDir, `local_multi_raw_${jobId}_${versionId}_${segmentIndex}.wav`);
+          const rawPath = path.resolve(getUploadsDir(), `local_multi_raw_${jobId}_${versionId}_${segmentIndex}.wav`);
           temporaryPaths.push(rawPath);
           clips.push({ path: rawPath, segment, segmentIndex });
           manifestJobs.push({
@@ -5974,7 +5912,7 @@ async function startServer() {
           const speakerId = String(synthesizedEvent.event.speakerId || '');
           const referencePath = referencePaths.get(speakerId);
           if (!referencePath) return [];
-          const rawPath = path.resolve(uploadsDir, `local_multi_event_generated_${jobId}_${versionId}_${synthesizedEvent.eventIndex}.wav`);
+          const rawPath = path.resolve(getUploadsDir(), `local_multi_event_generated_${jobId}_${versionId}_${synthesizedEvent.eventIndex}.wav`);
           temporaryPaths.push(rawPath);
           manifestJobs.push({
             id: `${versionId}-event-${synthesizedEvent.eventIndex}`,
@@ -6155,7 +6093,7 @@ async function startServer() {
         });
         filterParts.push(`${timelineItems.map((_item, index) => `[c${index}]`).join('')}amix=inputs=${timelineItems.length}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95:level=disabled,apad=whole_dur=${outputDuration.toFixed(3)},atrim=duration=${outputDuration.toFixed(3)}[out]`);
         const outputFileName = `local_multi_voice_${jobId}_${versionId}.wav`;
-        const outputPath = path.resolve(uploadsDir, outputFileName);
+        const outputPath = path.resolve(getUploadsDir(), outputFileName);
         outputPaths.push(outputPath);
         await runFfmpegFile([
           '-y', ...timelineItems.flatMap(item => ['-i', item.path]),
@@ -6320,8 +6258,8 @@ async function startServer() {
     if (!req.file) return res.status(400).json({ error: 'audio is required' });
     const sourceExtension = getSafeUploadExtension(req.file.originalname, req.file.mimetype, '.bin');
     const isVideo = req.file.mimetype.startsWith('video/') || ALLOWED_VIDEO_EXTENSIONS.has(sourceExtension);
-    const sourcePath = path.resolve(uploadsDir, `speech-to-text-source-${randomUUID()}${sourceExtension}`);
-    const extractedAudioPath = path.resolve(uploadsDir, `speech-to-text-audio-${randomUUID()}.wav`);
+    const sourcePath = path.resolve(getUploadsDir(), `speech-to-text-source-${randomUUID()}${sourceExtension}`);
+    const extractedAudioPath = path.resolve(getUploadsDir(), `speech-to-text-audio-${randomUUID()}.wav`);
     fs.writeFileSync(sourcePath, req.file.buffer);
 
     try {
@@ -6391,13 +6329,13 @@ async function startServer() {
 
     const sourceExt = getSafeUploadExtension(req.file.originalname, req.file.mimetype, '.wav');
     const sourceFileName = `translate_source_${randomUUID()}${sourceExt}`;
-    const sourcePath = path.join(uploadsDir, sourceFileName);
+    const sourcePath = path.join(getUploadsDir(), sourceFileName);
     fs.writeFileSync(sourcePath, req.file.buffer);
 
     const generatedFileName = `translated_dubbing_raw_${randomUUID()}.mp3`;
-    const generatedPath = path.join(uploadsDir, generatedFileName);
+    const generatedPath = path.join(getUploadsDir(), generatedFileName);
     const outputFileName = `translated_dubbing_${randomUUID()}.mp3`;
-    const outputPath = path.join(uploadsDir, outputFileName);
+    const outputPath = path.join(getUploadsDir(), outputFileName);
 
     try {
       const audio = new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype });
@@ -6474,7 +6412,7 @@ async function startServer() {
     asyncRoute(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'audio is required' });
 
-    const apiKey = process.env.ELEVENLABS_API_KEY || process.env.VITE_ELEVENLABS_API_KEY || '';
+    const apiKey = process.env.ELEVENLABS_API_KEY || '';
     if (!apiKey) return res.status(503).json({ error: 'ElevenLabs API Key is not configured.' });
 
     const sourceLanguage = String(req.body?.sourceLanguage || 'auto').trim();
@@ -6517,11 +6455,11 @@ async function startServer() {
       return res.status(422).json({ error: '只有上传视频时才能输出 MP4；音频文件请输出 MP3。' });
     }
     const sourceFileName = `translate_v2_source_${randomUUID()}${sourceExt}`;
-    const sourcePath = path.join(uploadsDir, sourceFileName);
+    const sourcePath = path.join(getUploadsDir(), sourceFileName);
     const downloadedFileName = `translated_dubbing_v2_raw_${randomUUID()}.flac`;
-    const downloadedPath = path.join(uploadsDir, downloadedFileName);
+    const downloadedPath = path.join(getUploadsDir(), downloadedFileName);
     const outputFileName = `translated_dubbing_v2_${randomUUID()}.${outputFormat}`;
-    const outputPath = path.join(uploadsDir, outputFileName);
+    const outputPath = path.join(getUploadsDir(), outputFileName);
     fs.writeFileSync(sourcePath, req.file.buffer);
 
     try {
@@ -6654,7 +6592,7 @@ async function startServer() {
     if (contentType.includes('multipart/form-data')) {
       upload.single('file')(req, res, (err) => {
         if (err) {
-          console.error('Multer upload error:', err);
+          logEvent('server.ts:6599', 'error', err);
           return next(err);
         }
         if (!req.file) {
@@ -6681,22 +6619,15 @@ async function startServer() {
           const ext = getSafeUploadExtension(originalFilename, contentType, '.wav');
           const cleanFilename = `audio_${randomUUID()}${ext}`;
           
-          const filePath = path.join(uploadsDir, cleanFilename);
+          const filePath = path.join(getUploadsDir(), cleanFilename);
           
           let fileBuffer: Buffer;
           if (Buffer.isBuffer(req.body)) {
             fileBuffer = req.body;
-          } else if (req.body && typeof req.body === 'object' && Object.keys(req.body).length === 0) {
-            fileBuffer = await new Promise<Buffer>((resolve, reject) => {
-              const chunks: Buffer[] = [];
-              req.on('data', (chunk) => chunks.push(chunk));
-              req.on('end', () => resolve(Buffer.concat(chunks)));
-              req.on('error', (err) => reject(err));
-            });
           } else if (typeof req.body === 'string') {
             fileBuffer = Buffer.from(req.body);
           } else {
-            fileBuffer = Buffer.alloc(0);
+            return res.status(400).json({ error: 'Invalid upload body' });
           }
 
           fs.writeFileSync(filePath, fileBuffer);
@@ -6706,7 +6637,7 @@ async function startServer() {
             fileName: cleanFilename
           });
         } catch (err: any) {
-          console.error('Error processing raw upload:', err);
+          logEvent('server.ts:6644', 'error', err);
           return res.status(500).json({ error: err.message });
         }
       });
@@ -6717,7 +6648,7 @@ async function startServer() {
   app.post('/api/sfx/upload-chunk', (req, res, next) => {
     upload.single('file')(req, res, async (err) => {
       if (err) {
-        console.error('Multer chunk upload error:', err);
+        logEvent('server.ts:6655', 'error', err);
         return next(err);
       }
 
@@ -6753,8 +6684,8 @@ async function startServer() {
           });
         }
 
-        tempChunkDir = path.resolve(uploadsDir, `temp_${uploadId}`);
-        if (!isPathInside(uploadsDir, tempChunkDir)) {
+        tempChunkDir = path.resolve(getUploadsDir(), `temp_${uploadId}`);
+        if (!isPathInside(getUploadsDir(), tempChunkDir)) {
           await safeUnlink(incomingFilePath);
           return res.status(400).json({ error: '分片上传路径无效。' });
         }
@@ -6821,8 +6752,8 @@ async function startServer() {
         await lockHandle.close();
 
         const cleanFilename = `video_${randomUUID()}${safeName.extension}`;
-        finalFilePath = path.resolve(uploadsDir, cleanFilename);
-        if (!isPathInside(uploadsDir, finalFilePath)) {
+        finalFilePath = path.resolve(getUploadsDir(), cleanFilename);
+        if (!isPathInside(getUploadsDir(), finalFilePath)) {
           throw new Error('合并后的视频路径无效。');
         }
 
@@ -6871,7 +6802,7 @@ async function startServer() {
           completed: true,
         });
       } catch (uploadError: any) {
-        console.error('Error during chunk upload:', uploadError);
+        logEvent('server.ts:6809', 'error', uploadError);
         await safeUnlink(incomingFilePath);
         await safeUnlink(finalFilePath);
         if (assemblyStarted) await safeRemoveDirectory(tempChunkDir);
@@ -6883,42 +6814,12 @@ async function startServer() {
   });
 
   // 6. Download File as Attachment (to bypass iframe download sandbox constraints)
-  app.get('/api/sfx/download-file', (req, res) => {
-    try {
-      const filePathParam = req.query.path as string;
-      const downloadName = req.query.name as string || 'download.mp3';
-      if (!filePathParam) {
-        return res.status(400).json({ error: 'Path parameter is required' });
-      }
-      
-      // Prevent path traversal & resolve safely
-      const cleanPath = filePathParam.replace(/^\/+/, '').replace(/^(\.\.(\/|\\))+/, '');
-      const absolutePath = path.join(process.cwd(), cleanPath);
-      
-      if (!fs.existsSync(absolutePath)) {
-        return res.status(404).json({ error: 'File not found' });
-      }
-      
-      // Handle file extension and mime-type dynamically
-      const ext = path.extname(absolutePath).toLowerCase();
-      let contentType = 'application/octet-stream';
-      if (ext === '.mp4') {
-        contentType = 'video/mp4';
-      } else if (ext === '.mp3') {
-        contentType = 'audio/mpeg';
-      } else if (ext === '.wav') {
-        contentType = 'audio/wav';
-      } else if (ext === '.json') {
-        contentType = 'application/json';
-      }
-
-      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(downloadName)}"`);
-      res.setHeader('Content-Type', contentType);
-      return fs.createReadStream(absolutePath).pipe(res);
-    } catch (err: any) {
-      console.error('Error downloading file:', err);
-      return res.status(500).json({ error: err.message });
-    }
+  app.get('/api/sfx/download-file', (req, res, next) => {
+    const rawPath = typeof req.query.path === 'string' ? req.query.path : '';
+    const requested = rawPath.startsWith('uploads/') ? `/${rawPath}` : rawPath;
+    if (!requested.startsWith('/uploads/')) return res.status(400).json({ error: '仅支持下载当前用户的上传产物。' });
+    return privateDownload(getUploadsDir(), requested.slice('/uploads/'.length), res, next,
+      typeof req.query.name === 'string' ? req.query.name : undefined);
   });
 
   const buildLocalVideoAnalysisFallback = ({
@@ -7181,13 +7082,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
         parsed = JSON.parse(response.text.trim());
       } catch (parseError) {
         const recoveredClips = recoverClipsFromPossiblyTruncatedJson(response.text);
-        console.error('Video analysis JSON parse failed:', {
-          length: response.text.length,
-          preview: response.text.slice(0, 500),
-          tail: response.text.slice(-500),
-          recoveredClipCount: recoveredClips.length,
-          parseError,
-        });
+        logEvent('server.ts:7088', 'error');
         if (recoveredClips.length > 0) {
           analysisPartial = true;
           parsed = { clips: recoveredClips };
@@ -7421,7 +7316,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
       });
       
     } catch (err: any) {
-      console.error('Error analyzing video:', err);
+      logEvent('server.ts:7328', 'error', err);
       let providerMessage = String(err?.message || '');
       try {
         const parsed = JSON.parse(providerMessage) as { error?: { message?: unknown } };
@@ -7473,7 +7368,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
           try {
             resolvedSfxPrompt = await prepareSoundEffectPrompt(resolvedSfxPrompt);
           } catch (translationError) {
-            console.warn('[timeline-sfx] Search prompt translation failed; trying the original prompt:', translationError);
+            logEvent('server.ts:7380', 'warn', translationError);
           }
           const onlineQuery = resolvedSfxPrompt
             .split(/[.;\n]/, 1)[0]
@@ -7486,7 +7381,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
             .join(' ');
           const onlineResult = await findAndCaptureTimelineOnlineSfx({
             query: onlineQuery,
-            uploadsDir,
+            uploadsDir: getUploadsDir,
             ffmpeg: FFMPEG_BINARY,
             maxDurationSeconds: parseNumber(duration, 5, 0.5, 30),
           });
@@ -7526,7 +7421,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
       }
 
       const cleanFilename = `el_${trackId}_${Date.now()}.${resolvedType === 'sfx' ? 'wav' : 'mp3'}`;
-      const filePath = path.join(uploadsDir, cleanFilename);
+      const filePath = path.join(getUploadsDir(), cleanFilename);
       
       if (resolvedType === 'dubbing') {
         // Text to Speech
@@ -7556,7 +7451,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
               String(req.body?.voiceName || '').trim(),
             );
           }
-          console.log(`ElevenLabs server TTS: text="${generationText}" voiceId=${targetVoice}`);
+          logEvent('server.ts:7463', 'info');
           const voiceBlob = await generateVoice(
             generationText,
             targetVoice,
@@ -7593,7 +7488,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
         
       } else {
         // Sound effect (Sound generation)
-        console.log(`ElevenLabs server SFX Gen: prompt="${prompt}" duration=${duration}`);
+        logEvent('server.ts:7500', 'info');
         
         const wavBlob = await generateSoundEffect(
           resolvedSfxPrompt,
@@ -7620,7 +7515,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
       });
       
     } catch (err: any) {
-      console.error('Error generating clip:', err);
+      logEvent('server.ts:7527', 'error', err);
       return res.status(Number(err?.status) || 500).json({ error: err.message });
     } finally {
       quotaRelease?.();
@@ -7650,7 +7545,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
     const createdFiles: string[] = [];
     const makeOutput = (suffix: string) => {
       const fileName = `${baseName}_${suffix}.wav`;
-      const filePath = path.join(uploadsDir, fileName);
+      const filePath = path.join(getUploadsDir(), fileName);
       createdFiles.push(filePath);
       return { fileName, filePath, audioUrl: `/uploads/${fileName}` };
     };
@@ -7686,7 +7581,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
         separationEngine = 'demucs-local';
       } else {
         if (demucsResult.errors.length > 0) {
-          console.warn('Demucs is unavailable or failed; falling back to cloud/filter separation:', demucsResult.errors.slice(-3));
+          logEvent('server.ts:7593', 'warn');
         }
 
         const hasElevenLabsKey = getElevenLabsApiKeys().length > 0;
@@ -7701,7 +7596,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
           try {
             const isolatedBlob = await isolateAudio(new Blob([fs.readFileSync(original.filePath)], { type: 'audio/wav' }));
             const isolatedExt = getSafeUploadExtension('isolated_audio', isolatedBlob.type, '.mp3');
-            isolatedTempPath = path.join(uploadsDir, `${baseName}_isolated_raw${isolatedExt}`);
+            isolatedTempPath = path.join(getUploadsDir(), `${baseName}_isolated_raw${isolatedExt}`);
             await fs.promises.writeFile(isolatedTempPath, Buffer.from(await isolatedBlob.arrayBuffer()));
             await runFfmpegFile([
               '-y',
@@ -7715,7 +7610,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
             ]);
             separationEngine = 'elevenlabs-audio-isolation';
           } catch (isolationError) {
-            console.warn('ElevenLabs audio isolation failed; falling back to FFmpeg vocal proxy:', isolationError);
+            logEvent('server.ts:7622', 'warn', isolationError);
             await runFfmpegFile([
               '-y',
               '-hide_banner',
@@ -7840,7 +7735,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
       }
 
       const safeVideoFileName = path.basename(String(videoFileName));
-      const inputVideoPath = path.join(uploadsDir, safeVideoFileName);
+      const inputVideoPath = path.join(getUploadsDir(), safeVideoFileName);
       if (!fs.existsSync(inputVideoPath)) {
         return res.status(404).json({ error: 'Video file not found' });
       }
@@ -7849,7 +7744,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
       const targetClips = requestedClips.filter((clip: any) => !clip?.muted);
       let validClips = targetClips.filter((clip: any) => {
         if (!clip.audioUrl || typeof clip.audioUrl !== 'string') return false;
-        const clipPath = path.join(uploadsDir, path.basename(clip.audioUrl));
+        const clipPath = path.join(getUploadsDir(), path.basename(clip.audioUrl));
         return fs.existsSync(clipPath);
       });
       if (validClips.length !== targetClips.length) {
@@ -7887,7 +7782,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
         });
       }
 
-      const mixInputs = await resolveVideoMixAudioInputs(uploadsDir, inputVideoPath, validClips,
+      const mixInputs = await resolveVideoMixAudioInputs(getUploadsDir(), inputVideoPath, validClips,
         filePath => detectMediaAudioStream(FFMPEG_BINARY, filePath), requestedOriginalAudio);
       validClips = mixInputs.clips;
 
@@ -7895,13 +7790,13 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
       const sourceExt = path.extname(safeVideoFileName);
       const base = path.basename(safeVideoFileName, sourceExt);
       const outputFileName = `mixed_${base}_${Date.now()}${videoAudioOutput.extension}`;
-      const outputFilePath = path.join(uploadsDir, outputFileName);
+      const outputFilePath = path.join(getUploadsDir(), outputFileName);
 
       const finishWithFfmpeg = (args: string[]) => {
         console.log('Running FFmpeg with argument count:', args.length);
         execFile(FFMPEG_BINARY, args, { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
           if (err) {
-            console.error('FFmpeg execution failed:', err, stderr);
+            logEvent('server.ts:7808', 'error', err);
             const ffmpegUnavailable = /ffmpeg.*(?:not recognized|not found)|ENOENT/i.test(`${err.message}\n${stderr}`);
             return res.status(ffmpegUnavailable ? 503 : 500).json({
               error: ffmpegUnavailable
@@ -7959,7 +7854,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
 
         const inputArgs = ['-i', inputVideoPath];
         validClips.forEach((clip: any) => {
-          const clipPath = path.join(uploadsDir, path.basename(clip.audioUrl));
+          const clipPath = path.join(getUploadsDir(), path.basename(clip.audioUrl));
           if (clip?.trackType === 'bgm' || clip?.trackId === 'bgm') {
             inputArgs.push('-stream_loop', '-1');
           }
@@ -7999,7 +7894,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
       mixWithDetectedSource(mixInputs.useOriginalAudio);
 
     } catch (err: any) {
-      console.error('Error in video mixing:', err);
+      logEvent('server.ts:7906', 'error', err);
       return res.status(Number(err.status) || 500).json({ error: err.message, code: err.code });
     }
   });
@@ -8021,7 +7916,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
       const validClips = targetClips.filter((c: any) => {
         if (!c.audioUrl || typeof c.audioUrl !== 'string') return false;
         const clipFileName = path.basename(c.audioUrl);
-        const clipPath = path.join(uploadsDir, clipFileName);
+        const clipPath = path.join(getUploadsDir(), clipFileName);
         return fs.existsSync(clipPath);
       });
 
@@ -8037,12 +7932,12 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
       }
 
       const outputFileName = `exported_audio_${normalizedTrackId || 'mixed'}_${Date.now()}.mp3`;
-      const outputFilePath = path.join(uploadsDir, outputFileName);
+      const outputFilePath = path.join(getUploadsDir(), outputFileName);
 
       const inputArgs: string[] = [];
       validClips.forEach((clip: any) => {
         const clipFileName = path.basename(clip.audioUrl);
-        const clipPath = path.join(uploadsDir, clipFileName);
+        const clipPath = path.join(getUploadsDir(), clipFileName);
         if (clip?.trackType === 'bgm' || clip?.trackId === 'bgm') {
           inputArgs.push('-stream_loop', '-1');
         }
@@ -8071,7 +7966,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
 
       execFile(FFMPEG_BINARY, ffmpegArgs, (err, stdout, stderr) => {
         if (err) {
-          console.error('Audio FFmpeg mixing failed:', err, stderr);
+          logEvent('server.ts:7978', 'error', err);
           const ffmpegUnavailable = /ffmpeg.*(?:not recognized|not found)|ENOENT/i.test(`${err.message}\n${stderr}`);
           return res.status(ffmpegUnavailable ? 503 : 500).json({
             error: ffmpegUnavailable
@@ -8084,7 +7979,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
       });
 
     } catch (err: any) {
-      console.error('Error in audio mixing endpoint:', err);
+      logEvent('server.ts:7991', 'error', err);
       return res.status(500).json({ error: err.message });
     }
   });
@@ -8104,7 +7999,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
     const inputArgs: string[] = [];
     targetClips.forEach((clip: any) => {
       const clipFileName = path.basename(String(clip.audioUrl || ''));
-      const clipPath = path.join(uploadsDir, clipFileName);
+      const clipPath = path.join(getUploadsDir(), clipFileName);
       if (clip?.trackType === 'bgm' || clip?.trackId === 'bgm') {
         inputArgs.push('-stream_loop', '-1');
       }
@@ -8151,7 +8046,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
 
     execFile(FFMPEG_BINARY, ffmpegArgs, (err, stdout, stderr) => {
       if (err) {
-        console.error('Audio FFmpeg v2 mixing failed:', err, stderr);
+        logEvent('server.ts:8058', 'error', err);
         reject(err);
         return;
       }
@@ -8188,7 +8083,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
     ));
     const validClips = targetClips.filter((clip: any) => {
       const clipFileName = path.basename(String(clip.audioUrl || ''));
-      const clipPath = path.join(uploadsDir, clipFileName);
+      const clipPath = path.join(getUploadsDir(), clipFileName);
       return clipFileName.length > 0 && fs.existsSync(clipPath);
     });
 
@@ -8203,7 +8098,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
     }
 
     const outputFileName = `exported_audio_${normalizedTrackId || 'master'}_${Date.now()}.${normalizedAudioFormat}`;
-    const outputFilePath = path.join(uploadsDir, outputFileName);
+    const outputFilePath = path.join(getUploadsDir(), outputFileName);
     await mixClipsToAudioFileV2(validClips, outputFilePath, {
       audioFormat: normalizedAudioFormat,
       sampleRate: normalizedSampleRate,
@@ -8246,7 +8141,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
 
       const validTrackClips = trackClips.filter((clip: any) => {
         const clipFileName = path.basename(String(clip.audioUrl || ''));
-        const clipPath = path.join(uploadsDir, clipFileName);
+        const clipPath = path.join(getUploadsDir(), clipFileName);
         return clipFileName.length > 0 && fs.existsSync(clipPath);
       });
       if (validTrackClips.length !== trackClips.length) {
@@ -8258,7 +8153,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
 
       const safeTrackName = sanitizeExportName(track?.name, trackId);
       const stemFileName = `${safeTrackName}_${trackId}_${timestamp}.${normalizedAudioFormat}`;
-      const stemPath = path.join(uploadsDir, stemFileName);
+      const stemPath = path.join(getUploadsDir(), stemFileName);
       await mixClipsToAudioFileV2(validTrackClips, stemPath, {
         audioFormat: normalizedAudioFormat,
         sampleRate: normalizedSampleRate,
@@ -8276,7 +8171,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
     }
 
     const zipFileName = `track_stems_${timestamp}.zip`;
-    const zipPath = path.join(uploadsDir, zipFileName);
+    const zipPath = path.join(getUploadsDir(), zipFileName);
     const zipBuffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
     fs.writeFileSync(zipPath, zipBuffer);
     tempStemPaths.forEach((stemPath) => {
@@ -8287,32 +8182,15 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
 
   // --- Global API Error Handler ---
   app.use('/api', (err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-    console.error('Unhandled API Error:', err);
-    if (res.headersSent) return next(err);
+    logEvent('server.ts:8194', 'error', err);
+    if (res.headersSent) { res.destroy(); return; }
 
     const isPayloadTooLarge = err?.code === 'LIMIT_FILE_SIZE'
       || err?.type === 'entity.too.large'
       || err?.status === 413
       || err?.statusCode === 413;
-    const rawMessage = String(err?.message || '');
-    // Gateways may return a JSON error string; expose its useful message.
-    let providerMessage = rawMessage;
-    try {
-      const parsed = JSON.parse(rawMessage) as { error?: { message?: unknown } };
-      const nestedMessage = parsed?.error?.message;
-      if (typeof nestedMessage === 'string' && nestedMessage.trim()) providerMessage = nestedMessage;
-    } catch {
-      // Keep the original message when it is not JSON.
-    }
-    const status = isPayloadTooLarge ? 413 : err?.status || err?.statusCode || 500;
-    const isJsonTruncationError = /Unterminated string in JSON|Unexpected end of JSON input|JSON at position/i.test(rawMessage);
-    return res.status(status).json({
-      error: isPayloadTooLarge
-        ? '上传内容超过 100MB 限制。'
-        : isJsonTruncationError
-          ? 'AI 返回结果过长或被截断，请缩短素材、减少字幕密度，或分段生成后重试。'
-        : providerMessage || 'Internal Server Error'
-    });
+    const status = isPayloadTooLarge ? 413 : (Number(err?.status || err?.statusCode) >= 400 && Number(err?.status || err?.statusCode) < 600 ? Number(err?.status || err?.statusCode) : 500);
+    return res.status(status).json({ error: publicError(status) });
   });
 
   // --- Vite & SPA integration ---
@@ -8341,12 +8219,18 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
     app.use(vite.middlewares);
   } else {
     console.log("Starting server in PRODUCTION mode...");
-    const distPath = path.join(process.cwd(), 'dist');
+    const distPath = path.join(process.cwd(), 'dist', 'client');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
+
+  app.use((err: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    logSafeError('http.unhandled', err);
+    if (res.headersSent) { res.destroy(); return; }
+    return res.status(500).json({ error: publicError(500) });
+  });
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Full-stack server running on http://localhost:${PORT}`);
@@ -8354,5 +8238,6 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
 }
 
 startServer().catch((err) => {
-  console.error("Failed to start full-stack server:", err);
+  logEvent('server.ts:8250', 'error', err);
+  process.exitCode = 1;
 });

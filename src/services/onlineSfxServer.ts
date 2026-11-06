@@ -1,3 +1,5 @@
+import { logEvent } from './safeLogging';
+import { uploadDirectory, type UploadDirectory } from './serverSecurity';
 import express from 'express';
 import fs from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
@@ -503,7 +505,7 @@ const rankTimelineCandidates = (candidates: Candidate[], query: string) => {
  */
 export async function findAndCaptureTimelineOnlineSfx(options: {
   query: string;
-  uploadsDir: string;
+  uploadsDir: UploadDirectory;
   ffmpeg: string;
   maxDurationSeconds?: number;
   fetcher?: typeof fetch;
@@ -517,7 +519,7 @@ export async function findAndCaptureTimelineOnlineSfx(options: {
     const result = await searchOnlineSfxSources({ query, limit: 12, fetcher });
     candidates = rankTimelineCandidates(result.items, query).slice(0, 3);
   } catch (error) {
-    console.warn('[timeline-sfx] Online search unavailable; using ElevenLabs fallback:', error);
+    logEvent('src/services/onlineSfxServer.ts:521', 'warn', error);
     return null;
   }
 
@@ -558,10 +560,10 @@ export async function findAndCaptureTimelineOnlineSfx(options: {
       if (!Number.isFinite(duration) || duration <= 0) continue;
 
       const fileName = `timeline_sfx_${randomUUID()}.wav`;
-      await fs.mkdir(options.uploadsDir, { recursive: true });
-      await fs.copyFile(output, path.join(options.uploadsDir, fileName));
+      await fs.mkdir(uploadDirectory(options.uploadsDir), { recursive: true });
+      await fs.copyFile(output, path.join(uploadDirectory(options.uploadsDir), fileName));
       await fs.writeFile(
-        path.join(options.uploadsDir, `${fileName}.source.json`),
+        path.join(uploadDirectory(options.uploadsDir), `${fileName}.source.json`),
         JSON.stringify({
           title: candidate.title,
           author: candidate.author,
@@ -582,7 +584,7 @@ export async function findAndCaptureTimelineOnlineSfx(options: {
         sourceUrl: candidate.sourceUrl,
       };
     } catch (error) {
-      console.warn(`[timeline-sfx] Preview capture failed for ${candidate.sourceUrl}:`, error);
+      logEvent('src/services/onlineSfxServer.ts:586', 'warn', error);
     } finally {
       if (temp) await fs.rm(temp, { recursive: true, force: true }).catch(() => {});
     }
@@ -591,13 +593,13 @@ export async function findAndCaptureTimelineOnlineSfx(options: {
 }
 
 export function createOnlineSfxRouter(options: {
-  uploadsDir: string; ffmpeg: string;
+  uploadsDir: UploadDirectory; ffmpeg: string;
   owner: (req: express.Request, res: express.Response) => string;
   reserve?: (req: express.Request, res: express.Response, points: number) => (() => void) | null;
 }) {
   const router = express.Router();
   type Ticket = { item: OnlineSfxItem; previewUrl: string; owner: string; at: number;
-    pending?: Promise<unknown>; captured?: unknown; fileName?: string; discarded?: boolean };
+    pending?: Promise<unknown>; captured?: unknown; fileName?: string; directory?: string; discarded?: boolean };
   const tickets = new Map<string, Ticket>();
   const searches = new Map<string, number>();
   const sessions = new Map<string, { query: string; nextPage: number; at: number; state: ReturnType<typeof createOnlineSfxSearchState> }>();
@@ -605,19 +607,19 @@ export function createOnlineSfxRouter(options: {
   let searching = 0, capturing = 0;
 
   const removeTicketFiles = async (ticket: Ticket) => {
-    if (!ticket.fileName) return;
+    if (!ticket.fileName || !ticket.directory) return;
     const fileName = ticket.fileName;
     ticket.fileName = undefined;
     await Promise.all([
-      fs.rm(path.join(options.uploadsDir, fileName), { force: true }),
-      fs.rm(path.join(options.uploadsDir, `${fileName}.source.json`), { force: true }),
+      fs.rm(path.join(ticket.directory!, fileName), { force: true }),
+      fs.rm(path.join(ticket.directory!, `${fileName}.source.json`), { force: true }),
     ]);
   };
   const discardTicket = async (id: string, ticket: Ticket) => {
     ticket.discarded = true;
     if (ticket.pending) {
       void ticket.pending.then(() => removeTicketFiles(ticket), () => removeTicketFiles(ticket))
-        .catch(error => console.warn('Failed to remove discarded online sound preview:', error))
+        .catch(error => logEvent('src/services/onlineSfxServer.ts:621', 'warn', error))
         .finally(() => tickets.delete(id));
       return;
     }
@@ -638,8 +640,8 @@ export function createOnlineSfxRouter(options: {
   };
 
   const orphanCutoff = Date.now();
-  void removeOrphanedOnlineSfxFiles(options.uploadsDir, orphanCutoff).catch(error => {
-    console.warn('Failed to remove orphaned online sound previews:', error);
+  if (typeof options.uploadsDir === 'string') void removeOrphanedOnlineSfxFiles(options.uploadsDir, orphanCutoff).catch(error => {
+    logEvent('src/services/onlineSfxServer.ts:643', 'warn', error);
   });
 
   router.post('/cleanup', async (req, res) => {
@@ -648,7 +650,7 @@ export function createOnlineSfxRouter(options: {
       if (!owner || owner === 'unknown') return res.status(401).json({ error: '无法识别当前会话。' });
       sessions.delete(owner);
       void cleanupOwner(owner).catch(error => {
-        console.warn('Failed to remove online sound previews after page close:', error);
+        logEvent('src/services/onlineSfxServer.ts:652', 'warn', error);
       });
       return res.json({ success: true });
     } catch {
@@ -680,7 +682,7 @@ export function createOnlineSfxRouter(options: {
       // Mark the old batch as discarded immediately, but let disk deletion run
       // alongside the remote search so cleanup never adds to search latency.
       void cleanupOwner(owner).catch(error => {
-        console.warn('Failed to remove previous online sound preview batch:', error);
+        logEvent('src/services/onlineSfxServer.ts:684', 'warn', error);
       });
       if (searching >= 4 || tickets.size >= 600 || Date.now() - (searches.get(owner) || 0) < 5000) {
         return res.status(429).json({ error: '搜索较频繁，请稍后重试。' });
@@ -756,11 +758,11 @@ export function createOnlineSfxRouter(options: {
         const duration = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
         if (!Number.isFinite(duration) || duration <= 0) throw fail('采集音频为空。');
         const fileName = `online_sfx_${randomUUID()}.wav`;
-        ticket.fileName = fileName;
-        await fs.mkdir(options.uploadsDir, { recursive: true });
-        await fs.copyFile(output, path.join(options.uploadsDir, fileName));
+        ticket.fileName = fileName; ticket.directory = uploadDirectory(options.uploadsDir);
+        await fs.mkdir(uploadDirectory(options.uploadsDir), { recursive: true });
+        await fs.copyFile(output, path.join(uploadDirectory(options.uploadsDir), fileName));
         const provenance = { ...ticket.item, querySource: 'public-preview', capturedAt: new Date().toISOString(), duration };
-        await fs.writeFile(path.join(options.uploadsDir, `${fileName}.source.json`), JSON.stringify(provenance));
+        await fs.writeFile(path.join(uploadDirectory(options.uploadsDir), `${fileName}.source.json`), JSON.stringify(provenance));
         if (ticket.discarded) {
           await removeTicketFiles(ticket);
           throw fail('页面已刷新，本次临时试听已清理。', 410);

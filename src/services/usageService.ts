@@ -2,7 +2,7 @@ import { getSfxLibraryAdminHeaders } from './sfxLibraryAdminService';
 
 export type UsagePeriod = 'week' | 'month' | 'billingCycle' | 'custom';
 export type UsageProviderName = 'elevenLabs' | 'legacy' | 'gpt' | 'onlineSfx';
-export type UsageIdentitySource = 'feishu' | 'device' | 'unknown';
+export type UsageIdentitySource = 'feishu' | 'account' | 'device' | 'unknown';
 
 export type UsageFeature = {
   feature: string;

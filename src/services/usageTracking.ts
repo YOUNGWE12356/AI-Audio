@@ -1,3 +1,4 @@
+import { logEvent } from './safeLogging';
 export type AiUsageEvent = {
   provider: 'elevenlabs' | 'legacy' | 'gpt' | 'network';
   model: string;
@@ -28,7 +29,7 @@ export const recordAiUsage = (event: AiUsageEvent) => {
   try {
     aiUsageRecorder?.(event);
   } catch (error) {
-    console.warn('[ai-usage] Failed to persist usage metadata:', error);
+    logEvent('src/services/usageTracking.ts:31', 'warn', error);
   }
 };
 

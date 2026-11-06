@@ -1,3 +1,4 @@
+import { logEvent } from './safeLogging';
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -46,11 +47,8 @@ export function createSfxRequirementsJobs(options: {
   }
   const ownerOf = (req: express.Request, res: express.Response) => {
     const identity = options.identity(req, res);
-    if (identity && identity !== 'unknown') return identity;
-    const cookie = /(?:^|;\s*)ai_audio_requirements=([a-f0-9-]{36})(?:;|$)/i.exec(req.headers.cookie || '')?.[1];
-    const id = cookie || randomUUID();
-    if (!cookie) res.append('Set-Cookie', `ai_audio_requirements=${id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`);
-    return `session:${id}`;
+    if (!identity || identity === 'unknown') throw Object.assign(new Error('Authentication required'), { status: 401 });
+    return identity;
   };
   const publicJob = ({ owner: _owner, fingerprint: _fingerprint, requestId: _requestId, ...job }: Job) => job.status === 'failed'
     ? { ...job, error: requirementsErrorText(job.error || job.message), message: requirementsErrorText(job.error || job.message) } : job;
@@ -83,7 +81,7 @@ export function createSfxRequirementsJobs(options: {
       const job: Job = { id: randomUUID(), owner, requestId, fingerprint, status: 'running',
         message: '已提交后台，等待 AI 识别参考素材并生成需求表。', createdAt: Date.now(), updatedAt: Date.now() };
       try { persist(job); } catch (error) {
-        release(); console.error('[sfx-requirements] Failed to create task:', error);
+        release(); logEvent('src/services/sfxRequirementsJobs.ts:83', 'error', error);
         throw Object.assign(new Error('需求表任务保存失败，请稍后重试。'), { status: 503 });
       }
       jobs.set(job.id, job);
@@ -95,7 +93,7 @@ export function createSfxRequirementsJobs(options: {
           job.result = await options.execute(input, message => {
             job.message = message; job.updatedAt = Date.now();
             // A locked progress manifest must not abort an otherwise valid AI request.
-            try { persist(job); } catch (error) { console.error('[sfx-requirements] Failed to save progress:', error); }
+            try { persist(job); } catch (error) { logEvent('src/services/sfxRequirementsJobs.ts:95', 'error', error); }
           }, controller.signal);
           job.status = 'completed'; job.message = `已生成 ${job.result.items.length} 条需求。`;
         } catch (error: any) {
@@ -104,7 +102,7 @@ export function createSfxRequirementsJobs(options: {
           job.message = job.error!;
         } finally {
           clearTimeout(deadline); release(); job.updatedAt = Date.now();
-          try { persist(job); } catch (error) { console.error('[sfx-requirements] Failed to save task:', error); }
+          try { persist(job); } catch (error) { logEvent('src/services/sfxRequirementsJobs.ts:104', 'error', error); }
           console.info(`[sfx-requirements] job=${job.id} status=${job.status} elapsedMs=${Date.now() - startedAt}`);
         }
       });

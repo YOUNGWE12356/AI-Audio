@@ -1,3 +1,4 @@
+import { uploadDirectory, type UploadDirectory } from './serverSecurity';
 import express from 'express';
 import path from 'node:path';
 import os from 'node:os';
@@ -139,7 +140,7 @@ export async function analyzeSfxBatch(input: ReturnType<typeof normalizeSfxBatch
 }
 
 export function createSfxBatchRouter(options: {
-  uploadsDir: string; jobsDir: string; ffmpeg: string;
+  uploadsDir: UploadDirectory; jobsDir: string; ffmpeg: string;
   owner: (req: express.Request, res: express.Response) => string;
   reserve: (req: express.Request, res: express.Response, points: number) => (() => void) | null;
   run: (req: express.Request, res: express.Response, work: () => Promise<void>) => void;
@@ -238,9 +239,9 @@ export function createSfxBatchRouter(options: {
           await runFile(options.ffmpeg, ['-nostdin', '-hide_banner', '-loglevel', 'error', '-i', input, '-vn', '-t', '60',
             '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', '-y', output], { windowsHide: true, timeout: 30_000, maxBuffer: 1024 * 1024 });
           const filename = `batch_sfx_${randomUUID()}.wav`;
-          await fs.mkdir(options.uploadsDir, { recursive: true });
-          await fs.copyFile(output, path.join(options.uploadsDir, filename));
-          await fs.writeFile(path.join(options.uploadsDir, `${filename}.source.json`), JSON.stringify({
+          await fs.mkdir(uploadDirectory(options.uploadsDir), { recursive: true });
+          await fs.copyFile(output, path.join(uploadDirectory(options.uploadsDir), filename));
+          await fs.writeFile(path.join(uploadDirectory(options.uploadsDir), `${filename}.source.json`), JSON.stringify({
             title: ticket.title, source: ticket.source, sourceUrl: ticket.sourceUrl, capturedAt: new Date().toISOString(),
           }));
           ticket.result = { url: `/uploads/${filename}` }; return ticket.result;

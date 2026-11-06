@@ -1,3 +1,5 @@
+import { logEvent } from './safeLogging';
+import { uploadDirectory, currentUserId, type UploadDirectory } from './serverSecurity';
 import { randomUUID } from 'node:crypto';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
@@ -77,6 +79,7 @@ type MusicStem = {
 
 type MusicSeparationJob = {
   id: string;
+  owner: string;
   mode?: 'stems' | 'vocals';
   status: MusicSeparationStatus;
   stage: string;
@@ -148,7 +151,7 @@ type EngineProbe = {
 };
 
 type MusicSeparationRouterOptions = {
-  uploadsDir: string;
+  uploadsDir: UploadDirectory;
   ffmpegBinary: string;
   maxUploadBytes: number;
 };
@@ -325,6 +328,8 @@ export function createMusicSeparationRouter({
   ffmpegBinary,
   maxUploadBytes,
 }: MusicSeparationRouterOptions) {
+  const getUploadsDir = () => uploadDirectory(uploadsDir);
+  const jobKey = (id: string) => `${currentUserId()}:${id}`;
   const router = express.Router();
   const jobs = new Map<string, MusicSeparationJob>();
   const vocalRecoveries = new Map<string, Promise<MusicSeparationJob>>();
@@ -375,7 +380,7 @@ export function createMusicSeparationRouter({
       fs.renameSync(temporaryPath, manifestPath);
     } catch (error) {
       try { fs.unlinkSync(temporaryPath); } catch {}
-      console.warn(`[music-separation] Unable to persist job ${job.id}:`, error);
+      logEvent('src/services/musicSeparationServer.ts:382', 'warn', error);
     }
   };
 
@@ -386,14 +391,14 @@ export function createMusicSeparationRouter({
 
   const restorePersistedJob = (id: string): MusicSeparationJob | null => {
     if (!JOB_ID_PATTERN.test(id)) return null;
-    const directoryPath = path.resolve(uploadsDir, `music-stems-${id}`);
-    if (!isPathInside(uploadsDir, directoryPath)) return null;
+    const directoryPath = path.resolve(getUploadsDir(), `music-stems-${id}`);
+    if (!isPathInside(getUploadsDir(), directoryPath)) return null;
     const manifestPath = getManifestPath(directoryPath);
     if (!fs.existsSync(manifestPath)) return null;
     try {
       const raw = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as Partial<PersistedMusicSeparationJob>;
       const status = raw.status as MusicSeparationStatus;
-      if (raw.version !== 1 || raw.id !== id || !validStatuses.has(status)) return null;
+      if (raw.version !== 1 || raw.id !== id || raw.owner !== currentUserId() || !validStatuses.has(status)) return null;
       const outputDir = path.resolve(directoryPath, 'stems');
       const validIds = new Set<string>(DELIVERABLE_STEMS);
       const stems = Array.isArray(raw.stems) ? raw.stems.flatMap((stem): MusicStem[] => {
@@ -435,7 +440,7 @@ export function createMusicSeparationRouter({
         : path.resolve(directoryPath, 'source');
       const directoryStat = fs.statSync(directoryPath);
       const job: MusicSeparationJob = {
-        id,
+        id, owner: currentUserId(),
         mode: raw.mode === 'vocals' ? 'vocals' : 'stems',
         status,
         stage: typeof raw.stage === 'string' ? raw.stage : status,
@@ -455,7 +460,7 @@ export function createMusicSeparationRouter({
         stems,
         zipUrl: status === 'completed' ? `/api/audio/music-separation/jobs/${id}/download` : undefined,
       };
-      jobs.set(id, job);
+      jobs.set(jobKey(id), job);
       persistJob(job);
       if (!TERMINAL_STATUSES.has(job.status)) {
         updateJob(job, {
@@ -469,72 +474,15 @@ export function createMusicSeparationRouter({
       }
       return job;
     } catch (error) {
-      console.warn(`[music-separation] Unable to restore job ${id}:`, error);
+      logEvent('src/services/musicSeparationServer.ts:476', 'warn', error);
       return null;
     }
   };
 
-  const recoverLegacyCompletedJob = (id: string): MusicSeparationJob | null => {
-    if (!JOB_ID_PATTERN.test(id)) return null;
-    const directoryPath = path.resolve(uploadsDir, `music-stems-${id}`);
-    if (!isPathInside(uploadsDir, directoryPath) || !fs.existsSync(directoryPath)) return null;
-    const outputDir = path.resolve(directoryPath, 'stems');
-    const zipPath = path.resolve(directoryPath, `music-stems-${id}.zip`);
-    if (!fs.existsSync(outputDir) || !fs.existsSync(zipPath)) return null;
-    try {
-      const outputFiles = fs.readdirSync(outputDir);
-      const stems = EXPECTED_STEMS.flatMap((stemId): MusicStem[] => {
-        const fileName = outputFiles.find(candidate => candidate.endsWith(`_${stemId}.wav`));
-        if (!fileName) return [];
-        const filePath = path.resolve(outputDir, fileName);
-        if (!isPathInside(outputDir, filePath) || !fs.statSync(filePath).isFile()) return [];
-        const waveInfo = readWaveInfo(filePath);
-        if (!waveInfo) return [];
-        return [{
-          id: stemId,
-          name: STEM_LABELS[stemId],
-          fileName,
-          audioUrl: `/uploads/${encodeURIComponent(path.basename(directoryPath))}/stems/${encodeURIComponent(fileName)}`,
-          size: fs.statSync(filePath).size,
-          duration: waveInfo.duration,
-          sampleRate: waveInfo.sampleRate,
-          rmsDb: null,
-          peakDb: null,
-          waveform: readWaveformPeaks(filePath, waveInfo),
-        }];
-      });
-      if (stems.length === 0) return null;
-      const directoryStat = fs.statSync(directoryPath);
-      const job: MusicSeparationJob = {
-        id,
-        status: 'completed',
-        stage: 'completed',
-        progress: 100,
-        message: `已恢复服务重启前完成的 ${stems.length} 条独立轨道`,
-        sourceName: '已恢复的音乐素材.wav',
-        createdAt: directoryStat.birthtime.toISOString(),
-        updatedAt: directoryStat.mtime.toISOString(),
-        directoryPath,
-        sourcePath: path.resolve(directoryPath, 'input', 'mixture.wav'),
-        duration: stems[0].duration,
-        sampleRate: stems[0].sampleRate,
-        stems,
-        zipUrl: `/api/audio/music-separation/jobs/${id}/download`,
-      };
-      jobs.set(id, job);
-      persistJob(job);
-      return job;
-    } catch (error) {
-      console.warn(`[music-separation] Unable to recover legacy job ${id}:`, error);
-      return null;
-    }
+  const getJob = (id: string) => {
+    if (!currentUserId()) return null;
+    return jobs.get(jobKey(id)) || restorePersistedJob(id);
   };
-
-  const getJob = (id: string) => (
-    jobs.get(id)
-    || restorePersistedJob(id)
-    || recoverLegacyCompletedJob(id)
-  );
 
   const publicJob = (job: MusicSeparationJob) => ({
     id: job.id,
@@ -547,7 +495,7 @@ export function createMusicSeparationRouter({
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
     queuePosition: job.status === 'queued'
-      ? Math.max(1, queue.filter(id => jobs.get(id)?.status === 'queued').indexOf(job.id) + 1)
+      ? Math.max(1, queue.filter(id => jobs.get(id)?.status === 'queued').indexOf(`${job.owner}:${job.id}`) + 1)
       : 0,
     duration: job.duration,
     sampleRate: job.sampleRate,
@@ -908,7 +856,7 @@ export function createMusicSeparationRouter({
       await fs.promises.unlink(job.sourcePath).catch(() => undefined);
       await fs.promises.unlink(normalizedInputPath).catch(() => undefined);
       await fs.promises.unlink(zipPath).catch(() => undefined);
-      console.error(`[music-separation] Job ${job.id} failed:`, error);
+      logEvent('src/services/musicSeparationServer.ts:858', 'error', error);
     }
   };
 
@@ -929,7 +877,7 @@ export function createMusicSeparationRouter({
   };
 
   const storage = multer.diskStorage({
-    destination: (_req, _file, callback) => callback(null, uploadsDir),
+    destination: (_req, _file, callback) => callback(null, getUploadsDir()),
     filename: (_req, file, callback) => {
       callback(null, `music-separation-upload-${randomUUID()}${sanitizeExtension(file.originalname, file.mimetype)}`);
     },
@@ -971,6 +919,12 @@ export function createMusicSeparationRouter({
         await fs.promises.unlink(req.file.path).catch(() => undefined);
         return res.status(202).json(publicJob(existingJob));
       }
+      const owner = currentUserId();
+      if (!owner) return res.status(401).json({ error: 'Authentication required' });
+      if (queue.length >= 32 || [...jobs.values()].filter(job => job.owner === owner && !TERMINAL_STATUSES.has(job.status)).length >= 2) {
+        await fs.promises.unlink(req.file.path).catch(() => undefined);
+        return res.status(429).json({ error: 'Task queue full' });
+      }
       const probe = await runProbe();
       if (!probe.ready) {
         await fs.promises.unlink(req.file.path).catch(() => undefined);
@@ -983,14 +937,14 @@ export function createMusicSeparationRouter({
       }
 
       const id = operationId || randomUUID();
-      const directoryPath = path.resolve(uploadsDir, `music-stems-${id}`);
-      if (!isPathInside(uploadsDir, directoryPath)) throw new Error('无法创建安全的分轨任务目录。');
+      const directoryPath = path.resolve(getUploadsDir(), `music-stems-${id}`);
+      if (!isPathInside(getUploadsDir(), directoryPath)) throw new Error('无法创建安全的分轨任务目录。');
       await fs.promises.mkdir(directoryPath, { recursive: true });
       const sourcePath = path.resolve(directoryPath, `source${sanitizeExtension(req.file.originalname, req.file.mimetype)}`);
       await fs.promises.rename(req.file.path, sourcePath);
       const now = new Date().toISOString();
       const job: MusicSeparationJob = {
-        id,
+        id, owner: currentUserId(),
         mode,
         status: 'queued',
         stage: 'queued',
@@ -1003,9 +957,9 @@ export function createMusicSeparationRouter({
         sourcePath,
         stems: [],
       };
-      jobs.set(id, job);
+      jobs.set(jobKey(id), job);
       persistJob(job);
-      queue.push(id);
+      queue.push(jobKey(id));
       startNextJob();
       return res.status(202).json(publicJob(job));
     } catch (error) {
@@ -1025,17 +979,17 @@ export function createMusicSeparationRouter({
     if (!job || job.status !== 'completed') {
       return res.status(404).json({ error: '已完成的分离任务不存在。' });
     }
-    let recovery = vocalRecoveries.get(job.id);
+    let recovery = vocalRecoveries.get(jobKey(job.id));
     if (!recovery) {
       recovery = completeVocalResult(job);
-      vocalRecoveries.set(job.id, recovery);
+      vocalRecoveries.set(jobKey(job.id), recovery);
     }
     try {
       return res.json(publicJob(await recovery));
     } catch (error) {
       return res.status(422).json({ error: error instanceof Error ? error.message : '伴奏补全失败。' });
     } finally {
-      if (vocalRecoveries.get(job.id) === recovery) vocalRecoveries.delete(job.id);
+      if (vocalRecoveries.get(jobKey(job.id)) === recovery) vocalRecoveries.delete(jobKey(job.id));
     }
   });
 
@@ -1046,7 +1000,7 @@ export function createMusicSeparationRouter({
       if (TERMINAL_STATUSES.has(job.status)) return res.json(publicJob(job));
       job.cancelRequested = true;
       if (job.status === 'queued') {
-        const queueIndex = queue.indexOf(job.id);
+        const queueIndex = queue.indexOf(jobKey(job.id));
         if (queueIndex >= 0) queue.splice(queueIndex, 1);
         updateJob(job, { status: 'cancelled', stage: 'cancelled', progress: 0, message: '任务已取消。' });
         await fs.promises.rm(job.directoryPath, { recursive: true, force: true });

@@ -51,7 +51,7 @@ import { isBgmImportFileName, isUcsImportFileName } from '../services/ucsNaming'
 import {
   getSfxLibraryAdminHeaders,
   loginSfxLibraryAdmin,
-  setSfxLibraryAdminToken,
+  clearSfxLibraryAdminState,
   verifySfxLibraryAdmin,
 } from '../services/sfxLibraryAdminService';
 import { DEFAULT_CATEGORIES } from '../data/sfxData';
@@ -1053,7 +1053,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
         });
         const payload = await response.json().catch(() => ({}));
         if (response.status === 401) {
-          setSfxLibraryAdminToken('');
+          clearSfxLibraryAdminState();
           setIsAuthorized(false);
           return;
         }
@@ -1552,7 +1552,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
       });
       const payload = await response.json().catch(() => ({}));
       if (response.status === 401) {
-        setSfxLibraryAdminToken('');
+        clearSfxLibraryAdminState();
         setIsAuthorized(false);
         throw new Error('管理权限已过期，请重新验证后再删除。');
       }
@@ -3017,7 +3017,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
             body: item.originalFile
           });
           if (response.status === 401) {
-            setSfxLibraryAdminToken('');
+            clearSfxLibraryAdminState();
             setIsAuthorized(false);
             throw new Error('管理权限已过期，请重新验证。');
           }

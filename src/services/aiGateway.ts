@@ -1,3 +1,4 @@
+import { logEvent } from './safeLogging';
 import { recordAiUsage, toUsageNumber } from './usageTracking';
 import {
   estimateGptTokenCompanyPoints,
@@ -183,7 +184,7 @@ export const generateAiContent = async (request: AiContentRequest): Promise<AiCo
   try {
     result = await requestGateway(gateway, body, timeoutMs, request.signal);
   } catch (error: any) {
-    console.warn(`[ai-router] ${hasImage ? 'Vision' : 'Text'} request failed via ${gateway.provider} after ${Date.now() - startedAt}ms (${error?.name || 'Error'}, status=${error?.status || 'unknown'}).`);
+    logEvent('src/services/aiGateway.ts:186', 'warn');
     if (error?.name === 'TimeoutError') throw Object.assign(new Error(`AI 网关超过 ${Math.round(timeoutMs / 1000)} 秒未返回结果，请稍后重试或减少单次需求数量。`), { status: 504 });
     throw error;
   }
