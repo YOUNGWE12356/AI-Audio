@@ -57,7 +57,6 @@ export const installClientIdentity = () => {
     new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
     headers.set(CLIENT_ID_HEADER, getClientId());
     return nativeFetch(input, { ...init, headers }).then((response) => {
-      if (response.status === 401) window.location.assign('/auth/login');
       try {
         const rawUrl = input instanceof Request ? input.url : String(input);
         const url = new URL(rawUrl, window.location.origin);
@@ -71,6 +70,12 @@ export const installClientIdentity = () => {
         }
       } catch {
         // Usage refresh is best-effort and must never affect the API response.
+      }
+      if (response.headers.has('X-Creation-Points-Charged')) window.dispatchEvent(new Event('ai-audio:points-changed'));
+      if (response.status === 401) {
+        void response.clone().json().then((body) => {
+          if (body.code === 'AUTH_REQUIRED') window.dispatchEvent(new Event('ai-audio:auth-required'));
+        }).catch(() => undefined);
       }
       return response;
     });

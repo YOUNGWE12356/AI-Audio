@@ -56,9 +56,9 @@ test('Feishu OAuth preserves trusted identity, binds one-use state and revokes l
   const request = (url: string, cookie = '', init: RequestInit = {}) => fetch(base + url, {
     ...init, redirect: 'manual', headers: { Origin: origin, Cookie: cookie, ...init.headers },
   });
-  assert.match(await (await request('/auth/login')).text(), /使用飞书登录/);
+  assert.equal((await request('/auth/login')).headers.get('location'), '/');
   assert.equal((await request('/auth/login', '', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'alice', password }) })).status, 403);
-  assert.equal((await request('/api/auth/guest', '', { method: 'POST' })).status, 401);
+  assert.equal((await request('/api/auth/guest', '', { method: 'POST' })).status, 403);
   const begin = async () => {
     const response = await request('/api/auth/lark');
     const target = new URL(response.headers.get('location')!);
@@ -242,10 +242,26 @@ test('real server rejects audited attacks and preserves an authenticated upload/
     assert.equal(response.status, 200); return response.headers.get('set-cookie')!.split(';')[0];
   };
   assert.equal((await request('/healthz')).status, 200);
-  for (const url of ['/api/sfx/library/state', '/api/sfx/library/stream?key=x', '/api/sfx/download-file?path=.env', '/uploads/old.wav', '/api/usage/quota']) {
+  for (const url of ['/api/sfx/library/state', '/api/sfx/library/stream?key=x', '/api/sfx/download-file?path=.env', '/uploads/old.wav', '/api/usage/quota', '/api/points/me', '/api/points/admin']) {
     assert.equal((await request(url)).status, 401, url);
   }
   const alice = await login('alice'), bob = await login('bob');
+  const points = await (await request('/api/points/me', alice)).json();
+  assert.equal(points.balance.userId, 'account:alice');
+  assert.equal(points.balance.remaining, 200);
+  assert.equal((await request('/api/points/admin', alice)).status, 403);
+  const elevated = await request('/api/sfx/admin/login', alice, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: adminPassword }) });
+  assert.equal(elevated.status, 200);
+  assert.equal((await request('/api/points/admin', alice)).status, 200);
+  assert.equal((await request('/api/points/admin', bob)).status, 403);
+  assert.equal((await request('/api/usage/quotas', alice, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 410);
+  const failedGeneration = await request('/api/ai/elevenlabs/sound-effect', alice, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'test' }) });
+  assert.ok(failedGeneration.status >= 400);
+  const refunded = await (await request('/api/points/admin', alice)).json();
+  assert.ok(refunded.entries.some((entry: any) => entry.type === 'reserve' && entry.points === 2));
+  assert.equal((await (await request('/api/points/me', alice)).json()).balance.frozen, 0);
+  await request('/api/sfx/admin/logout', alice, { method: 'POST' });
+  assert.equal((await request('/api/points/admin', alice)).status, 403);
   for (const value of ['.env', 'uploads/../../../../etc/passwd', '/uploads/../.env', '/uploads/%2e%2e/.env']) {
     const response = await request(`/api/sfx/download-file?path=${encodeURIComponent(value)}`, alice);
     assert.ok(response.status >= 400, value); assert.doesNotMatch(await response.text(), /LEAK_SENTINEL/);

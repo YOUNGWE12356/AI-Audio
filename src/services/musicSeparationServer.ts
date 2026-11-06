@@ -154,6 +154,7 @@ type MusicSeparationRouterOptions = {
   uploadsDir: UploadDirectory;
   ffmpegBinary: string;
   maxUploadBytes: number;
+  reservePoints?: (req: express.Request, res: express.Response) => Promise<(success: boolean) => void>;
 };
 
 const parseRunnerEvent = (line: string): RunnerEvent | null => {
@@ -327,12 +328,14 @@ export function createMusicSeparationRouter({
   uploadsDir,
   ffmpegBinary,
   maxUploadBytes,
+  reservePoints,
 }: MusicSeparationRouterOptions) {
   const getUploadsDir = () => uploadDirectory(uploadsDir);
   const jobKey = (id: string) => `${currentUserId()}:${id}`;
   const router = express.Router();
   const jobs = new Map<string, MusicSeparationJob>();
   const vocalRecoveries = new Map<string, Promise<MusicSeparationJob>>();
+  const settlements = new Map<string, (success: boolean) => void>();
   const queue: string[] = [];
   let activeJobId: string | null = null;
   let cachedProbe: { value: EngineProbe; expiresAt: number } | null = null;
@@ -385,6 +388,10 @@ export function createMusicSeparationRouter({
   };
 
   const updateJob = (job: MusicSeparationJob, patch: Partial<MusicSeparationJob>) => {
+    if (patch.status && TERMINAL_STATUSES.has(patch.status)) {
+      settlements.get(`${job.owner}:${job.id}`)?.(patch.status === 'completed');
+      settlements.delete(`${job.owner}:${job.id}`);
+    }
     Object.assign(job, patch, { updatedAt: new Date().toISOString() });
     persistJob(job);
   };
@@ -902,6 +909,7 @@ export function createMusicSeparationRouter({
 
   router.post(['/jobs', '/vocal-jobs'], upload.single('media'), async (req, res, next) => {
     const uploadedPath = req.file?.path;
+    let settle: ((success: boolean) => void) | undefined;
     try {
       if (!req.file) return res.status(400).json({ error: '请选择需要分轨的音频或视频。' });
       if (!isSupportedMedia(req.file)) {
@@ -936,6 +944,7 @@ export function createMusicSeparationRouter({
         return res.status(503).json({ code: 'MUSIC_SEPARATION_NOT_READY', error: reason, engine: probe });
       }
 
+      settle = await reservePoints?.(req, res);
       const id = operationId || randomUUID();
       const directoryPath = path.resolve(getUploadsDir(), `music-stems-${id}`);
       if (!isPathInside(getUploadsDir(), directoryPath)) throw new Error('无法创建安全的分轨任务目录。');
@@ -958,11 +967,13 @@ export function createMusicSeparationRouter({
         stems: [],
       };
       jobs.set(jobKey(id), job);
+      if (settle) settlements.set(jobKey(id), settle);
       persistJob(job);
       queue.push(jobKey(id));
       startNextJob();
       return res.status(202).json(publicJob(job));
     } catch (error) {
+      settle?.(false);
       if (uploadedPath) await fs.promises.unlink(uploadedPath).catch(() => undefined);
       return next(error);
     }

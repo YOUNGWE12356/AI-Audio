@@ -8,6 +8,8 @@
   },
   "type": "module",
   "scripts": {
+    "test:auth": "tsx --test tests/feishuAuth.test.ts",
+    "test:points": "tsx --test tests/points.test.ts",
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server/server.cjs",
     "start": "node dist/server/server.cjs",
@@ -26,6 +28,7 @@
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "ffmpeg-static": "^5.3.0",
+    "iron-session": "^8.0.4",
     "jszip": "^3.10.1",
     "lamejs": "1.2.0",
     "lucide-react": "^0.546.0",

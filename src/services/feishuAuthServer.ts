@@ -2,7 +2,7 @@ import express from 'express';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
 export type FeishuUser = { openId: string; displayName: string; avatarUrl: string };
-export function readFeishuAuthConfig(env: NodeJS.ProcessEnv) {
+export function readFeishuAuthConfig(env: NodeJS.ProcessEnv = process.env) {
   const appId = (env.FEISHU_APP_ID || env.LARK_APP_ID || '').trim();
   const appSecret = (env.FEISHU_APP_SECRET || env.LARK_APP_SECRET || '').trim();
   const redirectUri = (env.FEISHU_REDIRECT_URI || env.LARK_REDIRECT_URI || '').trim();
@@ -17,7 +17,14 @@ export function readFeishuAuthConfig(env: NodeJS.ProcessEnv) {
       throw new Error('Invalid FEISHU_REDIRECT_URI');
     }
   }
-  return { enabled, appId, appSecret, redirectUri };
+  return { enabled, appId, appSecret, redirectUri,
+    secure: enabled && new URL(redirectUri).protocol === 'https:', localGuestEnabled: env.LOCAL_GUEST_LOGIN_ENABLED === 'true' };
+}
+
+export function isLocalGuestRequest(req: express.Request) {
+  return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress || '')
+    && ['localhost', '127.0.0.1', '[::1]'].includes(req.hostname)
+    && !req.get('forwarded') && !req.get('x-forwarded-for') && !req.get('x-forwarded-host');
 }
 
 // OAuth state is one-use, browser-bound and server-side. Provider tokens are never stored.

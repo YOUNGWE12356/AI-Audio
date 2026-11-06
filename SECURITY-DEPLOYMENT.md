@@ -1,6 +1,6 @@
 # 安全配置与升级
 
-1. 优先使用已有飞书登录：配置 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_REDIRECT_URI`，回调路径为 `/api/auth/callback`；`FEISHU_AUTH_ENABLED=true` 显式启用（配置齐全时也会自动启用）。兼容 `LARK_` 别名。登录入口 `/api/auth/lark`，当前身份 `/api/auth/me`，退出 `POST /api/auth/logout`。飞书启用时禁止本地密码登录，也不提供游客绕过。
+1. 优先使用已有飞书登录：配置 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_REDIRECT_URI`，回调路径为 `/api/auth/callback`；`FEISHU_AUTH_ENABLED=true` 显式启用（配置齐全时也会自动启用）。兼容 `LARK_` 别名。登录入口 `/api/auth/lark`，当前身份 `/api/auth/me`，退出 `POST /api/auth/logout`。飞书启用时禁止本地密码登录，LOCAL_GUEST_LOGIN_ENABLED=true 可显式开启本机游客：仅回环回调地址和本机直连可用，拒绝代理转发及远程访问。本机游客共用固定额度身份，并可直接管理创作积分；其他管理操作仍需密码。
 
    仅在未启用飞书时，可为每位使用者配置独立本地账号。运行 `npm run auth:hash-password`，在隐藏输入提示下输入至少 16 位密码，将输出的 scrypt 哈希写入部署环境的 `AUTH_USERS_JSON`：
 
@@ -10,7 +10,7 @@
 
    不要提交真实配置或密码。飞书未启用且本地账号列表为空时，所有业务接口拒绝访问。飞书身份来自服务端换取的用户资料，设备 ID 不作为认证依据。旧版登录 cookie 不予信任，升级后需重新飞书授权。
 
-2. 生产环境设置 `NODE_ENV=production`，由 HTTPS 网关转发应用。`APP_ORIGIN` 默认使用飞书回调的 origin；显式设置时必须与回调 origin 一致。无飞书时生产环境必须配置 `APP_ORIGIN=https://实际域名`（无结尾斜杠），开发默认 `http://localhost:3000`。浏览器修改请求须携带匹配的 Origin。网关不要直接公开上传目录或构建目录；只代理应用的鉴权路由。
+2. 生产环境设置 `NODE_ENV=production`，由 HTTPS 网关转发应用。`APP_ORIGIN` 默认使用飞书回调的 origin；显式设置时必须与回调 origin 一致。无飞书时生产环境必须配置 `APP_ORIGIN=https://实际域名`（无结尾斜杠），开发默认 `http://localhost:4030`。浏览器修改请求须携带匹配的 Origin。网关不要直接公开上传目录或构建目录；只代理应用的鉴权路由。
 
 3. 管理功能可选配置独立的高熵 `SFX_LIBRARY_ADMIN_PASSWORD`，至少 24 位。员工先登录，再输入管理密码取得 30 分钟管理权限。管理权限绑定当前会话，不向浏览器发放管理 bearer token。基础登录会话为 8 小时，注销或重启进程即失效。设置页提供退出登录。
 

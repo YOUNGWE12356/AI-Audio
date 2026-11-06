@@ -141,7 +141,7 @@ export function createAssistantAgentRouter(options: Options) {
       if (typeof value === 'string') headers[key] = value;
     }
     const configuredCallback = process.env.FEISHU_REDIRECT_URI || process.env.LARK_REDIRECT_URI;
-    headers.origin = process.env.APP_ORIGIN || (configuredCallback ? new URL(configuredCallback).origin : `http://localhost:${process.env.PORT || '3000'}`);
+    headers.origin = process.env.APP_ORIGIN || (configuredCallback ? new URL(configuredCallback).origin : `http://localhost:${process.env.PORT || '4030'}`);
     const origin = `http://127.0.0.1:${req.socket.localPort}`;
     const signal = state.controller.signal;
     const asset = (id: string) => {
