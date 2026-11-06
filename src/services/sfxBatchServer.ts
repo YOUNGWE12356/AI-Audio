@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { generateAiContent, SchemaType as T } from './aiGateway';
-import { boundedFetch, searchOnlineSfxSources, recordOnlineSfxBatchUsage } from './onlineSfxServer';
+import { boundedFetch, searchOnlineSfxSources, recordOnlineSfxBatchUsage, createTimelineOnlineSfxBatchTracker } from './onlineSfxServer';
 import { createSfxRequirementsJobs } from './sfxRequirementsJobs';
 import { existingBatchSearchQuery, normalizeBatchRequirements, validateBatchSearchQuery, SFX_BATCH_MAX_ROWS } from './sfxBatch';
 import { normalizeBatchSearchQueryInput, prepareBatchSearchQuery } from './sfxBatchSearchQuery';
@@ -14,6 +14,7 @@ import { normalizeMusicVisualInput } from './musicVisualPrompt';
 import { batchVideoSegments, batchVideoOverview, mergeBatchVideoRequirements, SFX_BATCH_VIDEO_MAX_FRAMES, SFX_BATCH_VIDEO_CONCURRENCY, SFX_BATCH_VIDEO_JOB_TIMEOUT_MS } from './sfxBatchVideoAnalysis';
 import { batchRangeReviewPrompt } from './sfxBatchRangePrompt';
 import { batchNewEventPrompt } from './sfxBatchEventPrompt';
+import { batchKeywordPrompt } from './sfxBatchKeywordPrompt';
 import { analyzeBatchTable, type BatchSourceRow } from './sfxBatchTableAnalysis';
 const runFile = promisify(execFile);
 const fail = (message: string, status = 400) => Object.assign(new Error(message), { status });
@@ -42,8 +43,9 @@ async function analyzeSfxBatchPass(input: ReturnType<typeof normalizeSfxBatchInp
     contents: [{ parts: [
       { text: `你是游戏和影视音效设计师，把用户素材整理成可逐条制作的音效需求清单，只列 SFX，不列背景音乐、对白或配音。
 输入可能是音效需求表、表格截图或按时间顺序的视频关键帧。表格应忠实逐行提取，不能漏行、无故重复或编造额外需求；视频只识别明确新触发、需要配声的动作或动效。只分析画面，不声称听到了视频原声；关键帧未覆盖的动作不能捏造精确时间码。
-每条只包含一个可独立制作的声音事件。description 用简洁中文描述声源/动作/材质、起音/主体/尾音、力度/速度和空间，保留无音乐/无人声等排除项，不要把多个不相关音效拼到一条里。
-keywords 是中文核心关键词；searchQuery 必须仅有1～2个核心英文单词，用最关键的声源或声源+动作搜索，例如 click、card flip、door creak、sparkle。即使原表提供较长词组，也要提炼为1～2个词；禁止长句、堆叠同义词、营销形容词、否定词和UI等无必要前缀。详细材质、空间与场景仅保留在description和scene，不要塞进搜索词；description 保持中文，不需要翻译。name 优先保留用户表格里的原命名，空格换下划线；未指定时使用简洁 Sfx_CatID_FXName 形式，不瞎编复杂类别。
+每条只包含一个可独立制作的声音事件。先依据原始需求写description，再从描述提炼关键词；不得为了套用“提示音”等简短词而反过来将具体声音改写为泛化提示声。description 用简洁中文描述声源/动作/材质、起音/主体/尾音、力度/速度和空间，保留无音乐/无人声等排除项，不要把多个不相关音效拼到一条里。
+${batchKeywordPrompt}
+description 保持中文，不需要翻译。name 优先保留用户表格里的原命名，空格换下划线；未指定时使用简洁 Sfx_CatID_FXName 形式，不瞎编复杂类别。
 duration 单位秒，0.5～30；明确给出的时长优先，缺失时按事件合理估计，不把开始时间当时长；超过30秒的持续声输出30秒循环素材并在scene说明原需求。scene 记录触发场景和原表备注，保留原表中的已知时间信息。完整清单最多${SFX_BATCH_MAX_ROWS}条，超过上限要报错要求拆分，不能偷偷截断。视频的本轮分段只列该段真实支持的事件，不凑数量。无相关声音事件时items为空。
 time 是该音效在视频中的建议起始点位，单位秒，从0开始；必须依据提供的关键帧时间标签或原表明确时间，不能把时长当点位。无法确定时输出-1，不从含糊的时间范围中编造一个精确事件时刻。有多个独立出现时刻时分别列为需求。${input.videoDuration ? `视频总时长${input.videoDuration}秒，time必须小于该值。` : ''}关键帧只能给建议点位，在scene中说明依据和时间不确定性。
 endTime 是声音事件的建议结束秒数，与time组成出现范围，必须大于time，不能超过视频总时长。优先依据可见动作开始到结束或原表明确范围；只有单帧时结合事件合理估计范围，在scene注明估计依据，不要声称精确识别。未知起始时time和endTime均为-1。duration为所需音效素材长度，通常等于范围长度，但单条素材最多30秒。
@@ -60,8 +62,8 @@ ${input.pointEndTime !== undefined && !input.rangeReview ? `用户已指定范�
       type: T.OBJECT, required: ['items'], properties: { items: { type: T.ARRAY, items: {
         type: T.OBJECT, required: ['name', 'description', 'keywords', 'searchQuery', 'duration', 'scene', 'time', 'endTime', ...(sourceRows ? ['sourceRowId'] : [])], properties: {
           ...(sourceRows ? { sourceRowId: { type: T.STRING, enum: sourceRows.map(row => row.sourceRowId) } } : {}),
-          name: { type: T.STRING }, description: { type: T.STRING }, keywords: { type: T.STRING },
-          searchQuery: { type: T.STRING, description: '仅1～2个核心英文单词，例如 card flip 或 click；不用整句描述。' }, duration: { type: T.NUMBER }, scene: { type: T.STRING },
+          name: { type: T.STRING }, description: { type: T.STRING }, keywords: { type: T.STRING, description: '1～2个相关的常用中文音效检索词，用、分隔，例如纸牌、翻动；不要画面标签或长句。' },
+          searchQuery: { type: T.STRING, description: '与中文关键词对应的常见音效搜索词，仅1～2个核心英文单词，例如 card flip 或 click；不用整句描述。' }, duration: { type: T.NUMBER }, scene: { type: T.STRING },
           time: { type: T.NUMBER, description: '视频建议起始秒数，未知为-1；单点复核时使用指定点位。' },
           endTime: { type: T.NUMBER, description: '视频建议结束秒数，大于time且不超过视频时长；未知为-1。' },
         },
@@ -181,6 +183,9 @@ export function createSfxBatchRouter(options: {
     });
   });
   const searches = new Set<string>();
+  // Reuse timeline search billing: each user action shares one ID across its rows.
+  // A large queue can take several hours; keep the successful charge for its lifetime.
+  const searchBatches = createTimelineOnlineSfxBatchTracker({ ttlMs: 24 * 60 * 60_000 });
   const cooldowns = new Map<string, number>();
   let captures = 0;
   router.post('/search', async (req, res, next) => {
@@ -192,10 +197,14 @@ export function createSfxBatchRouter(options: {
       let query: string;
       try { query = validateBatchSearchQuery(typeof req.body?.query === 'string' ? req.body.query : ''); }
       catch (error) { throw fail(error instanceof Error ? error.message : '请填写1～2个英文搜索词。'); }
+      const searchBatchId = req.body?.searchBatchId ?? '';
+      if (typeof searchBatchId !== 'string' || searchBatchId.length > 128 || (searchBatchId && !/^[a-zA-Z0-9._:-]+$/.test(searchBatchId))) throw fail('搜索批次无效，请重新发起搜索。');
       if (searches.has(owner) || searches.size >= 4) throw fail('搜索任务正在进行，请等待本条完成。', 429);
       for (const [id, ticket] of tickets) if (!ticket.pending && Date.now() - ticket.at > 30 * 60_000) tickets.delete(id);
       if (tickets.size >= 600) throw fail('搜索结果较多，请稍后再试。', 429);
-      release = options.reserve(req, res, 1); if (!release) return;
+      if (!searchBatches.hasBeenBilled(owner, searchBatchId)) {
+        release = options.reserve(req, res, 1); if (!release) return;
+      }
       searches.add(owner); locked = true;
       const excluded = new Set<string>(Array.isArray(req.body?.excludeSourceUrls)
         ? req.body.excludeSourceUrls.filter((value: unknown) => typeof value === 'string').slice(0, 500) : []);
@@ -205,7 +214,7 @@ export function createSfxBatchRouter(options: {
         tickets.set(id, { ...candidate, owner, at: Date.now() });
         return { id, title: candidate.title, source: candidate.source, sourceUrl: candidate.sourceUrl };
       });
-      if (items.length) recordOnlineSfxBatchUsage();
+      if (items.length && searchBatches.markSuccessfulBatch(owner, searchBatchId)) recordOnlineSfxBatchUsage();
       res.json({ items, message: items.length ? '' : '未找到匹配音效，可修改搜索词再搜或使用 AI 生成。' });
     } catch (error) { next(error); }
     finally { if (locked) searches.delete(owner); release?.(); }

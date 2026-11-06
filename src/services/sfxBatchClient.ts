@@ -1,7 +1,8 @@
 import JSZip from 'jszip';
 import { extractVideoKeyframes, prepareFilesForAnalysis, type PreparedAnalysisMedia } from '../utils/mediaPreparation';
 import { generateRequirementsInBackground } from './sfxRequirementsClient';
-import { existingBatchSearchQuery, normalizeBatchRequirements, validateBatchSearchQuery, type SfxBatchRequirement } from './sfxBatch';
+import { normalizeBatchRequirements, validateBatchSearchQuery, type SfxBatchRequirement } from './sfxBatch';
+import { needsBatchSearchQuery } from './sfxBatchBilling';
 import { batchId } from './sfxBatchProject';
 import { SFX_BATCH_VIDEO_MAX_FRAMES, SFX_BATCH_VIDEO_MIN_FRAMES, SFX_BATCH_VIDEO_FRAME_INTERVAL, SFX_BATCH_VIDEO_MAX_DIMENSION, SFX_BATCH_VIDEO_JOB_TIMEOUT_MS, SFX_BATCH_RANGE_MAX_FRAMES, SFX_BATCH_RANGE_FRAME_INTERVAL, batchRangeFrameCount } from './sfxBatchVideoAnalysis';
 
@@ -68,6 +69,7 @@ export async function readSfxBatchDocument(file: File) {
 }
 
 export async function prepareSfxBatchInput(file: File | null, instructions: string, onProgress: (message: string) => void) {
+  if (!file && !instructions.trim()) throw new Error('请重新上传文件。');
   let files: PreparedAnalysisMedia[] = [], text = '', sourceType = 'table';
   if (file) {
     sourceType = validateSfxBatchFile(file);
@@ -124,16 +126,15 @@ export async function analyzeBatchRequirements(input: Awaited<ReturnType<typeof 
     sourceItemCount: result.sourceItemCount, excludedItems: result.excludedItems || [] };
 }
 
-export async function resolveBatchSearchQuery(row: Pick<SfxBatchRequirement, 'searchQuery' | 'keywords' | 'description'>) {
-  const existing = existingBatchSearchQuery(row.searchQuery);
-  if (existing) return existing;
+export async function resolveBatchSearchQuery(row: Pick<SfxBatchRequirement, 'searchQuery' | 'keywords' | 'description'> & { searchQuerySource?: string }) {
+  if (!needsBatchSearchQuery(row)) return validateBatchSearchQuery(row.searchQuery);
   if (!row.searchQuery.trim() && !row.keywords.trim() && !row.description.trim()) throw new Error('请先填写音效需求或关键词，再点击搜索或生成。');
   const response = await fetch('/api/ai/sfx-batch/search-query', { method: 'POST',
-    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(row), signal: AbortSignal.timeout(65_000) });
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ searchQuery: '', keywords: row.keywords, description: row.description }), signal: AbortSignal.timeout(65_000) });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || '英文搜索词提炼失败，请重试；本次未开始搜索或生成。');
   try { return validateBatchSearchQuery(typeof result.searchQuery === 'string' ? result.searchQuery : ''); }
-  catch { throw new Error('未能得到1～2个有效英文搜索词，请重试或手动填写；本次未开始搜索或生成。'); }
+  catch { throw new Error('关键词自动转换失败，请调整关键词后重试；本次未开始搜索或生成。'); }
 }
 
 export function saveBatchDownload(blob: Blob, name: string) {

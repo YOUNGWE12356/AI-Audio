@@ -80,3 +80,64 @@ test('job failures settle and release quota with an explicit error', async () =>
     assert.equal(failed.status, 'failed'); assert.match(failed.error, /240 秒/); assert.equal(releases, 1);
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); fs.rmSync(directory, { recursive: true, force: true }); }
 });
+
+test('Windows manifest locks retry, progress locks preserve generation, and failed starts release quota', async t => {
+  for (const mode of ['transient', 'progress', 'initial'] as const) {
+    await t.test(mode, async t => {
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sfx-requirements-lock-test-'));
+      let renames = 0, calls = 0, releases = 0;
+      const rename = fs.renameSync;
+      t.mock.method(fs, 'renameSync', ((source: fs.PathLike, destination: fs.PathLike) => {
+        if (String(source).startsWith(directory)) {
+          renames++;
+          if (mode === 'initial' || mode === 'transient' && renames <= 2 || mode === 'progress' && renames >= 2 && renames <= 10) {
+            throw Object.assign(new Error(`EPERM: rename '${source}' -> '${destination}'`), { code: 'EPERM' });
+          }
+        }
+        return rename(source, destination);
+      }) as typeof fs.renameSync);
+      t.mock.method(console, 'error', () => {});
+      const app = express(); app.use(express.json());
+      app.use('/requirements', createSfxRequirementsJobs({ directory, identity: () => 'alice', normalize: () => ({}),
+        reserve: () => () => { releases++; }, run: (_req, _res, work) => { void work(); },
+        execute: async (_input, progress) => { calls++; progress('正在分析截图'); return { items: [{ name: 'Door_Open' }] }; },
+      }));
+      app.use((error: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+        res.status(error.status || 500).json({ error: error.message });
+      });
+      const server = app.listen(0, '127.0.0.1'); await new Promise<void>(resolve => server.once('listening', resolve));
+      const base = `http://127.0.0.1:${(server.address() as any).port}/requirements`;
+      try {
+        const response = await fetch(base, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ background: true, requestId: 'requirements-lock-request-0001' }) });
+        const body = await response.json();
+        if (mode === 'initial') {
+          assert.equal(response.status, 503); assert.equal(body.error, '需求表任务保存失败，请稍后重试。'); assert.equal(calls, 0);
+        } else {
+          assert.equal(response.status, 202);
+          const done = await (await fetch(`${base}/jobs/${body.id}`)).json();
+          assert.equal(done.status, 'completed'); assert.equal(done.result.items[0].name, 'Door_Open'); assert.equal(calls, 1);
+          const saved = JSON.parse(fs.readFileSync(path.join(directory, `${body.id}.json`), 'utf8'));
+          assert.equal(saved.status, 'completed');
+          assert.equal(renames, mode === 'transient' ? 5 : 11);
+        }
+        assert.equal(releases, 1);
+      } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); fs.rmSync(directory, { recursive: true, force: true }); }
+    });
+  }
+});
+
+test('restored legacy failures hide filesystem paths without changing the failure category', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sfx-requirements-legacy-test-'));
+  const id = '11111111-1111-4111-8111-111111111111';
+  fs.writeFileSync(path.join(directory, `${id}.json`), JSON.stringify({ id, owner: 'alice', requestId: 'legacy-request-0001', fingerprint: '',
+    status: 'failed', createdAt: Date.now(), updatedAt: Date.now(), message: 'failed', error: "EPERM: rename 'D:/private/task.tmp' -> 'D:/private/task.json'" }));
+  const app = express(); app.use('/requirements', createSfxRequirementsJobs({ directory, identity: () => 'alice', normalize: () => ({}),
+    reserve: () => () => {}, run: () => {}, execute: async () => ({ items: [] }),
+  }));
+  const server = app.listen(0, '127.0.0.1'); await new Promise<void>(resolve => server.once('listening', resolve));
+  try {
+    const job = await (await fetch(`http://127.0.0.1:${(server.address() as any).port}/requirements/jobs/${id}`)).json();
+    assert.equal(job.error, '需求表任务保存失败，请稍后重试。'); assert.equal(job.message, job.error);
+    assert.doesNotMatch(JSON.stringify(job), /private|EPERM|owner/);
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); fs.rmSync(directory, { recursive: true, force: true }); }
+});

@@ -31,6 +31,7 @@ import {
   recordTimelineOnlineSfxUsage,
 } from './src/services/onlineSfxServer';
 import { ONLINE_SFX_BATCH_COMPANY_POINTS } from './src/services/onlineSfxTypes';
+import { resolveBatchSfxUsageFeature } from './src/services/sfxBatchBilling';
 import { createSfxBatchRouter } from './src/services/sfxBatchServer';
 import { batchVideoFrameCount, batchRangeFrameCount, SFX_BATCH_VIDEO_MAX_DIMENSION } from './src/services/sfxBatchVideoAnalysis';
 import { createMusicAnalysisRouter, isGptAudioAnalysisConfigured } from './src/services/musicAnalysisServer';
@@ -223,6 +224,8 @@ async function startServer() {
   };
   const resolveUsageFeature = (req: express.Request) => {
     const endpoint = req.path;
+    const batchFeature = resolveBatchSfxUsageFeature(endpoint, req.body);
+    if (batchFeature) return batchFeature;
     if (endpoint.includes('/sfx/online')) return 'AI 音效 · 联网搜索';
     if (endpoint.includes('/sfx-batch')) return 'AI 音效 · 批量制作';
     if (endpoint.includes('/assistant/plan')) return '智能助手 · GPT 任务规划';
@@ -491,7 +494,7 @@ async function startServer() {
                   ? event.billingUnit as AiUsageEvent['billingUnit']
                   : undefined,
                 timestamp: String(event.timestamp || ''),
-                feature: String(event.feature || '升级前未分类'),
+                feature: resolveBatchSfxUsageFeature(String(event.endpoint || '')) || String(event.feature || '升级前未分类'),
                 endpoint: String(event.endpoint || ''),
                 userId: String(event.userId || 'unknown'),
                 displayName: String(event.displayName || '历史未识别用户'),

@@ -10,6 +10,7 @@ import { analyzeSfxBatch, createSfxBatchRouter, normalizeSfxBatchInput } from '.
 import { sameBatchRange, confirmedVersion, restoreBatchProjectRow, type BatchRow } from './sfxBatchProject';
 import { validateSfxBatchFile, readSfxBatchDocument } from './sfxBatchClient';
 import { waitForRequirementsJob } from './sfxRequirementsClient';
+import { setAiUsageRecorder, type AiUsageEvent } from './usageTracking';
 
 const requirement = { name: 'Door Open.wav', description: '木门缓慢打开，木轴吱呀，短尾音，无音乐', keywords: '木门 打开', searchQuery: 'door creak', duration: 2.5, scene: '第5秒开门' };
 test('search and generation send only the editable English field even when all other fields contain Chinese', () => {
@@ -24,6 +25,8 @@ test('search and generation send only the editable English field even when all o
   }
   assert.equal(createBatchSfxRequest({ ...requirement, searchQuery: '  button   click  ' }, 'generate').body.text, 'button click');
   assert.equal(createBatchSfxRequest({ ...requirement, searchQuery: 'click' }, 'search').body.query, 'click');
+  assert.equal(createBatchSfxRequest(requirement, 'search', [], 'click-1').body.searchBatchId, 'click-1');
+  assert.equal('searchBatchId' in createBatchSfxRequest(requirement, 'generate', [], 'click-1').body, false);
 });
 test('batch normalization keeps event detail, safe filenames and rejects malformed or oversized lists', () => {
   const result = normalizeBatchRequirements([requirement]);
@@ -133,4 +136,56 @@ test('search tickets are owner-scoped; concurrent capture deduplicates and conve
     const wav = await fs.readFile(path.join(directory, outputs[0].url));
     assert.equal(wav.toString('ascii', 0, 4), 'RIFF'); assert.equal(wav.readUInt16LE(22), 2); assert.equal(wav.readUInt32LE(24), 48000);
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+test('batch search bills one point across rows, charges new clicks and users independently, and skips empty or failed searches', async () => {
+  const events: AiUsageEvent[] = [];
+  const balances = new Map([['alice', 1], ['bob', 1]]);
+  let reserved = 0, released = 0;
+  setAiUsageRecorder(event => events.push(event));
+  const app = express(); app.use(express.json());
+  app.use('/batch', createSfxBatchRouter({
+    uploadsDir: os.tmpdir(), jobsDir: os.tmpdir(), ffmpeg: ffmpeg!,
+    owner: req => String(req.headers['x-owner'] || 'unknown'),
+    reserve: (req, res, points) => {
+      const owner = String(req.headers['x-owner']);
+      if ((balances.get(owner) || 0) < points) { res.status(429).json({ error: '积分不足' }); return null; }
+      reserved++;
+      return () => { released++; };
+    },
+    run: (_req, _res, work) => { void work(); },
+    search: (async ({ query }) => {
+      if (query === 'broken') throw new Error('source unavailable');
+      return { items: query === 'missing' ? [] : [{ title: query, source: 'test', sourceUrl: `https://example.com/${query}`, previewUrl: 'https://example.com/audio' }] };
+    }) as typeof import('./onlineSfxServer').searchOnlineSfxSources,
+  }));
+  const server = app.listen(0, '127.0.0.1'); await new Promise<void>(resolve => server.once('listening', resolve));
+  const url = `http://127.0.0.1:${(server.address() as any).port}/batch/search`;
+  const post = (query: string, searchBatchId?: unknown, owner = 'alice') => fetch(url, { method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-owner': owner }, body: JSON.stringify({ query, searchBatchId }) });
+  try {
+    assert.equal((await post('missing', 'click-1')).status, 200);
+    assert.equal((await post('broken', 'click-1')).status, 500);
+    assert.equal(events.length, 0);
+    assert.equal((await post('door', 'click-1')).status, 200);
+    assert.equal(events.length, 1); assert.equal(events[0].companyPoints, 1);
+    const afterFirstMatch = reserved;
+    balances.set('alice', 0);
+    for (const query of ['click', 'whoosh', 'impact']) assert.equal((await post(query, 'click-1')).status, 200);
+    assert.equal(events.length, 1); assert.equal(reserved, afterFirstMatch);
+    assert.equal((await post('door', 'click-2')).status, 429);
+    balances.set('alice', 1);
+    assert.equal((await post('door', 'click-2')).status, 200);
+    assert.equal(events.length, 2);
+    assert.equal((await post('door', 'click-1', 'bob')).status, 200);
+    assert.equal(events.length, 3);
+    // Legacy single-row calls without a batch ID each count as a new batch.
+    assert.equal((await post('door')).status, 200);
+    assert.equal((await post('door')).status, 200);
+    assert.equal(events.length, 5);
+    assert.equal((await post('door', {})).status, 400);
+    assert.equal((await post('door', 'x'.repeat(129))).status, 400);
+    assert.equal(events.reduce((sum, event) => sum + (event.companyPoints || 0), 0), 5);
+    assert.equal(reserved, released);
+  } finally { setAiUsageRecorder(null); await new Promise<void>(resolve => server.close(() => resolve())); }
 });

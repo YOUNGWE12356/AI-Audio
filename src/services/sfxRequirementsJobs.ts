@@ -2,6 +2,8 @@ import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { replaceAssistantManifest } from './assistantManifest';
+import { requirementsErrorText } from './sfxRequirementsErrors';
 
 type Result = { items: any[]; sourceItemCount?: number; excludedItems?: Array<{ name: string; reason: string }> };
 type Job = {
@@ -27,7 +29,7 @@ export function createSfxRequirementsJobs(options: {
   const persist = (job: Job) => {
     const file = path.join(options.directory, `${job.id}.json`);
     fs.writeFileSync(`${file}.tmp`, JSON.stringify(job));
-    fs.renameSync(`${file}.tmp`, file);
+    replaceAssistantManifest(`${file}.tmp`, file);
   };
   for (const name of fs.readdirSync(options.directory)) {
     if (!/^[a-f0-9-]{36}\.json$/.test(name)) continue;
@@ -50,7 +52,8 @@ export function createSfxRequirementsJobs(options: {
     if (!cookie) res.append('Set-Cookie', `ai_audio_requirements=${id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`);
     return `session:${id}`;
   };
-  const publicJob = ({ owner: _owner, fingerprint: _fingerprint, requestId: _requestId, ...job }: Job) => job;
+  const publicJob = ({ owner: _owner, fingerprint: _fingerprint, requestId: _requestId, ...job }: Job) => job.status === 'failed'
+    ? { ...job, error: requirementsErrorText(job.error || job.message), message: requirementsErrorText(job.error || job.message) } : job;
   const prune = () => {
     for (const [id, job] of jobs) {
       if (job.status === 'running' || Date.now() - job.updatedAt <= RETENTION_MS) continue;
@@ -79,7 +82,10 @@ export function createSfxRequirementsJobs(options: {
       if (!release) return;
       const job: Job = { id: randomUUID(), owner, requestId, fingerprint, status: 'running',
         message: '已提交后台，等待 AI 识别参考素材并生成需求表。', createdAt: Date.now(), updatedAt: Date.now() };
-      try { persist(job); } catch (error) { release(); throw error; }
+      try { persist(job); } catch (error) {
+        release(); console.error('[sfx-requirements] Failed to create task:', error);
+        throw Object.assign(new Error('需求表任务保存失败，请稍后重试。'), { status: 503 });
+      }
       jobs.set(job.id, job);
       options.run(req, res, async () => {
         const controller = new AbortController();
@@ -87,12 +93,14 @@ export function createSfxRequirementsJobs(options: {
         const startedAt = Date.now();
         try {
           job.result = await options.execute(input, message => {
-            job.message = message; job.updatedAt = Date.now(); persist(job);
+            job.message = message; job.updatedAt = Date.now();
+            // A locked progress manifest must not abort an otherwise valid AI request.
+            try { persist(job); } catch (error) { console.error('[sfx-requirements] Failed to save progress:', error); }
           }, controller.signal);
           job.status = 'completed'; job.message = `已生成 ${job.result.items.length} 条需求。`;
         } catch (error: any) {
           job.status = 'failed';
-          job.error = controller.signal.aborted ? '需求表生成超过后台等待上限，请缩小需求范围后重试。' : error?.message || '需求表生成失败，请重试。';
+          job.error = controller.signal.aborted ? '需求表生成超过后台等待上限，请缩小需求范围后重试。' : requirementsErrorText(error);
           job.message = job.error!;
         } finally {
           clearTimeout(deadline); release(); job.updatedAt = Date.now();

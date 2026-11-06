@@ -1,7 +1,8 @@
 import React from 'react';
 import { Check, Search, Sparkles, X } from 'lucide-react';
 import GeneratedAudioPlayer from './GeneratedAudioPlayer';
-import { batchSearchWordCount } from '../services/sfxBatch';
+import BatchSfxCostHint from './BatchSfxCostHint';
+import { isBatchSfxDurationValid } from '../services/sfxBatchBilling';
 import type { BatchRow, BatchVersion } from '../services/sfxBatchProject';
 import type { BatchTimeRange } from '../services/batchVideoTimeline';
 import type { AudioDownloadRange } from '../services/audioRangeExport';
@@ -10,10 +11,10 @@ const control = 'inline-flex items-center justify-center gap-1.5 rounded-lg bord
 const input = 'mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 focus:border-emerald-500 focus:outline-none';
 
 export default function BatchSfxInspector({ row, index, version, chosen, locked, inline, range, hasVideo, activeAudioId,
-  setActiveAudioId, onClose, onEdit, onQuery, onRun, onSelectVersion, onDecoded, onRange, onConfirm }: {
+  setActiveAudioId, onClose, onEdit, onRun, onSelectVersion, onDecoded, onRange, onConfirm }: {
   row?: BatchRow; index: number; version?: BatchVersion; chosen?: BatchVersion; locked: boolean; inline: boolean;
   range: BatchTimeRange | null; hasVideo: boolean; activeAudioId: string | null; setActiveAudioId: (id: string | null) => void;
-  onClose: () => void; onEdit: (update: Partial<BatchRow>) => void; onQuery: (query: string) => void;
+  onClose: () => void; onEdit: (update: Partial<BatchRow>) => void;
   onRun: (kind: 'search' | 'generate') => void; onSelectVersion: (version: BatchVersion) => void;
   onDecoded: (duration: number) => void; onRange: (range: AudioDownloadRange | null) => void;
   onConfirm: (blob: Blob, range: AudioDownloadRange) => void;
@@ -28,10 +29,12 @@ export default function BatchSfxInspector({ row, index, version, chosen, locked,
             <label className="block">音效命名<input aria-label="当前范围音效命名" className={field} value={row.name} disabled={locked} onChange={event => onEdit({ name: event.target.value })} /></label>
             <label className="block">场景<input aria-label="当前范围音效场景" className={field} value={row.scene} disabled={locked} onChange={event => onEdit({ scene: event.target.value })} /></label>
             <label className="block sm:col-span-2">音效需求<textarea aria-label="当前范围音效描述" rows={2} className={`${field} resize-y`} value={row.description} disabled={locked} onChange={event => onEdit({ description: event.target.value })} /></label>
-            <label>关键词<input aria-label="当前范围音效关键词" className={field} value={row.keywords} disabled={locked} onChange={event => onEdit({ keywords: event.target.value })} /></label><label>英文搜索词 · 1～2词<input aria-label="当前范围英文搜索词" placeholder="留空时搜索前自动提炼" className={field} value={row.searchQuery} disabled={locked} aria-invalid={batchSearchWordCount(row.searchQuery) > 2} onChange={event => onQuery(event.target.value)} /></label>
-            {batchSearchWordCount(row.searchQuery) > 2 && <p className="text-amber-700 sm:col-span-2">搜索或生成前会自动精简为1～2个英文词。</p>}
+            <label className="sm:col-span-2">关键词<input aria-label="当前范围音效关键词" placeholder="用中文填写，例如：木门吱呀" className={field} value={row.keywords} disabled={locked} onChange={event => onEdit({ keywords: event.target.value })} /><span className="mt-1 block text-[10px] text-slate-400">搜索或生成时自动转换为英文。</span></label>
           </div> : <p className="text-[11px] leading-relaxed text-slate-500">{row.description}</p>}
-          <div className="flex flex-wrap gap-2"><button className={control} disabled={locked} onClick={() => onRun('search')}><Search size={13} />{row.versions.some(v => v.kind === 'search') ? '再次搜索' : '搜索音效'}</button><button className={control} disabled={locked} onClick={() => onRun('generate')}><Sparkles size={13} />{row.versions.some(v => v.kind === 'generate') ? '再次生成' : '生成音效'}</button></div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1.5"><button className={control} disabled={locked} onClick={() => onRun('search')}><Search size={13} />{row.versions.some(v => v.kind === 'search') ? '再次搜索' : '搜索音效'}</button><BatchSfxCostHint kind="search" rows={[row]} compact /></div>
+            <div className="space-y-1.5"><button className={control} disabled={locked || !isBatchSfxDurationValid(row.duration)} onClick={() => onRun('generate')}><Sparkles size={13} />{row.versions.some(v => v.kind === 'generate') ? '再次生成' : '生成音效'}</button><BatchSfxCostHint kind="generate" rows={[row]} compact /></div>
+          </div>
         </>}
         {row && hasVideo && <p className={inline ? 'text-[11px] text-slate-600' : 'text-xs text-slate-600'}>视频范围：{range ? `${range.start.toFixed(3)}—${range.end.toFixed(3)} 秒 · ${(range.end - range.start).toFixed(3)} 秒` : '未设置，请在需求表填写范围'}</p>}
       </div>

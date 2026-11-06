@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { normalizeBatchSearchQueryInput, prepareBatchSearchQuery } from './sfxBatchSearchQuery';
 import { resolveBatchSearchQuery } from './sfxBatchClient';
-import { createBatchSfxRequest } from './sfxBatch';
+import { batchQuerySource, batchRequirementsCsv, createBatchSfxRequest } from './sfxBatch';
 import { createSfxBatchRouter } from './sfxBatchServer';
 
 const manual = { searchQuery: '', keywords: '翻牌', description: '牌翻过来的声音' };
@@ -28,7 +28,7 @@ test('manual Chinese requirements become short English search terms while explic
   assert.throws(() => normalizeBatchSearchQueryInput({ keywords: '牌'.repeat(301) }), /过长/);
 });
 
-test('client resolves once then reuses the English field for search and generation', async () => {
+test('client converts Chinese keywords and reuses a hidden translation only for the same keywords and description', async () => {
   const original = globalThis.fetch;
   let calls = 0;
   globalThis.fetch = async (url, options) => {
@@ -38,17 +38,40 @@ test('client resolves once then reuses the English field for search and generati
   };
   try {
     const searchQuery = await resolveBatchSearchQuery(manual);
-    const prepared = { ...manual, searchQuery, duration: 1 };
+    const prepared = { ...manual, searchQuery, searchQuerySource: batchQuerySource(manual), duration: 1 };
     assert.equal(createBatchSfxRequest(prepared, 'search').body.query, 'card flip');
     assert.equal(createBatchSfxRequest(prepared, 'generate').body.text, 'card flip');
     assert.equal(await resolveBatchSearchQuery(prepared), 'card flip');
     assert.equal(calls, 1);
+    // Legacy rows must not let a previously visible English field override Chinese edits.
+    assert.equal(await resolveBatchSearchQuery({ ...manual, searchQuery: 'door creak' }), 'card flip');
+    assert.equal(calls, 2);
+    globalThis.fetch = async (_url, options) => {
+      calls++;
+      const body = JSON.parse(String(options?.body));
+      assert.equal(body.searchQuery, ''); assert.equal(body.keywords, '木门吱呀');
+      return Response.json({ searchQuery: 'door creak' });
+    };
+    const changed = { ...prepared, keywords: '木门吱呀' };
+    assert.equal(await resolveBatchSearchQuery(changed), 'door creak');
+    assert.equal(calls, 3);
+    globalThis.fetch = async (_url, options) => {
+      const body = JSON.parse(String(options?.body)); assert.equal(body.description, '木门打开');
+      assert.equal(body.searchQuery, ''); return Response.json({ searchQuery: 'door creak' });
+    };
+    assert.equal(await resolveBatchSearchQuery({ ...prepared, description: '木门打开' }), 'door creak');
     globalThis.fetch = async () => Response.json({ searchQuery: '牌' });
     await assert.rejects(resolveBatchSearchQuery(manual), /本次未开始搜索或生成/);
     globalThis.fetch = async () => Response.json({ error: '积分不足' }, { status: 429 });
     await assert.rejects(resolveBatchSearchQuery(manual), /积分不足/);
     await assert.rejects(resolveBatchSearchQuery({ searchQuery: '', keywords: '', description: '' }), /先填写/);
   } finally { globalThis.fetch = original; }
+});
+
+test('downloaded requirements have one Chinese keyword column without the internal English translation', () => {
+  const csv = batchRequirementsCsv([{ ...manual, id: 'one', name: '翻牌', searchQuery: 'card flip', duration: 1, scene: '' }]);
+  assert.match(csv, /"关键词"/); assert.match(csv, /翻牌/);
+  assert.doesNotMatch(csv, /英文搜索词|card flip/);
 });
 
 test('query preparation endpoint validates, accounts for AI work and never starts a search on failure', async () => {

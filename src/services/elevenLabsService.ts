@@ -9,6 +9,7 @@ import {
 } from '../utils/elevenLabsQuality';
 import type { ElevenLabsQualityMode } from '../utils/elevenLabsQuality';
 import { recordElevenLabsResponseUsage } from './usageTracking';
+import { SOUND_EFFECT_POINTS_PER_SECOND } from './companyPointRates';
 import { prepareSoundEffectPrompt } from './sfxPromptService';
 import { withAudioRequestTimeout } from '../utils/audioRequestTimeout';
 import { getSoundEffectPcmDuration, SOUND_EFFECT_CHANNELS, SOUND_EFFECT_SAMPLE_RATE } from '../utils/soundEffectAudio';
@@ -91,7 +92,7 @@ export const COMPANY_POINTS = {
   standardTtsPerThousandCharacters: 100,
   flashTtsPerThousandCharacters: 50,
   musicPerSecond: 2.5,
-  soundEffectPerSecond: 2,
+  soundEffectPerSecond: SOUND_EFFECT_POINTS_PER_SECOND,
   audioProcessingPerSecond: 2,
   speechToTextPerSecond: 36 / 60,
   dubbingV2PerSecond: 2200 / 60,

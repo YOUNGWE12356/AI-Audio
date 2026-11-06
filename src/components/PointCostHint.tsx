@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Coins } from 'lucide-react';
+import { SOUND_EFFECT_POINTS_PER_SECOND } from '../services/companyPointRates';
 
 export type PointCostKind =
   | 'tts-standard'
@@ -19,7 +20,7 @@ const RATE = {
   'tts-standard': { unit: 'character', value: 0.1, label: '100 分 / 千字符' },
   'tts-fast': { unit: 'character', value: 0.05, label: '50 分 / 千字符' },
   music: { unit: 'second', value: 2.5, label: '2.5 分 / 秒 / 版本' },
-  'sound-effect': { unit: 'second', value: 2, label: '2 分 / 秒 / 版本' },
+  'sound-effect': { unit: 'second', value: SOUND_EFFECT_POINTS_PER_SECOND, label: '2 分 / 秒 / 版本' },
   'timeline-sfx': { unit: 'second', value: 2, label: '优先联网搜索 1 分 / 批；未命中才按 2 分 / 秒使用 ElevenLabs' },
   'voice-changer': { unit: 'second', value: 2, label: '120 分 / 分钟 / 版本' },
   'audio-isolation': { unit: 'second', value: 2, label: '120 分 / 分钟' },

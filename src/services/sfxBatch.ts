@@ -3,6 +3,7 @@ export type SfxBatchRequirement = {
   time?: number; endTime?: number;
 };
 export const SFX_BATCH_MAX_ROWS = 300;
+export const batchQuerySource = (row: { keywords: string; description: string }) => JSON.stringify(['sound-keywords-v4', row.keywords.trim(), row.description.trim()]);
 export const batchSearchWordCount = (value: string) => (value.match(/[a-z]+(?:'[a-z]+)?/gi) || []).length;
 export function validateBatchSearchQuery(value: string) {
   const text = value.trim().replace(/\s+/g, ' ');
@@ -17,12 +18,12 @@ export function validateBatchSearchQuery(value: string) {
 export function existingBatchSearchQuery(value: string): string | null {
   try { return validateBatchSearchQuery(value); } catch { return null; }
 }
-/** Both actions use the user's editable English field; never fall back to scene notes. */
-export function createBatchSfxRequest(row: Pick<SfxBatchRequirement, 'searchQuery' | 'duration'>, kind: 'search' | 'generate', excludedSources: string[] = []) {
+/** Both actions use the prepared English query for the visible Chinese keywords. */
+export function createBatchSfxRequest(row: Pick<SfxBatchRequirement, 'searchQuery' | 'duration'>, kind: 'search' | 'generate', excludedSources: string[] = [], searchBatchId?: string) {
   const text = validateBatchSearchQuery(row.searchQuery);
-  if (kind === 'search') return { endpoint: '/api/ai/sfx-batch/search', body: { query: text, excludeSourceUrls: excludedSources } };
+  if (kind === 'search') return { endpoint: '/api/ai/sfx-batch/search', body: { query: text, excludeSourceUrls: excludedSources, searchBatchId } };
   if (!Number.isFinite(row.duration) || row.duration < 0.5 || row.duration > 30) throw new Error('时长应为0.5～30秒。');
-  return { endpoint: '/api/ai/elevenlabs/sound-effect', body: { text, duration: row.duration, qualityMode: 'standard' } };
+  return { endpoint: '/api/ai/elevenlabs/sound-effect', body: { text, duration: row.duration, qualityMode: 'standard', usageSource: 'sfx-batch' } };
 }
 export function batchFileStem(value: string, fallback = 'Sfx_Untitled') {
   return String(value || '').trim().replace(/\.(wav|mp3|ogg|flac)$/i, '').normalize('NFC')
@@ -53,8 +54,8 @@ const csvCell = (value: unknown) => {
   return `"${text.replace(/"/g, '""')}"`;
 };
 export function batchRequirementsCsv(rows: Array<SfxBatchRequirement & { confirmedDuration?: number }>) {
-  const cells = [['序号', '命名', '音效描述', '关键词', '英文搜索词', '需求时长（秒）', '场景', '确认音频时长（秒）', '视频点位（秒）', '视频结束（秒）'],
-    ...rows.map((row, index) => [index + 1, batchFileStem(row.name), row.description, row.keywords, row.searchQuery,
+  const cells = [['序号', '命名', '音效描述', '关键词', '需求时长（秒）', '场景', '确认音频时长（秒）', '视频点位（秒）', '视频结束（秒）'],
+    ...rows.map((row, index) => [index + 1, batchFileStem(row.name), row.description, row.keywords,
       row.duration, row.scene, row.confirmedDuration ?? '', row.time ?? '', row.time === undefined ? '' : row.endTime ?? row.time + row.duration])];
   return '\uFEFF' + cells.map(row => row.map(csvCell).join(',')).join('\r\n');
 }
