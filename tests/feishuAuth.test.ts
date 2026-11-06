@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createServerSecurity } from '../src/services/serverSecurity';
-import { readFeishuAuthConfig, isLocalGuestRequest } from '../src/services/feishuAuthServer';
+import { readFeishuAuthConfig } from '../src/services/feishuAuthServer';
 
 const config = readFeishuAuthConfig({
   FEISHU_APP_ID: 'cli_test', FEISHU_APP_SECRET: 'test-only-secret',
@@ -29,7 +29,7 @@ async function harness(t: TestContext, options = config, fetcher = fakeFetch) {
   const security = createServerSecurity({ privateRoot: directory, fetcher, now: () => now, env: {
     FEISHU_AUTH_ENABLED: String(options.enabled), FEISHU_APP_ID: options.appId,
     FEISHU_APP_SECRET: options.appSecret, FEISHU_REDIRECT_URI: options.redirectUri,
-    LOCAL_GUEST_LOGIN_ENABLED: String(options.localGuestEnabled),
+    LOCAL_GUEST_LOGIN_ENABLED: 'true',
   } });
   app.use('/api/auth', security.router);
   app.use(security.authenticate);
@@ -158,34 +158,12 @@ test('provider failure returns a safe retryable login error without granting acc
   assert(!response.headers.getSetCookie().some(value => value.startsWith('ai_audio_session=')));
 });
 
-test('local guest login persists without a Feishu identity and logout clears it', async t => {
-  const { request } = await harness(t, { ...config, localGuestEnabled: true });
-  assert.equal((await (await request('/api/auth/me')).json()).guestAllowed, true);
+test('guest login remains disabled even when a legacy environment flag is enabled', async t => {
+  const { request } = await harness(t);
+  assert.equal((await (await request('/api/auth/me')).json()).guestAllowed, false);
+  const response = await request('/api/auth/guest', { method: 'POST' });
+  assert.equal(response.status, 403);
+  assert.equal(response.headers.getSetCookie().length, 0);
   assert.equal((await request('/api/private')).status, 401);
-  const login = await request('/api/auth/guest', { method: 'POST' });
-  assert.equal(login.status, 200);
-  const cookie = login.headers.getSetCookie().find(value => value.startsWith('ai_audio_session='))!.split(';')[0];
-  const headers = { Cookie: cookie };
-  assert.deepEqual(await (await request('/api/auth/me', { headers })).json(), {
-    enabled: true, user: null, guest: true, guestAllowed: true,
-  });
-  assert.deepEqual(await (await request('/api/private', { headers })).json(), { user: null });
-  assert.equal((await request('/uploads/test.wav', { headers })).status, 200);
-  assert.equal((await request('/api/private', { headers: { ...headers, 'X-Forwarded-For': '192.0.2.1' } })).status, 401);
-  assert.equal((await request('/api/private', { headers: { ...headers, Host: 'audio.example.com' } })).status, 401);
-  const logout = await request('/api/auth/logout', { method: 'POST', headers });
-  assert(logout.headers.getSetCookie().some(value => value.startsWith('ai_audio_session=;') && value.includes('Max-Age=0')));
-  assert.equal((await request('/api/private')).status, 401);
-});
-
-test('guest login requires opt-in and direct local access, and rejects cross-site requests', async t => {
-  const disabled = await harness(t);
-  assert.equal((await disabled.request('/api/auth/guest', { method: 'POST' })).status, 403);
-  const { request } = await harness(t, { ...config, localGuestEnabled: true });
-  for (const headers of [{ 'X-Forwarded-For': '192.0.2.1' }, { Host: 'audio.example.com' }, { Origin: 'https://evil.example' }]) {
-    assert.equal((await request('/api/auth/guest', { method: 'POST', headers })).status, 403);
-  }
-  const remote = await harness(t, { ...config, localGuestEnabled: true, redirectUri: 'https://audio.example.com/api/auth/callback', secure: true });
-  assert.equal((await remote.request('/api/auth/guest', { method: 'POST' })).status, 403);
-  assert.equal(isLocalGuestRequest({ socket: { remoteAddress: '192.168.1.5' }, hostname: 'localhost', get: () => undefined } as unknown as express.Request), false);
+  assert.equal((await request('/uploads/test.wav')).status, 401);
 });

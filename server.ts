@@ -1047,11 +1047,7 @@ async function startServer() {
 
   const requireSfxLibraryAdmin = security.requireAdmin;
 
-  // localGuest is set only by the authenticated, direct-loopback guest middleware.
-  const requirePointsManager: express.RequestHandler = (req, res, next) => {
-    if (res.locals.localGuest === true) return next();
-    return requireSfxLibraryAdmin(req, res, next);
-  };
+  const requirePointsManager = requireSfxLibraryAdmin;
 
   app.get('/api/points/me', (req, res) => {
     const actor = pointsActor(req, res);

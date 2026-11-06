@@ -7,7 +7,6 @@ import { useEffect, useState } from 'react';
 import { Ban, Database, LockKeyhole, LogOut, Plus, ShieldCheck, Trash2 } from 'lucide-react';
 import UsageDashboard from './UsageDashboard';
 import PointsManagement from './PointsManagement';
-import { useAuth } from './AuthGate';
 import { clearLocalStoragePreservingClientIdentity } from '../services/clientIdentity';
 import { fetchAccessBlacklist, saveAccessBlacklist } from '../services/accessBlacklistService';
 import type { UsageUser } from '../services/usageService';
@@ -21,7 +20,6 @@ interface SettingsProps {
 }
 
 export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
-  const { guest } = useAuth();
   const [isAuthorized, setIsAuthorized] = useState(false);
   const [adminPassword, setAdminPassword] = useState('');
   const [passwordFeedback, setPasswordFeedback] = useState<string | null>(null);
@@ -158,13 +156,8 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
 
   if (!isAuthorized) {
     return (
-      <div className={guest ? 'mx-auto w-full max-w-7xl p-4 sm:p-6 lg:p-8' : 'mx-auto flex min-h-[calc(100dvh-4rem)] w-full max-w-md items-center px-4 py-10 lg:min-h-dvh'}>
-        {guest && <>
-          <h1 className="text-xl font-bold text-slate-900">设置</h1>
-          <p className="mt-2 text-sm text-slate-500">本地游客可直接查看积分明细、调整积分上限。</p>
-          <PointsManagement />
-        </>}
-        <section className={`w-full rounded-lg border border-slate-200 bg-white p-6 shadow-sm ${guest ? 'mt-8 max-w-md' : ''}`}>
+      <div className="mx-auto flex min-h-[calc(100dvh-4rem)] w-full max-w-md items-center px-4 py-10 lg:min-h-dvh">
+        <section className="w-full rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700">
             <ShieldCheck className="h-5 w-5" />
           </div>

@@ -4,7 +4,7 @@ import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'no
 import fs from 'node:fs';
 import path from 'node:path';
 import { assertPrivateEnvironment } from './serverEnvironment';
-import { createFeishuLogin, isLocalGuestRequest, readFeishuAuthConfig, type FeishuUser } from './feishuAuthServer';
+import { createFeishuLogin, readFeishuAuthConfig, type FeishuUser } from './feishuAuthServer';
 export { assertPrivateEnvironment } from './serverEnvironment';
 
 const deriveKey = (password: string, salt: Buffer) => new Promise<Buffer>((resolve, reject) => {
@@ -12,7 +12,7 @@ const deriveKey = (password: string, salt: Buffer) => new Promise<Buffer>((resol
 });
 const SESSION_MS = 8 * 60 * 60_000;
 const ADMIN_MS = 30 * 60_000;
-type User = { id: string; displayName: string; passwordHash: string; feishu?: FeishuUser; guest?: boolean };
+type User = { id: string; displayName: string; passwordHash: string; feishu?: FeishuUser };
 type Session = { user: User; expires: number; adminUntil: number };
 type RequestSecurity = { userId: string; directory: string; requestId: string };
 const context = new AsyncLocalStorage<RequestSecurity>();
@@ -82,8 +82,6 @@ export function createServerSecurity(options: { privateRoot: string; env?: NodeJ
   }
   const secure = origin.startsWith('https://');
   if (feishu.enabled && new URL(feishu.redirectUri).origin !== origin) throw new Error('APP_ORIGIN and Feishu callback origin must match');
-  const guestAllowed = (req: express.Request) => feishu.enabled && feishu.localGuestEnabled
-    && ['localhost', '127.0.0.1', '[::1]'].includes(new URL(feishu.redirectUri).hostname) && isLocalGuestRequest(req);
   const cookieName = secure ? '__Host-ai_audio_session' : 'ai_audio_session';
   const parsed = JSON.parse(env.AUTH_USERS_JSON || '[]');
   if (!Array.isArray(parsed) || parsed.length > 500) throw new Error('Invalid AUTH_USERS_JSON');
@@ -111,8 +109,7 @@ export function createServerSecurity(options: { privateRoot: string; env?: NodeJ
   const lookup = (req: express.Request) => {
     const key = digest(sessionToken(req));
     const session = sessions.get(key);
-    if (session && session.expires > now() && (!session.user.guest || guestAllowed(req))) return session;
-    if (session?.user.guest && session.expires > now()) return undefined;
+    if (session && session.expires > now()) return session;
     sessions.delete(key); return undefined;
   };
   const cookie = (token: string, maxAge: number) => `${cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure ? '; Secure' : ''}`;
@@ -134,14 +131,10 @@ export function createServerSecurity(options: { privateRoot: string; env?: NodeJ
     complete: (req, res, user) => issueSession(req, res, { id: user.openId, displayName: user.displayName, passwordHash: '', feishu: user }) }));
   router.get('/me', (req, res) => {
     const session = lookup(req);
-    res.json({ enabled: feishu.enabled, user: session?.user.feishu || null, guest: Boolean(session?.user.guest), guestAllowed: guestAllowed(req) });
+    res.json({ enabled: feishu.enabled, user: session?.user.feishu || null, guest: false, guestAllowed: false });
   });
   router.post('/guest', sameOrigin, (req, res) => {
-    if (!guestAllowed(req)) return res.status(403).json({ error: '游客入口仅限已启用的本机直连。' });
-    if (!loginLimit(req.socket.remoteAddress || 'unknown')) return res.status(429).json({ error: publicError(429) });
-    // All direct local guests share a stable quota identity; client IDs cannot reset the daily allowance.
-    if (!lookup(req)?.user.feishu) issueSession(req, res, { id: 'local-guest', displayName: '本地游客', passwordHash: '', guest: true });
-    return res.json({ ok: true });
+    return res.status(403).json({ error: '游客登录已停用，请使用飞书登录。' });
   });
   router.get('/login', (_req, res) => {
     res.setHeader('Content-Security-Policy', "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
@@ -194,12 +187,11 @@ export function createServerSecurity(options: { privateRoot: string; env?: NodeJ
     }
     if (!apiLimit(session.user.id)) return res.status(429).json({ error: publicError(429) });
     return sameOrigin(req, res, () => {
-      const userId = `${session.user.feishu ? 'feishu' : session.user.guest ? 'device' : 'account'}:${session.user.id}`;
+      const userId = `${session.user.feishu ? 'feishu' : 'account'}:${session.user.id}`;
       const directory = path.join(options.privateRoot, createHash('sha256').update(userId).digest('hex'));
       fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-      res.locals.authUser = { id: userId, displayName: session.user.displayName, identitySource: session.user.feishu ? 'feishu' : session.user.guest ? 'device' : 'account' };
+      res.locals.authUser = { id: userId, displayName: session.user.displayName, identitySource: session.user.feishu ? 'feishu' : 'account' };
       res.locals.feishuUser = session.user.feishu;
-      res.locals.localGuest = Boolean(session.user.guest);
       const requestId = randomUUID(); res.setHeader('X-Request-Id', requestId);
       res.setHeader('Cache-Control', 'no-store');
       const originalJson = res.json.bind(res);

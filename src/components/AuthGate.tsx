@@ -4,7 +4,7 @@ import { logoutSfxLibraryAdmin } from '../services/sfxLibraryAdminService';
 import { PointsBalance } from './PointsManagement';
 
 type User = { openId: string; displayName: string; avatarUrl: string };
-type AuthState = { enabled: boolean; user: User | null; guest?: boolean; guestAllowed?: boolean };
+type AuthState = { enabled: boolean; user: User | null };
 const AuthContext = createContext<AuthState>({ enabled: false, user: null });
 export const useAuth = () => useContext(AuthContext);
 
@@ -21,7 +21,6 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   const [auth, setAuth] = useState<AuthState | null>(null);
   const [error, setError] = useState('');
   const [checking, setChecking] = useState(true);
-  const [guestBusy, setGuestBusy] = useState(false);
   const [loginError] = useState(() => {
     const url = new URL(window.location.href);
     const code = url.searchParams.get('auth_error');
@@ -55,7 +54,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
       window.history.replaceState(null, '', url);
     }
     void check();
-    const expired = () => { setAuth(previous => ({ ...previous, enabled: true, user: null, guest: false })); };
+    const expired = () => { setAuth(previous => ({ ...previous, enabled: true, user: null })); };
     const focus = () => { void check(); };
     window.addEventListener('ai-audio:auth-required', expired);
     window.addEventListener('focus', focus);
@@ -67,21 +66,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
     };
   }, [check]);
 
-  const enterGuest = async () => {
-    setGuestBusy(true);
-    setError('');
-    try {
-      const response = await fetch('/api/auth/guest', { method: 'POST' });
-      if (!response.ok) throw new Error('游客登录失败，请重试。');
-      await check();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '游客登录失败。');
-    } finally {
-      setGuestBusy(false);
-    }
-  };
-
-  if (auth && (!auth.enabled || auth.user || auth.guest)) {
+  if (auth && (!auth.enabled || auth.user)) {
     return <AuthContext.Provider value={auth}>{children}</AuthContext.Provider>;
   }
   return (
@@ -101,7 +86,6 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
                 <LogIn className="h-4 w-4" aria-hidden="true" />使用飞书账号登录
               </a>
             )}
-            {auth?.guestAllowed && <button type="button" disabled={guestBusy} onClick={() => void enterGuest()} className="mt-3 w-full rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600">{guestBusy ? '正在进入…' : '游客进入'}</button>}
           </>
         )}
       </section>
@@ -110,7 +94,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
 }
 
 export function AuthProfile({ compact = false }: { compact?: boolean }) {
-  const { user, guest } = useAuth();
+  const { user } = useAuth();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const logout = async () => {
@@ -132,9 +116,9 @@ export function AuthProfile({ compact = false }: { compact?: boolean }) {
         {user?.avatarUrl ? <img src={user.avatarUrl} alt="" referrerPolicy="no-referrer" className="h-8 w-8 shrink-0 rounded-full object-cover" /> : (
           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-xs font-bold text-white">{user?.displayName.slice(0, 1) || 'AD'}</span>
         )}
-        {!compact && <div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold text-slate-700">{user?.displayName || (guest ? '本地游客' : 'Audio Director')}</p><p className="mt-1 text-[10px] text-slate-500">{user ? '飞书账号' : '本地工作空间'}</p></div>}
+        {!compact && <div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold text-slate-700">{user?.displayName || 'Audio Director'}</p><p className="mt-1 text-[10px] text-slate-500">{user ? '飞书账号' : '本地工作空间'}</p></div>}
       </div>
-      {(user || guest) && <button type="button" disabled={busy} onClick={() => void logout()} className="mt-3 w-full rounded-lg border border-slate-200 px-1 py-2 text-xs text-slate-600 hover:bg-white disabled:opacity-50">{busy ? '退出中…' : '退出登录'}</button>}
+      {user && <button type="button" disabled={busy} onClick={() => void logout()} className="mt-3 w-full rounded-lg border border-slate-200 px-1 py-2 text-xs text-slate-600 hover:bg-white disabled:opacity-50">{busy ? '退出中…' : '退出登录'}</button>}
       <PointsBalance compact={compact} />
       {error && <p role="alert" className="mt-2 text-xs text-red-600">{error}</p>}
     </div>

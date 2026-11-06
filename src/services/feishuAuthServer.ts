@@ -18,13 +18,7 @@ export function readFeishuAuthConfig(env: NodeJS.ProcessEnv = process.env) {
     }
   }
   return { enabled, appId, appSecret, redirectUri,
-    secure: enabled && new URL(redirectUri).protocol === 'https:', localGuestEnabled: env.LOCAL_GUEST_LOGIN_ENABLED === 'true' };
-}
-
-export function isLocalGuestRequest(req: express.Request) {
-  return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress || '')
-    && ['localhost', '127.0.0.1', '[::1]'].includes(req.hostname)
-    && !req.get('forwarded') && !req.get('x-forwarded-for') && !req.get('x-forwarded-host');
+    secure: enabled && new URL(redirectUri).protocol === 'https:' };
 }
 
 // OAuth state is one-use, browser-bound and server-side. Provider tokens are never stored.
