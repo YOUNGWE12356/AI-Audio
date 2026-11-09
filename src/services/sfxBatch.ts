@@ -1,6 +1,9 @@
+export type BatchSoundOccurrence = { time: number; endTime: number };
 export type SfxBatchRequirement = {
   id: string; name: string; description: string; keywords: string; searchQuery: string; duration: number; scene: string;
   time?: number; endTime?: number;
+  /** Additional placements of the same reusable sound, excluding the primary range. */
+  occurrences?: BatchSoundOccurrence[];
 };
 export const SFX_BATCH_MAX_ROWS = 300;
 export const batchQuerySource = (row: { keywords: string; description: string }) => JSON.stringify(['sound-keywords-v4', row.keywords.trim(), row.description.trim()]);
@@ -40,11 +43,26 @@ export function normalizeBatchRequirements(items: unknown): SfxBatchRequirement[
     return { id: `sfx-${index + 1}`, name: batchFileStem(text('name', 200), `Sfx_${index + 1}`),
       description: text('description', 2000), keywords: text('keywords', 300), searchQuery: validateBatchSearchQuery(text('searchQuery', 1000)),
       duration, scene: text('scene', 1000),
+      ...(Array.isArray(item.occurrences) ? { occurrences: normalizeSoundOccurrences(item.occurrences) } : {}),
       ...(typeof item.time === 'number' && Number.isFinite(item.time) && item.time >= 0 ? {
         time: Math.round(item.time * 1000) / 1000,
         ...(typeof item.endTime === 'number' && Number.isFinite(item.endTime) && item.endTime > item.time
           ? { endTime: Math.round(item.endTime * 1000) / 1000 } : {}),
       } : {}) };
+  });
+}
+export function normalizeSoundOccurrences(value: unknown): BatchSoundOccurrence[] {
+  if (!Array.isArray(value) || value.length > SFX_BATCH_MAX_ROWS) throw new Error('音效复用点位无效或过多。');
+  const seen = new Set<string>();
+  return value.map(item => {
+    if (!item || !Number.isFinite(item.time) || !Number.isFinite(item.endTime) || item.time < 0 || item.endTime <= item.time) {
+      throw new Error('音效复用点位须有有效的起止时间。');
+    }
+    return { time: Math.round(item.time * 1000) / 1000, endTime: Math.round(item.endTime * 1000) / 1000 };
+  }).filter(item => {
+    const key = `${item.time}:${item.endTime}`;
+    if (item.endTime <= item.time || seen.has(key)) return false;
+    seen.add(key); return true;
   });
 }
 // Protect spreadsheet formulas without damaging ordinary commas, quotes or newlines.
@@ -54,9 +72,10 @@ const csvCell = (value: unknown) => {
   return `"${text.replace(/"/g, '""')}"`;
 };
 export function batchRequirementsCsv(rows: Array<SfxBatchRequirement & { confirmedDuration?: number }>) {
-  const cells = [['序号', '命名', '音效描述', '关键词', '需求时长（秒）', '场景', '确认音频时长（秒）', '视频点位（秒）', '视频结束（秒）'],
+  const cells = [['序号', '命名', '音效描述', '关键词', '需求时长（秒）', '场景', '确认音频时长（秒）', '视频点位（秒）', '视频结束（秒）', '其他复用范围（秒）'],
     ...rows.map((row, index) => [index + 1, batchFileStem(row.name), row.description, row.keywords,
-      row.duration, row.scene, row.confirmedDuration ?? '', row.time ?? '', row.time === undefined ? '' : row.endTime ?? row.time + row.duration])];
+      row.duration, row.scene, row.confirmedDuration ?? '', row.time ?? '', row.time === undefined ? '' : row.endTime ?? row.time + row.duration,
+      row.occurrences?.map(item => `${item.time}—${item.endTime}`).join('；') || ''])];
   return '\uFEFF' + cells.map(row => row.map(csvCell).join(',')).join('\r\n');
 }
 export function uniqueBatchFileNames(names: string[]) {

@@ -1,17 +1,17 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Film, Pause, Play, Plus, RotateCw, Trash2 } from 'lucide-react';
-import { batchTimeRange, isBatchPoint } from '../services/batchVideoTimeline';
+import { batchOccurrenceRange, isBatchPoint, layoutBatchTimeRanges } from '../services/batchVideoTimeline';
 import BatchSfxRanges, { rangeTimeLabel } from './BatchSfxRanges';
 import type { BatchRow, BatchVideoAsset } from '../services/sfxBatchProject';
 
 const control = 'inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:border-emerald-400 disabled:opacity-40';
 export const pointLabel = rangeTimeLabel;
 
-export default function BatchSfxVideo({ asset, rows, activeRowId, locked, active = true, onDuration, onSelect,
+export default function BatchSfxVideo({ asset, rows, activeRowId, activeOccurrenceIndex = 0, locked, active = true, onDuration, onSelect,
   onAdd, onMove, onDelete, onBeginPlayback }: {
-  asset: BatchVideoAsset; rows: BatchRow[]; activeRowId?: string; locked: boolean; active?: boolean;
-  onDuration: (duration: number) => void; onSelect: (id: string) => void; onAdd: (time: number) => void;
-  onMove: (id: string, time: number | undefined, endTime?: number) => void; onDelete: (id: string) => void;
+  asset: BatchVideoAsset; rows: BatchRow[]; activeRowId?: string; activeOccurrenceIndex?: number; locked: boolean; active?: boolean;
+  onDuration: (duration: number) => void; onSelect: (id: string, occurrenceIndex: number) => void; onAdd: (time: number) => void;
+  onMove: (id: string, time: number | undefined, endTime?: number, occurrenceIndex?: number) => void; onDelete: (id: string) => void;
   onBeginPlayback: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -57,13 +57,14 @@ export default function BatchSfxVideo({ asset, rows, activeRowId, locked, active
     window.addEventListener('generated-audio-player-stop-others', interrupt);
     return () => { window.removeEventListener('generated-audio-player-stop-others', interrupt); pause(); };
   }, []);
-  const points = rows.filter(row => row.videoId === asset.id && isBatchPoint(row.time, duration));
+  const points = layoutBatchTimeRanges(rows, asset.id, duration);
   const unlocatedCount = rows.filter(row => row.videoId === asset.id && !isBatchPoint(row.time, duration)).length;
   const selected = rows.find(row => row.id === activeRowId && row.videoId === asset.id);
-  const selectedRange = selected ? batchTimeRange(selected, duration) : null;
-  const locate = (row: BatchRow) => {
-    pause(); onSelect(row.id);
-    if (videoRef.current && isBatchPoint(row.time, duration)) { videoRef.current.currentTime = row.time; setTime(row.time); }
+  const selectedRange = selected ? batchOccurrenceRange(selected, activeOccurrenceIndex, duration) : null;
+  const locate = (row: BatchRow, occurrenceIndex: number) => {
+    pause(); onSelect(row.id, occurrenceIndex);
+    const range = batchOccurrenceRange(row, occurrenceIndex, duration);
+    if (videoRef.current && range) { videoRef.current.currentTime = range.start; setTime(range.start); }
   };
   const seek = (value: number) => { pause(); if (videoRef.current) videoRef.current.currentTime = value; setTime(value); };
 
@@ -93,12 +94,12 @@ export default function BatchSfxVideo({ asset, rows, activeRowId, locked, active
     </div>
     <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
       <input type="range" aria-label="视频点位播放头" min={0} max={duration || 1} step={0.001} value={Math.min(time, duration)} disabled={!duration} onChange={e => seek(Number(e.target.value))} className="w-full accent-emerald-600" />
-      <BatchSfxRanges rows={rows} videoId={asset.id} duration={duration} time={time} selectedId={selected?.id} locked={locked || !!mediaError} onSelect={locate} onAdd={point => { seek(point); onAdd(point); }} onChange={(id, start, end) => { pause(); onMove(id, start, end); }} />
+      <BatchSfxRanges rows={rows} videoId={asset.id} duration={duration} time={time} selectedId={selected?.id} selectedOccurrenceIndex={activeOccurrenceIndex} locked={locked || !!mediaError} onSelect={locate} onAdd={point => { seek(point); onAdd(point); }} onChange={(id, start, end, occurrenceIndex) => { pause(); onMove(id, start, end, occurrenceIndex); }} />
       <p className="text-[10px] text-slate-400">点击范围展开需求与试听；按住中间拖动整体位置，拖动两端调整长短。重叠范围分行显示，双击空白处新增。分析范围为画面建议，可试听校准。</p>
     </div>
     {selected && <div className="flex flex-wrap items-end gap-2 rounded-xl bg-emerald-50/60 p-3">
-      <label className="text-[11px] text-slate-600">开始（秒）<input aria-label="当前音效范围开始秒数" type="number" min={0} max={duration} step="0.001" value={selectedRange?.start ?? ''} disabled={locked} onChange={e => onMove(selected.id, e.target.value === '' ? undefined : Number(e.target.value))} className="ml-2 w-24 rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs" /></label>
-      <label className="text-[11px] text-slate-600">结束（秒）<input aria-label="当前音效范围结束秒数" type="number" min={selectedRange?.start ?? 0} max={duration} step="0.001" value={selectedRange?.end ?? ''} disabled={locked || !selectedRange} onChange={e => { if (e.target.value !== '') onMove(selected.id, selected.time, Number(e.target.value)); }} className="ml-2 w-24 rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs" /></label>
-      <span className="mb-2 text-xs text-emerald-700">{selectedRange && `${(selectedRange.end - selectedRange.start).toFixed(3)} 秒 · `}{selected.name}</span><button className={control} disabled={locked || !duration} onClick={() => onMove(selected.id, Math.min(duration - 0.001, videoRef.current?.currentTime || 0))}>使用当前播放位置</button><button className={`${control} hover:!text-red-600`} disabled={locked} onClick={() => onDelete(selected.id)}><Trash2 size={13} />删除范围与需求</button></div>}
+      <label className="text-[11px] text-slate-600">开始（秒）<input aria-label="当前音效范围开始秒数" type="number" min={0} max={duration} step="0.001" value={selectedRange?.start ?? ''} disabled={locked} onChange={e => onMove(selected.id, e.target.value === '' ? undefined : Number(e.target.value), undefined, activeOccurrenceIndex)} className="ml-2 w-24 rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs" /></label>
+      <label className="text-[11px] text-slate-600">结束（秒）<input aria-label="当前音效范围结束秒数" type="number" min={selectedRange?.start ?? 0} max={duration} step="0.001" value={selectedRange?.end ?? ''} disabled={locked || !selectedRange} onChange={e => { if (e.target.value !== '') onMove(selected.id, selectedRange?.start, Number(e.target.value), activeOccurrenceIndex); }} className="ml-2 w-24 rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs" /></label>
+      <span className="mb-2 text-xs text-emerald-700">{selectedRange && `${(selectedRange.end - selectedRange.start).toFixed(3)} 秒 · `}{selected.name}{!!selected.occurrences?.length && ` · 复用位置 ${activeOccurrenceIndex + 1}/${selected.occurrences.length + 1}`}</span><button className={control} disabled={locked || !duration} onClick={() => onMove(selected.id, Math.min(duration - 0.001, videoRef.current?.currentTime || 0), undefined, activeOccurrenceIndex)}>使用当前播放位置</button><button className={`${control} hover:!text-red-600`} disabled={locked} onClick={() => onDelete(selected.id)}><Trash2 size={13} />删除需求及全部范围</button></div>}
   </section>;
 }

@@ -8,7 +8,7 @@ import { isBatchSfxDurationValid, needsBatchSearchQuery } from '../services/sfxB
 import { analyzeBatchRequirements, prepareSfxBatchInput, resolveBatchSearchQuery, saveBatchDownload, SFX_BATCH_ACCEPT, validateSfxBatchFile } from '../services/sfxBatchClient';
 import { batchFileStem, batchQuerySource, batchRequirementsCsv, createBatchSfxRequest, SFX_BATCH_MAX_ROWS, uniqueBatchFileNames } from '../services/sfxBatch';
 import { batchId, clearBatchWorkspace, confirmedVersion, loadBatchProject, loadBatchVideo, saveBatchVideo, sameBatchRange, saveBatchProject, type BatchRow, type BatchVersion, type BatchVideoAsset } from '../services/sfxBatchProject';
-import { batchTimeRange, isBatchPoint } from '../services/batchVideoTimeline';
+import { batchTimeRange, batchOccurrenceRange, updateBatchOccurrence, isBatchPoint } from '../services/batchVideoTimeline';
 import { readGeneratedSoundEffectDuration } from '../utils/soundEffectAudio';
 import type { AudioDownloadRange } from '../services/audioRangeExport';
 import { requirementsErrorText as errorText } from '../services/sfxRequirementsErrors';
@@ -48,6 +48,7 @@ export default function BatchSfxStudio({ active = true }: { active?: boolean }) 
   const [append, setAppend] = useState(true);
   const [sourceExpanded, setSourceExpanded] = useState(true);
   const [activeRowId, setActiveRowId] = useState('');
+  const [activeOccurrenceIndex, setActiveOccurrenceIndex] = useState(0);
   const [timelineDetails, setTimelineDetails] = useState(false);
   const [activeAudioId, setActiveAudioId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -156,7 +157,7 @@ export default function BatchSfxStudio({ active = true }: { active?: boolean }) 
       const next = requirements.map(row => {
         const range = analysisVideo ? batchTimeRange(row, videoDuration) : null;
         return { ...row, searchQuerySource: batchQuerySource(row), ...(analysisVideo ? { videoId: analysisVideo.id } : {}),
-          ...(range ? { endTime: range.end, duration: Math.max(0.5, Math.min(30, range.end - range.start)) } : {}),
+          ...(range ? { endTime: range.end, duration: row.occurrences?.length ? row.duration : Math.max(0.5, Math.min(30, range.end - range.start)) } : {}),
           selected: true, versions: [], excludedSources: [], status: '待制作' };
       });
       if (!appendResults) {
@@ -165,7 +166,7 @@ export default function BatchSfxStudio({ active = true }: { active?: boolean }) 
       }
       setRows(current => appendResults ? [...current, ...next] : next);
       const unlocatedCount = analysisVideo ? next.filter(row => !batchTimeRange(row, videoDuration)).length : 0;
-      setActiveRowId(next[0].id); setSourceExpanded(false); setMessage(`${inventory}${regenerate ? '已重新生成' : '分析完成，新增'} ${next.length} 条音效需求。${excluded}${unlocatedCount ? `其中 ${unlocatedCount} 条待定位，可在需求表填写范围。` : ''}`);
+      setActiveRowId(next[0].id); setActiveOccurrenceIndex(0); setSourceExpanded(false); setMessage(`${inventory}${regenerate ? '已重新生成' : '分析完成，新增'} ${next.length} 条音效需求。${excluded}${unlocatedCount ? `其中 ${unlocatedCount} 条待定位，可在需求表填写范围。` : ''}`);
     } catch (e) { setError(errorText(e)); setMessage(''); }
     finally { busyRef.current = false; setBusy(false); window.dispatchEvent(new Event('ai-audio:usage-updated')); }
   };
@@ -186,18 +187,20 @@ export default function BatchSfxStudio({ active = true }: { active?: boolean }) 
     const id = batchId();
     setRows(current => [...current, { id, name: `Sfx_${current.length + 1}`, description: '', keywords: '', searchQuery: '', duration: 3, scene: '', selected: true, versions: [], excludedSources: [], status: '待制作', ...(videoAsset ? { videoId: videoAsset.id, time, ...(time !== undefined ? { endTime: Math.min(videoDuration, time + 3) } : {}) } : {}) }]);
     setActiveRowId(id);
+    setActiveOccurrenceIndex(0);
     if (time !== undefined) setTimelineDetails(true);
     setActiveAudioId(null);
   };
-  const movePoint = (id: string, time: number | undefined, endTime?: number) => {
+  const movePoint = (id: string, time: number | undefined, endTime?: number, occurrenceIndex = 0) => {
     if (busyRef.current) return;
-    if (time === undefined) { setError(''); patchRow(id, { time: undefined, endTime: undefined, videoId: videoAsset?.id }); return; }
+    if (time === undefined) { setError(''); patchRow(id, row => ({ ...updateBatchOccurrence(row, occurrenceIndex, undefined), videoId: videoAsset?.id })); setActiveOccurrenceIndex(0); return; }
     const row = rowsRef.current.find(row => row.id === id);
     if (!row || !isBatchPoint(time, videoDuration)) { setError('范围开始须在视频时长内，且不能等于视频结束时间。'); return; }
-    const previous = row.videoId === videoAsset?.id ? batchTimeRange(row, videoDuration) : null;
+    const previous = row.videoId === videoAsset?.id ? batchOccurrenceRange(row, occurrenceIndex, videoDuration) : null;
     const end = endTime ?? (previous && previous.end > time ? previous.end : Math.min(videoDuration, time + (previous ? previous.end - previous.start : row.duration || 3)));
     if (!Number.isFinite(end) || end <= time || end > videoDuration) { setError('范围结束须大于开始时间，且不能超过视频时长。'); return; }
-    setError(''); patchRow(id, { time, endTime: end, duration: Math.max(0.5, Math.min(30, Math.round((end - time) * 1000) / 1000)), videoId: videoAsset?.id });
+    setError(''); patchRow(id, row => ({ ...updateBatchOccurrence(row, occurrenceIndex, time, end),
+      duration: row.occurrences?.length ? row.duration : Math.max(0.5, Math.min(30, Math.round((end - time) * 1000) / 1000)), videoId: videoAsset?.id }));
   };
   const capture = async (rowId: string, version: BatchVersion) => {
     if (version.blob && version.url) return;
@@ -243,7 +246,7 @@ export default function BatchSfxStudio({ active = true }: { active?: boolean }) 
     for (const id of ids) {
       if (stopRef.current) break;
       const row = rowsRef.current.find(r => r.id === id); if (!row) continue;
-      setActiveRowId(id); setMessage(`${kind === 'search' ? '搜索' : '生成'} ${completed + failed + 1}/${ids.length}：${row.name}`);
+      setActiveRowId(id); setActiveOccurrenceIndex(0); setMessage(`${kind === 'search' ? '搜索' : '生成'} ${completed + failed + 1}/${ids.length}：${row.name}`);
       try { await makeRow(row, kind, searchBatchId); completed++; }
       catch (e) { failed++; patchRow(id, { status: '制作失败，可重试', error: errorText(e) }); }
       finally { window.dispatchEvent(new Event('ai-audio:usage-updated')); }
@@ -304,10 +307,11 @@ export default function BatchSfxStudio({ active = true }: { active?: boolean }) 
   const chosenVersion = activeRow ? confirmedVersion(activeRow) : undefined;
   const locked = busy || clearing || !hydrated;
   const selectRow = (id: string) => {
+    setActiveOccurrenceIndex(0);
     if (id !== activeRow?.id) { setActiveRowId(id); setActiveAudioId(null); }
   };
-  const selectVideoRange = (id: string) => {
-    selectRow(id); setTimelineDetails(true);
+  const selectVideoRange = (id: string, occurrenceIndex = 0) => {
+    selectRow(id); setActiveOccurrenceIndex(occurrenceIndex); setTimelineDetails(true);
     const row = rowsRef.current.find(row => row.id === id);
     if (!row) return;
     const version = confirmedVersion(row) || row.versions.find(version => version.id === row.activeVersionId) || row.versions[0];
@@ -315,7 +319,7 @@ export default function BatchSfxStudio({ active = true }: { active?: boolean }) 
     else if (version && !version.url) void selectVersion(id, version);
   };
   const showTimelineDetails = timelineDetails && !!videoAsset && activeRow?.videoId === videoAsset.id;
-  const activeRange = activeRow && activeRow.videoId === videoAsset?.id ? batchTimeRange(activeRow, videoDuration) : null;
+  const activeRange = activeRow && activeRow.videoId === videoAsset?.id ? batchOccurrenceRange(activeRow, activeOccurrenceIndex, videoDuration) : null;
   const inspector = <BatchSfxInspector row={activeRow} index={activeRow ? rows.indexOf(activeRow) : 0} version={activeVersion} chosen={chosenVersion} locked={locked} inline={showTimelineDetails} range={activeRange} hasVideo={!!videoAsset}
     activeAudioId={activeAudioId} setActiveAudioId={setActiveAudioId} onClose={() => setTimelineDetails(false)}
     onEdit={update => { if (activeRow) patchRow(activeRow.id, update); }}
@@ -360,7 +364,7 @@ export default function BatchSfxStudio({ active = true }: { active?: boolean }) 
       <p className="text-[11px] text-slate-500">关键词用中文填写，搜索或生成时自动提炼为1～2个英文词。视频仅识别新触发的动作/动效，同次动画合并，常驻背景与循环装饰不列需求；范围可手动校准。分析及关键词 AI 转换按实际 Token 计费；联网搜索整批成功共1积分，全部未找到不扣搜索积分，再次搜索算新一批；AI生成每条1版、2积分/秒。</p>
       </div>
     </section>
-    {videoAsset && <BatchSfxVideo asset={videoAsset} rows={rows} activeRowId={activeRowId} locked={locked} active={active} onDuration={setVideoDuration} onSelect={selectVideoRange} onAdd={add} onMove={movePoint} onDelete={id => setRows(current => current.filter(row => row.id !== id))} onBeginPlayback={() => setActiveAudioId(null)} />}
+    {videoAsset && <BatchSfxVideo asset={videoAsset} rows={rows} activeRowId={activeRowId} activeOccurrenceIndex={activeOccurrenceIndex} locked={locked} active={active} onDuration={setVideoDuration} onSelect={selectVideoRange} onAdd={add} onMove={movePoint} onDelete={id => setRows(current => current.filter(row => row.id !== id))} onBeginPlayback={() => setActiveAudioId(null)} />}
     {showTimelineDetails && <div ref={detailsRef}>{inspector}</div>}
     {(message || error || storageWarning) && <div role="status" aria-live="polite" className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs space-y-1">{message && <p className="text-slate-700 flex items-center gap-2">{busy && <Loader2 size={14} className="animate-spin" />}{message}</p>}{error && <p className="text-red-600">{error}</p>}{storageWarning && <p className="text-amber-700">{storageWarning}</p>}</div>}
     <div className="flex flex-wrap gap-3 items-start">
@@ -387,7 +391,7 @@ export default function BatchSfxStudio({ active = true }: { active?: boolean }) 
               {rows.map((row, index) => <tr key={row.id} aria-selected={activeRow?.id === row.id} onClick={() => selectRow(row.id)} onFocus={e => { if (e.target.matches('input, textarea')) selectRow(row.id); }} className={`align-top transition-colors ${activeRow?.id === row.id ? 'bg-emerald-50/60' : 'hover:bg-slate-50/60'}`}>
                 <td className={`px-3 py-3 border-l-2 ${activeRow?.id === row.id ? 'border-emerald-500' : 'border-transparent'}`}><input type="checkbox" aria-label={`选择音效${index + 1}`} checked={row.selected} disabled={locked} onChange={e => patchRow(row.id, { selected: e.target.checked })} /><button aria-label={`试听音效${index + 1}`} className={`mt-3 block text-[11px] font-semibold ${activeRow?.id === row.id ? 'text-emerald-700' : 'text-slate-400'}`} onClick={() => selectRow(row.id)}>{String(index + 1).padStart(2, '0')}</button></td>
                 <td className="px-2 py-3"><input aria-label={`音效${index + 1}命名`} title={row.name} className={`${inputClass} !px-2 font-medium`} value={row.name} disabled={locked} onChange={e => patchRow(row.id, { name: e.target.value })} onBlur={() => patchRow(row.id, { name: batchFileStem(row.name) })} />{confirmedVersion(row) ? <span className="mt-3 inline-flex items-center gap-1 rounded-md bg-emerald-100 px-2 py-1 text-[10px] font-semibold text-emerald-700"><Check size={12} />已确认音效</span> : <p className="mt-3 text-[10px] leading-4 text-slate-500">{row.status}</p>}<button className="mt-2 block text-[11px] font-semibold text-emerald-700 hover:underline" onClick={() => selectRow(row.id)}>试听 / 剪辑{row.versions.length ? ` · ${row.versions.length} 版` : ''}</button>{row.error && <p title={row.error} className="mt-2 line-clamp-2 text-[10px] text-red-600">{row.error}</p>}</td>
-                <td className="px-2 py-3"><textarea aria-label={`音效${index + 1}描述`} className={`${inputClass} !px-2 resize-y min-h-[60px]`} rows={2} value={row.description} disabled={locked} onChange={e => patchRow(row.id, { description: e.target.value })} /><label className="mt-2 block text-[10px] text-slate-400">场景 / 时间点<input aria-label={`音效${index + 1}场景`} className={`${inputClass} mt-1 !px-2`} value={row.scene} disabled={locked} onChange={e => patchRow(row.id, { scene: e.target.value })} /></label></td>
+                <td className="px-2 py-3"><textarea aria-label={`音效${index + 1}描述`} className={`${inputClass} !px-2 resize-y min-h-[60px]`} rows={2} value={row.description} disabled={locked} onChange={e => patchRow(row.id, { description: e.target.value })} /><label className="mt-2 block text-[10px] text-slate-400">场景 / 时间点<input aria-label={`音效${index + 1}场景`} className={`${inputClass} mt-1 !px-2`} value={row.scene} disabled={locked} onChange={e => patchRow(row.id, { scene: e.target.value })} /></label>{!!row.occurrences?.length && <p className="mt-2 text-[10px] text-emerald-700" title={[{ time: row.time, endTime: row.endTime }, ...row.occurrences].map(point => `${point.time}—${point.endTime} 秒`).join('；')}>同一音效复用 {row.occurrences.length + 1} 次，时间轴保留全部位置</p>}</td>
                 <td className="px-2 py-3"><textarea aria-label={`音效${index + 1}关键词`} rows={2} placeholder="用中文填写，例如：木门吱呀" className={`${inputClass} !px-2 resize-y min-h-[60px]`} value={row.keywords} disabled={locked} onChange={e => patchRow(row.id, { keywords: e.target.value })} /><p className="mt-2 text-[10px] text-slate-400">搜索或生成时自动转换为英文</p></td>
                 <td className="px-2 py-3"><input aria-label={`音效${index + 1}时长`} type="number" min="0.5" max="30" step="0.1" className={`${inputClass} !px-1.5 tabular-nums`} value={Number.isFinite(row.duration) ? row.duration : ''} disabled={locked} onChange={e => patchRow(row.id, { duration: e.target.value === '' ? NaN : Number(e.target.value) })} />{videoAsset && <>
                   <label className="mt-3 block text-[10px] text-slate-500">开始 / 秒<input aria-label={`音效${index + 1}范围开始`} type="number" min="0" max={videoDuration || undefined} step="0.001" placeholder="待设置" className={`${inputClass} mt-1 !px-1 tabular-nums`} value={row.videoId === videoAsset.id ? row.time ?? '' : ''} disabled={locked || !videoDuration} onChange={e => movePoint(row.id, e.target.value === '' ? undefined : Number(e.target.value))} /></label>

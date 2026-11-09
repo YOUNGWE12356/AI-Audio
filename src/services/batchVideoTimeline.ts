@@ -12,6 +12,17 @@ export function batchTimeRange(row: { time?: number; endTime?: number; duration:
   return end > row.time ? { start: row.time, end } : null;
 }
 
+export function batchOccurrenceRange(row: BatchRow, occurrenceIndex: number, duration: number) {
+  return batchTimeRange(occurrenceIndex ? { ...row.occurrences?.[occurrenceIndex - 1], duration: row.duration } : row, duration);
+}
+
+export function updateBatchOccurrence(row: BatchRow, occurrenceIndex: number, time: number | undefined, endTime?: number): BatchRow {
+  if (!occurrenceIndex) return { ...row, time, endTime };
+  if (!row.occurrences?.[occurrenceIndex - 1]) return row;
+  return { ...row, occurrences: row.occurrences.flatMap((point, index) => index !== occurrenceIndex - 1 ? [point]
+    : time === undefined || endTime === undefined ? [] : [{ time, endTime }]) };
+}
+
 export function resizeBatchTimeRange(range: BatchTimeRange, edge: 'start' | 'end', time: number, duration: number): BatchTimeRange {
   const value = Math.round(time * 1000) / 1000;
   return edge === 'start' ? { start: Math.max(0, Math.min(range.end - 0.001, value)), end: range.end }
@@ -28,8 +39,10 @@ export function moveBatchTimeRange(range: BatchTimeRange, delta: number, duratio
 export function layoutBatchTimeRanges(rows: BatchRow[], videoId: string, duration: number) {
   const ends: number[] = [];
   return rows.flatMap((row, index) => {
-    const range = row.videoId === videoId ? batchTimeRange(row, duration) : null;
-    return range ? [{ row, index, range }] : [];
+    return row.videoId !== videoId ? [] : Array.from({ length: 1 + (row.occurrences?.length || 0) }, (_, occurrenceIndex) => {
+      const range = batchOccurrenceRange(row, occurrenceIndex, duration);
+      return range ? { row, index, range, occurrenceIndex } : null;
+    }).filter(item => item !== null);
   }).sort((a, b) => a.range.start - b.range.start || a.index - b.index).map(item => {
     let lane = ends.findIndex(end => end <= item.range.start);
     if (lane < 0) lane = ends.length;
@@ -41,12 +54,14 @@ export function layoutBatchTimeRanges(rows: BatchRow[], videoId: string, duratio
 export function batchVideoClips(rows: BatchRow[], videoId: string, duration: number) {
   return rows.flatMap(row => {
     const version = confirmedVersion(row);
-    const range = batchTimeRange(row, duration);
-    if (row.videoId !== videoId || !range || !version?.confirmedBlob || row.placedVersionId !== version.id) return [];
+    if (row.videoId !== videoId || !version?.confirmedBlob || row.placedVersionId !== version.id) return [];
     const length = (version.confirmedRange?.end || 0) - (version.confirmedRange?.start || 0);
     if (length <= 0) return [];
-    return [{ rowId: row.id, versionId: version.id, name: row.name, time: range.start,
-      duration: Math.min(length, range.end - range.start), blob: version.confirmedBlob }];
+    return Array.from({ length: 1 + (row.occurrences?.length || 0) }, (_, occurrenceIndex) => {
+      const range = batchOccurrenceRange(row, occurrenceIndex, duration);
+      return range ? { rowId: row.id, occurrenceIndex, versionId: version.id, name: row.name, time: range.start,
+        duration: Math.min(length, range.end - range.start), blob: version.confirmedBlob! } : null;
+    }).filter(item => item !== null);
   });
 }
 export type BatchVideoClip = ReturnType<typeof batchVideoClips>[number];
