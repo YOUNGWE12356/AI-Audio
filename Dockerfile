@@ -22,5 +22,5 @@ COPY package.json ./
 RUN mkdir -p data uploads && chown node:node data uploads
 USER node
 EXPOSE 4030
-HEALTHCHECK --interval=5s --timeout=3s --start-period=20s --retries=6 CMD node -e "fetch('http://127.0.0.1:4030/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+HEALTHCHECK --interval=5s --timeout=3s --start-period=20s --retries=6 CMD node -e "fetch('http://127.0.0.1:4030/healthz').then(r=>{if(!r.ok)console.error('GET /healthz HTTP '+r.status);process.exit(r.ok?0:1)}).catch(e=>{console.error('GET /healthz failed:',e.message,e.cause?.code||'');process.exit(1)})"
 CMD ["node", "dist/server/server.cjs"]

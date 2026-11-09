@@ -57,7 +57,13 @@ if [[ -n "$OLD_ID" ]]; then
   "${DOCKER[@]}" rename "$APP" "$BACKUP"
 fi
 rollback() {
-  "${DOCKER[@]}" logs --tail 60 "$APP" >&2 || true
+  printf '\n失败容器状态（回滚前）：\n' >&2
+  "${DOCKER[@]}" inspect --format 'status={{.State.Status}} exitCode={{.State.ExitCode}} oomKilled={{.State.OOMKilled}} restarts={{.RestartCount}} error={{json .State.Error}}' "$APP" >&2 || true
+  printf '\n健康检查记录：\n' >&2
+  "${DOCKER[@]}" inspect --format '{{if .State.Health}}{{json .State.Health}}{{else}}无健康检查记录{{end}}' "$APP" >&2 || true
+  printf '\n服务日志（最近 120 行）：\n' >&2
+  "${DOCKER[@]}" logs --timestamps --tail 120 "$APP" >&2 || true
+  printf '\n开始回滚…\n' >&2
   "${DOCKER[@]}" rm -f "$APP" >/dev/null 2>&1 || true
   if [[ -n "$OLD_ID" ]]; then
     "${DOCKER[@]}" rename "$BACKUP" "$APP"

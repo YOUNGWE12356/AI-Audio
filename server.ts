@@ -1,4 +1,4 @@
-import { logEvent } from './src/services/safeLogging';
+import { logEvent, logStartupError } from './src/services/safeLogging';
 import 'dotenv/config';
 import express from 'express';
 import { PointsStore, pointsMonth, validateMonth } from './src/services/pointsStore';
@@ -8148,6 +8148,6 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
 }
 
 startServer().catch((err) => {
-  logEvent('server.ts:8250', 'error', err);
+  logStartupError(err);
   process.exitCode = 1;
 });
