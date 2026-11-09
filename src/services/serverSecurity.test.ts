@@ -110,7 +110,8 @@ test('realpath download checks reject traversal, symlinks, manifests and dotfile
   fs.writeFileSync(path.join(root, 'audio.wav'), 'audio');
   fs.writeFileSync(path.join(root, 'job.json'), '{}');
   fs.writeFileSync(path.join(root, 'audio.wav.source.json'), '{}');
-  fs.symlinkSync(path.join(directory, '.env'), path.join(root, 'link.wav'));
+  try { fs.symlinkSync(path.join(directory, '.env'), path.join(root, 'link.wav')); }
+  catch (error) { if (process.platform !== 'win32' || (error as NodeJS.ErrnoException).code !== 'EPERM') throw error; t.diagnostic('Windows symlink creation requires developer mode; traversal and missing-link checks still run.'); }
   assert.equal(resolvePrivateDownload(root, 'audio.wav'), fs.realpathSync(path.join(root, 'audio.wav')));
   for (const name of ['../.env', 'x/../../.env', '.env', 'job.json', 'audio.wav.source.json', 'link.wav', '/audio.wav', 'a\\b']) {
     assert.equal(resolvePrivateDownload(root, name), null, name);
@@ -214,7 +215,7 @@ test('authenticated middleware isolates files/jobs, revokes sessions and rejects
 });
 
 test('real server rejects audited attacks and preserves an authenticated upload/download workflow', { timeout: 30_000 }, async t => {
-  const directory = temp(); t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const directory = temp();
   // Allocate a loopback port without touching the application's configured deployment.
   const allocator = express().listen(0, '127.0.0.1'); await once(allocator, 'listening');
   const port = (allocator.address() as any).port; await new Promise<void>(resolve => allocator.close(() => resolve()));
@@ -228,7 +229,10 @@ test('real server rejects audited attacks and preserves an authenticated upload/
       SFX_LIBRARY_ADMIN_PASSWORD: adminPassword, UPLOADS_CLEANUP_ENABLED: 'false',
       OPENAI_API_KEY: '', ARK_API_KEY: '', TOKENHUB_API_KEY: '', ELEVENLABS_API_KEY: '', ELEVENLABS_FALLBACK_API_KEY: '', ELEVENLABS_API_KEYS: '' },
     stdio: ['ignore', 'pipe', 'pipe'] });
-  t.after(async () => { if (child.exitCode === null) { child.kill(); await once(child, 'exit'); } });
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) { const exited = once(child, 'exit'); child.kill(); await exited; }
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('Server did not become ready')), 15_000);
     child.stdout.on('data', data => { if (String(data).includes('Full-stack server running')) { clearTimeout(timeout); resolve(); } });
@@ -246,20 +250,22 @@ test('real server rejects audited attacks and preserves an authenticated upload/
     assert.equal((await request(url)).status, 401, url);
   }
   const alice = await login('alice'), bob = await login('bob');
-  const points = await (await request('/api/points/me', alice)).json();
-  assert.equal(points.balance.userId, 'account:alice');
-  assert.equal(points.balance.remaining, 200);
+  const points = await (await request('/api/usage/quota', alice)).json();
+  assert.equal(points.user.userId, 'account:alice');
+  assert.equal(points.quota.remainingCredits, 5000);
+  assert.equal((await request('/api/points/me', alice)).status, 410);
   assert.equal((await request('/api/points/admin', alice)).status, 403);
   const elevated = await request('/api/sfx/admin/login', alice, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: adminPassword }) });
   assert.equal(elevated.status, 200);
-  assert.equal((await request('/api/points/admin', alice)).status, 200);
+  assert.equal((await request('/api/points/admin', alice)).status, 410);
+  assert.equal((await request('/api/usage/quotas', alice)).status, 200);
   assert.equal((await request('/api/points/admin', bob)).status, 403);
-  assert.equal((await request('/api/usage/quotas', alice, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 410);
+  assert.equal((await request('/api/usage/quotas', alice, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 400);
   const failedGeneration = await request('/api/ai/elevenlabs/sound-effect', alice, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'test' }) });
   assert.ok(failedGeneration.status >= 400);
-  const refunded = await (await request('/api/points/admin', alice)).json();
-  assert.ok(refunded.entries.some((entry: any) => entry.type === 'reserve' && entry.points === 2));
-  assert.equal((await (await request('/api/points/me', alice)).json()).balance.frozen, 0);
+  const refunded = await (await request('/api/usage/quota', alice)).json();
+  assert.equal(refunded.quota.pendingCredits, 0);
+  assert.equal(refunded.quota.usedCredits, 0);
   await request('/api/sfx/admin/logout', alice, { method: 'POST' });
   assert.equal((await request('/api/points/admin', alice)).status, 403);
   for (const value of ['.env', 'uploads/../../../../etc/passwd', '/uploads/../.env', '/uploads/%2e%2e/.env']) {

@@ -6,7 +6,6 @@
 import { useEffect, useState } from 'react';
 import { Ban, Database, LockKeyhole, LogOut, Plus, ShieldCheck, Trash2 } from 'lucide-react';
 import UsageDashboard from './UsageDashboard';
-import PointsManagement from './PointsManagement';
 import { clearLocalStoragePreservingClientIdentity } from '../services/clientIdentity';
 import { fetchAccessBlacklist, saveAccessBlacklist } from '../services/accessBlacklistService';
 import type { UsageUser } from '../services/usageService';
@@ -213,7 +212,6 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
         </button>
       </header>
 
-      <PointsManagement />
       <UsageDashboard
         blacklistedIps={blacklistedIps}
         blacklistLoading={blacklistLoading}

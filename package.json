@@ -9,7 +9,7 @@
   "type": "module",
   "scripts": {
     "test:auth": "tsx --test tests/feishuAuth.test.ts",
-    "test:points": "tsx --test tests/points.test.ts",
+    "test:points": "tsx --test tests/companyPoints.test.ts src/services/companyPointPricing.test.ts src/services/sfxBatchBilling.test.ts",
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server/server.cjs",
     "start": "node dist/server/server.cjs",

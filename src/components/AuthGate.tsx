@@ -1,7 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { LogIn, Waves } from 'lucide-react';
 import { logoutSfxLibraryAdmin } from '../services/sfxLibraryAdminService';
-import { PointsBalance } from './PointsManagement';
 
 type User = { openId: string; displayName: string; avatarUrl: string };
 type AuthState = { enabled: boolean; user: User | null };
@@ -119,7 +118,6 @@ export function AuthProfile({ compact = false }: { compact?: boolean }) {
         {!compact && <div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold text-slate-700">{user?.displayName || 'Audio Director'}</p><p className="mt-1 text-[10px] text-slate-500">{user ? '飞书账号' : '本地工作空间'}</p></div>}
       </div>
       {user && <button type="button" disabled={busy} onClick={() => void logout()} className="mt-3 w-full rounded-lg border border-slate-200 px-1 py-2 text-xs text-slate-600 hover:bg-white disabled:opacity-50">{busy ? '退出中…' : '退出登录'}</button>}
-      <PointsBalance compact={compact} />
       {error && <p role="alert" className="mt-2 text-xs text-red-600">{error}</p>}
     </div>
   );
