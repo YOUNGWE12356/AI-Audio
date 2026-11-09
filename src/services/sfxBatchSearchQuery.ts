@@ -1,5 +1,5 @@
 import { generateAiContent, SchemaType as T } from './aiGateway';
-import { existingBatchSearchQuery, validateBatchSearchQuery } from './sfxBatch';
+import { existingBatchSearchQuery, normalizeBatchRequirements, validateBatchSearchQuery } from './sfxBatch';
 import { batchKeywordPrompt } from './sfxBatchKeywordPrompt';
 
 export function normalizeBatchSearchQueryInput(body: any) {
@@ -29,4 +29,35 @@ ${batchKeywordPrompt}
   } catch {
     throw Object.assign(new Error('关键词提炼失败，请调整中文关键词后重试；本次未开始搜索或生成。'), { status: 502 });
   }
+}
+
+/** Validate the full list first, then repair only invalid model-generated queries. */
+export async function normalizeBatchAnalysisRequirements(items: unknown, signal?: AbortSignal, generate = generateAiContent) {
+  const invalid = new Set<number>();
+  const rows = normalizeBatchRequirements(Array.isArray(items) ? items.map((item, index) => {
+    if (!item || typeof item !== 'object') return item;
+    if (typeof item.searchQuery === 'string' && existingBatchSearchQuery(item.searchQuery)) return item;
+    invalid.add(index);
+    return { ...item, searchQuery: 'pending' };
+  }) : items);
+  const pending = [...invalid];
+  let cursor = 0;
+  let failed = false;
+  const results = await Promise.allSettled(Array.from({ length: Math.min(3, pending.length) }, async () => {
+    while (!failed && cursor < pending.length) {
+      signal?.throwIfAborted();
+      const index = pending[cursor++];
+      const row = rows[index];
+      try {
+        row.searchQuery = await prepareBatchSearchQuery({ searchQuery: '', keywords: row.keywords, description: row.description }, signal, generate);
+      } catch (error) {
+        failed = true;
+        signal?.throwIfAborted();
+        throw Object.assign(new Error(`AI 返回的第 ${index + 1} 条需求缺少有效英文搜索词，自动补全失败。请重新分析或缩小单次需求范围。`), { status: 502, cause: error });
+      }
+    }
+  }));
+  const failure = results.find(result => result.status === 'rejected');
+  if (failure?.status === 'rejected') throw failure.reason;
+  return rows;
 }

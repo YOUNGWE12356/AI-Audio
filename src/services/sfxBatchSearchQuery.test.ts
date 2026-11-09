@@ -4,12 +4,38 @@ import express from 'express';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { normalizeBatchSearchQueryInput, prepareBatchSearchQuery } from './sfxBatchSearchQuery';
+import { normalizeBatchAnalysisRequirements, normalizeBatchSearchQueryInput, prepareBatchSearchQuery } from './sfxBatchSearchQuery';
 import { resolveBatchSearchQuery } from './sfxBatchClient';
 import { batchQuerySource, batchRequirementsCsv, createBatchSfxRequest } from './sfxBatch';
 import { createSfxBatchRouter } from './sfxBatchServer';
 
 const manual = { searchQuery: '', keywords: '翻牌', description: '牌翻过来的声音' };
+
+test('analysis repairs missing, Chinese and overly long queries without changing valid rows or timing', async () => {
+  const values = ['door creak', '', undefined, '翻牌', 'a very long card flip'];
+  let calls = 0;
+  const rows = values.map((searchQuery, i) => ({ ...manual, searchQuery, name: `sound_${i}`, duration: 2, scene: '场景', time: i * 3, endTime: i * 3 + 2 }));
+  const result = await normalizeBatchAnalysisRequirements(rows, undefined, (async () => {
+    calls++; return { text: JSON.stringify({ searchQuery: 'card flip' }) };
+  }) as any);
+  assert.equal(calls, 4);
+  assert.deepEqual(result.map(row => row.searchQuery), ['door creak', 'card flip', 'card flip', 'card flip', 'card flip']);
+  assert.deepEqual(result.map(row => [row.name, row.description, row.time, row.endTime]), rows.map(row => [row.name, row.description, row.time, row.endTime]));
+  assert.equal(rows[1].searchQuery, '');
+});
+
+test('analysis validates other fields before repair and reports repair failure with the row number', async () => {
+  let calls = 0;
+  const generate = (async () => { calls++; return { text: '{"searchQuery":""}' }; }) as any;
+  const row = { ...manual, name: 'card', scene: '', duration: 1 };
+  await assert.rejects(normalizeBatchAnalysisRequirements([{ ...row, duration: 99 }], undefined, generate), /时长/);
+  assert.equal(calls, 0);
+  await assert.rejects(normalizeBatchAnalysisRequirements([{ ...row, searchQuery: 'click' }, row], undefined, generate), /第 2 条.*自动补全失败/);
+  assert.equal(calls, 1);
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(normalizeBatchAnalysisRequirements([row], controller.signal, generate), { name: 'AbortError' });
+  assert.equal(calls, 1);
+});
 
 test('manual Chinese requirements become short English search terms while explicit English bypasses AI', async () => {
   let calls = 0;

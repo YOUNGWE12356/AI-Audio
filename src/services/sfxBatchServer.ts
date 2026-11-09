@@ -10,7 +10,7 @@ import { generateAiContent, SchemaType as T } from './aiGateway';
 import { boundedFetch, searchOnlineSfxSources, recordOnlineSfxBatchUsage, createTimelineOnlineSfxBatchTracker } from './onlineSfxServer';
 import { createSfxRequirementsJobs } from './sfxRequirementsJobs';
 import { existingBatchSearchQuery, normalizeBatchRequirements, validateBatchSearchQuery, SFX_BATCH_MAX_ROWS } from './sfxBatch';
-import { normalizeBatchSearchQueryInput, prepareBatchSearchQuery } from './sfxBatchSearchQuery';
+import { normalizeBatchAnalysisRequirements, normalizeBatchSearchQueryInput, prepareBatchSearchQuery } from './sfxBatchSearchQuery';
 import { normalizeMusicVisualInput } from './musicVisualPrompt';
 import { batchVideoSegments, batchVideoOverview, mergeBatchVideoRequirements, SFX_BATCH_VIDEO_MAX_FRAMES, SFX_BATCH_VIDEO_CONCURRENCY, SFX_BATCH_VIDEO_JOB_TIMEOUT_MS } from './sfxBatchVideoAnalysis';
 import { batchRangeReviewPrompt } from './sfxBatchRangePrompt';
@@ -76,7 +76,7 @@ ${input.pointEndTime !== undefined && !input.rangeReview ? `用户已指定范�
   });
   let data: any;
   try { data = JSON.parse(response.text); } catch { throw fail('AI 返回的需求列表不完整，请拆分素材后重试。', 502); }
-  let items = normalizeBatchRequirements(data.items);
+  let items = await normalizeBatchAnalysisRequirements(data.items, signal, generate);
   if (input.rangeReview) items = items.filter(item => item.time === undefined || (item.time >= input.pointTime! && item.time < input.pointEndTime!))
     .map(item => item.time === undefined ? item : { ...item, endTime: Math.min(input.pointEndTime!, item.endTime ?? item.time + item.duration) });
   else if (input.pointTime !== undefined) items = items.slice(0, 1).map(item => ({ ...item, time: input.pointTime,
