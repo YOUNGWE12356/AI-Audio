@@ -191,7 +191,10 @@ test('authenticated middleware isolates files/jobs, revokes sessions and rejects
   const form = new FormData(); form.set('prompt', 'test'); form.append('files', new Blob(['<script>sentinel</script>']), 'active.html');
   assert.equal((await request('/api/assistant/jobs', alice, { method: 'POST', body: form })).status, 415);
   assert.equal((await request('/api/admin', alice)).status, 403);
-  assert.equal((await request('/api/admin/login', alice, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'wrong' }) })).status, 403);
+  // Repeated incorrect management passwords must not lock out a later valid attempt.
+  for (let attempt = 0; attempt < 8; attempt++) {
+    assert.equal((await request('/api/admin/login', alice, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'wrong' }) })).status, 403);
+  }
   const elevation = await request('/api/admin/login', alice, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: adminPassword }) });
   assert.equal(elevation.status, 200); assert.equal((await elevation.json()).token, undefined);
   assert.equal((await request('/api/admin', alice)).status, 200);

@@ -95,7 +95,6 @@ export function createServerSecurity(options: { privateRoot: string; env?: NodeJ
   const sessions = new Map<string, Session>();
   const loginLimit = createRateLimiter(10, 15 * 60_000);
   const accountLimit = createRateLimiter(20, 15 * 60_000);
-  const adminLimit = createRateLimiter(5, 15 * 60_000);
   const apiLimit = createRateLimiter(600, 60_000);
   const inflight = new Map<string, number>();
   let passwordChecks = 0;
@@ -230,7 +229,7 @@ export function createServerSecurity(options: { privateRoot: string; env?: NodeJ
   const requireAdmin: express.RequestHandler = (req, res, next) => isAdmin(req) ? next() : res.status(403).json({ error: publicError(403) });
   const elevateAdmin = (req: express.Request, password: unknown) => {
     const session = lookup(req);
-    if (!session || !adminLimit(`${req.socket.remoteAddress}:${session.user.id}`)) return { status: 429 };
+    if (!session) return { status: 401 };
     const expected = env.SFX_LIBRARY_ADMIN_PASSWORD?.trim() || '';
     if (!expected) return { status: 503 };
     const actualHash = createHash('sha256').update(typeof password === 'string' ? password : '').digest();
