@@ -118,6 +118,9 @@ import { analyzeVideoSubtitles, MAX_SUBTITLE_VIDEO_SECONDS, SUBTITLE_SAMPLE_INTE
 import { createVideoAnalysisJobs } from './src/services/videoAnalysisJobsServer';
 import { analyzeVideoTrack, createModelLimiter } from './src/services/videoTrackAnalysis';
 import type { VideoAnalysisTrack } from './src/services/videoAnalysisJobs';
+import { createMcpAccess, createMcpAccessRouter } from './src/services/mcpAccess';
+import { createAudioMcp } from './src/services/mcpServer';
+import { mcpSetupPage, mcpSetupScript } from './src/services/mcpSetupPage';
 
 async function startServer() {
   const app = express();
@@ -128,10 +131,17 @@ async function startServer() {
 
   const dataDir = path.join(process.cwd(), 'data');
   const privateUploadsRoot = path.join(dataDir, 'private-uploads');
-  const security = createServerSecurity({ privateRoot: privateUploadsRoot });
+  const mcpAccess = createMcpAccess(path.join(dataDir, 'mcp'));
+  const security = createServerSecurity({ privateRoot: privateUploadsRoot, machineIdentity: mcpAccess.authenticate });
   const getUploadsDir = currentUploadDirectory;
   app.use((_req, res, next) => { res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'same-origin'); next(); });
   app.get('/healthz', (_req, res) => res.json({ ok: true }));
+  app.get('/mcp/setup', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'");
+    res.type('html').send(mcpSetupPage);
+  });
+  app.get('/mcp/setup.js', (_req, res) => res.type('application/javascript').send(mcpSetupScript));
   app.use('/auth', security.router);
   app.use('/api/auth', security.router);
   app.use(security.authenticate);
@@ -256,6 +266,10 @@ async function startServer() {
     res.locals.aiUsageContext = context;
     usageRequestContext.run(context, next);
   });
+
+  app.use('/api/mcp/access', createMcpAccessRouter(mcpAccess, security.adminExpiresAt));
+  app.use(createAudioMcp({ directory: path.join(dataDir, 'mcp', 'workspaces'), origin: security.origin,
+    access: mcpAccess, ffmpeg: FFMPEG_BINARY }));
 
   // Directories paths
   // Keep the private sound library outside the application upload directory so

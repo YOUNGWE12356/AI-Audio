@@ -6,6 +6,7 @@ import path from 'node:path';
 import { assertPrivateEnvironment } from './serverEnvironment';
 import { createFeishuLogin, readFeishuAuthConfig, type FeishuUser } from './feishuAuthServer';
 import { publicRequirementsFailure } from './sfxRequirementsErrors';
+import type { McpIdentity } from './mcpAccess';
 export { assertPrivateEnvironment } from './serverEnvironment';
 
 const deriveKey = (password: string, salt: Buffer) => new Promise<Buffer>((resolve, reject) => {
@@ -71,7 +72,7 @@ export async function verifyPassword(password: string, encoded: string) {
   return timingSafeEqual(actual, Buffer.from(match[2], 'hex'));
 }
 
-export function createServerSecurity(options: { privateRoot: string; env?: NodeJS.ProcessEnv; now?: () => number; fetcher?: typeof fetch }) {
+export function createServerSecurity(options: { privateRoot: string; env?: NodeJS.ProcessEnv; now?: () => number; fetcher?: typeof fetch; machineIdentity?: (req: express.Request) => McpIdentity | null }) {
   const env = options.env || process.env;
   assertPrivateEnvironment(env);
   const now = options.now || Date.now;
@@ -179,26 +180,35 @@ export function createServerSecurity(options: { privateRoot: string; env?: NodeJ
   });
 
   const authenticate: express.RequestHandler = (req, res, next) => {
-    if (['GET', 'HEAD'].includes(req.method) && !/^\/(?:api|uploads)(?:\/|$)/.test(req.path)) return next();
+    if (['GET', 'HEAD'].includes(req.method) && req.path !== '/mcp' && !/^\/(?:api|uploads)(?:\/|$)/.test(req.path)) return next();
+    const hasBearer = Boolean(req.get('authorization'));
+    const machine = hasBearer ? options.machineIdentity?.(req) : null;
     const session = lookup(req);
-    if (!session) {
+    if ((hasBearer && !machine) || (!machine && (!session || req.path === '/mcp'))) {
+      if (req.path === '/mcp') res.setHeader('WWW-Authenticate', 'Bearer realm="T1 Ai Audio MCP"');
       if (req.method === 'GET' && req.accepts('html') && !req.path.startsWith('/api/') && !req.path.startsWith('/uploads/')) return res.redirect('/auth/login');
       return res.status(401).json({ code: 'AUTH_REQUIRED', error: publicError(401) });
     }
-    if (!apiLimit(session.user.id)) return res.status(429).json({ error: publicError(429) });
-    return sameOrigin(req, res, () => {
-      const userId = `${session.user.feishu ? 'feishu' : 'account'}:${session.user.id}`;
+    const userId = machine?.id || `${session!.user.feishu ? 'feishu' : 'account'}:${session!.user.id}`;
+    if (!apiLimit(userId)) return res.status(429).json({ error: publicError(429) });
+    const enter = () => {
       const directory = path.join(options.privateRoot, createHash('sha256').update(userId).digest('hex'));
       fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-      res.locals.authUser = { id: userId, displayName: session.user.displayName, identitySource: session.user.feishu ? 'feishu' : 'account' };
-      res.locals.feishuUser = session.user.feishu;
+      res.locals.authUser = machine || { id: userId, displayName: session!.user.displayName, identitySource: session!.user.feishu ? 'feishu' : 'account' };
+      res.locals.machineIdentity = machine;
+      res.locals.feishuUser = machine ? undefined : session!.user.feishu;
       const requestId = randomUUID(); res.setHeader('X-Request-Id', requestId);
       res.setHeader('Cache-Control', 'no-store');
       const originalJson = res.json.bind(res);
-      res.json = ((body: any) => originalJson(res.statusCode >= 400
+      if (req.path !== '/mcp') res.json = ((body: any) => originalJson(res.statusCode >= 400
         ? { error: publicError(res.statusCode), code: /^[A-Z0-9_]+$/.test(body?.code || '') ? body.code : undefined, requestId }
         : sanitizeResponse(body))) as typeof res.json;
       context.run({ userId, directory, requestId }, next);
+    };
+    if (machine && !req.get('origin') && req.get('sec-fetch-site') !== 'cross-site') return enter();
+    return sameOrigin(req, res, () => {
+      if (machine && req.get('origin') !== origin) return res.status(403).json({ error: publicError(403) });
+      enter();
     });
   };
   const resourceLimits: express.RequestHandler = (req, res, next) => {
@@ -226,7 +236,10 @@ export function createServerSecurity(options: { privateRoot: string; env?: NodeJ
     };
     void checkStorage().then(() => next(), next);
   };
-  const isAdmin = (req: express.Request) => (lookup(req)?.adminUntil || 0) > now();
+  const isAdmin = (req: express.Request) => {
+    if (req.get('authorization')) return (options.machineIdentity?.(req)?.adminUntil || 0) > now();
+    return (lookup(req)?.adminUntil || 0) > now();
+  };
   const requireAdmin: express.RequestHandler = (req, res, next) => isAdmin(req) ? next() : res.status(403).json({ code: 'ADMIN_AUTH_REQUIRED', error: publicError(403) });
   const elevateAdmin = (req: express.Request, password: unknown) => {
     const session = lookup(req);

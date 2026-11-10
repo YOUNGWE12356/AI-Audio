@@ -1,0 +1,105 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { once } from 'node:events';
+import { randomBytes, scryptSync } from 'node:crypto';
+import express from 'express';
+import ffmpeg from 'ffmpeg-static';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { createMcpAccess, createMcpAccessRouter, isMcpApiAllowed } from './mcpAccess';
+import { createAudioMcp } from './mcpServer';
+import { createServerSecurity, currentUserId, currentUploadDirectory } from './serverSecurity';
+
+const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), 't1-audio-mcp-'));
+const user = (id: string) => ({ id: `account:${id}`, displayName: id, identitySource: 'account' as const });
+const jsonResult = (result: any) => { assert.ok(!result.isError, JSON.stringify(result)); return JSON.parse(result.content[0].text); };
+
+test('personal tokens persist hashes only, expire and revoke; route scopes exclude local engines and administration', t => {
+  const dir = temp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  let now = Date.now();
+  const access = createMcpAccess(dir, () => now), alice = access.issue(user('alice'), 'test', 1);
+  assert.doesNotMatch(fs.readFileSync(path.join(dir, 'tokens.json'), 'utf8'), new RegExp(alice.token));
+  assert.equal(createMcpAccess(dir, () => now).verify(alice.token)?.id, 'account:alice');
+  access.revoke('account:bob', alice.id); assert.ok(access.verify(alice.token));
+  access.revoke('account:alice', alice.id); assert.equal(access.verify(alice.token), null);
+  const second = access.issue(user('alice'), 'expires', 1); now += 86400_001; assert.equal(access.verify(second.token), null);
+  for (const endpoint of ['/api/ai/local/voice-clone', '/api/audio-to-midi/convert', '/api/audio/music-separation/jobs', '/api/usage/quotas', '/api/auth/login', '/api/mcp/access', '/api/ai/assistant/jobs']) {
+    for (const method of ['GET', 'POST', 'PUT']) assert.equal(isMcpApiAllowed(method, endpoint), false, `${method} ${endpoint}`);
+  }
+  assert.ok(isMcpApiAllowed('POST', '/api/sfx/online/search'));
+  assert.ok(isMcpApiAllowed('POST', '/api/ai/elevenlabs/voice'));
+});
+
+test('official MCP client: authentication, coverage, real FFmpeg trim, downloads, job deduplication and account isolation', async t => {
+  const dir = temp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const origin = 'https://audio.example.test', password = 'test-account-only-long-password', salt = randomBytes(16);
+  const passwordHash = `scrypt$${salt.toString('hex')}$${scryptSync(password, salt, 64, { N: 32768, maxmem: 64 * 1024 * 1024 }).toString('hex')}`;
+  const access = createMcpAccess(path.join(dir, 'mcp'));
+  const security = createServerSecurity({ privateRoot: path.join(dir, 'private'), machineIdentity: access.authenticate,
+    env: { APP_ORIGIN: origin, AUTH_USERS_JSON: JSON.stringify([{ id: 'alice', displayName: 'alice', passwordHash }]) } });
+  const app = express(); app.use('/auth', security.router); app.use(security.authenticate); app.use(security.resourceLimits); app.use(express.json({ limit: '15mb' }));
+  app.use('/api/mcp/access', createMcpAccessRouter(access, security.adminExpiresAt));
+  app.use(createAudioMcp({ directory: path.join(dir, 'workspaces'), origin, access, ffmpeg: ffmpeg! }));
+  let voiceCalls = 0, searchCalls = 0;
+  app.get('/api/usage/quota', (_req, res) => res.json({ owner: currentUserId(), remaining: 42 }));
+  app.post('/api/ai/sfx-batch/search-query', (req, res) => { assert.equal(req.body.searchQuery, 'door slam'); res.json({ searchQuery: req.body.searchQuery }); });
+  app.post('/api/sfx/online/search', (req, res) => { searchCalls++; assert.equal(req.body.query, 'door slam'); fs.rmSync(path.join(currentUploadDirectory(), 'online_sfx_preview.wav'), { force: true }); res.json({ items: [{ id: 'ticket', source: 'envato', sourceUrl: 'https://example.test/item' }] }); });
+  app.post('/api/sfx/online/capture', (_req, res) => {
+    const file = path.join(currentUploadDirectory(), 'online_sfx_preview.wav'); fs.writeFileSync(file, wav);
+    fs.writeFileSync(`${file}.source.json`, JSON.stringify({ source: 'envato', sourceUrl: 'https://example.test/item' }));
+    res.json({ url: '/uploads/online_sfx_preview.wav' });
+  });
+  app.post('/api/ai/elevenlabs/voice', (req, res) => { voiceCalls++; assert.equal(req.body.languageCode, 'zh'); res.type('audio/wav').send(wav); });
+  const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const base = `http://127.0.0.1:${(server.address() as any).port}`;
+  const login = await fetch(`${base}/auth/login`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ id: 'alice', password }) });
+  const cookie = login.headers.get('set-cookie')!.split(';')[0];
+  const created = await fetch(`${base}/api/mcp/access`, { method: 'POST', headers: { origin, cookie, 'content-type': 'application/json' }, body: JSON.stringify({ name: 'client', days: 7 }) });
+  assert.equal(created.status, 200); const alice = await created.json();
+  const bob = access.issue(user('bob'), 'client', 7);
+  assert.equal((await fetch(`${base}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 401);
+  assert.equal((await fetch(`${base}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${alice.token}`, origin: 'https://evil.test', 'content-type': 'application/json' }, body: '{}' })).status, 403);
+  assert.equal((await fetch(`${base}/api/ai/local/voice-clone`, { method: 'POST', headers: { authorization: `Bearer ${alice.token}`, 'content-type': 'application/json' }, body: '{}' })).status, 401);
+  assert.equal((await fetch(`${base}/api/mcp/access`, { headers: { authorization: `Bearer ${alice.token}` } })).status, 401);
+  const connect = async (token: string) => { const client = new Client({ name: 'test-client', version: '1' }); await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } })); t.after(() => client.close()); return client; };
+  const client = await connect(alice.token), other = await connect(bob.token);
+  const names = (await client.listTools()).tools.map(t => t.name);
+  for (const name of ['generate_speech', 'generate_speech_batch', 'generate_music', 'generate_sound_effect', 'sound_requirements', 'analyze_sfx_batch', 'produce_sfx_batch', 'search_online_sound_effects', 'capture_online_sound_effect', 'audio_design', 'analyze_video', 'analyze_audio', 'process_audio', 'mix_timeline', 'export_timeline_stems', 'library_search', 'library_import', 'start_audio_job']) assert.ok(names.includes(name), name);
+  for (const name of ['clone_voice', 'clone_dialogue', 'local_separation', 'audio_to_midi', 'open_module']) assert.ok(!names.includes(name), name);
+  const info = jsonResult(await client.callTool({ name: 'engine_status', arguments: { module: 'quota' } })); assert.equal(info.owner, 'account:alice');
+  const wav = Buffer.alloc(44 + 48000 * 2); wav.write('RIFF'); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8); wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(48000, 24); wav.writeUInt32LE(96000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(wav.length - 44, 40);
+  for (let i = 0; i < 48000; i++) wav.writeInt16LE(Math.round(Math.sin(i * 2 * Math.PI * 440 / 48000) * 10000), 44 + i * 2);
+  const uploaded = jsonResult(await client.callTool({ name: 'upload_asset', arguments: { name: '测试.wav', base64: wav.toString('base64') } })).asset;
+  assert.equal(uploaded.name, '测试.wav'); assert.equal(uploaded.duration, 1);
+  const fakeWav = jsonResult(await client.callTool({ name: 'upload_asset', arguments: { name: 'playlist.wav', base64: Buffer.from("ffconcat version 1.0\nfile '" + uploaded.url.split('/').at(-1) + "'\n").toString('base64') } })).asset;
+  assert.ok((await client.callTool({ name: 'process_audio', arguments: { assetId: fakeWav.id, name: 'rejected.wav' } })).isError);
+  const processed = jsonResult(await client.callTool({ name: 'process_audio', arguments: { assetId: uploaded.id, name: 'trim.wav', start: .2, duration: .3 } })).asset;
+  assert.ok(processed.size > 1000 && processed.size < wav.length);
+  assert.equal(processed.duration, .3);
+  const read = jsonResult(await client.callTool({ name: 'read_asset', arguments: { assetId: processed.id, length: 100 } })); assert.equal(Buffer.from(read.base64, 'base64').toString('ascii', 0, 4), 'RIFF');
+  assert.ok((await other.callTool({ name: 'read_asset', arguments: { assetId: processed.id } })).isError);
+  assert.ok((await client.callTool({ name: 'process_audio', arguments: { assetId: uploaded.id, name: 'bad', start: -2 } })).isError);
+  const download = await fetch(`${base}/api/mcp/files/${processed.id}`, { headers: { authorization: `Bearer ${alice.token}` } }); assert.equal(download.status, 200);
+  assert.equal((await fetch(`${base}/api/mcp/files/${processed.id}`, { headers: { authorization: `Bearer ${bob.token}` } })).status, 404);
+  const form = new FormData(); form.append('file', new Blob([wav]), 'another.wav');
+  const multipart = await fetch(`${base}/api/mcp/files`, { method: 'POST', headers: { authorization: `Bearer ${alice.token}` }, body: form }); assert.equal(multipart.status, 200);
+  jsonResult(await client.callTool({ name: 'generate_speech', arguments: { voiceId: 'real-id', text: '你好', name: '配音', languageCode: 'zh' } })); assert.equal(voiceCalls, 1);
+  jsonResult(await client.callTool({ name: 'search_online_sound_effects', arguments: { keywords: '关门', searchQuery: 'door slam' } })); assert.equal(searchCalls, 1);
+  const captured = jsonResult(await client.callTool({ name: 'capture_online_sound_effect', arguments: { id: 'ticket', name: '关门.wav' } })).asset;
+  assert.equal(captured.metadata.source, 'envato');
+  jsonResult(await client.callTool({ name: 'search_online_sound_effects', arguments: { keywords: '关门', searchQuery: 'door slam' } }));
+  jsonResult(await client.callTool({ name: 'read_asset', arguments: { assetId: captured.id, length: 32 } }));
+  const args = { tool: 'save_report', arguments: { name: 'result.txt', content: 'done' }, requestId: 'request-1234567890123456' };
+  let job = jsonResult(await client.callTool({ name: 'start_audio_job', arguments: args }));
+  const again = jsonResult(await client.callTool({ name: 'start_audio_job', arguments: args })); assert.equal(again.id, job.id);
+  for (let i = 0; i < 20 && job.status === 'running'; i++) job = jsonResult(await client.callTool({ name: 'get_audio_job', arguments: { jobId: job.id } }));
+  assert.equal(job.status, 'completed');
+  assert.ok((await other.callTool({ name: 'get_audio_job', arguments: { jobId: job.id } })).isError);
+  assert.ok((await client.callTool({ name: 'start_audio_job', arguments: { ...args, arguments: { name: 'different.txt', content: 'different' } } })).isError);
+  access.revoke('account:alice', alice.id);
+  assert.equal((await fetch(`${base}/api/mcp/files/${processed.id}`, { headers: { authorization: `Bearer ${alice.token}` } })).status, 401);
+});
