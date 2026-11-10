@@ -46,6 +46,7 @@ import type { AssistantVoiceRequest } from './GlobalAssistant';
 import PointCostHint from './PointCostHint';
 import { clearRecentVoiceIds, readRecentVoiceIds, rememberVoiceId } from '../utils/recentVoices';
 import { deduplicateBatchVoiceImages } from '../utils/batchVoiceImport';
+import { ELEVENLABS_TTS_LANGUAGES, ttsLanguageLabel } from '../utils/elevenLabsTtsLanguage';
 
 interface PendingVoiceOption {
   url: string;
@@ -1303,51 +1304,13 @@ export default function DubbingStudio({
     setEditingHistoryId(null);
   };
 
-  const langsList = [
-    { id: 'zh', name: '中文 普通话 (Chinese)' },
-    { id: 'en', name: '英语 美式/英式 (English)' },
-    { id: 'ja', name: '日语 (Japanese)' },
-    { id: 'ko', name: '韩语 (Korean)' },
-    { id: 'ar', name: '阿拉伯语 (Arabic)' },
-    { id: 'fr', name: '法语 (French)' },
-    { id: 'de', name: '德语 (German)' },
-    { id: 'es', name: '西班牙语 (Spanish)' },
-  ];
-
-  const detectLanguage = (text: string): string | null => {
-    if (!text.trim()) return null;
-    if (/[\u3040-\u309F\u30A0-\u30FF]/.test(text)) {
-      return 'ja';
-    }
-    if (/[\u4e00-\u9fa5]/.test(text)) {
-      return 'zh';
-    }
-    if (/[盲枚眉脽脛脰脺]/.test(text)) {
-      return 'de';
-    }
-    if (/[茅脿猫霉莽芒锚卯么没毛茂眉脣脧脺脗脢脦脭脹脡脌脠脵脟]/.test(text)) {
-      return 'fr';
-    }
-    if (/[a-zA-Z]/.test(text)) {
-      return 'en';
-    }
-    return null;
-  };
-
   const handleTextChange = (val: string) => {
     setStandaloneVoicePrompt(val);
     if (voiceEnhancement && val !== voiceEnhancement.enhancedText) {
       setVoiceEnhancement(null);
       setVoiceEnhancementError(null);
     }
-    const detected = detectLanguage(val);
-    if (detected) {
-      setStandaloneVoiceLang(detected);
-    }
   };
-
-  const detectedLangCode = detectLanguage(standaloneVoicePrompt);
-  const detectedLangObj = langsList.find(l => l.id === detectedLangCode);
 
   const voiceHistory = historyList.filter(item => item.type === 'voice');
   const selectedVoiceObj = displayVoices.find(v => v.id === standaloneVoiceRole);
@@ -1663,6 +1626,7 @@ export default function DubbingStudio({
           qualityMode: getElevenLabsQualityMode(),
           fallbackText,
           seed: Date.now() % 1_000_000_000,
+          languageCode: standaloneVoiceLang,
           ...sharedVoiceOptions,
         },
       );
@@ -1677,7 +1641,7 @@ export default function DubbingStudio({
         prompt: generationText,
         url,
         timestamp: new Date().toISOString(),
-        details: `批量配音 · ${standaloneVoiceLang.toUpperCase()} · ${selectedBatchVoice?.name || standaloneVoiceRole}`,
+        details: `批量配音 · ${ttsLanguageLabel(standaloneVoiceLang)} · ${selectedBatchVoice?.name || standaloneVoiceRole}`,
         speed: standaloneVoiceSpeed,
       }, ...prev]);
       return { ...item, status: 'done' as const, audioUrl: url, error: undefined };
@@ -1957,17 +1921,30 @@ export default function DubbingStudio({
               {/* Core parameters */}
               <div className="lg:col-span-7 space-y-5">
           <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-5 shadow-sm">
+            <div className="space-y-2">
+              <label htmlFor="tts-language" className="flex items-center gap-1.5 text-[11px] font-bold text-slate-700">
+                <Languages className="h-3.5 w-3.5 text-emerald-600" />
+                配音语言
+              </label>
+              <select
+                id="tts-language"
+                value={standaloneVoiceLang}
+                onChange={event => setStandaloneVoiceLang(event.target.value)}
+                disabled={standaloneVoiceLoading || batchVoiceLoading}
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs text-slate-800 outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 disabled:opacity-50"
+              >
+                <option value="auto">自动</option>
+                {ELEVENLABS_TTS_LANGUAGES.map(language => (
+                  <option key={language.code} value={language.code}>{language.label}</option>
+                ))}
+              </select>
+              <p className="text-[10px] text-slate-400">自动识别台词语言；手动选择可固定发音语言，不会翻译台词。</p>
+            </div>
             {/* Dialogue textarea with dynamic bracket highlighting */}
             {ttsInputMode === 'single' && (
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-bold text-slate-700 block uppercase tracking-wider">配音台词 / 输入文本</label>
-                {detectedLangObj && (
-                  <span className="text-[10px] text-emerald-700 font-semibold bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-100 flex items-center gap-1">
-                    <Sparkles className="w-2.5 h-2.5 animate-pulse text-emerald-600" />
-                    已智能检测语种：{detectedLangObj.name.split(' ')[0]}
-                  </span>
-                )}
               </div>
               
               <style>{`
@@ -2845,7 +2822,7 @@ export default function DubbingStudio({
                     title={option.displayName}
                     titleBadge={label}
                     prompt={option.processedText}
-                    meta={`属性：${standaloneVoiceGender === 'male' ? '男声' : '女声'} · ${standaloneVoiceLang.toUpperCase()} · ${option.speed}x`}
+                    meta={`属性：${standaloneVoiceGender === 'male' ? '男声' : '女声'} · ${ttsLanguageLabel(standaloneVoiceLang)} · ${option.speed}x`}
                     playbackRate={option.speed}
                     activeId={activeGeneratedVoiceId}
                     setActiveId={setActiveGeneratedVoiceId}

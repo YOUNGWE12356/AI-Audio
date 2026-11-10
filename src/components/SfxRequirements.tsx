@@ -28,6 +28,8 @@ import { motion, AnimatePresence } from 'motion/react';
 import { generateSfxRequirements, type ExistingSfxRequirementItem } from '../services/aiService';
 import type { AssistantRequirementsRequest } from './GlobalAssistant';
 import PointCostHint from './PointCostHint';
+import { copyText } from '../utils/copyText';
+import { requirementTableText } from '../utils/requirementTableTransfer';
 
 type TemplateType = 'game_sfx_general' | 'game_sfx_middleware' | 'voiceover_general' | 'voiceover_multilang';
 type GenerateMode = 'replace' | 'append';
@@ -42,6 +44,7 @@ const PROJECT_OPTIONS: Array<{ id: Exclude<ProjectOption, ''>; name: string }> =
 interface SfxRequirementsProps {
   hasAiTextModel: boolean;
   assistantRequest?: AssistantRequirementsRequest | null;
+  onBatchSfxRequest: (text: string) => void;
 }
 
 // Demo data matching our standard design principles
@@ -690,7 +693,7 @@ const normalizeAvatarRequirementItems = (items: any[]) => items.map((item) => {
   return normalizedItem;
 });
 
-export default function SfxRequirements({ hasAiTextModel, assistantRequest = null }: SfxRequirementsProps) {
+export default function SfxRequirements({ hasAiTextModel, assistantRequest = null, onBatchSfxRequest }: SfxRequirementsProps) {
   const [templateType, setTemplateType] = useState<TemplateType>('game_sfx_general');
   const [selectedProject, setSelectedProject] = useState<ProjectOption>('');
   const [columnWidthsByTemplate, setColumnWidthsByTemplate] = useState<Record<TemplateType, number[]>>(DEFAULT_COLUMN_WIDTHS);
@@ -720,6 +723,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
   const [loadingMessage, setLoadingMessage] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [tableActionMessage, setTableActionMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('已根据您的要求完美扩充并格式化。您可直接在下方表格中修改任何单元格！');
   const [activeGenerateMode, setActiveGenerateMode] = useState<GenerateMode>('replace');
   
@@ -1328,6 +1332,15 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
     },
   });
 
+  const getTableText = () => {
+    const info = TEMPLATE_INFO[templateType];
+    return requirementTableText(info.headers, rows.map(row => info.keys.map(key => getRequirementCellValue(row, key))));
+  };
+  const handleCopyTable = async () => {
+    const copied = await copyText(getTableText());
+    setTableActionMessage(copied ? '需求表已复制，可粘贴到 AI 音效的批量制作输入框。' : '复制失败，请允许剪贴板访问，或点击“批量生成音效”直接带入。');
+  };
+
   // Export to CSV UTF-8 with BOM
   const handleExportCSV = () => {
     const info = TEMPLATE_INFO[templateType];
@@ -1708,8 +1721,8 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
       {/* Main Requirement Sheet Interactive Table */}
       <div id="card-table-stage" className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4 shadow-sm">
         {/* Table Controls */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
-          <div>
+        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+          <div className="min-w-0">
             <h3 className="text-sm font-semibold text-slate-800 flex items-center gap-1.5">
               <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
               <span>{currentTemplate.name}</span>
@@ -1721,7 +1734,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
               编辑下方任意输入框即可动态更改内容，双击/点击即可修改、调整、补充或翻译。
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
             <button
               id="btn-add-row"
               onClick={handleAddRow}
@@ -1741,6 +1754,23 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
             </button>
             <div className="w-[1px] h-4 bg-slate-250 mx-1" />
             <button
+              id="btn-copy-requirements"
+              disabled={!rows.length || loading}
+              onClick={() => void handleCopyTable()}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 rounded-xl text-[11px] font-semibold border border-slate-200 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Copy className="w-3 h-3" />复制需求表
+            </button>
+            <button
+              id="btn-batch-generate-sfx"
+              disabled={!rows.length || loading}
+              onClick={() => onBatchSfxRequest(getTableText())}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-xl text-[11px] font-semibold border border-emerald-200 disabled:opacity-40 disabled:cursor-not-allowed"
+              title="打开 AI 音效的批量制作，将当前需求表带入输入框"
+            >
+              <ArrowRight className="w-3 h-3" />批量生成音效
+            </button>
+            <button
               id="btn-export-csv"
               disabled={rows.length === 0}
               onClick={handleExportCSV}
@@ -1754,6 +1784,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
         </div>
 
         {/* Scrollable Table Stage */}
+        {tableActionMessage && <p role="status" className="text-xs text-slate-600">{tableActionMessage}</p>}
         <div className={`overflow-x-auto w-full custom-scrollbar border border-slate-200 rounded-xl bg-white ${resizingColumn !== null ? 'select-none' : ''}`}>
           {rows.length === 0 ? (
             <div className="p-12 text-center flex flex-col items-center justify-center space-y-3">

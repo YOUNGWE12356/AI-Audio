@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { assertPrivateEnvironment } from './serverEnvironment';
 import { createFeishuLogin, readFeishuAuthConfig, type FeishuUser } from './feishuAuthServer';
+import { publicRequirementsFailure } from './sfxRequirementsErrors';
 export { assertPrivateEnvironment } from './serverEnvironment';
 
 const deriveKey = (password: string, salt: Buffer) => new Promise<Buffer>((resolve, reject) => {
@@ -45,7 +46,7 @@ export function sanitizeResponse(value: any, failed = false): any {
   const taskFailed = failed || value.status === 'failed';
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
     (key === 'error' && typeof item === 'string') || (taskFailed && key === 'message')
-      ? '处理失败，请稍后重试。' : sanitizeResponse(item, taskFailed)]));
+      ? publicRequirementsFailure(item) || '处理失败，请稍后重试。' : sanitizeResponse(item, taskFailed)]));
 }
 
 /** Fixed-window limiter with bounded storage; never trusts forwarded client IP headers. */
@@ -226,7 +227,7 @@ export function createServerSecurity(options: { privateRoot: string; env?: NodeJ
     void checkStorage().then(() => next(), next);
   };
   const isAdmin = (req: express.Request) => (lookup(req)?.adminUntil || 0) > now();
-  const requireAdmin: express.RequestHandler = (req, res, next) => isAdmin(req) ? next() : res.status(403).json({ error: publicError(403) });
+  const requireAdmin: express.RequestHandler = (req, res, next) => isAdmin(req) ? next() : res.status(403).json({ code: 'ADMIN_AUTH_REQUIRED', error: publicError(403) });
   const elevateAdmin = (req: express.Request, password: unknown) => {
     const session = lookup(req);
     if (!session) return { status: 401 };
@@ -238,6 +239,7 @@ export function createServerSecurity(options: { privateRoot: string; env?: NodeJ
     return { status: 200, expiresAt: session.adminUntil };
   };
   return { router, authenticate, resourceLimits, isAdmin, requireAdmin, elevateAdmin, origin,
+    adminExpiresAt: (req: express.Request) => isAdmin(req) ? lookup(req)!.adminUntil : 0,
     revokeAdmin: (req: express.Request) => { const session = lookup(req); if (session) session.adminUntil = 0; } };
 }
 

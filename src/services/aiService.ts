@@ -5,6 +5,7 @@ import { normalizeAudioDesignSfxSchemes } from '../utils/audioDesignNaming';
 import { AUDIO_METRICS_MIME, AUDIO_EVIDENCE_RULES, validateAudioEvidence, type AudioMetricEvidence } from '../utils/audioEvidence';
 import { isBgmImportFileName, normalizeRequirementEngineeringNames, normalizeUcsImportFileName, normalizeUcsRequirementItems, UCS_CATALOG_PROMPT, UCS_CATALOG_VERSION } from './ucsNaming';
 import { generateRequirementsInBackground } from './sfxRequirementsClient';
+import { repairRequirementUcsNames } from './sfxRequirementNaming';
 import { generateAudioDesignInBackground } from './audioDesignJobsClient';
 import { AUDIO_DESIGN_MODEL_TIMEOUT_MS } from './audioDesignJobs';
 
@@ -1203,7 +1204,8 @@ const AVATAR_NAMING_GUIDE = `
         2) 三星以上且有配乐：audio_avatar_bgm_<CostumeName>_<CostumeId>_<Girl|Boy>
         3) 三星以上且有配乐的双人：audio_avatar_bgm_<CostumeName>_<CostumeId>_Double
       - 例：服装名“秋叶”、服装 ID“20011”时，三星以下无配乐：男声必须命名为 audio_avatar_show_Qiuye_20011_Girl，女声必须命名为 audio_avatar_show_Qiuye_20011_Boy；三星以上有配乐：女声必须命名为 audio_avatar_bgm_Qiuye_20011_Girl，男声必须命名为 audio_avatar_bgm_Qiuye_20011_Boy，双人使用 audio_avatar_bgm_Qiuye_20011_Double。
-      - 严格保留参考素材中的服装名和服装 ID；服装名使用首字母大写的英文单词，ID 原样保留。不要凭空编造名称或 ID。
+      - filename 中的 CostumeName：中文服装名只取原名的前两个汉字，再转为不带声调、首字母大写的连写拼音；不是拼音的前两个字母，也不要使用完整长名称或英文意译。单字名保留一个字；两字名保持不变。服装 ID 原样保留，不要编造名称或 ID。scene、description 等描述字段仍保留完整服装名。
+      - 例：服装“昼星隐曜时”、ID“22830”，CostumeName 只能为 Zhouxing；文件名为 audio_avatar_show_Zhouxing_22830_Girl 或对应的 bgm/Boy/Double 变体，禁止 Zhouxingyinyaoshi。服装“秋叶流光”、ID“20011”，CostumeName 只能为 Qiuye。
       - 后缀映射必须按星级和配乐分档执行：三星以下无配乐时男→Girl、女→Boy；三星以上有配乐时女→Girl、男→Boy；双人始终→Double。若模板包含 event_name，必须与 filename 完全相同，不要输出 event:/、Event_、SFX_ 或 Play_。
       - 当用户提供了服装名和服装 ID 时，必须一次性输出全部有效变体，不得只输出一个：三星以下同时给出男、女 2 个命名；三星以上同时给出女、男、双人 3 个命名。三星以下没有双人模板，禁止虚构 audio_avatar_show_*_Double。
 `;
@@ -1268,12 +1270,15 @@ const extractSunnyIslandReferenceNames = async (
 const AVATAR_COSTUME_NAME_ALIASES: Record<string, string> = {
   '元宝': 'Yuanbao',
   '秋叶': 'Qiuye',
+  '昼星': 'Zhouxing',
 };
 
 const normalizeAvatarCostumeName = (value: string) => {
   const trimmed = value.trim().replace(/[.。]+$/g, '');
   if (!trimmed) return '';
-  const aliased = AVATAR_COSTUME_NAME_ALIASES[trimmed];
+  const chineseName = trimmed.match(/^\p{Script=Han}+/u)?.[0];
+  const shortName = chineseName ? Array.from(chineseName).slice(0, 2).join('') : trimmed;
+  const aliased = AVATAR_COSTUME_NAME_ALIASES[shortName];
   if (aliased) return aliased;
   if (/[^a-zA-Z0-9 _-]/.test(trimmed)) return '';
   return trimmed
@@ -1284,14 +1289,16 @@ const normalizeAvatarCostumeName = (value: string) => {
 };
 
 const extractAvatarCostumeDetails = (inputText: string) => {
-  const match = inputText.trim().match(
+  const namedMatch = inputText.trim().match(
     /(?:服装名?\s*[:：]\s*)?([^\s:：,，;；]+)\s*(?:服装\s*)?ID\s*[:：]?\s*([A-Za-z0-9_-]+)/i,
   );
+  const idFirstMatch = inputText.trim().match(/^(\d+)\s+([\p{Script=Han}]+)(?:\s|$)/u);
+  const match = namedMatch || (idFirstMatch ? [idFirstMatch[0], idFirstMatch[2], idFirstMatch[1]] : null);
   if (!match) return null;
   const costumeName = normalizeAvatarCostumeName(match[1]);
   const costumeId = match[2].trim();
   if (!costumeName || !costumeId) return null;
-  return { costumeName, costumeId };
+  return { costumeName, costumeId, fullCostumeName: match[1].trim() };
 };
 
 const createAvatarRequirementItems = (inputText: string) => {
@@ -1313,7 +1320,7 @@ const createAvatarRequirementItems = (inputText: string) => {
       filename,
       event_name: filename,
       duration: '-',
-      scene: `Avatar ${variant.tier}服装语音转换`,
+      scene: `Avatar ${variant.tier}服装“${details.fullCostumeName}”（${details.costumeId}）`,
       description: '按 Avatar 固定命名模板生成的角色声音资源。',
       remarks: '事件名与文件名保持完全一致。',
       video_link: '-',
@@ -1692,16 +1699,13 @@ export async function generateSfxRequirements(
     });
   }
 
-  for (let attempt = 0; attempt < (useUcsSfxNaming ? 2 : 1); attempt++) {
+  {
     options.signal?.throwIfAborted();
-    options.onProgress?.(attempt ? '正在修正 UCS 分类并重新校验需求表。' : 'AI 正在识别素材并生成完整需求表，服务器仍在处理，请等待结果。');
+    options.onProgress?.('AI 正在识别素材并生成完整需求表，服务器仍在处理，请等待结果。');
     const response = await generateAiContent({
       timeoutMs: 240_000,
       signal: options.signal,
-      contents: [{ parts: attempt === 0 ? parts : [
-        ...parts,
-        { text: '上次返回含无效 UCS CatID。请重新生成完整 JSON；每条 SFX 的 filename 格式必须为 Sfx_CatID_FXName，Sfx_ 后使用本提示中的真实 CatID。BGM/VO 不使用 CatID。' },
-      ] }],
+      contents: [{ parts }],
       config: {
         responseMimeType: "application/json",
         maxOutputTokens: 20_480,
@@ -1721,22 +1725,17 @@ export async function generateSfxRequirements(
     }
     options.onProgress?.('AI 已返回结果，正在校验命名和表格内容。');
     const items = Array.isArray(parsed.items) ? parsed.items : [];
-    const checked = useUcsSfxNaming
-      ? normalizeUcsRequirementItems(items, templateType)
-      : { items: normalizeRequirementEngineeringNames(items), invalid: [] };
-    if (checked.invalid.length) {
-      if (attempt === 0) continue;
-      throw new Error(`AI 未能为第 ${checked.invalid.join('、')} 行选出有效 UCS ${UCS_CATALOG_VERSION} 分类，请调整音效描述后重试。`);
-    }
+    const checkedItems = useUcsSfxNaming
+      ? await repairRequirementUcsNames(items, templateType, options)
+      : normalizeRequirementEngineeringNames(items);
     const sourceItemCount = Number.parseInt(String(parsed.sourceItemCount ?? 0), 10);
     return {
-      items: checked.items,
+      items: checkedItems,
       sourceItemCount: Number.isFinite(sourceItemCount) && sourceItemCount > 0
         ? Math.min(sourceItemCount, 100)
         : 0,
     };
   }
-  throw new Error('UCS 分类校验失败，请重试。');
 }
 
 export interface OptimizedImportItem {

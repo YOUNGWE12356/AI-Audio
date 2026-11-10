@@ -132,7 +132,9 @@ powershell -ExecutionPolicy Bypass -File tools/music-separation/setup-music-sepa
 
 ### 音效多站搜索
 
-- 联网音效搜索并行查询 Envato Elements、Pro Sound Effects、Epidemic Sound 和 Mixkit；结果足够时，最多 100 条按约 50% Envato、50% 其他来源混排，备用来源之间均分并互相补足。Freesound 已移除，不再请求或采集。
+- 联网音效搜索并行查询 Envato Elements、Pro Sound Effects、Epidemic Sound、Mixkit 和全网公开试听；结果足够时，最多 100 条按 30% Envato、30% 其他三库合计、40% 全网混排。三库内部均分并互补；任何来源缺少结果、超时或不可访问时，其余来源可双向补位，不强制凑数。
+- 全网通过 DuckDuckGo HTML 检索发现实际页面，不足时尝试 Bing 网页搜索。解析页面公开的音频标签、试听属性、下载链接和 AudioObject 元数据，校验试听连接后才加入候选。固定来源不重复计入全网；结果显示实际网站和原页面。无需新增搜索密钥；搜索引擎验证、登录限制、页面结构变化或没有可读取试听的资源会被跳过。不能保证抓取任何网站或每批严格达到目标配比。
+- 任意全网 URL 只允许公开 HTTPS 地址；DNS 中有私网/保留地址则拒绝，每次跳转重新校验并固定连接 IP，限制时长、大小和并发。音频转换只允许本地媒体格式与 file/pipe 协议，不让 FFmpeg 读取网络播放列表。
 - PSE 使用网站公开的目录搜索与对应 MP3 试听，仅保留 PSE 自有目录，分页使用真实 `pageIndex`。Epidemic 使用网站当前公开搜索动作（从页面动态发现接口标识并短期缓存），仅返回接口实际提供的十条搜索结果，不抓首页推荐，也不假设支持后续分页。两站公开接口可能随网站更新变化，失效时自动降级到健康来源。
 - Pond5 当前阻止服务端自动访问（HTTP 403 / 网站验证），尚未接通搜索/试听；界面明确显示待官方接口接入，保留来源入口。需取得 [Pond5 官方 API](https://www.pond5.com/api) 的访问权限与文档后完成集成，不尝试绕过网站验证。
 - Mixkit 按关键词匹配实际音效分类；没有匹配分类时不使用首页推荐凑数。结果不足时按实际数量返回。
@@ -140,7 +142,7 @@ powershell -ExecutionPolicy Bypass -File tools/music-separation/setup-music-sepa
 - 单站超时、验证或连接失败不影响其他站点；全站失败后该来源冷却 60 秒再尝试，健康来源自动补位。单个页面失败保留其他页面结果，后续批次重试失败页。
 - 继续搜索保留尚未展示的候选并去重。候选会话随服务重启或 30 分钟过期，过期需刷新重新搜索。
 - 每批有结果才结算一次公司积分，不按网站或翻页次数重复结算。只采集公开试听，保留来源、作者和原试听水印；FFmpeg 只处理下载到本地的文件。
-- 回归测试：`npx tsx --test src/services/onlineSfxServer.test.ts src/services/onlineSfxRelevance.test.ts`。
+- 回归测试：`npx tsx --test src/services/onlineSfxServer.test.ts src/services/onlineSfxWebSearch.test.ts src/services/onlineSfxRelevance.test.ts`。
 
 ### 智能助手执行层
 

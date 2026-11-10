@@ -14,10 +14,12 @@ import { SOUND_EFFECT_POINTS_PER_SECOND } from './companyPointRates';
 import { prepareSoundEffectPrompt } from './sfxPromptService';
 import { withAudioRequestTimeout } from '../utils/audioRequestTimeout';
 import { getSoundEffectPcmDuration, SOUND_EFFECT_CHANNELS, SOUND_EFFECT_SAMPLE_RATE } from '../utils/soundEffectAudio';
+import { normalizeTtsLanguageCode, supportsTtsLanguage } from '../utils/elevenLabsTtsLanguage';
 
 const isBrowser = typeof window !== 'undefined';
 
 interface ElevenLabsGenerationOptions {
+  languageCode?: string;
   qualityMode?: ElevenLabsQualityMode;
   fallbackText?: string;
   seed?: number;
@@ -64,7 +66,13 @@ const resolveQualityMode = (options?: ElevenLabsGenerationOptions): ElevenLabsQu
 
 const ELEVENLABS_PROMPT_POLICY_ERROR = /violated our Terms of Service|prompt appears to have violated|policy|safety/i;
 const MUSIC_PROMPT_POLICY_MESSAGE = '音乐提示词被 ElevenLabs 安全策略拦截了。我已经会在生成前自动改写成更音乐化的英文描述；如果仍失败，请避开“恐怖、惊吓、暴力、血腥、武器、模仿某歌手”等直白词，改写成“阴暗悬疑、紧张弦乐、诡异氛围、无鼓点”等配乐语言。';
-export const ELEVENLABS_MUSIC_MODEL = 'music_v2';
+export const ELEVENLABS_MUSIC_MODEL = 'music_v2_5';
+export const ELEVENLABS_MUSIC_FALLBACK_MODEL = 'music_v2';
+export const ELEVENLABS_MUSIC_MODELS = [ELEVENLABS_MUSIC_MODEL, ELEVENLABS_MUSIC_FALLBACK_MODEL] as const;
+export type ElevenLabsMusicModel = typeof ELEVENLABS_MUSIC_MODELS[number];
+interface ElevenLabsMusicOptions extends ElevenLabsGenerationOptions {
+  onModelUsed?: (model: ElevenLabsMusicModel) => void;
+}
 // Officially documented high-quality v2 output format.
 export const ELEVENLABS_MUSIC_OUTPUT_FORMAT = 'mp3_48000_192';
 // Sound Effects currently exposes one model. Request the highest-quality
@@ -405,7 +413,7 @@ export async function generateMusic(
   duration?: number,
   isInstrumental: boolean = true,
   lyrics?: string,
-  options?: ElevenLabsGenerationOptions,
+  options?: ElevenLabsMusicOptions,
 ): Promise<Blob> {
   const qualityMode = resolveQualityMode(options);
   if (isBrowser) {
@@ -450,41 +458,57 @@ export async function generateMusic(
   logEvent('src/services/elevenLabsService.ts:449', 'info');
 
   return withElevenLabsApiKey('ElevenLabs music generation', async (apiKey) => {
-    const response = await fetch(
-      `https://api.elevenlabs.io/v1/music?output_format=${ELEVENLABS_MUSIC_OUTPUT_FORMAT}`,
-      {
-      method: "POST",
-      headers: {
-        "xi-api-key": apiKey,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        prompt: limitedMusicPrompt,
-        music_length_ms: musicLengthMs,
-        model_id: ELEVENLABS_MUSIC_MODEL,
-        force_instrumental: isInstrumental,
-      }),
-      },
-    );
+    for (const model of ELEVENLABS_MUSIC_MODELS) {
+      const response = await fetch(
+        `https://api.elevenlabs.io/v1/music?output_format=${ELEVENLABS_MUSIC_OUTPUT_FORMAT}`,
+        {
+          method: "POST",
+          headers: {
+            "xi-api-key": apiKey,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            prompt: limitedMusicPrompt,
+            music_length_ms: musicLengthMs,
+            model_id: model,
+            force_instrumental: isInstrumental,
+          }),
+        },
+      );
 
-    if (!response.ok) {
-      const message = await getElevenLabsErrorMessage(response);
-      if (ELEVENLABS_PROMPT_POLICY_ERROR.test(message)) {
-        throw new Error(MUSIC_PROMPT_POLICY_MESSAGE);
+      if (!response.ok) {
+        const message = await getElevenLabsErrorMessage(response);
+        if (ELEVENLABS_PROMPT_POLICY_ERROR.test(message)) {
+          throw new Error(MUSIC_PROMPT_POLICY_MESSAGE);
+        }
+        // Only retry explicit provider/model failures. Transport failures and body
+        // read failures may have already generated audio, so never retry those.
+        const modelUnavailable = /model[_ -]?(?:not[_ -]?found|unavailable|not[_ -]?available|not[_ -]?supported)|model.*(?:not found|does not exist|unavailable|not available|not supported|unsupported|no access|not have access|disabled)|(?:unsupported|unknown|invalid) model/i.test(message);
+        const canUseFallback = model === ELEVENLABS_MUSIC_MODEL
+          && !isElevenLabsQuotaErrorMessage(message)
+          && response.status !== 401 && response.status !== 429
+          && (response.status >= 500 || modelUnavailable && [400, 403, 404, 422].includes(response.status));
+        if (canUseFallback) {
+          logEvent('elevenlabs.music.fallback.music_v2', 'warn');
+          continue;
+        }
+        throw new Error(message);
       }
-      throw new Error(message);
-    }
 
-    recordElevenLabsResponseUsage(response, ELEVENLABS_MUSIC_MODEL, {
-      fallbackCredits: estimateTimedCredits(
-        normalizedDurationSeconds,
-        ELEVENLABS_MUSIC_CREDITS_PER_MINUTE,
-      ),
-      companyPoints: estimateTimedCompanyPoints(normalizedDurationSeconds, COMPANY_POINTS.musicPerSecond),
-      billingQuantity: normalizedDurationSeconds,
-      billingUnit: 'second',
-    });
-    return await response.blob();
+      recordElevenLabsResponseUsage(response, model, {
+        fallbackCredits: estimateTimedCredits(
+          normalizedDurationSeconds,
+          ELEVENLABS_MUSIC_CREDITS_PER_MINUTE,
+        ),
+        companyPoints: estimateTimedCompanyPoints(normalizedDurationSeconds, COMPANY_POINTS.musicPerSecond),
+        billingQuantity: normalizedDurationSeconds,
+        billingUnit: 'second',
+      });
+      const audio = await response.blob();
+      options?.onModelUsed?.(model);
+      return audio;
+    }
+    throw new Error('音乐主模型和备用模型均不可用，请稍后重试。');
   });
 }
 
@@ -497,6 +521,7 @@ export async function generateVoice(
   options?: ElevenLabsGenerationOptions,
 ): Promise<Blob> {
   const qualityMode = resolveQualityMode(options);
+  const languageCode = normalizeTtsLanguageCode(options?.languageCode);
   const fallbackText = options?.fallbackText?.trim() || text;
   if (isBrowser) {
     return requestBlob('/api/ai/elevenlabs/voice', {
@@ -514,6 +539,7 @@ export async function generateVoice(
         voiceSource: options?.voiceSource,
         publicOwnerId: options?.publicOwnerId,
         voiceName: options?.voiceName,
+        ...(languageCode ? { languageCode } : {}),
       }),
     });
   }
@@ -521,7 +547,7 @@ export async function generateVoice(
   logEvent('src/services/elevenLabsService.ts:523', 'info');
 
   // Prefer Eleven v4 for quality, while keeping the established models as automatic fallbacks.
-  const modelsToTry = ELEVENLABS_TTS_MODELS;
+  const modelsToTry = ELEVENLABS_TTS_MODELS.filter(modelId => supportsTtsLanguage(modelId, languageCode));
   let lastError: any = null;
 
   try {
@@ -545,6 +571,7 @@ export async function generateVoice(
             body: JSON.stringify({
               text: textForModel,
               model_id: modelId,
+              ...(languageCode ? { language_code: languageCode } : {}),
               ...(typeof options?.seed === 'number' ? { seed: options.seed } : {}),
               voice_settings: voiceSettings,
             }),
@@ -590,7 +617,7 @@ export async function generateVoice(
   // Fallback if voice ID was not found: try with a configured guaranteed default voice and stable v2 model
   const isVoiceNotFoundError = lastError && (lastError.message.toLowerCase().includes("not found") || lastError.message.toLowerCase().includes("voice_id"));
   const guaranteedFallbackVoiceId: string = '';
-  if (isVoiceNotFoundError && guaranteedFallbackVoiceId && voiceId !== guaranteedFallbackVoiceId) {
+  if (!languageCode && isVoiceNotFoundError && guaranteedFallbackVoiceId && voiceId !== guaranteedFallbackVoiceId) {
     logEvent('src/services/elevenLabsService.ts:596', 'warn');
     
     try {

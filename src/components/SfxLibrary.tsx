@@ -46,8 +46,8 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { HistoryItem } from '../types';
-import { optimizeImportMetadata } from '../services/aiService';
-import { isBgmImportFileName, isUcsImportFileName } from '../services/ucsNaming';
+import { SfxLibraryNamingProvider, SfxLibraryNamingControls, SfxLibraryNamingSelection, SfxLibraryNamingSuggestion } from './SfxLibraryNaming';
+import { validateLibraryNamingChanges, type LibraryNamingSource, type LibraryNamingChange } from '../services/sfxLibraryNaming';
 import {
   getSfxLibraryAdminHeaders,
   loginSfxLibraryAdmin,
@@ -64,6 +64,7 @@ import {
 import { scoreSfxSearchCandidate } from '../services/sfxSearchLexicon';
 import { prepareSfxLibraryArchive } from '../services/sfxLibraryArchiveClient';
 import { displaySfxLibraryFileName } from '../utils/sfxLibraryFileName';
+import { LibraryRevisionConflict, SfxLibrarySync, type LibrarySnapshot, type LibrarySyncStatus } from '../services/sfxLibrarySync';
 
 interface ImportItem {
   id: string;
@@ -78,7 +79,8 @@ interface ImportItem {
   size: string;
   type: string;
   duration: number;
-  status?: 'pending' | 'uploading' | 'success' | 'error' | 'skipped';
+  status?: 'pending' | 'uploading' | 'saving' | 'success' | 'error' | 'skipped';
+  librarySoundId?: string;
 }
 
 type DuplicateImportResolution = 'replace' | 'skip' | 'keep';
@@ -612,6 +614,10 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
       showCustomAlert("需要开启管理", "请点击左侧目录上方的“管理”，输入管理密码并进入管理模式后再操作。");
       return false;
     }
+    if (!isServerLibraryReady) {
+      showCustomAlert('音效库尚未就绪', '请先等待音效库加载完成；加载失败时请点击重试。');
+      return false;
+    }
     return true;
   };
 
@@ -620,14 +626,21 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     let active = true;
     const syncAuthorization = async () => {
       const authorized = await verifySfxLibraryAdmin();
-      if (active) setIsAuthorized(authorized);
+      if (active) {
+        setIsAuthorized(authorized);
+        if (!authorized) setIsDirectoryManageMode(false);
+      }
     };
     const handleStateChange = () => void syncAuthorization();
     void syncAuthorization();
     window.addEventListener('security-state-changed', handleStateChange);
+    window.addEventListener('focus', handleStateChange);
+    const timer = window.setInterval(handleStateChange, 60_000);
     return () => {
       active = false;
       window.removeEventListener('security-state-changed', handleStateChange);
+      window.removeEventListener('focus', handleStateChange);
+      window.clearInterval(timer);
     };
   }, []);
   const [selectedCategory, setSelectedCategory] = useState<string>('全部');
@@ -653,16 +666,16 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   const [isMusicParentExpanded, setIsMusicParentExpanded] = useState<boolean>(true);
 
   // Dynamic Categories state
-  const [categories, setCategories] = useState<CategoryGroup[]>(() => {
+  const [categories, setCategoriesState] = useState<CategoryGroup[]>(() => {
     if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem(SFX_LIBRARY_CATEGORIES_KEY);
-      if (saved) {
-        try {
+      try {
+        const saved = localStorage.getItem(SFX_LIBRARY_CATEGORIES_KEY);
+        if (saved) {
           const parsed = JSON.parse(saved);
           return Array.isArray(parsed) ? parsed : [];
-        } catch (e) {
-          console.error("Failed to parse saved categories from localStorage", e);
         }
+      } catch (e) {
+        console.error("Failed to parse saved categories from localStorage", e);
       }
     }
     return [];
@@ -844,7 +857,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   const [filterSampleRate, setFilterSampleRate] = useState<string>('全部'); // 全部, 44.1, 48.0, 96.0
 
   // Dynamic Sounds state with backend synchronization
-  const [sounds, setSounds] = useState<SoundEffect[]>([]);
+  const [sounds, setSoundsState] = useState<SoundEffect[]>([]);
   const [soundRatings, setSoundRatings] = useState<SoundRatings>(readStoredSoundRatings);
   const [soundFavoriteOverrides, setSoundFavoriteOverrides] = useState<SoundFavoriteOverrides>(readStoredSoundFavorites);
 
@@ -881,11 +894,86 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     });
   }, []);
 
-  const isLoadedFromServer = useRef(false);
   const [isServerLibraryReady, setIsServerLibraryReady] = useState(false);
   const [libraryLoadError, setLibraryLoadError] = useState(false);
   const serverRevisionRef = useRef(0);
-  const serverSnapshotRef = useRef({ categories: '', sounds: '' });
+  const draftKeyRef = useRef('');
+  const [draftTabId] = useState(() => {
+    const createId = () => globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    try {
+      const key = 'sfx_library_draft_tab';
+      const id = sessionStorage.getItem(key) || createId();
+      sessionStorage.setItem(key, id);
+      return id;
+    } catch { return createId(); }
+  });
+  const [saveStatus, setSaveStatus] = useState<LibrarySyncStatus>('loading');
+  const [saveError, setSaveError] = useState('');
+  const [draftStorageError, setDraftStorageError] = useState(false);
+  const syncRef = useRef<SfxLibrarySync | null>(null);
+  if (!syncRef.current) syncRef.current = new SfxLibrarySync({
+    readDraft: () => draftKeyRef.current ? localStorage.getItem(draftKeyRef.current) : null,
+    writeDraft: value => {
+      if (!draftKeyRef.current) {
+        if (value) throw new Error('无法确认待保存内容所属账号。');
+        return;
+      }
+      if (value) localStorage.setItem(draftKeyRef.current, value);
+      else localStorage.removeItem(draftKeyRef.current);
+    },
+    save: async snapshot => {
+      const response = await fetch('/api/sfx/library/state', {
+        method: 'PUT',
+        headers: getSfxLibraryAdminHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ ...snapshot, baseRevision: snapshot.revision }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (response.status === 401 || response.status === 403) {
+        clearSfxLibraryAdminState();
+        setIsAuthorized(false);
+        syncRef.current?.setAuthorized(false);
+        throw new Error('管理权限已过期，请重新开启“管理”后重试保存。待保存内容已保留。');
+      }
+      if (response.status === 409 && Array.isArray(payload.categories) && Array.isArray(payload.sounds)) {
+        throw new LibraryRevisionConflict(payload);
+      }
+      if (!response.ok) throw new Error(payload.error || `保存失败（HTTP ${response.status}），请重试。`);
+      return { ...snapshot, revision: Number(payload.revision) };
+    },
+    changed: (data, status, error) => {
+      setCategoriesState(data.categories);
+      setSoundsState(data.sounds);
+      setSaveStatus(status);
+      setSaveError(error);
+      setDraftStorageError(Boolean(syncRef.current?.storageError));
+      serverRevisionRef.current = syncRef.current?.revision || 0;
+      try {
+        localStorage.setItem(SFX_LIBRARY_CATEGORIES_KEY, JSON.stringify(data.categories));
+        localStorage.setItem(SFX_LIBRARY_SOUNDS_KEY, JSON.stringify(data.sounds));
+      } catch { /* Browser cache failures must not block server persistence. */ }
+      publishSfxLibraryIndex(data.categories, data.sounds);
+    },
+  });
+  // Track edits immediately, before React effects or an SSE response can run.
+  const setCategories = (update: React.SetStateAction<CategoryGroup[]>) => syncRef.current!.edit('categories', update);
+  const setSounds = (update: React.SetStateAction<SoundEffect[]>) => syncRef.current!.edit('sounds', update);
+  const flushLibrary = () => syncRef.current!.flush();
+
+  useEffect(() => { syncRef.current!.setAuthorized(isAuthorized); }, [isAuthorized]);
+  useEffect(() => {
+    const sync = syncRef.current!;
+    sync.activate();
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (!sync.dirty) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', beforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', beforeUnload);
+      sync.dispose();
+    };
+  }, []);
   const [serverAssetStats, setServerAssetStats] = useState<AudioAssetLibraryStats | null>(null);
   const [isRefreshingAssetIndex, setIsRefreshingAssetIndex] = useState(false);
 
@@ -969,7 +1057,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   };
 
   const fetchJsonIfAvailable = useCallback(async <T,>(url: string): Promise<T | null> => {
-    const response = await fetch(url, { headers: { Accept: 'application/json' } });
+    const response = await fetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
     if (!response.ok) return null;
 
     const contentType = response.headers.get('content-type') || '';
@@ -983,24 +1071,23 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
       const [libraryState, assetStatsData] = await Promise.all([
         fetchJsonIfAvailable<{
           revision: number;
+          ownerId?: string;
           categories: CategoryGroup[];
           sounds: SoundEffect[];
         }>('/api/sfx/library/state'),
         fetchJsonIfAvailable<AudioAssetLibraryStats>('/api/audio-assets/stats'),
       ]);
       if (libraryState && Array.isArray(libraryState.categories) && Array.isArray(libraryState.sounds)) {
-        const categoriesJson = JSON.stringify(libraryState.categories);
-        const soundsJson = JSON.stringify(libraryState.sounds);
-        serverRevisionRef.current = Number(libraryState.revision) || 0;
-        serverSnapshotRef.current = { categories: categoriesJson, sounds: soundsJson };
-        setCategories(libraryState.categories);
-        setSounds(libraryState.sounds);
+        if (!draftKeyRef.current) {
+          // Older running servers don't include the account in the state
+          // response. Use the existing authenticated balance endpoint once so
+          // recovery also works before that server is restarted.
+          const ownerId = libraryState.ownerId || (await fetchJsonIfAvailable<{ user?: { userId?: string } }>('/api/usage/quota').catch(() => null))?.user?.userId;
+          if (ownerId) draftKeyRef.current = `sfx_library_pending_v1:${ownerId}:${draftTabId}`;
+        }
+        syncRef.current!.receive(libraryState);
         setIsServerLibraryReady(true);
         setLibraryLoadError(false);
-        localStorage.setItem(SFX_LIBRARY_CATEGORIES_KEY, categoriesJson);
-        localStorage.setItem(SFX_LIBRARY_SOUNDS_KEY, soundsJson);
-        publishSfxLibraryIndex(libraryState.categories, libraryState.sounds);
-        isLoadedFromServer.current = true;
       } else {
         setLibraryLoadError(true);
       }
@@ -1009,7 +1096,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
       console.error('Failed to load sfx library database from server:', err);
       setLibraryLoadError(true);
     }
-  }, [fetchJsonIfAvailable]);
+  }, [draftTabId, fetchJsonIfAvailable]);
 
   // The server is authoritative. SSE provides immediate updates and polling
   // recovers automatically after sleep, Wi-Fi changes, or a proxy timeout.
@@ -1025,52 +1112,6 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
       window.clearInterval(pollingTimer);
     };
   }, [loadServerData]);
-
-  // Admin edits are committed atomically with optimistic revision checking.
-  useEffect(() => {
-    if (!isLoadedFromServer.current) return;
-    const categoriesJson = JSON.stringify(categories);
-    const soundsJson = JSON.stringify(sounds);
-    localStorage.setItem(SFX_LIBRARY_CATEGORIES_KEY, categoriesJson);
-    localStorage.setItem(SFX_LIBRARY_SOUNDS_KEY, soundsJson);
-    publishSfxLibraryIndex(categories, sounds);
-    if (!isAuthorized) return;
-    if (
-      categoriesJson === serverSnapshotRef.current.categories
-      && soundsJson === serverSnapshotRef.current.sounds
-    ) return;
-
-    const syncTimer = window.setTimeout(async () => {
-      try {
-        const response = await fetch('/api/sfx/library/state', {
-          method: 'PUT',
-          headers: getSfxLibraryAdminHeaders({ 'Content-Type': 'application/json' }),
-          body: JSON.stringify({
-            baseRevision: serverRevisionRef.current,
-            categories,
-            sounds,
-          }),
-        });
-        const payload = await response.json().catch(() => ({}));
-        if (response.status === 401) {
-          clearSfxLibraryAdminState();
-          setIsAuthorized(false);
-          return;
-        }
-        if (response.status === 409) {
-          console.warn(payload.error || 'Sound library changed on another client; refreshing.');
-          await loadServerData();
-          return;
-        }
-        if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
-        serverRevisionRef.current = Number(payload.revision) || serverRevisionRef.current;
-        serverSnapshotRef.current = { categories: categoriesJson, sounds: soundsJson };
-      } catch (err) {
-        console.error('Failed to sync sound library with backend:', err);
-      }
-    }, 250);
-    return () => window.clearTimeout(syncTimer);
-  }, [categories, isAuthorized, loadServerData, sounds]);
 
   // Edit Sound state
   const [editingSound, setEditingSound] = useState<SoundEffect | null>(null);
@@ -1374,14 +1415,19 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     });
   };
 
-  const handleSaveEditSound = (updated: SoundEffect) => {
+  const handleSaveEditSound = async (updated: SoundEffect) => {
     if (!checkOwnerPermission()) return;
     setSounds(prev => prev.map(s => s.id === updated.id ? updated : s));
-    setEditingSound(null);
-    showCustomAlert("保存成功", `已成功更新 "${updated.name}" 的元数据信息。`);
+    try {
+      await flushLibrary();
+      setEditingSound(null);
+      showCustomAlert("保存成功", `已成功更新 "${updated.name}" 的元数据信息。`);
+    } catch (error) {
+      showCustomAlert('保存未完成', (error as Error).message);
+    }
   };
 
-  const handleAddSound = () => {
+  const handleAddSound = async () => {
     if (!checkOwnerPermission()) return;
     if (!addSoundForm.name.trim()) {
       showCustomAlert("输入错误", "请输入资产显示名称！");
@@ -1402,7 +1448,12 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     setSounds(prev => [newSound, ...prev]);
     setSelectedSoundId(newId);
     setIsAddSoundModalOpen(false);
-    showCustomAlert("新建成功", `已成功在 "${addSoundForm.category} -> ${addSoundForm.subcategory || '无'}" 下创建了全新音效资产 "${addSoundForm.name}"。`);
+    try {
+      await flushLibrary();
+      showCustomAlert("新建成功", `已成功在 "${addSoundForm.category} -> ${addSoundForm.subcategory || '无'}" 下创建了全新音效资产 "${addSoundForm.name}"。`);
+    } catch (error) {
+      showCustomAlert('新建尚未保存', `${(error as Error).message} 请使用页面上方“重试保存”，无需重复新建。`);
+    }
   };
 
   // --- Category / Directory Tree Management Functions ---
@@ -1536,8 +1587,28 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     childId?: string;
     displayName: string;
     confirmationPassword?: string;
+    authorizationPassword?: string;
   }) => {
     try {
+      const password = input.confirmationPassword ?? input.authorizationPassword;
+      if (password !== undefined) {
+        // The confirmation password also renews an expired management session.
+        await loginSfxLibraryAdmin(password.trim());
+        setIsAuthorized(true);
+        setIsDirectoryManageMode(true);
+        syncRef.current!.setAuthorized(true);
+      } else if (!await verifySfxLibraryAdmin()) {
+        setIsAuthorized(false);
+        setIsDirectoryManageMode(false);
+        showCustomConfirm(
+          '管理权限已过期',
+          `请重新输入管理密码，验证后永久删除“${input.displayName}”及其中的音频文件。`,
+          password => { void deleteFolderWithContents({ ...input, authorizationPassword: password }); },
+          { tone: 'danger', confirmLabel: '验证并永久删除', requiresPassword: true },
+        );
+        return;
+      }
+      await flushLibrary();
       const response = await fetch('/api/sfx/library/folder', {
         method: 'DELETE',
         headers: getSfxLibraryAdminHeaders({ 'Content-Type': 'application/json' }),
@@ -1547,32 +1618,30 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
           subId: input.subId,
           childId: input.childId,
           baseRevision: serverRevisionRef.current,
-          confirmationPassword: input.confirmationPassword,
+          confirmationPassword: input.confirmationPassword?.trim(),
         }),
       });
       const payload = await response.json().catch(() => ({}));
-      if (response.status === 401) {
+      if (response.status === 401 || payload.code === 'ADMIN_AUTH_REQUIRED') {
         clearSfxLibraryAdminState();
         setIsAuthorized(false);
+        setIsDirectoryManageMode(false);
         throw new Error('管理权限已过期，请重新验证后再删除。');
       }
       if (response.status === 409) {
         await loadServerData();
-        throw new Error(payload.error || '音效库已被其他管理员更新，请确认最新内容后重试。');
+        throw new Error('音效库内容已更新，已刷新目录。请核对最新内容后重新确认删除。');
       }
+      if (payload.code === 'LIBRARY_FOLDER_NOT_FOUND') {
+        await loadServerData();
+        throw new Error('该目录已不存在，已刷新目录，请重新选择。');
+      }
+      if (payload.code === 'LIBRARY_ADMIN_PASSWORD_INVALID') throw new Error('管理密码错误，目录未删除。');
       if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
 
       const nextCategories = Array.isArray(payload.categories) ? payload.categories : [];
       const nextSounds = Array.isArray(payload.sounds) ? payload.sounds : [];
-      const categoriesJson = JSON.stringify(nextCategories);
-      const soundsJson = JSON.stringify(nextSounds);
-      serverRevisionRef.current = Number(payload.revision) || serverRevisionRef.current;
-      serverSnapshotRef.current = { categories: categoriesJson, sounds: soundsJson };
-      setCategories(nextCategories);
-      setSounds(nextSounds);
-      localStorage.setItem(SFX_LIBRARY_CATEGORIES_KEY, categoriesJson);
-      localStorage.setItem(SFX_LIBRARY_SOUNDS_KEY, soundsJson);
-      publishSfxLibraryIndex(nextCategories, nextSounds);
+      syncRef.current!.receive({ revision: payload.revision, categories: nextCategories, sounds: nextSounds });
       setSelectedCategory('全部');
       setSelectedSoundId(nextSounds[0]?.id || '');
       setIsPlaying(false);
@@ -1924,10 +1993,22 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   // Core Flow A: Import / Drag-and-drop file upload states
   const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
-  const [isAiBatchOptimizing, setIsAiBatchOptimizing] = useState<boolean>(false);
-  const importNamingRequestRef = useRef(0);
+  const [isImportNamingBusy, setIsImportNamingBusy] = useState(false);
+  const [isLibraryNamingBusy, setIsLibraryNamingBusy] = useState(false);
+  const [showLibraryNaming, setShowLibraryNaming] = useState(false);
+  const isAiBatchOptimizing = isImportNamingBusy || isLibraryNamingBusy;
   const [importItems, setImportItems] = useState<ImportItem[]>([]);
   const [isUploading, setIsUploading] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!isUploading) return;
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', beforeUnload);
+    return () => window.removeEventListener('beforeunload', beforeUnload);
+  }, [isUploading]);
   const [duplicateImportDialog, setDuplicateImportDialog] = useState<{
     names: string[];
     resolve: (resolution: DuplicateImportResolution | null) => void;
@@ -1955,14 +2036,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     pendingDialog?.resolve(resolution);
   };
 
-  // Batch upload naming and category states
-  const [namingStrategy, setNamingStrategy] = useState<'smart' | 'original' | 'standard'>('smart');
-  useEffect(() => {
-    if (!isImportModalOpen) {
-      importNamingRequestRef.current += 1;
-      setIsAiBatchOptimizing(false);
-    }
-  }, [isImportModalOpen]);
+  // Uploads preserve their names; AI naming runs only in the separate preview dialog.
   const [batchMainCategory, setBatchMainCategory] = useState<string>('');
   const [batchSubCategory, setBatchSubCategory] = useState<string>('');
   const [batchChildCategory, setBatchChildCategory] = useState<string>('');
@@ -2044,7 +2118,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     setBatchMainCategory(target.category);
     setBatchSubCategory(target.subcategory);
     setBatchChildCategory(target.childCategory);
-    setImportItems(prev => prev.map(item => ({
+    setImportItems(prev => prev.map(item => item.status === 'success' || item.status === 'saving' ? item : ({
       ...item,
       category: target.category,
       subcategory: target.subcategory,
@@ -2075,51 +2149,16 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     applyImportTarget({ category: batchMainCategory, subcategory: batchSubCategory, childCategory });
   };
 
-  const handleNamingStrategyChange = (strategy: 'smart' | 'original' | 'standard') => {
-    if (!checkOwnerPermission()) return;
-    importNamingRequestRef.current += 1;
-    setIsAiBatchOptimizing(false);
-    setNamingStrategy(strategy);
-    const updatedItems = importItems.map(item => {
-      const file = item.originalFile;
-      const finalFileName = strategy === 'original'
-        ? file.name
-        : item.category === '全部音乐'
-          ? (isBgmImportFileName(item.fileName, file.name) ? item.fileName : file.name)
-          : (isUcsImportFileName(item.fileName, file.name) ? item.fileName : file.name);
-
-      return {
-        ...item,
-        fileName: finalFileName
-      };
-    });
-    setImportItems(updatedItems);
-    if (strategy !== 'original') void handleAiBatchOptimize(updatedItems, strategy === 'smart');
-  };
-
   const handleApplyBatchCategory = () => {
     if (!checkOwnerPermission()) return;
     if (!batchMainCategory) return;
-    importNamingRequestRef.current += 1;
-    setIsAiBatchOptimizing(false);
-    const updatedItems = importItems.map(item => {
-      const file = item.originalFile;
-      const finalFileName = namingStrategy === 'original'
-        ? file.name
-        : batchMainCategory === '全部音乐'
-          ? (isBgmImportFileName(item.fileName, file.name) ? item.fileName : file.name)
-          : (isUcsImportFileName(item.fileName, file.name) ? item.fileName : file.name);
-
-      return {
+    const updatedItems = importItems.map(item => item.status === 'success' || item.status === 'saving' ? item : ({
         ...item,
         category: batchMainCategory,
         subcategory: batchSubCategory,
         childCategory: batchChildCategory,
-        fileName: finalFileName
-      };
-    });
+    }));
     setImportItems(updatedItems);
-    if (namingStrategy !== 'original') void handleAiBatchOptimize(updatedItems, true);
     
     showCustomAlert("批量应用成功", `已将待入库的所有音效分类一键批量调整为: "${batchMainCategory} -> ${batchSubCategory || '无'}${batchChildCategory ? ` -> ${batchChildCategory}` : ''}"。`);
   };
@@ -2827,20 +2866,20 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
           const duration = await new Promise<number>((resolve) => {
             const audio = new Audio();
             const objectUrl = URL.createObjectURL(file);
+            const finish = (value: number) => {
+              window.clearTimeout(timeout);
+              audio.onloadedmetadata = null;
+              audio.onerror = null;
+              audio.removeAttribute('src');
+              audio.load();
+              URL.revokeObjectURL(objectUrl);
+              resolve(value);
+            };
+            const timeout = window.setTimeout(() => finish(1.0), 3000);
+            audio.onloadedmetadata = () => finish(Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 1.0);
+            audio.onerror = () => finish(1.0);
+            audio.preload = 'metadata';
             audio.src = objectUrl;
-            audio.onloadedmetadata = () => {
-              resolve(audio.duration || 1.0);
-              URL.revokeObjectURL(objectUrl);
-            };
-            audio.onerror = () => {
-              resolve(1.0);
-              URL.revokeObjectURL(objectUrl);
-            };
-            // Set a timeout of 3 seconds just in case
-            setTimeout(() => {
-              resolve(1.0);
-              URL.revokeObjectURL(objectUrl);
-            }, 3000);
           });
           return {
             ...analyzed,
@@ -2854,7 +2893,6 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
         })
       );
       setImportItems(items);
-      if (namingStrategy !== 'original') await handleAiBatchOptimize(items, true);
     } catch (err) {
       console.error("Error processing import files:", err);
       const items = audioFiles.map(file => {
@@ -2869,7 +2907,6 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
           : analyzed;
       });
       setImportItems(items);
-      if (namingStrategy !== 'original') await handleAiBatchOptimize(items, true);
     } finally {
       setIsAnalyzing(false);
     }
@@ -2878,15 +2915,26 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   const handleConfirmImport = async () => {
     if (!checkOwnerPermission()) return;
     if (importItems.length === 0) return;
-    if (isAiBatchOptimizing) return;
+    if (isAiBatchOptimizing || isUploading) return;
 
-    const unnamedSfx = namingStrategy === 'original' ? [] : importItems.filter(item => (
-      item.category === '全部音乐'
-        ? !isBgmImportFileName(item.fileName, item.originalFile.name)
-        : !isUcsImportFileName(item.fileName, item.originalFile.name)
-    ));
-    if (unnamedSfx.length) {
-      showCustomAlert('需要规范命名', `${unnamedSfx.length} 个音频尚未获得有效的 UCS 音效名或 BGM 音乐名。请点击“AI 智能优化”重试、手动修改文件名，或明确选择“保留原名”后入库。`);
+    // These files already exist on the server. A metadata retry must never
+    // upload them again or apply duplicate-file rules to their pending entries.
+    if (importItems.some(item => item.status === 'saving')) {
+      setIsUploading(true);
+      try {
+        await flushLibrary();
+        const savedIds = new Set(syncRef.current!.data.sounds.map(sound => sound.id));
+        if (importItems.some(item => item.status === 'saving' && !savedIds.has(item.librarySoundId))) {
+          throw new Error('待保存的入库条目已被移除，请核对音效库内容后重新导入。');
+        }
+        const updated = importItems.map(item => item.status === 'saving' ? { ...item, status: 'success' as const } : item);
+        setImportItems(updated);
+        const complete = updated.every(item => item.status === 'success' || item.status === 'skipped');
+        if (complete) { setIsImportModalOpen(false); setImportItems([]); }
+        showCustomAlert('入库已保存', complete ? '已上传文件的音效清单已保存，刷新后可继续使用。' : '已上传文件的音效清单已保存。剩余未上传项目可继续入库。');
+      } catch (error) {
+        showCustomAlert('入库尚未保存', (error as Error).message);
+      } finally { setIsUploading(false); }
       return;
     }
 
@@ -3016,7 +3064,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
             }),
             body: item.originalFile
           });
-          if (response.status === 401) {
+          if (response.status === 401 || response.status === 403) {
             clearSfxLibraryAdminState();
             setIsAuthorized(false);
             throw new Error('管理权限已过期，请重新验证。');
@@ -3039,7 +3087,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
       }
 
       if (isSuccess) {
-        item.status = 'success';
+        item.status = 'saving';
         
         let slug = 'foley';
         if (item.category === '角色与拟音') slug = 'foley';
@@ -3082,6 +3130,13 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
         }
 
         soundsToAdd.push(newSound);
+        item.librarySoundId = newSound.id;
+        // Journal completed uploads while the rest of the batch is uploading.
+        setSounds(previous => [newSound, ...previous.filter(existing => (
+          duplicateResolution !== 'replace' || getAudioDirectoryFileKey(
+            existing.category, existing.subcategory, existing.fileName, existing.childCategory,
+          ) !== getAudioDirectoryFileKey(newSound.category, newSound.subcategory, newSound.fileName, newSound.childCategory)
+        ))]);
       } else {
         item.status = 'error';
       }
@@ -3089,37 +3144,18 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
       setImportItems([...itemsToUpload]);
     }
 
-    setIsUploading(false);
-
     // Add successful ones to library
     if (soundsToAdd.length > 0) {
       const newFileNameKeys = new Set(soundsToAdd.map(sound => (
         getAudioDirectoryFileKey(sound.category, sound.subcategory, sound.fileName, sound.childCategory)
       )));
 
-      if (duplicateResolution === 'replace') {
-        const replacedStorageKeys = sounds
+      const replacedStorageKeys = duplicateResolution === 'replace' ? sounds
           .filter(sound => newFileNameKeys.has(
             getAudioDirectoryFileKey(sound.category, sound.subcategory, sound.fileName, sound.childCategory),
           ))
           .map(sound => sound.storageKey)
-          .filter((storageKey): storageKey is string => Boolean(storageKey));
-
-        const cleanupResults = await Promise.allSettled(replacedStorageKeys.map(async (storageKey) => {
-          const response = await fetch(`/api/sfx/library/file?key=${encodeURIComponent(storageKey)}`, {
-            method: 'DELETE',
-            headers: getSfxLibraryAdminHeaders(),
-          });
-          if (!response.ok && response.status !== 404) {
-            throw new Error(`HTTP ${response.status}`);
-          }
-        }));
-        cleanupResults.forEach((result, index) => {
-          if (result.status === 'rejected') {
-            console.warn(`Failed to remove replaced library file ${replacedStorageKeys[index]}:`, result.reason);
-          }
-        });
-      }
+          .filter((storageKey): storageKey is string => Boolean(storageKey)) : [];
 
       setSounds(prev => {
         const retainedSounds = duplicateResolution === 'replace'
@@ -3132,10 +3168,26 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
               ),
             ))
           : prev;
-        return [...soundsToAdd, ...retainedSounds];
+        const addedIds = new Set(soundsToAdd.map(sound => sound.id));
+        return [...soundsToAdd, ...retainedSounds.filter(sound => !addedIds.has(sound.id))];
       });
       setSelectedSoundId(soundsToAdd[0].id);
+      try {
+        await flushLibrary();
+        itemsToUpload.forEach(item => { if (item.status === 'saving') item.status = 'success'; });
+        setImportItems([...itemsToUpload]);
+        // Replaced originals can only be removed after the new metadata commits.
+        void Promise.allSettled(replacedStorageKeys.map(storageKey => fetch(
+          `/api/sfx/library/file?key=${encodeURIComponent(storageKey)}`,
+          { method: 'DELETE', headers: getSfxLibraryAdminHeaders() },
+        )));
+      } catch (error) {
+        setIsUploading(false);
+        showCustomAlert('文件已上传，入库尚未保存', `${(error as Error).message} 无需重新上传文件，请点击“重试保存入库”。`);
+        return;
+      }
     }
+    setIsUploading(false);
 
     const failedCount = itemsToUpload.filter(item => item.status === 'error').length;
     const successCount = itemsToUpload.filter(item => item.status === 'success').length;
@@ -3144,10 +3196,8 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     if (failedCount === 0) {
       const skippedMessage = skippedCount > 0 ? `，已跳过 ${skippedCount} 个同名文件` : '';
       showCustomAlert("导入完成", `已成功上传并入库 ${successCount} 个音频${skippedMessage}。`);
-      setTimeout(() => {
-        setIsImportModalOpen(false);
-        setImportItems([]);
-      }, 1500);
+      setIsImportModalOpen(false);
+      setImportItems([]);
     } else {
       showCustomAlert(
         "⚠️ 导入未全部完成",
@@ -3156,59 +3206,27 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     }
   };
 
-  const handleAiBatchOptimize = async (sourceItems: ImportItem[] = importItems, onlyInvalid = false) => {
-    if (!checkOwnerPermission()) return;
-    const targetItems = onlyInvalid
-      ? sourceItems.filter(item => item.category === '全部音乐'
-        ? !isBgmImportFileName(item.fileName, item.originalFile.name)
-        : !isUcsImportFileName(item.fileName, item.originalFile.name))
-      : sourceItems;
-    if (targetItems.length === 0) return;
-    const requestId = ++importNamingRequestRef.current;
-    setIsAiBatchOptimizing(true);
-    try {
-      const mappedForAi = targetItems.map(item => ({
-        id: item.id,
-        originalName: item.originalFile.name,
-        path: item.relativePath || item.originalFile.name,
-        size: item.size,
-        type: item.type
-      }));
-      const optimized = [];
-      for (let start = 0; start < mappedForAi.length; start += 20) {
-        optimized.push(...await optimizeImportMetadata(mappedForAi.slice(start, start + 20)));
-        if (requestId !== importNamingRequestRef.current) return;
-      }
-      const optimizedById = new Map(optimized.map(item => [item.id, item]));
-      setImportItems(prev => {
-        if (requestId !== importNamingRequestRef.current) return prev;
-        return prev.map(item => {
-          const opt = optimizedById.get(item.id);
-          if (opt) {
-            const group = categories.find(category => category.name === opt.category);
-            const subcategory = group?.subCategories.find(sub => sub.name === opt.subcategory)
-              ? opt.subcategory
-              : group?.subCategories[0]?.name || item.subcategory;
-            return {
-              ...item,
-              name: opt.name,
-              fileName: opt.fileName,
-              category: opt.category,
-              subcategory,
-              childCategory: group?.subCategories.find(sub => sub.name === subcategory)?.childCategories?.[0]?.name || '',
-              tags: opt.tags
-            };
-          }
-          return item;
-        });
-      });
-    } catch (err: any) {
-      console.error("AI batch optimize error:", err);
-      if (requestId === importNamingRequestRef.current) {
-        showCustomAlert("UCS 命名失败", `未修改原文件名，请检查名称线索或模型状态后重试。详情: ${err.message || '未知错误'}`);
-      }
-    } finally {
-      if (requestId === importNamingRequestRef.current) setIsAiBatchOptimizing(false);
+  const importNamingSources = (items: ImportItem[]): LibraryNamingSource[] => items.map(item => ({
+    ...item, path: item.relativePath || item.originalFile.name,
+  }));
+
+  const applyNaming = async (target: 'import' | 'library', changes: LibraryNamingChange[]) => {
+    if (!checkOwnerPermission()) throw new Error('请重新开启管理后再应用命名。');
+    const current: LibraryNamingSource[] = target === 'import'
+      ? importNamingSources(importItems)
+      : sounds.map(sound => ({ ...sound, type: sound.format }));
+    const currentById = new Map(current.map(source => [source.id, source]));
+    if (changes.some(change => !currentById.has(change.id))) {
+      throw new Error('文件已被修改或移除，请关闭后重新打开命名整理。');
+    }
+    validateLibraryNamingChanges(current, changes);
+    const byId = new Map(changes.map(change => [change.id, change]));
+    if (target === 'import') {
+      setImportItems(previous => previous.map(item => byId.has(item.id) ? { ...item, ...byId.get(item.id) } : item));
+    } else {
+      // Storage keys and audio URLs remain stable; downloads use the confirmed filename.
+      setSounds(previous => previous.map(sound => byId.has(sound.id) ? { ...sound, ...byId.get(sound.id) } : sound));
+      await flushLibrary();
     }
   };
 
@@ -3297,6 +3315,32 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
           </button>
         </div>
       </header>
+
+      {isServerLibraryReady && (
+        <div role={saveError ? 'alert' : 'status'} className={`flex shrink-0 flex-wrap items-center gap-3 border-b px-5 py-2 text-xs ${saveError || draftStorageError ? 'border-amber-200 bg-amber-50 text-amber-900' : 'border-slate-100 bg-slate-50 text-slate-500'}`}>
+          <span>{saveError || (saveStatus === 'saved' ? '音效库已保存' : saveStatus === 'saving' ? '正在保存音效库，请稍候…' : isAuthorized ? '有待保存的修改…' : '有待保存的修改，请开启“管理”后保存。')}</span>
+          {draftStorageError && <span>浏览器暂存不可用，请确认保存成功后再刷新。</span>}
+          {saveStatus === 'error' && <button type="button" className="font-bold underline" onClick={() => void flushLibrary().catch(() => {})}>重试保存</button>}
+          {saveStatus === 'conflict' && <>
+            <button type="button" className="font-bold underline" onClick={() => {
+              const url = URL.createObjectURL(new Blob([syncRef.current!.exportDraft()], { type: 'application/json' }));
+              const link = document.createElement('a');
+              link.href = url; link.download = '音效库待保存内容.json'; link.click();
+              setTimeout(() => URL.revokeObjectURL(url), 1000);
+            }}>导出待保存内容</button>
+            <button type="button" className="font-bold underline" onClick={() => showCustomConfirm(
+              '使用服务器版本？', '这会放弃本机尚未保存的修改。建议先导出待保存内容以便核对。',
+              () => { void (async () => {
+                try {
+                  const remote = await fetchJsonIfAvailable<LibrarySnapshot>('/api/sfx/library/state');
+                  if (!remote) throw new Error('无法加载服务器版本，请稍后重试。');
+                  syncRef.current!.useServer(remote);
+                } catch (error) { showCustomAlert('处理失败', (error as Error).message); }
+              })(); },
+            )}>使用服务器版本</button>
+          </>}
+        </div>
+      )}
 
       {/* Main Three-Column Layout Container */}
       <div id="sfx-library-columns" className="flex-1 flex overflow-hidden">
@@ -4206,10 +4250,24 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
           </div>
 
           {/* Table list of matching sounds */}
+          <SfxLibraryNamingProvider
+            sources={filteredSounds.map(sound => ({ ...sound, type: sound.format }))}
+            onApply={changes => applyNaming('library', changes)}
+            onBusyChange={setIsLibraryNamingBusy}
+            disabled={!canModifyLibrary || !isServerLibraryReady || isImportModalOpen}
+          >
           <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-2">
             <div className="flex justify-between items-center text-[10px] text-slate-450 px-2 uppercase font-bold tracking-wider">
               <div className="flex items-center gap-2">
                 <span>共检索到 <strong className="text-emerald-700 font-extrabold">{filteredSounds.length}</strong> 个音效资产</span>
+                {canModifyLibrary && filteredSounds.length > 0 && (
+                  <button type="button" onClick={() => setShowLibraryNaming(current => !current)} disabled={!isServerLibraryReady || isLibraryNamingBusy}
+                    aria-pressed={showLibraryNaming}
+                    title="在当前列表中整理命名"
+                    className="flex shrink-0 items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 font-sans text-emerald-700 hover:bg-emerald-100 disabled:opacity-50">
+                    <Sparkles className="h-3 w-3" />AI 命名整理
+                  </button>
+                )}
                 {filteredSounds.length > 0 && (
                   <button
                     onClick={downloadFilteredSoundsAsZip}
@@ -4225,6 +4283,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
               <span>点击行可选中与加载预览</span>
             </div>
 
+            {canModifyLibrary && showLibraryNaming && filteredSounds.length > 0 && <SfxLibraryNamingControls />}
             {filteredSounds.length === 0 ? (
               <div className="h-60 bg-slate-100/50 border border-dashed border-slate-200 rounded-2xl flex flex-col items-center justify-center p-6 text-center space-y-2">
                 <FileAudio className="w-8 h-8 text-slate-400 animate-pulse" />
@@ -4271,6 +4330,11 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                     >
                       {/* Left Block: Audio trigger & Names */}
                       <div className="flex items-center gap-3 min-w-0 flex-1 sm:min-w-[210px]">
+                        {canModifyLibrary && showLibraryNaming && (
+                          <span onClick={event => event.stopPropagation()}>
+                            <SfxLibraryNamingSelection id={sound.id} fileName={sound.fileName} />
+                          </span>
+                        )}
                         <button
                           type="button"
                           onClick={(e) => {
@@ -4366,6 +4430,11 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                           onRate={handleRateSound}
                         />
                       </div>
+                      {canModifyLibrary && showLibraryNaming && (
+                        <div className="sm:col-span-3 md:col-span-4" onClick={event => event.stopPropagation()}>
+                          <SfxLibraryNamingSuggestion id={sound.id} />
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -4374,6 +4443,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
           </div>
 
           {/* Preview Global Audio Player Drawer */}
+          </SfxLibraryNamingProvider>
           <div className="p-4 border-t border-slate-200 bg-white flex flex-col gap-3">
             {/* Audio Waveform with dynamic tracker */}
             <div className="space-y-1.5">
@@ -4635,8 +4705,8 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
               <div className="flex items-center gap-2.5">
                 <Sparkles className="w-4 h-4 text-emerald-400 animate-pulse" />
                 <div>
-                  <h3 className="text-xs font-black text-white uppercase tracking-wider">AI 辅助音效资产 & 文件夹批量入库工作台</h3>
-                  <p className="text-[10px] text-gray-500 mt-0.5">支持智能自动识别、分类和重命名，您也可以在下方手动修改任意字段。</p>
+                  <h3 className="text-xs font-black text-white uppercase tracking-wider">音效资产 & 文件夹批量入库</h3>
+                  <p className="text-[10px] text-gray-500 mt-0.5">默认保留原文件名直接上传；需要命名时，在下方生成建议并确认应用。</p>
                 </div>
               </div>
               <button 
@@ -4659,50 +4729,28 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                     <Sparkles className="absolute inset-0 m-auto w-5 h-5 text-emerald-400 animate-bounce" />
                   </div>
                   <div>
-                    <h4 className="text-sm font-bold text-white">正在识别文件名并整理入库信息...</h4>
+                    <h4 className="text-sm font-bold text-white">正在读取文件信息...</h4>
                     <p className="text-xs text-gray-500 mt-1.5 max-w-sm leading-relaxed">
-                      根据文件名和相对路径为音效生成 UCS 命名；此步骤不分析音频内容。
+                      正在读取格式、大小和时长，不调用 AI，也不修改文件名。
                     </p>
                   </div>
                 </div>
               ) : (
+                <SfxLibraryNamingProvider
+                  sources={importNamingSources(importItems.filter(item => !item.status || item.status === 'pending' || item.status === 'error'))}
+                  onApply={changes => applyNaming('import', changes)}
+                  onBusyChange={setIsImportNamingBusy}
+                  disabled={isUploading || isLibraryNamingBusy}
+                >
                 <div className="space-y-4">
                   {/* Top action bar: AI Optimization */}
-                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3.5">
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-bold text-slate-800">AI 智能元数据高级调优</span>
-                        <span className="text-[9px] bg-emerald-150 text-emerald-700 px-1.5 py-0.5 rounded font-bold border border-emerald-200">AI 网关驱动</span>
-                      </div>
-                      <p className="text-[10px] text-slate-500">
-                        根据原文件名与目录重新生成 UCS 8.2.1 音效名称；音乐沿用 BGM 命名。请在入库前核对分类。
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      disabled={isAiBatchOptimizing || importItems.length === 0}
-                      onClick={() => void handleAiBatchOptimize()}
-                      className="px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-700 hover:from-emerald-500 hover:to-teal-600 text-white font-extrabold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow-lg shadow-emerald-500/10 transition-all shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      {isAiBatchOptimizing ? (
-                        <>
-                          <RefreshCw className="w-3.5 h-3.5 animate-spin text-white" />
-                          <span>AI 正在翻译调优中...</span>
-                        </>
-                      ) : (
-                        <>
-                          <Sparkles className="w-3.5 h-3.5 text-white" />
-                          <span>AI 一键批量调优</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
+                  <SfxLibraryNamingControls />
 
                   {/* 一键批量属性配置面板 (Batch Settings Panel) */}
                   <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
                     <div className="flex items-center gap-2">
                       <FolderOpen className="w-4 h-4 text-indigo-600" />
-                      <span className="text-xs font-bold text-slate-800">批量分类与命名规则配置</span>
+                      <span className="text-xs font-bold text-slate-800">批量入库目录配置</span>
                     </div>
                     
                     <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
@@ -4767,70 +4815,32 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                         </button>
                       </div>
 
-                      {/* Batch Naming Strategy selection */}
-                      <div className="md:col-span-5 space-y-1">
-                        <label className="text-[10px] text-slate-500 font-bold block">批量文件名生成策略</label>
-                        <div className="flex bg-white border border-slate-200 rounded-lg p-0.5 gap-1">
-                          <button
-                            type="button"
-                            onClick={() => handleNamingStrategyChange('smart')}
-                            className={`flex-1 py-1.5 rounded-md text-[10px] font-extrabold transition-all ${
-                              namingStrategy === 'smart'
-                                ? 'bg-emerald-600 text-white shadow-sm'
-                                : 'text-slate-500 hover:bg-slate-100'
-                            }`}
-                            title="保留已有 UCS 音效名称；中文或旧格式音效用 AI 转为 UCS 命名"
-                          >
-                            自动检测 (有规范保留，无则生成)
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleNamingStrategyChange('original')}
-                            className={`flex-1 py-1.5 rounded-md text-[10px] font-extrabold transition-all ${
-                              namingStrategy === 'original'
-                                ? 'bg-emerald-600 text-white shadow-sm'
-                                : 'text-slate-500 hover:bg-slate-100'
-                            }`}
-                            title="强制保留导入时的原始文件名"
-                          >
-                            保留原名
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleNamingStrategyChange('standard')}
-                            className={`flex-1 py-1.5 rounded-md text-[10px] font-extrabold transition-all ${
-                              namingStrategy === 'standard'
-                                ? 'bg-emerald-600 text-white shadow-sm'
-                                : 'text-slate-500 hover:bg-slate-100'
-                            }`}
-                            title="所有音效重新按 UCS 分类命名；音乐使用 BGM 命名"
-                          >
-                            全量生成命名
-                          </button>
-                        </div>
-                      </div>
                     </div>
                   </div>
 
                   {/* Batch Import List Table */}
-                  <div className="border border-slate-200 rounded-xl overflow-hidden bg-white">
-                    <table className="w-full text-left border-collapse table-auto text-xs">
+                  <div className="border border-slate-200 rounded-xl overflow-x-auto bg-white">
+                    <table className="w-full min-w-[1100px] text-left border-collapse table-auto text-xs">
                       <thead>
                         <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold">
+                          <th className="p-3 min-w-12 whitespace-nowrap">命名</th>
                           <th className="p-3 w-[180px]">原始路径/相对文件夹</th>
                           <th className="p-3 w-[120px] text-center">上传状态</th>
                           <th className="p-3 w-[150px]">资产名称 (手动修改)</th>
-                          <th className="p-3 w-[160px]">工程化文件名 (手动修改)</th>
+                          <th className="p-3 min-w-[240px]">工程化文件名 / AI 建议</th>
                           <th className="p-3 w-[130px]">主分类 (可手改)</th>
                           <th className="p-3 w-[140px]">二级子分类 (可手改)</th>
                           <th className="p-3 w-[140px]">三级文件夹 (可选)</th>
-                          <th className="p-3">特征标签 (英文/逗号分隔)</th>
+                          <th className="p-3 min-w-[180px]">特征标签 (英文/逗号分隔)</th>
                           <th className="p-3 text-center w-[50px]">操作</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
                         {importItems.map((item, index) => (
                           <tr key={item.id} className="hover:bg-slate-50/50 transition-colors">
+                            <td className="p-2 align-top">
+                              <SfxLibraryNamingSelection id={item.id} fileName={item.fileName} />
+                            </td>
                             {/* Original Path */}
                             <td className="p-2 font-mono text-[10px] text-slate-500 break-all max-w-[180px]">
                               {item.relativePath && item.relativePath !== item.originalFile.name ? (
@@ -4870,6 +4880,12 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                                   正在上传...
                                 </span>
                               )}
+                              {item.status === 'saving' && (
+                                <span className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1 text-[10px] font-bold text-amber-700">
+                                  <RefreshCw className="h-3 w-3 shrink-0" />
+                                  已上传，等待保存
+                                </span>
+                              )}
                               {item.status === 'skipped' && (
                                 <span className="inline-flex items-center gap-1 bg-slate-100 text-slate-600 border border-slate-200 px-2.5 py-1 rounded-md text-[10px] font-bold">
                                   <Check className="w-3 h-3 shrink-0" />
@@ -4905,7 +4921,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                                   updated[index].name = e.target.value;
                                   setImportItems(updated);
                                 }}
-                                disabled={isUploading || isAiBatchOptimizing || item.status === 'success'}
+                                disabled={isUploading || isAiBatchOptimizing || item.status === 'success' || item.status === 'saving'}
                                 className="w-full bg-slate-50 border border-slate-200 hover:border-slate-300 focus:border-emerald-500 disabled:bg-slate-100 disabled:text-slate-400 rounded-lg px-2.5 py-1.5 text-xs text-slate-850 outline-none transition-all"
                                 placeholder="输入中文描述"
                               />
@@ -4921,10 +4937,11 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                                   updated[index].fileName = e.target.value;
                                   setImportItems(updated);
                                 }}
-                                disabled={isUploading || isAiBatchOptimizing || item.status === 'success'}
+                                disabled={isUploading || isAiBatchOptimizing || item.status === 'success' || item.status === 'saving'}
                                 className="w-full bg-slate-50 border border-slate-200 hover:border-slate-300 focus:border-emerald-500 disabled:bg-slate-100 disabled:text-slate-400 rounded-lg px-2.5 py-1.5 font-mono text-[11px] text-emerald-700 outline-none transition-all"
                                 placeholder="UIClick_ConfirmButton.wav"
                               />
+                              <SfxLibraryNamingSuggestion id={item.id} />
                             </td>
 
                             {/* Primary Category selector */}
@@ -4936,13 +4953,11 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                                   updated[index].category = e.target.value;
                                   // Automatically assign the first subcategory from the new group
                                   const group = categories.find(g => g.name === e.target.value);
-                                  if (group && group.subCategories.length > 0) {
-                                    updated[index].subcategory = group.subCategories[0].name;
-                                    updated[index].childCategory = group.subCategories[0].childCategories?.[0]?.name || '';
-                                  }
+                                  updated[index].subcategory = group?.subCategories[0]?.name || '';
+                                  updated[index].childCategory = group?.subCategories[0]?.childCategories?.[0]?.name || '';
                                   setImportItems(updated);
                                 }}
-                                disabled={isUploading || item.status === 'success'}
+                                disabled={isUploading || item.status === 'success' || item.status === 'saving'}
                                 className="w-full bg-slate-50 border border-slate-200 hover:border-slate-300 focus:border-emerald-500 disabled:bg-slate-100 disabled:text-slate-400 rounded-lg px-1.5 py-1.5 text-xs text-slate-700 outline-none transition-all"
                               >
                                 {categories.map(g => (
@@ -4963,7 +4978,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                                     ?.childCategories?.[0]?.name || '';
                                   setImportItems(updated);
                                 }}
-                                disabled={isUploading || item.status === 'success'}
+                                disabled={isUploading || item.status === 'success' || item.status === 'saving'}
                                 className="w-full bg-slate-50 border border-slate-200 hover:border-slate-300 focus:border-emerald-500 disabled:bg-slate-100 disabled:text-slate-400 rounded-lg px-1.5 py-1.5 text-xs text-slate-700 outline-none transition-all"
                               >
                                 {(() => {
@@ -4985,7 +5000,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                                   updated[index].childCategory = e.target.value;
                                   setImportItems(updated);
                                 }}
-                                disabled={isUploading || item.status === 'success'}
+                                disabled={isUploading || item.status === 'success' || item.status === 'saving'}
                                 className="w-full bg-slate-50 border border-slate-200 hover:border-slate-300 focus:border-emerald-500 disabled:bg-slate-100 disabled:text-slate-400 rounded-lg px-1.5 py-1.5 text-xs text-slate-700 outline-none transition-all"
                               >
                                 <option value="">不使用</option>
@@ -5009,7 +5024,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                                   updated[index].tags = e.target.value.split(',').map(t => t.trim()).filter(Boolean);
                                   setImportItems(updated);
                                 }}
-                                disabled={isUploading || item.status === 'success'}
+                                disabled={isUploading || item.status === 'success' || item.status === 'saving'}
                                 className="w-full bg-slate-50 border border-slate-200 hover:border-slate-300 focus:border-emerald-500 disabled:bg-slate-100 disabled:text-slate-400 rounded-lg px-2.5 py-1.5 text-xs text-slate-700 outline-none transition-all"
                                 placeholder="标签, 用逗号分隔"
                               />
@@ -5026,7 +5041,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                                     setIsImportModalOpen(false);
                                   }
                                 }}
-                                disabled={isUploading || item.status === 'success'}
+                                disabled={isUploading || item.status === 'success' || item.status === 'saving'}
                                 className="p-1.5 bg-red-50 hover:bg-red-100 disabled:bg-slate-100 disabled:text-slate-300 border border-red-200 disabled:border-slate-200 rounded-lg text-red-600 transition-colors"
                                 title="从待导入队列中移除"
                               >
@@ -5039,6 +5054,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                     </table>
                   </div>
                 </div>
+                </SfxLibraryNamingProvider>
               )}
             </div>
 
@@ -5071,6 +5087,8 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                       <RefreshCw className="w-3.5 h-3.5 animate-spin text-white" />
                       <span>正在上传入库中...</span>
                     </>
+                  ) : importItems.some(item => item.status === 'saving') ? (
+                    <><RefreshCw className="w-3.5 h-3.5" /><span>重试保存入库</span></>
                   ) : importItems.some(item => item.status === 'error') ? (
                     <>
                       <RefreshCw className="w-3.5 h-3.5" />
@@ -5427,7 +5445,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                     type="password"
                     value={confirmPassword}
                     onChange={(event) => setConfirmPassword(event.target.value)}
-                    placeholder="输入管理密码后才能删除母文件夹"
+                    placeholder="输入管理密码后确认删除"
                     autoComplete="current-password"
                     autoFocus
                     className="h-10 w-full rounded-xl border border-rose-200 bg-white px-3 text-sm text-slate-800 outline-none transition-colors focus:border-rose-500 focus:ring-2 focus:ring-rose-100"

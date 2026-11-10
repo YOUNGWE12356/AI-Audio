@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { normalizeBatchAnalysisRequirements, normalizeBatchSearchQueryInput, prepareBatchSearchQuery } from './sfxBatchSearchQuery';
 import { resolveBatchSearchQuery } from './sfxBatchClient';
-import { batchQuerySource, batchRequirementsCsv, createBatchSfxRequest } from './sfxBatch';
+import { batchQuerySource, batchRequirementsCsv, createBatchSfxRequest, normalizeBatchRequirements } from './sfxBatch';
 import { createSfxBatchRouter } from './sfxBatchServer';
 
 const manual = { searchQuery: '', keywords: '翻牌', description: '牌翻过来的声音' };
@@ -35,6 +35,28 @@ test('analysis validates other fields before repair and reports repair failure w
   const controller = new AbortController(); controller.abort();
   await assert.rejects(normalizeBatchAnalysisRequirements([row], controller.signal, generate), { name: 'AbortError' });
   assert.equal(calls, 1);
+});
+
+test('Chinese-only analysis results convert only when search or generation starts', async () => {
+  const original = globalThis.fetch;
+  let conversions = 0;
+  globalThis.fetch = async (url, options) => {
+    conversions++;
+    assert.equal(url, '/api/ai/sfx-batch/search-query');
+    assert.deepEqual(JSON.parse(String(options?.body)), manual);
+    return Response.json({ searchQuery: 'card flip' });
+  };
+  try {
+    const [row] = normalizeBatchRequirements([{ name: '翻牌', description: manual.description, keywords: manual.keywords, duration: 1, scene: '翻牌动作' }]);
+    assert.equal(conversions, 0);
+    assert.equal(row.searchQuery, '');
+    const searchQuery = await resolveBatchSearchQuery(row);
+    assert.equal(conversions, 1);
+    assert.equal(createBatchSfxRequest({ ...row, searchQuery }, 'search').body.query, 'card flip');
+    const cached = { ...row, searchQuery, searchQuerySource: batchQuerySource(row) };
+    assert.equal(createBatchSfxRequest({ ...cached, searchQuery: await resolveBatchSearchQuery(cached) }, 'generate').body.text, 'card flip');
+    assert.equal(conversions, 1);
+  } finally { globalThis.fetch = original; }
 });
 
 test('manual Chinese requirements become short English search terms while explicit English bypasses AI', async () => {

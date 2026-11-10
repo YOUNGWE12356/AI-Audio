@@ -10,12 +10,12 @@ export const batchQuerySource = (row: { keywords: string; description: string })
 export const batchSearchWordCount = (value: string) => (value.match(/[a-z]+(?:'[a-z]+)?/gi) || []).length;
 export function validateBatchSearchQuery(value: string) {
   const text = value.trim().replace(/\s+/g, ' ');
-  if (!text) throw new Error('请先填写“英文搜索词”，搜索和生成都使用这一栏。');
+  if (!text) throw new Error('关键词尚未完成自动转换，请调整中文关键词后重试。');
   if (Array.from(text).some(char => /\p{L}/u.test(char) && !/\p{Script=Latin}/u.test(char))) {
-    throw new Error('“英文搜索词”含有非英文文字，请修改为英文后重试；不会自动改用中文描述。');
+    throw new Error('关键词自动转换结果不是有效英文，请调整中文关键词后重试。');
   }
   const count = batchSearchWordCount(text);
-  if (count < 1 || count > 2 || text.length > 160) throw new Error(`英文搜索词请填写1～2个核心英文单词${count > 2 ? `（当前${count}个）` : ''}，例如 card flip 或 click。`);
+  if (count < 1 || count > 2 || text.length > 160) throw new Error(`关键词自动转换结果应为1～2个核心英文单词${count > 2 ? `（当前${count}个）` : ''}，请调整中文关键词后重试。`);
   return text;
 }
 export function existingBatchSearchQuery(value: string): string | null {
@@ -41,7 +41,9 @@ export function normalizeBatchRequirements(items: unknown): SfxBatchRequirement[
     if (!text('description', 2000)) throw new Error(`第 ${index + 1} 条缺少音效描述。`);
     if (!Number.isFinite(duration) || duration < 0.5 || duration > 30) throw new Error(`第 ${index + 1} 条时长应为 0.5～30 秒。`);
     return { id: `sfx-${index + 1}`, name: batchFileStem(text('name', 200), `Sfx_${index + 1}`),
-      description: text('description', 2000), keywords: text('keywords', 300), searchQuery: validateBatchSearchQuery(text('searchQuery', 1000)),
+      // Analysis only requires Chinese keywords. The hidden English query is
+      // prepared on search/generate; invalid legacy caches cannot reject a list.
+      description: text('description', 2000), keywords: text('keywords', 300), searchQuery: existingBatchSearchQuery(text('searchQuery', 1000)) || '',
       duration, scene: text('scene', 1000),
       ...(Array.isArray(item.occurrences) ? { occurrences: normalizeSoundOccurrences(item.occurrences) } : {}),
       ...(typeof item.time === 'number' && Number.isFinite(item.time) && item.time >= 0 ? {

@@ -70,6 +70,10 @@ export async function readSfxBatchDocument(file: File) {
 
 export async function prepareSfxBatchInput(file: File | null, instructions: string, onProgress: (message: string) => void) {
   if (!file && !instructions.trim()) throw new Error('请重新上传文件。');
+  if (!file) {
+    if (instructions.length > 80_000) throw new Error('需求表超过80000字，请拆分后粘贴。');
+    return { text: instructions, files: [] as PreparedAnalysisMedia[], sourceType: 'table', instructions: '' };
+  }
   let files: PreparedAnalysisMedia[] = [], text = '', sourceType = 'table';
   if (file) {
     sourceType = validateSfxBatchFile(file);

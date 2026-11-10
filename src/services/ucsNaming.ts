@@ -5,6 +5,7 @@ const categories = catalog as UcsCategory[];
 const catIdByLowercase = new Map(categories.map(({ catId }) => [catId.toLowerCase(), catId]));
 
 export const UCS_CATALOG_VERSION = '8.2.1';
+export const UCS_CAT_IDS = categories.map(({ catId }) => catId);
 
 export const UCS_CATALOG_PROMPT = categories
   .map(({ catId, category, subcategory }) => `${catId}:${category}/${subcategory}`)

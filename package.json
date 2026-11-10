@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "packageManager": "npm@11.9.0",
   "engines": {
-    "node": ">=20"
+    "node": ">=20.18.1"
   },
   "type": "module",
   "scripts": {
@@ -25,10 +25,12 @@
     "@tonejs/midi": "^2.0.28",
     "@types/jszip": "^3.4.0",
     "@vitejs/plugin-react": "^5.0.4",
+    "cheerio": "^1.2.0",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "ffmpeg-static": "^5.3.0",
     "iron-session": "^8.0.4",
+    "ipaddr.js": "^2.5.0",
     "jszip": "^3.10.1",
     "lamejs": "1.2.0",
     "lucide-react": "^0.546.0",

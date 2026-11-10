@@ -9,6 +9,7 @@ import { HistoryItem } from '../types';
 import GeneratedAudioPlayer, { sanitizeAudioFileName } from './GeneratedAudioPlayer';
 import PointCostHint from './PointCostHint';
 import { requiresSoundEffectTranslation } from '../services/sfxPromptService';
+import type { SfxBatchInputRequest } from '../utils/requirementTableTransfer';
 const OnlineSfxSearch = lazy(() => import('./OnlineSfxSearch'));
 const BatchSfxStudio = lazy(() => import('./BatchSfxStudio'));
 
@@ -22,6 +23,7 @@ interface PendingSfxOption {
 }
 interface SfxStudioProps {
   active?: boolean;
+  batchInputRequest?: SfxBatchInputRequest | null;
   standalonePrompt: string;
   setStandalonePrompt: (prompt: string) => void;
   standaloneDuration: number;
@@ -44,6 +46,7 @@ interface SfxStudioProps {
 
 export default function SfxStudio({
   active = true,
+  batchInputRequest = null,
   standalonePrompt,
   setStandalonePrompt,
   standaloneDuration,
@@ -60,6 +63,9 @@ export default function SfxStudio({
   const [mode, setMode] = useState<'generate' | 'online' | 'batch'>('online');
   const [onlineVisited, setOnlineVisited] = useState(true);
   const [batchVisited, setBatchVisited] = useState(false);
+  useEffect(() => {
+    if (batchInputRequest) { setBatchVisited(true); setMode('batch'); }
+  }, [batchInputRequest]);
   // Assistant requests still use the native generation surface even if the
   // user last visited online search.
   useEffect(() => { if (standaloneLoading) setMode('generate'); }, [standaloneLoading]);
@@ -87,7 +93,7 @@ export default function SfxStudio({
           className={`rounded-lg px-5 py-2.5 text-xs font-bold ${mode === 'batch' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>批量制作</button>
       </div>
       {batchVisited && <div role="tabpanel" id="sfx-batch-panel" aria-labelledby="sfx-batch-tab" hidden={mode !== 'batch'}>
-        <Suspense fallback={<p className="text-xs text-slate-500">正在打开批量制作…</p>}><BatchSfxStudio active={active && mode === 'batch'} /></Suspense>
+        <Suspense fallback={<p className="text-xs text-slate-500">正在打开批量制作…</p>}><BatchSfxStudio active={active && mode === 'batch'} inputRequest={batchInputRequest} /></Suspense>
       </div>}
       {onlineVisited && <div role="tabpanel" id="sfx-online-panel" aria-labelledby="sfx-online-tab" hidden={mode !== 'online'}>
         <Suspense fallback={<p className="text-xs text-slate-500">正在打开搜索…</p>}><OnlineSfxSearch /></Suspense>

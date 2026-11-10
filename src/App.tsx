@@ -27,6 +27,8 @@ import { fetchPlatformHealth } from './services/platformService';
 import { isPdfFile, prepareFilesForAnalysis } from './utils/mediaPreparation';
 import { loadPersistentHistory, persistHistory } from './services/historyStorage';
 import { readRecentVoiceIds } from './utils/recentVoices';
+import { ttsLanguageLabel } from './utils/elevenLabsTtsLanguage';
+import type { SfxBatchInputRequest } from './utils/requirementTableTransfer';
 
 export interface PendingMusicOption {
   id: 'A' | 'B';
@@ -99,6 +101,11 @@ export default function App() {
   const [assistantVideoRequest, setAssistantVideoRequest] = useState<AssistantVideoRequest | null>(null);
   const [assistantVoiceRequest, setAssistantVoiceRequest] = useState<AssistantVoiceRequest | null>(null);
   const [assistantRequirementsRequest, setAssistantRequirementsRequest] = useState<AssistantRequirementsRequest | null>(null);
+  const [batchSfxInputRequest, setBatchSfxInputRequest] = useState<SfxBatchInputRequest | null>(null);
+  const handleBatchSfxInputRequest = useCallback((text: string) => {
+    setBatchSfxInputRequest({ id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, text });
+    setCurrentTab('sfx-studio');
+  }, []);
   const [assistantLibrarySearchQuery, setAssistantLibrarySearchQuery] = useState('');
   const [assistantLibraryCategory, setAssistantLibraryCategory] = useState('');
   const [assistantLibrarySubcategory, setAssistantLibrarySubcategory] = useState('');
@@ -230,7 +237,7 @@ export default function App() {
 
   // Standalone Music Generator States
   const [standaloneMusicPrompt, setStandaloneMusicPrompt] = useState('');
-  const [standaloneMusicDuration, setStandaloneMusicDuration] = useState(30);
+  const [standaloneMusicDuration, setStandaloneMusicDuration] = useState(60);
   const [standaloneMusicType, setStandaloneMusicType] = useState<'instrumental' | 'vocal'>('instrumental');
   const [standaloneMusicLyrics, setStandaloneMusicLyrics] = useState('');
   const [standaloneMusicLoading, setStandaloneMusicLoading] = useState(false);
@@ -248,7 +255,7 @@ export default function App() {
   const [standaloneVoiceRole, setStandaloneVoiceRole] = useState(() => readRecentVoiceIds()[0] || '');
   const [selectedStandaloneVoice, setSelectedStandaloneVoice] = useState<VoiceItem | null>(null);
   const [standaloneVoiceEmotion, setStandaloneVoiceEmotion] = useState('');
-  const [standaloneVoiceLang, setStandaloneVoiceLang] = useState('zh');
+  const [standaloneVoiceLang, setStandaloneVoiceLang] = useState('auto');
   const [standaloneVoiceSpeed, setStandaloneVoiceSpeed] = useState<number>(1.0);
   const [standaloneVoiceLoading, setStandaloneVoiceLoading] = useState(false);
   const [standaloneVoiceAudioUrl, setStandaloneVoiceAudioUrl] = useState<string | null>(null);
@@ -699,6 +706,7 @@ export default function App() {
           qualityMode: elevenLabsQualityMode,
           fallbackText: finalSpokenText,
           seed: takeSeedBase,
+          languageCode: standaloneVoiceLang,
           ...sharedVoiceOptions,
         },
       );
@@ -712,6 +720,7 @@ export default function App() {
           qualityMode: elevenLabsQualityMode,
           fallbackText: finalSpokenText,
           seed: takeSeedBase + 1,
+          languageCode: standaloneVoiceLang,
           ...sharedVoiceOptions,
         },
       );
@@ -724,7 +733,7 @@ export default function App() {
       const matchedVoice = ELEVENLABS_VOICES.find(v => v.id === voiceId);
       const voiceLabel = matchedVoice ? matchedVoice.name : (voiceDesc || (detectedGender === 'male' ? '自定义男声' : '自定义女声'));
       const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 16);
-      const details = `${processedText.length}字 · ${standaloneVoiceLang.toUpperCase()}语种 · 语速${standaloneVoiceSpeed}x`;
+      const details = `${processedText.length}字 · ${ttsLanguageLabel(standaloneVoiceLang)} · 语速${standaloneVoiceSpeed}x`;
 
       setPendingVoiceOptions({
         optionA: {
@@ -1519,6 +1528,7 @@ export default function App() {
               <section hidden={currentTab !== 'sfx-studio'} className="min-h-full">
                 <SfxStudio
                   active={currentTab === 'sfx-studio'}
+                  batchInputRequest={batchSfxInputRequest}
                   standalonePrompt={standalonePrompt}
                   setStandalonePrompt={setStandalonePrompt}
                   standaloneDuration={standaloneDuration}
@@ -1596,6 +1606,7 @@ export default function App() {
                 <SfxRequirements
                   hasAiTextModel={hasAiTextModel}
                   assistantRequest={assistantRequirementsRequest}
+                  onBatchSfxRequest={handleBatchSfxInputRequest}
                 />
               </section>
             )}

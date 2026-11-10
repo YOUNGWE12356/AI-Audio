@@ -1,7 +1,6 @@
 import React from 'react';
 import { Check, Search, Sparkles, X } from 'lucide-react';
 import GeneratedAudioPlayer from './GeneratedAudioPlayer';
-import BatchSfxCostHint from './BatchSfxCostHint';
 import { isBatchSfxDurationValid } from '../services/sfxBatchBilling';
 import type { BatchRow, BatchVersion } from '../services/sfxBatchProject';
 import type { BatchTimeRange } from '../services/batchVideoTimeline';
@@ -32,8 +31,8 @@ export default function BatchSfxInspector({ row, index, version, chosen, locked,
             <label className="sm:col-span-2">关键词<input aria-label="当前范围音效关键词" placeholder="用中文填写，例如：木门吱呀" className={field} value={row.keywords} disabled={locked} onChange={event => onEdit({ keywords: event.target.value })} /><span className="mt-1 block text-[10px] text-slate-400">搜索或生成时自动转换为英文。</span></label>
           </div> : <p className="text-[11px] leading-relaxed text-slate-500">{row.description}</p>}
           <div className="grid gap-3 sm:grid-cols-2">
-            <div className="space-y-1.5"><button className={control} disabled={locked} onClick={() => onRun('search')}><Search size={13} />{row.versions.some(v => v.kind === 'search') ? '再次搜索' : '搜索音效'}</button><BatchSfxCostHint kind="search" rows={[row]} compact /></div>
-            <div className="space-y-1.5"><button className={control} disabled={locked || !isBatchSfxDurationValid(row.duration)} onClick={() => onRun('generate')}><Sparkles size={13} />{row.versions.some(v => v.kind === 'generate') ? '再次生成' : '生成音效'}</button><BatchSfxCostHint kind="generate" rows={[row]} compact /></div>
+            <div><button className={control} disabled={locked} onClick={() => onRun('search')}><Search size={13} />{row.versions.some(v => v.kind === 'search') ? '再次搜索' : '搜索音效'}</button></div>
+            <div><button className={control} disabled={locked || !isBatchSfxDurationValid(row.duration)} onClick={() => onRun('generate')}><Sparkles size={13} />{row.versions.some(v => v.kind === 'generate') ? '再次生成' : '生成音效'}</button></div>
           </div>
         </>}
         {row && hasVideo && <p className={inline ? 'text-[11px] text-slate-600' : 'text-xs text-slate-600'}>视频范围：{range ? `${range.start.toFixed(3)}—${range.end.toFixed(3)} 秒 · ${(range.end - range.start).toFixed(3)} 秒` : '未设置，请在需求表填写范围'}</p>}

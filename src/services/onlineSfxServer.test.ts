@@ -17,7 +17,8 @@ import {
   parseMixkitSearch,
   mixOnlineSfxCandidates,
   mixkitSearchCategories,
-  searchOnlineSfxSources,
+  searchOnlineSfxSources as searchSources,
+  onlineSfxGroupTargets,
   recordOnlineSfxBatchUsage,
   recordTimelineOnlineSfxUsage,
   removeOrphanedOnlineSfxFiles,
@@ -29,6 +30,10 @@ import {
   ONLINE_SFX_SOURCES,
 } from './onlineSfxTypes';
 import { setAiUsageRecorder, type AiUsageEvent } from './usageTracking';
+
+// Existing catalog fixtures remain offline; full-web integration has its own fixtures.
+const searchOnlineSfxSources = (options: Parameters<typeof searchSources>[0]) =>
+  searchSources({ ...options, webSearch: options.webSearch || (async () => []) });
 
 const card = (id: number, source = `/whoosh-${id}`, host = 'public-assets.content-platform.envatousercontent.com') => `
   <div data-testid="audio-card"><a title="Whoosh &amp; Hit ${id}" data-testid="title-link" href="${source}">title</a>
@@ -73,22 +78,75 @@ test('alternate parsers pair real search cards and reject unrelated or mismatche
   assert.deepEqual(mixkitSearchCategories('unrecognised specific object'), []);
 });
 
-test('mix one hundred as fifty primary plus shared alternates, interleave and keep unused candidates', () => {
-  const names = ['primary', 'pse', 'epidemic', 'mix'];
+test('mix one hundred as 30 Envato, 30 shared catalogs, 40 web; retain unused candidates', () => {
+  const names = ['primary', 'pse', 'epidemic', 'mix', 'web'];
   const pools = names.map(name => sampleCandidates(name, 100));
   const result = mixOnlineSfxCandidates(pools, 100);
-  assert.deepEqual(names.map(source => result.filter(item => item.source === source).length), [50, 17, 17, 16]);
-  assert.equal(new Set(result.slice(0, 7).map(item => item.source)).size, 4);
-  assert.deepEqual(pools.map(pool => pool.length), [50, 83, 83, 84]);
+  assert.deepEqual(names.map(source => result.filter(item => item.source === source).length), [30, 10, 10, 10, 40]);
+  assert.equal(new Set(result.slice(0, 9).map(item => item.source)).size, 5);
+  assert.deepEqual(pools.map(pool => pool.length), [70, 90, 90, 90, 60]);
   const second = mixOnlineSfxCandidates(pools, 100);
   assert.equal(new Set([...result, ...second].map(item => item.sourceUrl)).size, 200);
 });
 
 test('redistribute quotas when primary or alternates are empty without fabricating results', () => {
-  for (const counts of [[0, 100, 0], [100, 0, 0], [10, 100, 10], [50, 0, 50]]) {
+  for (const counts of [[0, 100, 0, 0, 0], [100, 0, 0, 0, 0], [10, 100, 10, 0, 0],
+    [50, 0, 50, 0, 0], [0, 0, 0, 0, 100], [0, 10, 0, 0, 100], [100, 0, 0, 0, 5]]) {
     assert.equal(mixOnlineSfxCandidates(counts.map((count, i) => sampleCandidates(String(i), count)), 100).length, 100);
   }
   assert.equal(mixOnlineSfxCandidates([sampleCandidates('p', 7), [], []], 100).length, 7);
+});
+
+test('small result limits honor rounded group quotas without overfilling', () => {
+  for (let limit = 1; limit <= 100; limit++) {
+    const [primary, catalogs, web] = onlineSfxGroupTargets(limit);
+    assert.equal(primary + catalogs + web, limit);
+    const pools = Array.from({ length: 5 }, (_, i) => sampleCandidates(String(i), 100));
+    const items = mixOnlineSfxCandidates(pools, limit);
+    assert.equal(items.length, limit);
+    assert.equal(items.filter(item => item.source === '0').length, primary);
+    assert.equal(items.filter(item => item.source === '4').length, web);
+  }
+});
+
+test('web fills every failed catalog and continuation never repeats the same audio under another page URL', async () => {
+  const state = createOnlineSfxSearchState();
+  let calls = 0;
+  const webSearch = async ({ page }: { page: number }) => {
+    calls++;
+    return Array.from({ length: 60 }, (_, i) => ({ title: `Whoosh ${page * 60 + i}`, author: '',
+      source: '全网 · sounds.example.com', sourceUrl: `https://sounds.example.com/page-${page}/sound-${i}`,
+      previewUrl: `https://cdn.example.com/whoosh-${(page - 1) * 40 + i}.mp3` }));
+  };
+  const fetcher: typeof fetch = async () => new Response('blocked', { status: 403 });
+  const first = await searchOnlineSfxSources({ query: 'whoosh', state, fetcher, webSearch });
+  assert.equal(first.items.length, 100);
+  assert.equal(first.sources[4].count, 100);
+  assert.ok(first.sources.slice(0, 4).every(source => source.unavailable));
+  const second = await searchOnlineSfxSources({ query: 'whoosh', state, fetcher, webSearch });
+  assert.ok(second.items.length > 0);
+  assert.equal(new Set([...first.items, ...second.items].map(item => item.previewUrl)).size,
+    first.items.length + second.items.length);
+  assert.ok(calls >= 3);
+});
+
+test('a full web failure has a cooldown and healthy catalogs fill all places', async () => {
+  let webCalls = 0;
+  const cooldowns = new Map<string, number>();
+  const state = createOnlineSfxSearchState();
+  const fetcher: typeof fetch = async input => {
+    const url = new URL(String(input));
+    if (url.hostname !== 'elements.envato.com') return new Response('blocked', { status: 403 });
+    const page = Number(url.pathname.match(/pg-(\d+)/)?.[1] || 1);
+    return new Response(Array.from({ length: 50 }, (_, i) => card(page * 100 + i)).join(''));
+  };
+  const webSearch = async () => { webCalls++; throw new Error('engine down'); };
+  const first = await searchOnlineSfxSources({ query: 'whoosh', fetcher, state, cooldowns, webSearch });
+  assert.equal(first.items.length, 100);
+  assert.equal(first.sources[4].unavailable, true);
+  const second = await searchOnlineSfxSources({ query: 'whoosh', fetcher, state, cooldowns, webSearch });
+  assert.equal(second.items.length, 100);
+  assert.equal(webCalls, 1);
 });
 
 test('parallel search tolerates a failed primary, fills from backups and skips it during cooldown', async () => {
@@ -137,7 +195,7 @@ test('one failed source page does not discard good pages or skip the failed page
   assert.equal(new Set([...first.items, ...second.items].map(item => item.sourceUrl)).size, first.items.length + second.items.length);
 });
 
-test('when Mixkit is exhausted later batches still reserve half for the remaining alternate', async () => {
+test('when Mixkit or web is exhausted later batches fill from available catalogs', async () => {
   const state = createOnlineSfxSearchState();
   const fetcher: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
@@ -154,9 +212,13 @@ test('when Mixkit is exhausted later batches still reserve half for the remainin
     return new Response('unavailable', { status: 403 });
   };
   const first = await searchOnlineSfxSources({ query: 'whoosh', state, fetcher });
-  assert.deepEqual(first.sources.map(source => source.count), [50, 30, 0, 20, 0]);
+  assert.equal(first.items.length, 100);
+  assert.ok(first.sources[0].count >= 30);
+  assert.equal(first.sources[3].count, 20);
   const second = await searchOnlineSfxSources({ query: 'whoosh', state, fetcher });
-  assert.deepEqual(second.sources.map(source => source.count), [50, 50, 0, 0, 0]);
+  assert.equal(second.items.length, 100);
+  assert.ok(second.sources[0].count >= 30);
+  assert.equal(second.sources[3].count, 0);
   assert.equal(new Set([...first.items, ...second.items].map(item => item.sourceUrl)).size, 200);
 });
 
@@ -181,9 +243,11 @@ test('four approved sources search with real protocols, cache action discovery a
     return new Response(epidemicFlight(Array.from({ length: 10 }, (_, i) => epidemicTrack(i))));
   };
   const first = await searchOnlineSfxSources({ query: 'whoosh', fetcher });
-  assert.deepEqual(first.sources.map(source => source.count), [50, 20, 10, 20, 0]);
+  assert.equal(first.items.length, 100);
+  assert.ok(first.sources[0].count >= 30);
+  assert.equal(first.sources[2].count, 10);
   assert.ok(first.sources.slice(0, 4).every(source => !source.unavailable));
-  assert.match(first.sources[4].reason || '', /网站验证/);
+  assert.match(first.sources[5].reason || '', /网站验证/);
   assert.equal(ONLINE_SFX_SOURCES.some(source => String(source.id) === 'freesound'), false);
   assert.equal(requested.filter(url => url === epidemicScript).length, 1);
   await searchOnlineSfxSources({ query: 'whoosh', fetcher });
@@ -205,7 +269,8 @@ test('Epidemic never treats homepage recommendations as search and recovers afte
 });
 
 test('all unavailable sources are reported and return no false success candidates', async () => {
-  const result = await searchOnlineSfxSources({ query: 'whoosh', fetcher: async () => new Response('blocked', { status: 403 }) });
+  const result = await searchOnlineSfxSources({ query: 'whoosh', fetcher: async () => new Response('blocked', { status: 403 }),
+    webSearch: async () => { throw new Error('web unavailable'); } });
   assert.equal(result.items.length, 0);
   assert.ok(result.sources.every(source => source.unavailable));
 });
@@ -223,7 +288,7 @@ test('filter irrelevant cards before allocating site quotas, including cards tag
   const state = createOnlineSfxSearchState();
   const result = await searchOnlineSfxSources({ query: 'water', state, fetcher });
   assert.deepEqual(result.items.map(item => item.title), ['Water flowing']);
-  assert.deepEqual(result.sources.map(source => source.count), [0, 0, 0, 1, 0]);
+  assert.deepEqual(result.sources.map(source => source.count), [0, 0, 0, 1, 0, 0]);
   assert.ok(state.every(stream => stream.buffer.every(item => item.title !== 'Hard pop click')));
 });
 
@@ -401,6 +466,7 @@ test('timeline capture persists a project-safe WAV with source metadata', async 
       ffmpeg: ffmpeg!,
       maxDurationSeconds: 0.6,
       fetcher,
+      webSearch: async () => [],
     });
     assert.ok(result);
     assert.match(result.audioUrl, /^\/uploads\/timeline_sfx_[a-f0-9-]+\.wav$/);
@@ -424,6 +490,7 @@ test('timeline search returns null when no usable web result exists', async () =
       uploadsDir: directory,
       ffmpeg: ffmpeg || 'ffmpeg',
       fetcher: async () => new Response('<html>no results</html>', { headers: { 'content-type': 'text/html' } }),
+      webSearch: async () => [],
     });
     assert.equal(result, null);
     assert.deepEqual(await fs.readdir(directory), []);

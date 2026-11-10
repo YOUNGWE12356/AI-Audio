@@ -87,6 +87,7 @@ import {
 } from './src/services/usageAggregation';
 import {
   ELEVENLABS_MUSIC_MODEL,
+  ELEVENLABS_MUSIC_MODELS,
   ELEVENLABS_MUSIC_OUTPUT_FORMAT,
   ELEVENLABS_MUSIC_CREDITS_PER_MINUTE,
   ELEVENLABS_SOUND_MODEL,
@@ -114,6 +115,9 @@ import { prepareSoundEffectPrompt } from './src/services/sfxPromptService';
 import { isGptCompanyPointPricingEnabled } from './src/services/companyPointPricing';
 import { AUDIO_LANGUAGE_REGISTRY } from './src/services/languageRegistry';
 import { analyzeVideoSubtitles, MAX_SUBTITLE_VIDEO_SECONDS, SUBTITLE_SAMPLE_INTERVAL } from './src/services/videoSubtitleAnalysis';
+import { createVideoAnalysisJobs } from './src/services/videoAnalysisJobsServer';
+import { analyzeVideoTrack, createModelLimiter } from './src/services/videoTrackAnalysis';
+import type { VideoAnalysisTrack } from './src/services/videoAnalysisJobs';
 
 async function startServer() {
   const app = express();
@@ -488,7 +492,7 @@ async function startServer() {
   const getEventCompanyPoints = (event: StoredAiUsageEvent) => {
     if (event.pricingVersion && Number.isFinite(event.companyPoints)) return Math.max(0, event.companyPoints || 0);
     if (event.provider !== 'elevenlabs') return 0;
-    if (event.model === ELEVENLABS_MUSIC_MODEL) return Math.max(0, event.credits / 6);
+    if (ELEVENLABS_MUSIC_MODELS.some(model => model === event.model)) return Math.max(0, event.credits / 6);
     if (event.model === 'dubbing_v2') return Math.max(0, event.credits * 2.2);
     if (event.model === 'scribe_v2') return Math.max(0, event.credits * (4 / 330));
     if (event.model === 'audio-isolation' || event.model === 'eleven_multilingual_sts_v2') {
@@ -887,6 +891,7 @@ async function startServer() {
       if (req.originalUrl.startsWith('/api/ai/sfx-requirements') && (req.method === 'GET' || req.body?.background === true)) return next();
       // Design jobs reserve once for their entire lifetime, including reconnects.
       if (req.originalUrl.split('?')[0].match(/^\/api\/ai\/audio-design\/jobs(?:\/|$)/)) return next();
+      if (req.originalUrl.split('?')[0].match(/^\/api\/video\/analyze\/jobs(?:\/|$)/)) return next();
       return requireElevenLabsQuota(() => 0.1)(req, res, next);
     },
   );
@@ -1462,7 +1467,7 @@ async function startServer() {
     if (result.status !== 200) return res.status(result.status).json({ error: publicError(result.status) });
     return res.json({ authorized: true, expiresAt: result.expiresAt });
   });
-  app.get('/api/sfx/admin/session', (req, res) => res.json({ authorized: security.isAdmin(req) }));
+  app.get('/api/sfx/admin/session', (req, res) => res.json({ authorized: security.isAdmin(req), expiresAt: security.adminExpiresAt(req) }));
   app.post('/api/sfx/admin/logout', (req, res) => {
     security.revokeAdmin(req);
     return res.json({ success: true });
@@ -1489,6 +1494,7 @@ async function startServer() {
       res.setHeader('Cache-Control', 'no-store');
       return res.json({
         revision: sfxLibraryRevision,
+        ownerId: res.locals.authUser.id,
         categories: repaired.categories,
         sounds: repaired.sounds,
       });
@@ -1559,7 +1565,7 @@ async function startServer() {
         ? req.body.confirmationPassword
         : '';
       if (!secretsMatch(confirmationPassword, sfxLibraryAdminPassword)) {
-        return res.status(403).json({ error: '管理密码错误，母文件夹未删除。' });
+        return res.status(403).json({ code: 'LIBRARY_ADMIN_PASSWORD_INVALID', error: '管理密码错误，母文件夹未删除。' });
       }
     }
 
@@ -1575,18 +1581,18 @@ async function startServer() {
 
     const current = loadAndRepairLibraryMetadata();
     const group = current.categories.find((item: any) => item?.id === groupId);
-    if (!group) return res.status(404).json({ error: '要删除的文件夹不存在或已被删除。' });
+    if (!group) return res.status(404).json({ code: 'LIBRARY_FOLDER_NOT_FOUND', error: '要删除的文件夹不存在或已被删除。' });
     const subcategory = kind !== 'category'
       ? group.subCategories?.find((item: any) => item?.id === subId)
       : null;
     if (kind !== 'category' && !subcategory) {
-      return res.status(404).json({ error: '要删除的子文件夹不存在或已被删除。' });
+      return res.status(404).json({ code: 'LIBRARY_FOLDER_NOT_FOUND', error: '要删除的子文件夹不存在或已被删除。' });
     }
     const childCategory = kind === 'childcategory'
       ? subcategory.childCategories?.find((item: any) => item?.id === childId)
       : null;
     if (kind === 'childcategory' && !childCategory) {
-      return res.status(404).json({ error: '要删除的三级文件夹不存在或已被删除。' });
+      return res.status(404).json({ code: 'LIBRARY_FOLDER_NOT_FOUND', error: '要删除的三级文件夹不存在或已被删除。' });
     }
 
     const deletedSounds = current.sounds.filter((sound: any) => (
@@ -4886,7 +4892,7 @@ async function startServer() {
       duration,
       req.body?.isInstrumental !== false,
       typeof req.body?.lyrics === 'string' ? req.body.lyrics : undefined,
-      { qualityMode },
+      { qualityMode, onModelUsed: model => res.setHeader('X-Music-Model', model) },
     ));
     }),
   );
@@ -6209,6 +6215,7 @@ async function startServer() {
         {
           qualityMode,
           fallbackText,
+          languageCode: req.body?.languageCode,
           ...(Number.isFinite(seed) ? { seed } : {}),
         },
       );
@@ -6912,6 +6919,30 @@ async function startServer() {
   };
 
   // 7. Video AI Multi-modal Analysis
+  const videoModelLimit = createModelLimiter(2);
+  app.use('/api/video/analyze/jobs', createVideoAnalysisJobs({
+    directory: path.join(dataDir, 'video-analysis-jobs'),
+    identity: currentUserId,
+    normalize: async body => {
+      const { videoPath } = await resolveValidatedUploadedVideo(body.fileName);
+      const stat = await fs.promises.stat(videoPath);
+      const tracks: VideoAnalysisTrack[] = ['bgm', 'sfx', 'dubbing'].filter(track => Array.isArray(body.tracks) && body.tracks.includes(track)) as VideoAnalysisTrack[];
+      if (!tracks.length || typeof body.videoDuration !== 'number' || !Number.isFinite(body.videoDuration) || body.videoDuration <= 0 || body.videoDuration > 3600) {
+        throw Object.assign(new Error('无效的视频分析参数。'), { status: 400 });
+      }
+      return { fileName: body.fileName, videoDuration: body.videoDuration, tracks,
+        requirements: String(body.requirements || '').slice(0, 30000), sourceVersion: `${stat.size}:${stat.mtimeMs}` };
+    },
+    reserve: (req, res) => {
+      const reservation = reserveElevenLabsQuota(resolveUsageActor(req, res), 0.1);
+      if (!reservation.release) res.status(429).json({ code: 'COMPANY_POINTS_EXCEEDED', error: '个人积分不足，请联系管理员追加额度。' });
+      return reservation.release;
+    },
+    run: (_req, res, work) => { void usageRequestContext.run(res.locals.aiUsageContext, work); },
+    execute: (input, track, signal, units, save, progress) => analyzeVideoTrack({ input, track, signal, units, save, progress, limit: videoModelLimit,
+      frames: options => extractServerVideoKeyframes(input.fileName, input.videoDuration, options),
+    }),
+  }));
   app.post('/api/video/analyze', async (req, res) => {
     try {
       const {
@@ -7439,6 +7470,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
 
       const cleanFilename = `el_${trackId}_${Date.now()}.${resolvedType === 'sfx' ? 'wav' : 'mp3'}`;
       const filePath = path.join(getUploadsDir(), cleanFilename);
+      let usedMusicModel: string = ELEVENLABS_MUSIC_MODEL;
       
       if (resolvedType === 'dubbing') {
         // Text to Speech
@@ -7499,7 +7531,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
           targetDuration,
           true,
           undefined,
-          { qualityMode },
+          { qualityMode, onModelUsed: model => { usedMusicModel = model; } },
         );
         fs.writeFileSync(filePath, Buffer.from(await musicBlob.arrayBuffer()));
         
@@ -7520,7 +7552,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
         audioUrl: `/uploads/${cleanFilename}`,
         ...(resolvedType === 'bgm' ? {
           provider: 'ElevenLabs Music',
-          model: ELEVENLABS_MUSIC_MODEL,
+          model: usedMusicModel,
           outputFormat: ELEVENLABS_MUSIC_OUTPUT_FORMAT,
           requestedDuration: parseNumber(duration, 30, 3, 600),
         } : resolvedType === 'sfx' ? {

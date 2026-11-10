@@ -12,6 +12,7 @@ import { batchTimeRange, batchOccurrenceRange, updateBatchOccurrence, isBatchPoi
 import { readGeneratedSoundEffectDuration } from '../utils/soundEffectAudio';
 import type { AudioDownloadRange } from '../services/audioRangeExport';
 import { requirementsErrorText as errorText } from '../services/sfxRequirementsErrors';
+import type { SfxBatchInputRequest } from '../utils/requirementTableTransfer';
 
 const inputClass = 'w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 focus:border-emerald-500 focus:outline-none';
 const buttonClass = 'inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:border-emerald-400 disabled:opacity-40 disabled:cursor-not-allowed';
@@ -33,11 +34,12 @@ async function api(path: string, body: unknown, timeout = 150_000) {
   } finally { clearTimeout(timer); }
 }
 
-export default function BatchSfxStudio({ active = true }: { active?: boolean }) {
+export default function BatchSfxStudio({ active = true, inputRequest = null }: { active?: boolean; inputRequest?: SfxBatchInputRequest | null }) {
   const [rows, setRows] = useState<BatchRow[]>([]);
   const rowsRef = useRef(rows); rowsRef.current = rows;
   const [hydrated, setHydrated] = useState(false);
   const [file, setFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<{ file: File; url: string } | null>(null);
   const [videoAsset, setVideoAsset] = useState<BatchVideoAsset | null>(null);
   const [videoDuration, setVideoDuration] = useState(0);
   const videoRef = useRef(videoAsset); videoRef.current = videoAsset;
@@ -63,8 +65,17 @@ export default function BatchSfxStudio({ active = true }: { active?: boolean }) 
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [pendingAnalysis, setPendingAnalysis] = useState<{ regenerate: boolean } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const instructionsRef = useRef<HTMLTextAreaElement>(null);
+  const consumedInputRequest = useRef<string | null>(null);
+  const [inputFocusRequest, setInputFocusRequest] = useState<string | null>(null);
   const detailsRef = useRef<HTMLDivElement>(null);
   const urls = useRef(new Set<string>());
+  useEffect(() => {
+    if (!file || validateSfxBatchFile(file) !== 'image') { setImagePreview(null); return; }
+    const url = URL.createObjectURL(file);
+    setImagePreview({ file, url });
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
   useEffect(() => {
     if (timelineDetails) detailsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, [timelineDetails, activeRowId]);
@@ -80,6 +91,25 @@ export default function BatchSfxStudio({ active = true }: { active?: boolean }) 
       .finally(() => { if (mounted) setHydrated(true); });
     return () => { mounted = false; stopRef.current = true; urls.current.forEach(url => URL.revokeObjectURL(url)); };
   }, []);
+  useEffect(() => {
+    if (!inputRequest || consumedInputRequest.current === inputRequest.id || !active || !hydrated || busy || queueing || clearing || zipping) return;
+    consumedInputRequest.current = inputRequest.id;
+    setInstructions(inputRequest.text);
+    // A transferred table is its own source. Retain the video and completed audio,
+    // but do not re-analyze an old upload alongside this unrelated table.
+    setFile(null);
+    setAppend(true);
+    setSourceExpanded(true);
+    setPendingAnalysis(null); setShowClearConfirm(false); setError('');
+    setMessage('需求表已带入，点击“分析并列出需求”继续。原有音效列表已保留。');
+    setInputFocusRequest(inputRequest.id);
+  }, [inputRequest, active, hydrated, busy, queueing, clearing, zipping]);
+  useEffect(() => {
+    if (!inputFocusRequest || !active || !sourceExpanded) return;
+    instructionsRef.current?.focus({ preventScroll: true });
+    instructionsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setInputFocusRequest(null);
+  }, [inputFocusRequest, active, sourceExpanded]);
   useEffect(() => {
     if (!hydrated || clearing) return;
     const timer = setTimeout(() => {
@@ -347,10 +377,10 @@ export default function BatchSfxStudio({ active = true }: { active?: boolean }) 
           <input ref={inputRef} type="file" className="hidden" accept={SFX_BATCH_ACCEPT} onChange={e => { if (e.target.files?.[0]) chooseFile(e.target.files[0]); e.target.value = ''; }} />
           <button className="flex items-center gap-2 text-xs font-bold text-emerald-700" disabled={locked} onClick={() => inputRef.current?.click()}><FileUp size={18} />{file ? '上传新视频 / 图片 / 需求表' : '上传视频 / 图片 / 需求表'}</button>
           <p className="mt-2 text-[11px] text-slate-500">可拖拽上传；视频最大500MB，图片与需求表最大20MB。截图可粘贴到下方文本框。</p>
-          {file && <div className="mt-3 flex items-center gap-2 text-xs text-slate-700"><span className="truncate">{file.name}</span><button aria-label="移除素材" disabled={locked} onClick={() => { if (file === videoAsset?.file) storeVideo(null); setFile(null); }}><X size={14} /></button></div>}
+          {file && <div className="mt-3 flex min-w-0 items-center gap-3 text-xs text-slate-700">{imagePreview?.file === file && <img src={imagePreview.url} alt={`上传图片预览：${file.name}`} className="h-20 w-28 shrink-0 rounded-lg border border-slate-200 bg-white object-contain" />}<span className="min-w-0 truncate">{file.name}</span><button className="shrink-0" aria-label="移除素材" disabled={locked} onClick={() => { if (file === videoAsset?.file) storeVideo(null); setFile(null); }}><X size={14} /></button></div>}
         </div>
       <div id="batch-sfx-source" hidden={!sourceExpanded} className="space-y-4">
-        <textarea aria-label="批量音效补充要求" className={`${inputClass} min-h-28 resize-y`} value={instructions} disabled={locked} placeholder="补充场景和制作要求，或直接输入音效需求；可在这里粘贴截图。" onChange={e => setInstructions(e.target.value)} onPaste={(e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+        <textarea ref={instructionsRef} aria-label="批量音效补充要求" className={`${inputClass} min-h-28 resize-y`} value={instructions} disabled={locked} placeholder="补充场景和制作要求，或直接粘贴音效需求表；可在这里粘贴截图。" onChange={e => setInstructions(e.target.value)} onPaste={(e: React.ClipboardEvent<HTMLTextAreaElement>) => {
           const image = Array.from<File>(e.clipboardData.files).find(f => f.type.startsWith('image/'))
             || Array.from<DataTransferItem>(e.clipboardData.items).find(i => i.kind === 'file' && i.type.startsWith('image/'))?.getAsFile();
           if (image && !locked) { e.preventDefault(); chooseFile(image); }
@@ -367,13 +397,19 @@ export default function BatchSfxStudio({ active = true }: { active?: boolean }) 
     {videoAsset && <BatchSfxVideo asset={videoAsset} rows={rows} activeRowId={activeRowId} activeOccurrenceIndex={activeOccurrenceIndex} locked={locked} active={active} onDuration={setVideoDuration} onSelect={selectVideoRange} onAdd={add} onMove={movePoint} onDelete={id => setRows(current => current.filter(row => row.id !== id))} onBeginPlayback={() => setActiveAudioId(null)} />}
     {showTimelineDetails && <div ref={detailsRef}>{inspector}</div>}
     {(message || error || storageWarning) && <div role="status" aria-live="polite" className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs space-y-1">{message && <p className="text-slate-700 flex items-center gap-2">{busy && <Loader2 size={14} className="animate-spin" />}{message}</p>}{error && <p className="text-red-600">{error}</p>}{storageWarning && <p className="text-amber-700">{storageWarning}</p>}</div>}
-    <div className="flex flex-wrap gap-3 items-start">
+    <div className="space-y-2">
+    <div className="flex flex-wrap gap-3 items-center">
       <button className={buttonClass} disabled={locked || rows.length >= SFX_BATCH_MAX_ROWS} onClick={() => add()}><Plus size={14} />新增音效</button>
-      <div className="max-w-full space-y-1.5"><button className={buttonClass} disabled={locked || !selectedIds.length} onClick={() => void run('search', selectedIds)}><Search size={14} />一键搜索（{selectedIds.length}）</button><BatchSfxCostHint kind="search" rows={selectedRows} /></div>
-      <div className="max-w-full space-y-1.5"><button className={buttonClass} disabled={locked || !selectedIds.length || selectedRows.some(row => !isBatchSfxDurationValid(row.duration))} onClick={() => void run('generate', selectedIds)}><Sparkles size={14} />一键生成（{selectedIds.length}）</button><BatchSfxCostHint kind="generate" rows={selectedRows} /></div>
+      <button className={buttonClass} disabled={locked || !selectedIds.length} onClick={() => void run('search', selectedIds)}><Search size={14} />一键搜索（{selectedIds.length}）</button>
+      <button className={buttonClass} disabled={locked || !selectedIds.length || selectedRows.some(row => !isBatchSfxDurationValid(row.duration))} onClick={() => void run('generate', selectedIds)}><Sparkles size={14} />一键生成（{selectedIds.length}）</button>
       {queueing && <button className={buttonClass} onClick={() => { stopRef.current = true; setMessage('当前步骤完成后停止队列，已完成结果会保留。'); }}>停止后续任务</button>}
       <button className={buttonClass} disabled={!rows.length} onClick={downloadTable}><Download size={14} />下载需求表</button>
       <button className={buttonClass} disabled={!ready.length || zipping} onClick={() => void zip()}>{zipping ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}打包下载（{ready.length}）</button>
+    </div>
+    <div className="max-w-full overflow-x-auto pb-1" aria-label="批量制作积分提示"><div className="flex w-max items-center gap-4">
+      <BatchSfxCostHint kind="search" rows={selectedRows} inline />
+      <BatchSfxCostHint kind="generate" rows={selectedRows} inline />
+    </div></div>
     </div>
     <div className={`grid gap-5 items-start ${showTimelineDetails ? '' : 'xl:grid-cols-[minmax(0,1fr)_350px] 2xl:grid-cols-[minmax(0,1fr)_400px]'}`}>
       <section aria-label="音效需求表" className="min-w-0 rounded-2xl border border-slate-200 bg-white overflow-hidden">
@@ -384,7 +420,7 @@ export default function BatchSfxStudio({ active = true }: { active?: boolean }) 
             <colgroup><col className="w-11" /><col className="w-[160px]" /><col /><col className="w-[180px]" /><col className="w-[70px]" /><col className="w-[88px]" /></colgroup>
             <thead className="sticky top-0 z-10 bg-slate-50 text-[11px] text-slate-500"><tr>
               <th scope="col" className="px-3 py-3"><input type="checkbox" aria-label="全选需求" disabled={locked || !rows.length} checked={!!rows.length && selectedIds.length === rows.length} onChange={e => setRows(current => current.map(row => ({ ...row, selected: e.target.checked })))} /></th>
-              <th scope="col" className="px-2 py-3 font-medium">文件命名 / 状态</th><th scope="col" className="px-2 py-3 font-medium">音效描述 / 场景</th><th scope="col" className="px-2 py-3 font-medium">关键词</th><th scope="col" className="px-2 py-3 font-medium">时长 / 范围</th><th scope="col" className="px-2 py-3 font-medium">操作</th>
+              <th scope="col" className="px-2 py-3 font-medium">文件命名 / 状态</th><th scope="col" className="px-2 py-3 font-medium">音效描述 / 场景</th><th scope="col" className="px-2 py-3 font-medium">音效生成关键词</th><th scope="col" className="px-2 py-3 font-medium">时长 / 范围</th><th scope="col" className="px-2 py-3 font-medium">操作</th>
             </tr></thead>
             <tbody className="divide-y divide-slate-100">
               {!rows.length && <tr><td colSpan={6} className="p-10 text-center text-slate-400">{hydrated ? '上传素材分析，或新增一条音效需求。' : '正在恢复本地项目…'}</td></tr>}
@@ -398,8 +434,8 @@ export default function BatchSfxStudio({ active = true }: { active?: boolean }) 
                   <label className="mt-2 block text-[10px] text-slate-500">结束 / 秒<input aria-label={`音效${index + 1}范围结束`} type="number" min={row.time ?? 0} max={videoDuration || undefined} step="0.001" placeholder="待设置" className={`${inputClass} mt-1 !px-1 tabular-nums`} value={row.videoId === videoAsset.id ? batchTimeRange(row, videoDuration)?.end ?? '' : ''} disabled={locked || !videoDuration || row.videoId !== videoAsset.id || row.time === undefined} onChange={e => { if (e.target.value !== '') movePoint(row.id, row.time, Number(e.target.value)); }} /></label>
                 </>}</td>
                 <td className="px-2 py-3 space-y-2">
-                  <div className="space-y-1"><button aria-label={`搜索音效${index + 1}`} title={row.versions.some(v => v.kind === 'search') ? '再次搜索' : '搜索'} className={`${buttonClass} w-full !px-1.5`} disabled={locked} onClick={() => void run('search', [row.id])}><Search size={12} />搜索</button><p className="text-[10px] text-amber-700">成功 1 分/批</p></div>
-                  <div className="space-y-1"><button aria-label={`生成音效${index + 1}`} title={row.versions.some(v => v.kind === 'generate') ? '再次生成' : '生成'} className={`${buttonClass} w-full !px-1.5`} disabled={locked || !isBatchSfxDurationValid(row.duration)} onClick={() => void run('generate', [row.id])}><Sparkles size={12} />生成</button><BatchSfxCostHint kind="generate" rows={[row]} compact /></div>
+                  <button aria-label={`搜索音效${index + 1}`} title={row.versions.some(v => v.kind === 'search') ? '再次搜索' : '搜索'} className={`${buttonClass} w-full !px-1.5`} disabled={locked} onClick={() => void run('search', [row.id])}><Search size={12} />搜索</button>
+                  <button aria-label={`生成音效${index + 1}`} title={row.versions.some(v => v.kind === 'generate') ? '再次生成' : '生成'} className={`${buttonClass} w-full !px-1.5`} disabled={locked || !isBatchSfxDurationValid(row.duration)} onClick={() => void run('generate', [row.id])}><Sparkles size={12} />生成</button>
                   <div className="flex justify-between gap-1"><button aria-label={`下载音效${index + 1}`} title="下载已确认音效" className={`${buttonClass} !p-2`} disabled={!confirmedVersion(row)} onClick={() => saveBatchDownload(confirmedVersion(row)!.confirmedBlob!, `${batchFileStem(row.name)}.wav`)}><Download size={13} /></button><button className={`${buttonClass} !p-2 hover:!text-red-500`} aria-label={`删除音效${index + 1}`} title="删除需求" disabled={locked} onClick={() => setRows(current => current.filter(r => r.id !== row.id))}><Trash2 size={13} /></button></div>
                 </td>
               </tr>)}

@@ -12,13 +12,15 @@ import {
   ONLINE_SFX_BATCH_COMPANY_POINTS,
   ONLINE_SFX_MAX_RESULTS,
   ONLINE_SFX_PRICING_VERSION,
-  ONLINE_SFX_SOURCES,
   onlineSfxSearchUrl,
   type OnlineSfxItem,
   type OnlineSfxSourceStatus,
+  type OnlineSfxCandidate,
 } from './onlineSfxTypes';
 import { recordAiUsage } from './usageTracking';
 import { createOnlineSfxRelevanceMatcher } from './onlineSfxRelevance';
+import { fetchPublicResource, publicHttpsUrl } from './onlineSfxPublicFetch';
+import { searchWebSoundEffects } from './onlineSfxWebSearch';
 
 const runFile = promisify(execFile);
 const PREVIEW_HOST = 'public-assets.content-platform.envatousercontent.com';
@@ -139,7 +141,10 @@ export function allowedPreviewUrl(value: string) {
   } catch { return false; }
 }
 
-type Candidate = Omit<OnlineSfxItem, 'id'> & { previewUrl: string };
+type Candidate = OnlineSfxCandidate;
+
+export const downloadOnlineSfxPreview = (url: string, limit: number, signal: AbortSignal, fetcher?: typeof fetch) =>
+  allowedPreviewUrl(url) ? boundedFetch(url, limit, signal, fetcher) : fetchPublicResource(url, limit, signal);
 // Use title/source/audio from the same card; never guess preview URLs or use
 // unrelated homepage recommendations when the result schema changes.
 export function parseEnvatoSearch(html: string, limit = ONLINE_SFX_MAX_RESULTS): Candidate[] {
@@ -267,33 +272,47 @@ const SEARCH_SOURCES = [
   // Public Epidemic search exposes ten results, without public pagination.
   { id: 'epidemic', name: 'Epidemic Sound', pages: 1, parse: parseEpidemicSearch },
   { id: 'mixkit', name: 'Mixkit', pages: 1, parse: parseMixkitSearch },
+  { id: 'web', name: '全网搜索', pages: 1, parse: () => [] as Candidate[] },
 ] as const;
 type SourceState = { page: number; completed: Set<number>; buffer: Candidate[]; seen: Set<string>; exhausted: boolean };
 export function createOnlineSfxSearchState() {
   return SEARCH_SOURCES.map((): SourceState => ({ page: 1, completed: new Set(), buffer: [], seen: new Set(), exhausted: false }));
 }
 
-/** 50% primary, 50% shared alternates; unused capacity flows to available sources. */
+export function onlineSfxGroupTargets(limit: number) {
+  const weights = [0.3, 0.3, 0.4];
+  const targets = weights.map(weight => Math.floor(weight * limit));
+  const order = weights.map((weight, index) => ({ index, remainder: weight * limit - targets[index] }))
+    .sort((a, b) => b.remainder - a.remainder || a.index - b.index);
+  for (let i = 0, remaining = limit - targets.reduce((a, b) => a + b, 0); i < remaining; i++) targets[order[i].index]++;
+  return targets;
+}
+
+/** Envato 30%, three other catalogs together 30%, web 40%; all deficits flow both ways. */
 export function mixOnlineSfxCandidates(pools: Candidate[][], limit: number): Candidate[] {
   const picked = pools.map(() => [] as Candidate[]);
   const seen = new Set<string>();
+  const seenAudio = new Set<string>();
   const take = (index: number) => {
-    while (pools[index].length) {
+    while (pools[index]?.length) {
       const candidate = pools[index].shift()!;
-      if (seen.has(candidate.sourceUrl)) continue;
+      if (seen.has(candidate.sourceUrl) || candidate.previewUrl && seenAudio.has(candidate.previewUrl)) continue;
+      if (candidate.previewUrl) seenAudio.add(candidate.previewUrl);
       seen.add(candidate.sourceUrl); picked[index].push(candidate); return true;
     }
     return false;
   };
-  const primaryTarget = Math.ceil(limit / 2);
-  for (let count = 0; count < primaryTarget && pools[0]?.length; count++) take(0);
-  let total = seen.size;
-  while (total < limit) {
-    let changed = false;
-    for (let index = 1; index < pools.length && total < limit; index++) {
-      if (take(index)) { total++; changed = true; }
+  const groups = [[0], [1, 2, 3], [4]];
+  const targets = onlineSfxGroupTargets(limit);
+  for (let group = 0; group < groups.length; group++) {
+    let count = 0;
+    while (count < targets[group]) {
+      let changed = false;
+      for (const index of groups[group]) {
+        if (count < targets[group] && take(index)) { count++; changed = true; }
+      }
+      if (!changed) break;
     }
-    if (!changed) break;
   }
   while (seen.size < limit) {
     let changed = false;
@@ -316,6 +335,7 @@ export async function searchOnlineSfxSources(options: {
   query: string; state?: ReturnType<typeof createOnlineSfxSearchState>; limit?: number;
   excluded?: Set<string>; fetcher?: typeof fetch;
   cooldowns?: Map<string, number>;
+  webSearch?: typeof searchWebSoundEffects;
 }) {
   const state = options.state || createOnlineSfxSearchState();
   const limit = Math.min(ONLINE_SFX_MAX_RESULTS, Math.max(1, options.limit || ONLINE_SFX_MAX_RESULTS));
@@ -336,6 +356,9 @@ export async function searchOnlineSfxSources(options: {
     if (!pages.length) { if (stream.page > 50) stream.exhausted = true; return; }
     pages.forEach(page => attempted[index].add(page));
     const responses = await Promise.allSettled(pages.map(async page => {
+      if (source.id === 'web') return (options.webSearch || searchWebSoundEffects)({
+        query: options.query, page, signal: AbortSignal.any([deadline, AbortSignal.timeout(12_000)]),
+      });
       const queries = source.id === 'mixkit' ? categories : [options.query];
       const results = await Promise.allSettled(queries.map(async query => {
         const signal = AbortSignal.any([deadline, AbortSignal.timeout(6_000)]);
@@ -370,8 +393,10 @@ export async function searchOnlineSfxSources(options: {
       stream.completed.add(pages[i]);
       while (stream.completed.delete(stream.page)) stream.page++;
       for (const candidate of response.value) {
-        if (stream.seen.has(candidate.sourceUrl)) continue;
+        const audioKey = `audio:${candidate.previewUrl}`;
+        if (stream.seen.has(candidate.sourceUrl) || candidate.previewUrl && stream.seen.has(audioKey)) continue;
         stream.seen.add(candidate.sourceUrl);
+        if (candidate.previewUrl) stream.seen.add(audioKey);
         newCandidates++;
         if (!excluded.has(candidate.sourceUrl) && relevance(candidate.title) > 0) stream.buffer.push(candidate);
       }
@@ -384,22 +409,25 @@ export async function searchOnlineSfxSources(options: {
       && (response.value.length === 0 || (source.id === 'mixkit' && !newCandidates)))) stream.exhausted = true;
   };
   for (const stream of state) stream.buffer = stream.buffer.filter(candidate => !excluded.has(candidate.sourceUrl) && relevance(candidate.title) > 0);
-  await Promise.all(SEARCH_SOURCES.map((source, index) => state[index].buffer.length < Math.ceil(limit * (index === 0 ? 0.5 : 0.5 / (SEARCH_SOURCES.length - 1)))
+  const targets = onlineSfxGroupTargets(limit);
+  const sourceTargets = [targets[0], ...Array(3).fill(Math.ceil(targets[1] / 3)), targets[2]];
+  await Promise.all(SEARCH_SOURCES.map((source, index) => state[index].buffer.length < sourceTargets[index]
     ? fill(index, source.pages) : Promise.resolve()));
   // Backups are already queried in parallel. Fetch extra pages only if the total
   // is short; an unavailable primary never blocks successful alternate results.
   const totalAvailable = state.reduce((sum, stream) => sum + stream.buffer.length, 0);
-  const alternateAvailable = state.slice(1).reduce((sum, stream) => sum + stream.buffer.length, 0);
+  const alternateAvailable = state.slice(1, 4).reduce((sum, stream) => sum + stream.buffer.length, 0);
   const totalShort = totalAvailable < limit;
-  const alternatesShort = alternateAvailable < Math.floor(limit / 2);
-  if ((totalShort || alternatesShort) && !deadline.aborted) {
-    await Promise.all(SEARCH_SOURCES.map((source, index) => unavailable.has(source.id) || (!totalShort && index === 0)
-      ? Promise.resolve() : fill(index, 2)));
+  const groupShort = [state[0].buffer.length < targets[0], alternateAvailable < targets[1], state[4].buffer.length < targets[2]];
+  if ((totalShort || groupShort.some(Boolean)) && !deadline.aborted) {
+    await Promise.all(SEARCH_SOURCES.map((source, index) => unavailable.has(source.id) || (!totalShort && !groupShort[index === 0 ? 0 : index === 4 ? 2 : 1])
+      ? Promise.resolve() : fill(index, source.id === 'web' ? 1 : 2)));
   }
   for (const stream of state) stream.buffer.sort((a, b) => relevance(b.title) - relevance(a.title));
   const items = mixOnlineSfxCandidates(state.map(stream => stream.buffer), limit);
   const sources: OnlineSfxSourceStatus[] = SEARCH_SOURCES.map(source => ({ source: source.name,
-    count: items.filter(item => item.source === source.name).length, unavailable: unavailable.has(source.id) }));
+    count: items.filter(item => source.id === 'web' ? item.source.startsWith('全网 · ') : item.source === source.name).length,
+    unavailable: unavailable.has(source.id) }));
   sources.push({ source: 'Pond5', count: 0, unavailable: true, reason: '网站验证限制，待官方接口接入' });
   return { items, sources };
 }
@@ -509,6 +537,7 @@ export async function findAndCaptureTimelineOnlineSfx(options: {
   ffmpeg: string;
   maxDurationSeconds?: number;
   fetcher?: typeof fetch;
+  webSearch?: typeof searchWebSoundEffects;
 }): Promise<TimelineOnlineSfxResult | null> {
   const query = options.query.trim().slice(0, 160);
   if (!query) return null;
@@ -516,7 +545,7 @@ export async function findAndCaptureTimelineOnlineSfx(options: {
   const fetcher = options.fetcher || fetch;
   let candidates: Candidate[];
   try {
-    const result = await searchOnlineSfxSources({ query, limit: 12, fetcher });
+    const result = await searchOnlineSfxSources({ query, limit: 12, fetcher: options.fetcher, webSearch: options.webSearch });
     candidates = rankTimelineCandidates(result.items, query).slice(0, 3);
   } catch (error) {
     logEvent('src/services/onlineSfxServer.ts:521', 'warn', error);
@@ -530,7 +559,7 @@ export async function findAndCaptureTimelineOnlineSfx(options: {
   for (const candidate of candidates) {
     let temp: string | undefined;
     try {
-      const { data, type } = await boundedFetch(
+      const { data, type } = await downloadOnlineSfxPreview(
         candidate.previewUrl,
         MAX_BYTES,
         AbortSignal.timeout(18_000),
@@ -543,7 +572,8 @@ export async function findAndCaptureTimelineOnlineSfx(options: {
       const output = path.join(temp, 'capture.wav');
       await fs.writeFile(input, data);
       await runFile(options.ffmpeg, [
-        '-nostdin', '-hide_banner', '-loglevel', 'error', '-i', input,
+        '-nostdin', '-hide_banner', '-loglevel', 'error', '-protocol_whitelist', 'file,pipe',
+        '-format_whitelist', 'mp3,wav,ogg,mov,flac,aac', '-i', input,
         '-vn', '-t', String(captureSeconds), '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', '-y', output,
       ], { windowsHide: true, timeout: 30_000, maxBuffer: 1024 * 1024 });
 
@@ -674,8 +704,8 @@ export function createOnlineSfxRouter(options: {
         for (const value of req.body.excludeSourceUrls.slice(0, 1000)) {
           if (typeof value !== 'string') continue;
           try {
-            const url = new URL(value);
-            if (ONLINE_SFX_SOURCES.some(source => source.searchable && new URL(source.url).origin === url.origin)) excluded.add(url.href);
+            const url = publicHttpsUrl(value);
+            if (url) excluded.add(url.href);
           } catch { /* Ignore malformed client-side history entries. */ }
         }
       }
@@ -737,7 +767,7 @@ export function createOnlineSfxRouter(options: {
       capturing++;
       const work = async () => {
         const started = Date.now();
-        const { data, type } = await boundedFetch(ticket.previewUrl, MAX_BYTES, AbortSignal.timeout(25_000));
+        const { data, type } = await downloadOnlineSfxPreview(ticket.previewUrl, MAX_BYTES, AbortSignal.timeout(25_000));
         if (/text\/|application\/(?:json|xml)/i.test(type) || data.length < 32) throw fail('来源返回的不是有效试听音频。');
         temp = await fs.mkdtemp(path.join(os.tmpdir(), 'ai-audio-online-sfx-'));
         const input = path.join(temp, 'preview.mp3');
@@ -745,7 +775,8 @@ export function createOnlineSfxRouter(options: {
         await fs.writeFile(input, data);
         // Capture the public preview's decoded signal, retaining source overlays.
         // Local input only: FFmpeg never receives an arbitrary network URL.
-        await runFile(options.ffmpeg, ['-nostdin', '-hide_banner', '-loglevel', 'error', '-i', input,
+        await runFile(options.ffmpeg, ['-nostdin', '-hide_banner', '-loglevel', 'error', '-protocol_whitelist', 'file,pipe',
+          '-format_whitelist', 'mp3,wav,ogg,mov,flac,aac', '-i', input,
           '-vn', '-t', String(MAX_CAPTURE_SECONDS), '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', '-y', output],
         { windowsHide: true, timeout: 30_000, maxBuffer: 1024 * 1024 });
         const wav = await fs.readFile(output);
