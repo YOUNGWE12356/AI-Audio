@@ -43,7 +43,7 @@ test('official MCP client: authentication, coverage, real FFmpeg trim, downloads
   const app = express(); app.use('/auth', security.router); app.use(security.authenticate); app.use(security.resourceLimits); app.use(express.json({ limit: '15mb' }));
   app.use('/api/mcp/access', createMcpAccessRouter(access, security.adminExpiresAt));
   app.use(createAudioMcp({ directory: path.join(dir, 'workspaces'), origin, access, ffmpeg: ffmpeg! }));
-  let voiceCalls = 0, searchCalls = 0;
+  let voiceCalls = 0, searchCalls = 0, sfxCalls = 0, batchSearchCalls = 0, batchSearchStatus = 200;
   app.get('/api/usage/quota', (_req, res) => res.json({ owner: currentUserId(), remaining: 42 }));
   app.post('/api/ai/sfx-batch/search-query', (req, res) => { assert.equal(req.body.searchQuery, 'door slam'); res.json({ searchQuery: req.body.searchQuery }); });
   app.post('/api/sfx/online/search', (req, res) => { searchCalls++; assert.equal(req.body.query, 'door slam'); fs.rmSync(path.join(currentUploadDirectory(), 'online_sfx_preview.wav'), { force: true }); res.json({ items: [{ id: 'ticket', source: 'envato', sourceUrl: 'https://example.test/item' }] }); });
@@ -53,6 +53,16 @@ test('official MCP client: authentication, coverage, real FFmpeg trim, downloads
     res.json({ url: '/uploads/online_sfx_preview.wav' });
   });
   app.post('/api/ai/elevenlabs/voice', (req, res) => { voiceCalls++; assert.equal(req.body.languageCode, 'zh'); res.type('audio/wav').send(wav); });
+  app.post('/api/ai/sfx-batch/search', (_req, res) => {
+    batchSearchCalls++;
+    if (batchSearchStatus !== 200) return res.status(batchSearchStatus).json({ error: '搜索服务失败。' });
+    res.json({ items: [{ id: 'batch-ticket' }] });
+  });
+  app.post('/api/ai/sfx-batch/capture', (_req, res) => {
+    fs.writeFileSync(path.join(currentUploadDirectory(), 'batch-preview.wav'), wav);
+    res.json({ url: '/uploads/batch-preview.wav' });
+  });
+  app.post('/api/ai/elevenlabs/sound-effect', (_req, res) => { sfxCalls++; res.type('audio/wav').send(wav); });
   const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
   t.after(() => { server.closeAllConnections(); server.close(); });
   const base = `http://127.0.0.1:${(server.address() as any).port}`;
@@ -68,7 +78,7 @@ test('official MCP client: authentication, coverage, real FFmpeg trim, downloads
   const connect = async (token: string) => { const client = new Client({ name: 'test-client', version: '1' }); await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } })); t.after(() => client.close()); return client; };
   const client = await connect(alice.token), other = await connect(bob.token);
   const names = (await client.listTools()).tools.map(t => t.name);
-  for (const name of ['generate_speech', 'generate_speech_batch', 'generate_music', 'generate_sound_effect', 'sound_requirements', 'analyze_sfx_batch', 'produce_sfx_batch', 'search_online_sound_effects', 'capture_online_sound_effect', 'audio_design', 'analyze_video', 'analyze_audio', 'process_audio', 'mix_timeline', 'export_timeline_stems', 'library_search', 'library_import', 'start_audio_job']) assert.ok(names.includes(name), name);
+  for (const name of ['generate_speech', 'generate_speech_batch', 'generate_music', 'generate_sound_effect', 'produce_sound_effect', 'sound_requirements', 'analyze_sfx_batch', 'produce_sfx_batch', 'search_online_sound_effects', 'capture_online_sound_effect', 'audio_design', 'analyze_video', 'analyze_audio', 'process_audio', 'mix_timeline', 'export_timeline_stems', 'library_search', 'library_import', 'start_audio_job']) assert.ok(names.includes(name), name);
   for (const name of ['clone_voice', 'clone_dialogue', 'local_separation', 'audio_to_midi', 'open_module']) assert.ok(!names.includes(name), name);
   const info = jsonResult(await client.callTool({ name: 'engine_status', arguments: { module: 'quota' } })); assert.equal(info.owner, 'account:alice');
   const wav = Buffer.alloc(44 + 48000 * 2); wav.write('RIFF'); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8); wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(48000, 24); wav.writeUInt32LE(96000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(wav.length - 44, 40);
@@ -93,6 +103,17 @@ test('official MCP client: authentication, coverage, real FFmpeg trim, downloads
   assert.equal(captured.metadata.source, 'envato');
   jsonResult(await client.callTool({ name: 'search_online_sound_effects', arguments: { keywords: '关门', searchQuery: 'door slam' } }));
   jsonResult(await client.callTool({ name: 'read_asset', arguments: { assetId: captured.id, length: 32 } }));
+  const soundArgs = { name: '关门', keywords: '关门', searchQuery: 'door slam', duration: 2 };
+  const searched = jsonResult(await client.callTool({ name: 'produce_sound_effect', arguments: soundArgs }));
+  assert.equal(searched.method, 'search'); assert.equal(sfxCalls, 0);
+  batchSearchStatus = 502;
+  const fallback = jsonResult(await client.callTool({ name: 'produce_sound_effect', arguments: soundArgs }));
+  assert.equal(fallback.method, 'generate'); assert.equal(fallback.fallback, true); assert.equal(sfxCalls, 1);
+  const searchesBefore = batchSearchCalls;
+  const explicit = jsonResult(await client.callTool({ name: 'produce_sound_effect', arguments: { ...soundArgs, mode: 'generate' } }));
+  assert.equal(explicit.fallback, false); assert.equal(batchSearchCalls, searchesBefore); assert.equal(sfxCalls, 2);
+  batchSearchStatus = 429;
+  assert.ok((await client.callTool({ name: 'produce_sound_effect', arguments: soundArgs })).isError); assert.equal(sfxCalls, 2);
   const args = { tool: 'save_report', arguments: { name: 'result.txt', content: 'done' }, requestId: 'request-1234567890123456' };
   let job = jsonResult(await client.callTool({ name: 'start_audio_job', arguments: args }));
   const again = jsonResult(await client.callTool({ name: 'start_audio_job', arguments: args })); assert.equal(again.id, job.id);

@@ -33,7 +33,7 @@
 | 配音、批量配音、台词增强与翻译 | `generate_speech`, `generate_speech_batch`, `enhance_voice_text`, `translate_text` |
 | 云端声音转换、翻译配音、语音识别、人声提取 | `change_voice`, `translate_dubbing`, `transcribe_speech`, `cloud_isolation` |
 | 音乐、歌词、配乐提示词、画面配乐分析 | `generate_music`, `generate_lyrics`, `edit_lyrics`, `music_prompt`, `visual_music_prompt` |
-| 音效生成、联网搜索、采集试听 | `generate_sound_effect`, `prepare_sfx_query`, `search_online_sound_effects`, `capture_online_sound_effect` |
+| 音效默认制作入口、指定AI生成、联网搜索、采集试听 | `produce_sound_effect`, `generate_sound_effect`, `prepare_sfx_query`, `search_online_sound_effects`, `capture_online_sound_effect` |
 | 音效需求表、批量需求分析、批量搜索或生成 | `sound_requirements`, `analyze_sfx_batch`, `produce_sfx_batch` |
 | 音频设计、视频画面/配乐/音效/字幕时间线分析 | `audio_design`, `analyze_video` |
 | 裁剪、压缩、格式、音量、响度、变速、移调、淡化、降噪、提取视频音轨 | `process_audio` |
@@ -64,7 +64,9 @@ curl --fail -H "Authorization: Bearer <个人令牌>" \
 
 ## 推荐调用流程
 
-音效批量制作：上传需求截图/文档/视频 → `analyze_sfx_batch` → 修改返回的需求 → `produce_sfx_batch`（`mode`为`search`或`generate`）→ 试听 → `process_audio`裁剪 → `package_files`下载。搜索模式与网页复用Envato30%、其他三库合计30%、全网40%及来源互补逻辑；中文关键词在执行时提炼为1～2个英文检索词。生成与搜索均沿用原有计费，不是所有批量任务固定只扣1分。
+普通“需要某种音效”请求使用 `produce_sound_effect`，批量使用 `produce_sfx_batch`，`mode`不填或填`auto`。默认先搜索并采集试听；搜索或候选采集服务报错且没有可用音效时，自动改为AI生成一次，返回`method=generate`、`fallback=true`和`fallbackReason`说明实际方式。部分候选失败但仍有可用音效时继续返回搜索结果。正常的空搜索结果会提示无匹配，不自动生成；登录、权限、积分不足、限流、参数错误和用户取消时停止。明确要求AI生成时填`mode=generate`，直接生成，不先查询或翻译搜索词；明确只搜索时填`mode=search`，失败也不自动生成。批量的单条`mode`可覆盖批次设置。
+
+音效批量制作：上传需求截图/文档/视频 → `analyze_sfx_batch` → 修改返回的需求 → `produce_sfx_batch` → 试听 → `process_audio`裁剪 → `package_files`下载。搜索模式与网页复用Envato30%、其他三库合计30%、全网40%及来源互补逻辑；中文关键词在搜索时提炼为1～2个英文检索词，生成时保留完整音效描述。生成与搜索均沿用原有计费；回退AI生成按实际生成计费，不是所有批量任务固定只扣1分。
 
 视频制作：上传视频 → `analyze_video`分别分析所需轨道 → 配乐/音效/配音生成工具逐条生成 → 试听/修改 → 用户明确需要导出时调用 `mix_timeline`，可再 `export_timeline_stems`。远程MCP不操作网页按钮，不会自动打开或跳转工作台。
 

@@ -8,7 +8,7 @@
   },
   "type": "module",
   "scripts": {
-    "test:mcp": "tsx --test src/services/mcpServer.test.ts",
+    "test:mcp": "tsx --test src/services/mcpServer.test.ts src/services/mcpSfxProduction.test.ts",
     "test:auth": "tsx --test tests/feishuAuth.test.ts",
     "test:points": "tsx --test tests/companyPoints.test.ts src/services/companyPointPricing.test.ts src/services/sfxBatchBilling.test.ts",
     "dev": "tsx server.ts",

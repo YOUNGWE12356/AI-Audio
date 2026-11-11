@@ -251,7 +251,7 @@ export function createSfxBatchRouter(options: {
         return { id, title: candidate.title, source: candidate.source, sourceUrl: candidate.sourceUrl };
       });
       if (items.length && searchBatches.markSuccessfulBatch(owner, searchBatchId)) recordOnlineSfxBatchUsage();
-      res.json({ items, message: items.length ? '' : '未找到匹配音效，可修改搜索词再搜或使用 AI 生成。' });
+      res.json({ items, sources: result.sources, message: items.length ? '' : '未找到匹配音效，可修改搜索词再搜或使用 AI 生成。' });
     } catch (error) { next(error); }
     finally { if (locked) searches.delete(owner); release?.(); }
   });

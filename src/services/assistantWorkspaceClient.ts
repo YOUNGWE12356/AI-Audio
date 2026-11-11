@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import type { TabType } from '../types';
 import type { AssistantWorkspaceCommand } from './assistantAgentTypes';
 import { runAssistantToolOperation } from './assistantToolWorkspace';
+import { createClientTaskId } from '../utils/clientId';
 
 type Handler = (command: AssistantWorkspaceCommand, signal: AbortSignal, context: { jobId: string; clientId: string }) => Promise<Record<string, any>>;
 const handlers = new Map<string, Handler>();
@@ -11,7 +12,7 @@ const receipts = new Map<string, Record<string, any>>();
 const clientKey = 'assistant_workspace_client_v1';
 const clientId = () => {
   let id = sessionStorage.getItem(clientKey);
-  if (!id) { id = crypto.randomUUID(); sessionStorage.setItem(clientKey, id); }
+  if (!id) { id = createClientTaskId(); sessionStorage.setItem(clientKey, id); }
   return id;
 };
 export function setAssistantWorkspaceNavigator(handler: (tab: TabType) => void) {

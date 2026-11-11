@@ -5,6 +5,7 @@ import { createAssistantTools, type AgentToolContext } from './assistantAgentToo
 import type { AgentTool } from './assistantAgentLoop';
 import { AUDIO_LANGUAGE_REGISTRY } from './languageRegistry';
 import { createAudioEvidence } from '../utils/audioEvidence';
+import { MCP_SFX_POLICY, produceMcpSoundEffect } from './mcpSfxProduction';
 
 const s = { type: 'string' }, n = { type: 'number' }, b = { type: 'boolean' };
 const strings = { type: 'array', items: s, maxItems: 200 };
@@ -18,6 +19,8 @@ export function createMcpAudioTools(c: AgentToolContext) {
   const add = (name: string, description: string, properties: Record<string, any>, required: string[], execute: AgentTool['execute']) =>
     tools.push({ name, description, parameters: { type: 'object', properties, required, additionalProperties: false }, execute });
   const replace = (name: string, execute: AgentTool['execute']) => { tools.find(t => t.name === name)!.execute = execute; };
+  const generation = tools.find(t => t.name === 'generate_sound_effect')!;
+  generation.description = '仅在用户明确要求AI生成音效，或搜索失败需要回退时使用。普通“需要某种音效”请求用produce_sound_effect，默认先搜索。生成支持0.5～30秒。';
   const image = async (id: string) => {
     const a = c.asset(id);
     if (!a.mimeType.startsWith('image/')) throw new Error('请选择图片。');
@@ -45,7 +48,7 @@ export function createMcpAudioTools(c: AgentToolContext) {
   engine.description = '检查云端 AI 服务或本人的积分额度。';
   (engine.parameters.properties as any).module = choice('ai', 'quota');
   replace('engine_status', ({ module }) => c.request(module === 'quota' ? '/api/usage/quota' : '/api/health?scope=ai'));
-  replace('inspect_tools', async ({ query }) => ({ tools: tools.filter(t => !query || `${t.name} ${t.description}`.toLowerCase().includes(String(query).toLowerCase()))
+  replace('inspect_tools', async ({ query }) => ({ soundEffectPolicy: MCP_SFX_POLICY, tools: tools.filter(t => !query || `${t.name} ${t.description}`.toLowerCase().includes(String(query).toLowerCase()))
     .map(({ name, description, parameters }) => ({ name, description, inputSchema: parameters })), excluded: '依赖本地模型的功能不开放。' }));
   // Language selection is forwarded to the same voice endpoint used by the UI.
   const speech = tools.find(t => t.name === 'generate_speech')!;
@@ -117,30 +120,25 @@ export function createMcpAudioTools(c: AgentToolContext) {
       const job = await c.request('/api/ai/sfx-batch/analyze', { text, files, sourceType, videoDuration, instructions: a.instructions || '', background: true, requestId: randomUUID() });
       return waitJob('/api/ai/sfx-batch/analyze/jobs', job);
     });
-  const row = { type: 'object', properties: { name: s, keywords: s, description: s, searchQuery: s, duration: n }, required: ['name', 'keywords'], additionalProperties: false };
-  add('produce_sfx_batch', '批量搜索或生成音效，逐条返回成功/失败，不掩盖部分失败。搜索复用同一searchBatchId的原有积分规则；候选试听保留来源。需先试听，满意后自行process_audio裁剪、package_files打包。不会自动混入视频。',
-    { mode: choice('search', 'generate'), items: { type: 'array', items: row, minItems: 1, maxItems: 200 }, searchBatchId: s }, ['mode', 'items'], async a => {
+  const modeSchema = { ...choice('auto', 'search', 'generate'), default: 'auto', description: '默认auto先搜索，服务报错时AI生成；明确要求AI生成填generate；只搜索不生成填search。' };
+  const soundProperties = { name: { ...s, minLength: 1, maxLength: 180 }, keywords: { ...s, minLength: 1, maxLength: 300 },
+    description: { ...s, maxLength: 2000 }, searchQuery: s, duration: { ...n, minimum: 0.5, maximum: 30 }, mode: modeSchema };
+  const produce = (input: any) => produceMcpSoundEffect(c, input, generation.execute);
+  add('produce_sound_effect', '普通音效需求的默认入口：先联网搜索并采集候选试听；搜索或采集服务报错且没有可用结果时自动AI生成一次。明确要求AI生成时mode=generate直接生成。没有搜索结果、积分不足、权限问题、限流或取消不会触发生成。返回method与fallbackReason，告知实际方式。',
+    { ...soundProperties, searchBatchId: s }, ['name', 'keywords'], produce);
+  const row = { type: 'object', properties: soundProperties, required: ['name', 'keywords'], additionalProperties: false };
+  add('produce_sfx_batch', '批量制作音效的默认入口：每条默认先搜索，遇服务错误且没有可用音效时自动AI生成一次。用户明确要求AI生成才用mode=generate；mode=search仅搜索。每条可指定mode覆盖批次模式，返回实际method及切换原因。搜索复用同一searchBatchId的原有积分规则；先试听，不自动混入视频。',
+    { mode: modeSchema, items: { type: 'array', items: row, minItems: 1, maxItems: 200 }, searchBatchId: s }, ['items'], async a => {
       const searchBatchId = a.searchBatchId || randomUUID();
       const items = [];
       for (const [index, item] of a.items.entries()) {
         c.signal.throwIfAborted(); c.progress?.(`制作音效 ${index + 1}/${a.items.length}`);
         try {
-          const { searchQuery } = await c.request('/api/ai/sfx-batch/search-query', { keywords: item.keywords, searchQuery: item.searchQuery || '', description: item.description || '' });
-          if (a.mode === 'generate') {
-            const result = await tools.find(t => t.name === 'generate_sound_effect')!.execute({ prompt: searchQuery, duration: item.duration || 4, name: item.name });
-            items.push({ index, name: item.name, status: 'completed', result });
-          } else {
-            const result = await c.request('/api/ai/sfx-batch/search', { query: searchQuery, searchBatchId });
-            const candidates = [];
-            for (const candidate of result.items || []) {
-              try {
-                const captured = await c.request('/api/ai/sfx-batch/capture', { id: candidate.id });
-                candidates.push({ ...candidate, asset: await c.register(captured.url, `${item.name}_${candidates.length + 1}.wav`, false) });
-              } catch { candidates.push({ ...candidate, status: 'failed' }); }
-            }
-            items.push({ index, name: item.name, status: candidates.some(v => v.asset) ? 'completed' : 'failed', candidates });
-          }
-        } catch (error) { items.push({ index, name: item.name, status: 'failed', message: error instanceof Error ? error.message : '处理失败' }); }
+          items.push({ index, name: item.name, ...await produce({ ...item, mode: item.mode || a.mode || 'auto', searchBatchId }) });
+        } catch (error) {
+          c.signal.throwIfAborted();
+          items.push({ index, name: item.name, status: 'failed', message: error instanceof Error ? error.message : '处理失败' });
+        }
       }
       return { searchBatchId, items, completedCount: items.filter(v => v.status === 'completed').length };
     });

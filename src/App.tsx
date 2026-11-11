@@ -29,6 +29,7 @@ import { loadPersistentHistory, persistHistory } from './services/historyStorage
 import { readRecentVoiceIds } from './utils/recentVoices';
 import { ttsLanguageLabel } from './utils/elevenLabsTtsLanguage';
 import type { SfxBatchInputRequest } from './utils/requirementTableTransfer';
+import { createClientTaskId } from './utils/clientId';
 
 export interface PendingMusicOption {
   id: 'A' | 'B';
@@ -820,7 +821,7 @@ export default function App() {
       const requestedDuration = standaloneDurationMode === 'fixed' ? standaloneDuration : undefined;
       const baseTitle = `独立音效 - ${prompt.substring(0, 20)}${prompt.length > 20 ? '...' : ''}`;
       const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 16);
-      const batchId = crypto.randomUUID();
+      const batchId = createClientTaskId();
       const results = await generateSoundEffectVersions({
         prompt,
         duration: requestedDuration,

@@ -171,8 +171,9 @@ export default function Workbench({ setCurrentTab, historyList, assistantPanel }
         <div className="relative z-10">
           <div className="space-y-3 text-center">
             <h2 className="text-2xl md:text-3xl font-extrabold text-slate-800 tracking-tight">
-              欢迎回来，音频制作人
+              AI 音频创作平台
             </h2>
+            <p className="text-sm md:text-base font-medium text-slate-500">让声音创作更高效</p>
           </div>
         </div>
       </div>
