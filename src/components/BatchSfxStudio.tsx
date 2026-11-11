@@ -252,7 +252,7 @@ export default function BatchSfxStudio({ active = true, inputRequest = null }: {
     if (needsBatchSearchQuery(row)) patchRow(row.id, { status: '正在自动转换关键词…', error: undefined });
     const searchQuery = await resolveBatchSearchQuery(row);
     patchRow(row.id, { searchQuery, searchQuerySource: batchQuerySource(row) });
-    const request = createBatchSfxRequest({ ...row, searchQuery }, kind, row.excludedSources, searchBatchId);
+    const request = createBatchSfxRequest({ ...row, searchQuery }, kind, row.excludedSources, searchBatchId, row.id);
     patchRow(row.id, { status: kind === 'search' ? '正在搜索…' : '正在生成音效…', error: undefined });
     if (kind === 'search') {
       const result = await api(request.endpoint, request.body, 65_000);
@@ -271,18 +271,22 @@ export default function BatchSfxStudio({ active = true, inputRequest = null }: {
   const run = async (kind: 'search' | 'generate', ids: string[]) => {
     if (busyRef.current || !ids.length) return;
     busyRef.current = true; stopRef.current = false; setBusy(true); setQueueing(true); setError('');
-    const searchBatchId = kind === 'search' ? batchId() : undefined;
     let completed = 0, failed = 0;
-    for (const id of ids) {
-      if (stopRef.current) break;
-      const row = rowsRef.current.find(r => r.id === id); if (!row) continue;
-      setActiveRowId(id); setActiveOccurrenceIndex(0); setMessage(`${kind === 'search' ? '搜索' : '生成'} ${completed + failed + 1}/${ids.length}：${row.name}`);
-      try { await makeRow(row, kind, searchBatchId); completed++; }
-      catch (e) { failed++; patchRow(id, { status: '制作失败，可重试', error: errorText(e) }); }
-      finally { window.dispatchEvent(new Event('ai-audio:usage-updated')); }
-    }
-    setMessage(`${stopRef.current ? '队列已停止。' : '本轮完成。'}成功 ${completed} 条，失败 ${failed} 条${completed ? '，请试听并点击“确认音效”完成选用。' : '。'}`);
-    busyRef.current = false; setBusy(false); setQueueing(false);
+    try {
+      const searchBatchId = kind === 'search'
+        ? (await api('/api/ai/sfx-batch/search-batches', { itemIds: ids })).batchId as string
+        : undefined;
+      for (const id of ids) {
+        if (stopRef.current) break;
+        const row = rowsRef.current.find(r => r.id === id); if (!row) continue;
+        setActiveRowId(id); setActiveOccurrenceIndex(0); setMessage(`${kind === 'search' ? '搜索' : '生成'} ${completed + failed + 1}/${ids.length}：${row.name}`);
+        try { await makeRow(row, kind, searchBatchId); completed++; }
+        catch (e) { failed++; patchRow(id, { status: '制作失败，可重试', error: errorText(e) }); }
+        finally { window.dispatchEvent(new Event('ai-audio:usage-updated')); }
+      }
+      setMessage(`${stopRef.current ? '队列已停止。' : '本轮完成。'}成功 ${completed} 条，失败 ${failed} 条${completed ? '，请试听并点击“确认音效”完成选用。' : '。'}`);
+    } catch (e) { setError(errorText(e)); }
+    finally { busyRef.current = false; setBusy(false); setQueueing(false); }
   };
   const selectVersion = async (rowId: string, version: BatchVersion) => {
     if (busyRef.current) return;

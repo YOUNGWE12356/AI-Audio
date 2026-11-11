@@ -23,15 +23,16 @@ import { planAssistantTask } from './src/services/assistantPlannerService';
 import { createAssistantAgentRouter } from './src/services/assistantAgentServer';
 import { createAssistantWorkspaceOperationCache } from './src/services/assistantWorkspaceOperations';
 import { detectMediaAudioStream } from './src/services/mediaStreamProbe';
+import { measureAudioDurationSeconds } from './src/services/measuredAudioDuration';
 import { resolveVideoMixAudioInputs } from './src/services/videoMixInputs';
 import { createMusicSeparationRouter } from './src/services/musicSeparationServer';
 import {
-  createTimelineOnlineSfxBatchTracker,
   createOnlineSfxRouter,
   findAndCaptureTimelineOnlineSfx,
   recordTimelineOnlineSfxUsage,
 } from './src/services/onlineSfxServer';
 import { ONLINE_SFX_BATCH_COMPANY_POINTS } from './src/services/onlineSfxTypes';
+import { createSearchBillingBatches } from './src/services/searchBillingBatches';
 import { resolveBatchSfxUsageFeature } from './src/services/sfxBatchBilling';
 import { createSfxBatchRouter } from './src/services/sfxBatchServer';
 import { batchVideoFrameCount, batchRangeFrameCount, SFX_BATCH_VIDEO_MAX_DIMENSION } from './src/services/sfxBatchVideoAnalysis';
@@ -96,7 +97,7 @@ import {
   ELEVENLABS_SPEECH_TO_TEXT_CREDITS_PER_MINUTE,
   ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE,
   COMPANY_POINTS,
-  estimateAudioDurationSecondsFromBlob,
+  setBillableAudioDurationMeasurer,
   estimateTimedCompanyPoints,
   estimateTtsCompanyPoints,
   estimateTextGenerationCredits,
@@ -126,6 +127,7 @@ async function startServer() {
   const app = express();
   const PORT = Number.parseInt(process.env.PORT || '4030', 10);
   const FFMPEG_BINARY = process.env.FFMPEG_PATH || ffmpegStatic || 'ffmpeg';
+  setBillableAudioDurationMeasurer(measureAudioDurationSeconds);
 
   app.disable('x-powered-by');
 
@@ -480,6 +482,7 @@ async function startServer() {
                 totalTokens: Number(event.totalTokens) || 0,
                 credits: Number(event.credits) || 0,
                 companyPoints: Number(event.companyPoints) || 0,
+                outcome: event.outcome === 'failed' || event.outcome === 'success' ? event.outcome : undefined,
                 pricingVersion: typeof event.pricingVersion === 'string' ? event.pricingVersion : undefined,
                 billingQuantity: Number(event.billingQuantity) || 0,
                 billingUnit: ['character', 'second', 'token', 'request'].includes(String(event.billingUnit))
@@ -591,7 +594,7 @@ async function startServer() {
   );
   const MAX_ELEVENLABS_ACCOUNT_CYCLE_CREDITS = 100_000_000;
   const activeElevenLabsQuotaReservations = new Map<string, number>();
-  const timelineOnlineSfxBatchTracker = createTimelineOnlineSfxBatchTracker();
+  const timelineOnlineSfxBatchTracker = createSearchBillingBatches();
 
   const readElevenLabsQuotaStore = (): ElevenLabsQuotaStore => {
     try {
@@ -847,35 +850,41 @@ async function startServer() {
     };
   };
 
-  const estimateUploadedMediaDuration = (req: express.Request) => {
-    if (!req.file) return undefined;
-    if (req.file.mimetype.startsWith('video/')) return 60;
-    return estimateAudioDurationSecondsFromBlob(
-      new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype }),
-    );
+  const uploadedAudioBlobs = new WeakMap<Express.Multer.File, Blob>();
+  const uploadedAudioBlob = (req: express.Request) => {
+    if (!req.file) throw Object.assign(new Error('audio is required'), { status: 400 });
+    let audio = uploadedAudioBlobs.get(req.file);
+    if (!audio) {
+      audio = new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype });
+      uploadedAudioBlobs.set(req.file, audio);
+    }
+    return audio;
   };
+  const estimateUploadedMediaDuration = (req: express.Request) => measureAudioDurationSeconds(uploadedAudioBlob(req));
 
   const requireElevenLabsQuota = (
-    estimateCredits: (req: express.Request) => number,
+    estimateCredits: (req: express.Request) => number | Promise<number>,
   ): express.RequestHandler => (req, res, next) => {
-    const actor = resolveUsageActor(req, res);
-    const reservation = reserveElevenLabsQuota(actor, estimateCredits(req));
-    if (!reservation.release) {
-      return res.status(429).json({
-        code: 'COMPANY_POINTS_EXCEEDED',
-        error: `本月个人积分不足。已用 ${Math.ceil(reservation.quota.usedCredits)} / ${reservation.quota.limitCredits}，请联系管理员追加额度或项目池积分。`,
-        quota: reservation.quota,
-      });
-    }
-    let completed = false;
-    const release = () => {
-      if (completed) return;
-      completed = true;
-      reservation.release?.();
-    };
-    res.once('finish', release);
-    res.once('close', release);
-    return next();
+    void (async () => {
+      const actor = resolveUsageActor(req, res);
+      const reservation = reserveElevenLabsQuota(actor, await estimateCredits(req));
+      if (!reservation.release) {
+        return res.status(429).json({
+          code: 'COMPANY_POINTS_EXCEEDED',
+          error: `本月个人积分不足。已用 ${Math.ceil(reservation.quota.usedCredits)} / ${reservation.quota.limitCredits}，请联系管理员追加额度或项目池积分。`,
+          quota: reservation.quota,
+        });
+      }
+      let completed = false;
+      const release = () => {
+        if (completed) return;
+        completed = true;
+        reservation.release?.();
+      };
+      res.once('finish', release);
+      res.once('close', release);
+      return next();
+    })().catch(next);
   };
 
   // Text/vision model costs are settled from recorded token usage. Reserve a
@@ -884,12 +893,15 @@ async function startServer() {
     [
       '/api/ai/assistant',
       '/api/ai/audio-design',
+      '/api/ai/audio-design-video',
+      '/api/ai/audio-design-video-preuploaded',
       '/api/ai/regenerate-lyrics',
       '/api/ai/generate-lyrics',
       '/api/ai/sfx-requirements',
       '/api/ai/batch-voice-image-ocr',
       '/api/ai/optimize-metadata',
       '/api/ai/translate',
+      '/api/ai/translate-language',
       '/api/ai/music-prompt',
       '/api/ai/voice-v4-enhance',
       '/api/ai/voice-v3-enhance',
@@ -2448,10 +2460,28 @@ async function startServer() {
     }
   });
 
+  // Multipart stream callbacks may run outside the request's async context.
+  // Restore both authenticated file ownership and usage attribution before continuing.
+  const multipartDirectories = new WeakMap<express.Request, string>();
+  const scopedMultipart = (parser: multer.Multer) => {
+    const bind = (middleware: express.RequestHandler): express.RequestHandler => (req, res, next) => {
+      const runInRequest = AsyncLocalStorage.snapshot();
+      multipartDirectories.set(req, getUploadsDir());
+      middleware(req, res, error => runInRequest(next, error));
+    };
+    return {
+      single: (field: string) => bind(parser.single(field)),
+      array: (field: string, count?: number) => bind(parser.array(field, count)),
+      fields: (fields: multer.Field[]) => bind(parser.fields(fields)),
+    };
+  };
+
   // Configure multer disk storage for multipart/form-data
   const storage = multer.diskStorage({
     destination: (req, file, cb) => {
-      cb(null, getUploadsDir());
+      const directory = multipartDirectories.get(req);
+      if (!directory) return cb(new Error('Authenticated file context required'), '');
+      cb(null, directory);
     },
     filename: (req, file, cb) => {
       const ext = getSafeUploadExtension(file.originalname, file.mimetype, '.wav');
@@ -2460,10 +2490,10 @@ async function startServer() {
     }
   });
 
-  const upload = multer({ 
+  const upload = scopedMultipart(multer({
     storage,
     limits: { fileSize: MAX_UPLOAD_BYTES }
-  });
+  }));
 
   type AudioDesignVideoPreupload = {
     owner: string;
@@ -2499,10 +2529,10 @@ async function startServer() {
     void cleanupExpiredAudioDesignPreuploads();
   }, 5 * 60 * 1000).unref?.();
 
-  const aiUpload = multer({
+  const aiUpload = scopedMultipart(multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: MAX_UPLOAD_BYTES },
-  });
+  }));
 
   app.use(createAssistantWorkspaceOperationCache((req, res) => resolveUsageActor(req, res).userId));
   app.use('/api/ai/assistant', createAssistantAgentRouter({
@@ -4327,7 +4357,7 @@ async function startServer() {
   }));
 
   // Compatibility for older clients: only interpret supplied local evidence.
-  const namingUpload = multer({ storage: multer.memoryStorage(), limits: { files: 10, fileSize: 2 * 1024 * 1024, fields: 1, fieldSize: 256 * 1024 } });
+  const namingUpload = scopedMultipart(multer({ storage: multer.memoryStorage(), limits: { files: 10, fileSize: 2 * 1024 * 1024, fields: 1, fieldSize: 256 * 1024 } }));
   app.post('/api/ai/music-analysis-naming/audio', namingUpload.array('audio', 10), asyncRoute(async (req, res) => {
     let items: unknown;
     try { items = JSON.parse(req.body?.metadata || 'null'); }
@@ -6244,13 +6274,13 @@ async function startServer() {
   app.post(
     '/api/ai/elevenlabs/speech-to-speech',
     aiUpload.single('audio'),
-    requireElevenLabsQuota(req => estimateTimedCompanyPoints(
-      estimateUploadedMediaDuration(req),
+    requireElevenLabsQuota(async req => estimateTimedCompanyPoints(
+      await estimateUploadedMediaDuration(req),
       COMPANY_POINTS.audioProcessingPerSecond,
     )),
     asyncRoute(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'audio is required' });
-    const audio = new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype });
+    const audio = uploadedAudioBlob(req);
     const voiceId = validateVoiceId(req.body?.voiceId);
     return sendAudioBlob(res, await runVoiceGenerationQueued(voiceId, async () => {
       if (String(req.body?.voiceSource || '').trim() === 'voice_library') {
@@ -6274,13 +6304,13 @@ async function startServer() {
   app.post(
     '/api/ai/elevenlabs/audio-isolation',
     aiUpload.single('audio'),
-    requireElevenLabsQuota(req => estimateTimedCompanyPoints(
-      estimateUploadedMediaDuration(req),
+    requireElevenLabsQuota(async req => estimateTimedCompanyPoints(
+      await estimateUploadedMediaDuration(req),
       COMPANY_POINTS.audioProcessingPerSecond,
     )),
     asyncRoute(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'audio is required' });
-    const audio = new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype });
+    const audio = uploadedAudioBlob(req);
     return sendAudioBlob(res, await isolateAudio(audio));
     }),
   );
@@ -6288,8 +6318,8 @@ async function startServer() {
   app.post(
     '/api/ai/elevenlabs/speech-to-text',
     aiUpload.single('audio'),
-    requireElevenLabsQuota(req => estimateTimedCompanyPoints(
-      estimateUploadedMediaDuration(req),
+    requireElevenLabsQuota(async req => estimateTimedCompanyPoints(
+      await estimateUploadedMediaDuration(req),
       COMPANY_POINTS.speechToTextPerSecond,
     )),
     asyncRoute(async (req, res) => {
@@ -6326,7 +6356,9 @@ async function startServer() {
         transcriptionType = 'audio/wav';
       }
 
-      const audio = new Blob([new Uint8Array(fs.readFileSync(transcriptionPath))], { type: transcriptionType });
+      const audio = isVideo
+        ? new Blob([new Uint8Array(fs.readFileSync(transcriptionPath))], { type: transcriptionType })
+        : uploadedAudioBlob(req);
       const result = await transcribeSpeech(
         audio,
         typeof req.body?.languageCode === 'string' ? req.body.languageCode : undefined,
@@ -6348,8 +6380,8 @@ async function startServer() {
   app.post(
     '/api/ai/elevenlabs/translate-dubbing',
     aiUpload.single('audio'),
-    requireElevenLabsQuota(req => {
-      const duration = estimateUploadedMediaDuration(req);
+    requireElevenLabsQuota(async req => {
+      const duration = await estimateUploadedMediaDuration(req);
       return estimateTimedCompanyPoints(duration, COMPANY_POINTS.speechToTextPerSecond)
         + estimateTimedCompanyPoints(duration, COMPANY_POINTS.standardTtsPerThousandCharacters / 60);
     }),
@@ -6443,8 +6475,8 @@ async function startServer() {
   app.post(
     '/api/ai/elevenlabs/translate-dubbing-v2',
     aiUpload.single('audio'),
-    requireElevenLabsQuota(req => {
-      const duration = estimateUploadedMediaDuration(req);
+    requireElevenLabsQuota(async req => {
+      const duration = await estimateUploadedMediaDuration(req);
       return estimateTimedCompanyPoints(duration, COMPANY_POINTS.dubbingV2PerSecond);
     }),
     asyncRoute(async (req, res) => {
@@ -6501,13 +6533,13 @@ async function startServer() {
     fs.writeFileSync(sourcePath, req.file.buffer);
 
     try {
-      const sourceAudio = new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype });
+      const sourceAudio = uploadedAudioBlob(req);
       const transcriptionPromise = transcribeSpeech(
         sourceAudio,
         sourceCode,
         false,
       ).catch(() => ({ text: '', language_code: undefined }));
-      const sourceDurationPromise = getMediaDurationSeconds(sourcePath).catch(() => 0);
+      const sourceDurationPromise = measureAudioDurationSeconds(sourceAudio);
 
       const createForm = new FormData();
       createForm.append('file', sourceAudio, req.file.originalname || 'source-media');
@@ -6586,15 +6618,15 @@ async function startServer() {
         reasoningTokens: 0,
         totalTokens: 0,
         credits: estimateTimedCredits(
-          sourceDuration || estimateAudioDurationSecondsFromBlob(sourceAudio),
+          sourceDuration,
           ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE,
         ),
         companyPoints: estimateTimedCompanyPoints(
-          sourceDuration || estimateAudioDurationSecondsFromBlob(sourceAudio),
+          sourceDuration,
           COMPANY_POINTS.dubbingV2PerSecond,
         ),
         pricingVersion: 'company-v1',
-        billingQuantity: sourceDuration || estimateAudioDurationSecondsFromBlob(sourceAudio),
+        billingQuantity: sourceDuration,
         billingUnit: 'second',
       });
       const sourceText = String(transcription.text || '').trim();
@@ -7394,6 +7426,11 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
     }
   });
 
+  app.post('/api/video/sfx-search-batches', (req, res, next) => {
+    try { res.json(timelineOnlineSfxBatchTracker.create(resolveUsageActor(req, res).userId, req.body?.itemIds)); }
+    catch (error) { next(error); }
+  });
+
   // 8. Generate Timeline Clip Audio. SFX clips prefer a usable online preview
   // and only consume ElevenLabs when search or capture cannot satisfy the clip.
   app.post('/api/video/generate-clip', async (req, res) => {
@@ -7419,9 +7456,8 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
 
       let resolvedSfxPrompt = String(prompt || '').trim();
       if (resolvedType === 'sfx') {
-        const requestedBatchId = normalizeIdentityText(req.body?.onlineSfxBatchId, 128);
-        const onlineSfxBatchId = /^[a-zA-Z0-9._:-]+$/.test(requestedBatchId) ? requestedBatchId : '';
-        const batchAlreadyBilled = timelineOnlineSfxBatchTracker.hasBeenBilled(actor.userId, onlineSfxBatchId);
+        const batch = timelineOnlineSfxBatchTracker.claim(actor.userId, req.body?.onlineSfxBatchId, req.body?.onlineSfxItemId);
+        const batchAlreadyBilled = batch.hasBeenBilled;
         const onlineRelease = batchAlreadyBilled
           ? undefined
           : reserveQuota(ONLINE_SFX_BATCH_COMPANY_POINTS);
@@ -7448,10 +7484,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
             maxDurationSeconds: parseNumber(duration, 5, 0.5, 30),
           });
           if (onlineResult) {
-            const chargedThisRequest = timelineOnlineSfxBatchTracker.markSuccessfulBatch(
-              actor.userId,
-              onlineSfxBatchId,
-            );
+            const chargedThisRequest = batch.markSuccessful();
             if (chargedThisRequest) recordTimelineOnlineSfxUsage();
             return res.json({
               audioUrl: onlineResult.audioUrl,

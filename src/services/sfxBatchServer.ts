@@ -7,7 +7,8 @@ import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { generateAiContent, SchemaType as T } from './aiGateway';
-import { boundedFetch, searchOnlineSfxSources, recordOnlineSfxBatchUsage, createTimelineOnlineSfxBatchTracker } from './onlineSfxServer';
+import { boundedFetch, searchOnlineSfxSources, recordOnlineSfxBatchUsage } from './onlineSfxServer';
+import { createSearchBillingBatches } from './searchBillingBatches';
 import { createSfxRequirementsJobs } from './sfxRequirementsJobs';
 import { existingBatchSearchQuery, normalizeBatchRequirements, validateBatchSearchQuery, SFX_BATCH_MAX_ROWS } from './sfxBatch';
 import { normalizeBatchSearchQueryInput, prepareBatchSearchQuery } from './sfxBatchSearchQuery';
@@ -219,9 +220,11 @@ export function createSfxBatchRouter(options: {
     });
   });
   const searches = new Set<string>();
-  // Reuse timeline search billing: each user action shares one ID across its rows.
-  // A large queue can take several hours; keep the successful charge for its lifetime.
-  const searchBatches = createTimelineOnlineSfxBatchTracker({ ttlMs: 24 * 60 * 60_000 });
+  const searchBatches = createSearchBillingBatches();
+  router.post('/search-batches', (req, res, next) => {
+    try { res.json(searchBatches.create(options.owner(req, res), req.body?.itemIds)); }
+    catch (error) { next(error); }
+  });
   const cooldowns = new Map<string, number>();
   let captures = 0;
   router.post('/search', async (req, res, next) => {
@@ -233,12 +236,11 @@ export function createSfxBatchRouter(options: {
       let query: string;
       try { query = validateBatchSearchQuery(typeof req.body?.query === 'string' ? req.body.query : ''); }
       catch (error) { throw fail(error instanceof Error ? error.message : '请填写1～2个英文搜索词。'); }
-      const searchBatchId = req.body?.searchBatchId ?? '';
-      if (typeof searchBatchId !== 'string' || searchBatchId.length > 128 || (searchBatchId && !/^[a-zA-Z0-9._:-]+$/.test(searchBatchId))) throw fail('搜索批次无效，请重新发起搜索。');
       if (searches.has(owner) || searches.size >= 4) throw fail('搜索任务正在进行，请等待本条完成。', 429);
       for (const [id, ticket] of tickets) if (!ticket.pending && Date.now() - ticket.at > 30 * 60_000) tickets.delete(id);
       if (tickets.size >= 600) throw fail('搜索结果较多，请稍后再试。', 429);
-      if (!searchBatches.hasBeenBilled(owner, searchBatchId)) {
+      const batch = searchBatches.claim(owner, req.body?.searchBatchId, req.body?.searchBatchItemId);
+      if (!batch.hasBeenBilled) {
         release = options.reserve(req, res, 1); if (!release) return;
       }
       searches.add(owner); locked = true;
@@ -250,7 +252,7 @@ export function createSfxBatchRouter(options: {
         tickets.set(id, { ...candidate, owner, at: Date.now() });
         return { id, title: candidate.title, source: candidate.source, sourceUrl: candidate.sourceUrl };
       });
-      if (items.length && searchBatches.markSuccessfulBatch(owner, searchBatchId)) recordOnlineSfxBatchUsage();
+      if (items.length && batch.markSuccessful()) recordOnlineSfxBatchUsage();
       res.json({ items, sources: result.sources, message: items.length ? '' : '未找到匹配音效，可修改搜索词再搜或使用 AI 生成。' });
     } catch (error) { next(error); }
     finally { if (locked) searches.delete(owner); release?.(); }

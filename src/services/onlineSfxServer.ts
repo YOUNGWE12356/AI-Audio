@@ -65,51 +65,6 @@ export function recordTimelineOnlineSfxUsage() {
   });
 }
 
-export function createTimelineOnlineSfxBatchTracker(options: {
-  ttlMs?: number;
-  maxEntries?: number;
-  now?: () => number;
-} = {}) {
-  const ttlMs = Math.max(1, options.ttlMs ?? TTL);
-  const maxEntries = Math.max(1, options.maxEntries ?? 5_000);
-  const now = options.now ?? Date.now;
-  const billedBatches = new Map<string, number>();
-  const getKey = (userId: string, batchId: string) => {
-    const normalizedUserId = String(userId || '').trim();
-    const normalizedBatchId = String(batchId || '').trim();
-    return normalizedUserId && normalizedBatchId ? `${normalizedUserId}\u0000${normalizedBatchId}` : '';
-  };
-  const prune = (timestamp: number) => {
-    for (const [key, billedAt] of billedBatches) {
-      if (timestamp - billedAt >= ttlMs) billedBatches.delete(key);
-    }
-  };
-
-  return {
-    hasBeenBilled(userId: string, batchId: string) {
-      const timestamp = now();
-      prune(timestamp);
-      const key = getKey(userId, batchId);
-      return Boolean(key && billedBatches.has(key));
-    },
-    markSuccessfulBatch(userId: string, batchId: string) {
-      const timestamp = now();
-      prune(timestamp);
-      const key = getKey(userId, batchId);
-      // Requests without a client batch ID are standalone batches.
-      if (!key) return true;
-      if (billedBatches.has(key)) return false;
-      billedBatches.set(key, timestamp);
-      while (billedBatches.size > maxEntries) {
-        const oldestKey = billedBatches.keys().next().value;
-        if (typeof oldestKey !== 'string') break;
-        billedBatches.delete(oldestKey);
-      }
-      return true;
-    },
-  };
-}
-
 export async function removeOrphanedOnlineSfxFiles(uploadsDir: string, createdBefore = Date.now()) {
   let entries: Dirent[];
   try {

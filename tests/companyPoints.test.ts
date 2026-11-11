@@ -8,6 +8,7 @@ import { scryptSync } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import express from 'express';
+import { pcmWav } from './helpers/audioFixture';
 
 test('original points use persisted allowances and actual usage, protect concurrent requests and preserve audit files', { timeout: 35_000 }, async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'company-points-'));
@@ -37,6 +38,8 @@ test('original points use persisted allowances and actual usage, protect concurr
     res.type('application/octet-stream').send(Buffer.alloc(48000 * 2 * 2 * 2.5));
   });
   mock.post('/chat', (_req, res) => res.json({ output_text: '{"prompt":"door creak"}', output: [{ type: 'message', content: [{ type: 'output_text', text: '{"prompt":"door creak"}' }] }], usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 } }));
+  let transcriptionCalls = 0;
+  mock.post('/transcribe', express.raw({ type: () => true, limit: '20mb' }), (_req, res) => { transcriptionCalls++; res.json({ text: 'fixture' }); });
   const provider = mock.listen(0, '127.0.0.1'); await once(provider, 'listening');
   const children: ChildProcess[] = [];
   t.after(async () => {
@@ -50,6 +53,7 @@ test('original points use persisted allowances and actual usage, protect concurr
   fs.writeFileSync(preload, `const original = globalThis.fetch; globalThis.fetch = (input, init) => {
     const url = String(input);
     if (url.startsWith('https://api.elevenlabs.io/v1/sound-generation')) return original('${providerBase}/sound', init);
+    if (url.startsWith('https://api.elevenlabs.io/v1/speech-to-text')) return original('${providerBase}/transcribe', init);
     if (url.startsWith('https://mock-company-provider.test/')) return original('${providerBase}/chat', init);
     throw new Error('Unexpected external request in points regression: ' + url);
   };`);
@@ -63,10 +67,11 @@ test('original points use persisted allowances and actual usage, protect concurr
     ELEVENLABS_QUOTA_ENABLED: 'true', ELEVENLABS_API_KEY: 'fixture-only', ELEVENLABS_FALLBACK_API_KEY: '', ELEVENLABS_API_KEYS: '',
     OPENAI_API_KEY: 'fixture-only', OPENAI_BASE_URL: 'https://mock-company-provider.test/v1', OPENAI_MODEL: 'fixture',
     ARK_API_KEY: '', TOKENHUB_API_KEY: '', GPT_INPUT_USD_PER_MILLION_TOKENS: '2', GPT_OUTPUT_USD_PER_MILLION_TOKENS: '10', GPT_MINIMUM_COMPANY_POINTS_PER_REQUEST: '1' };
+  let serverErrors = '';
   const start = async () => {
     const child = spawn(process.execPath, ['--import', pathToFileURL(preload).href, '--import', import.meta.resolve('tsx'), fileURLToPath(new URL('../server.ts', import.meta.url))], { cwd: directory, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let errors = '';
-    child.stderr.on('data', chunk => { errors += String(chunk); });
+    child.stderr.on('data', chunk => { errors += String(chunk); serverErrors += String(chunk); });
     children.push(child);
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('Points server startup timeout')), 15_000);
@@ -95,7 +100,7 @@ test('original points use persisted allowances and actual usage, protect concurr
   release(); assert.equal((await generating).status, 200);
   assert.equal((await balance()).usedCredits, 4997.5);
   assert.equal((await balance()).pendingCredits, 0);
-  assert.equal((await request('/api/ai/elevenlabs/sound-effect', alice, { text: 'fail', duration: 1 })).status, 500);
+  assert.equal((await request('/api/ai/elevenlabs/sound-effect', alice, { text: 'fail', duration: 1 })).status, 422);
   assert.equal((await balance()).remainingCredits, 2.5);
   assert.equal((await request('/api/ai/translate', alice, { text: '木门吱呀', purpose: 'sound-effect' })).status, 200);
   assert.equal((await balance()).usedCredits, 4998.5);
@@ -120,4 +125,29 @@ test('original points use persisted allowances and actual usage, protect concurr
   const reconnected = await login('alice');
   assert.equal((await balance(reconnected)).limitCredits, 20000);
   assert.equal((await balance(reconnected)).usedCredits, 4998.5);
+
+  // Real server admission and settlement must agree for files of different sizes.
+  const bobAgain = await login('bob');
+  const transcribe = async (sampleRate: number, channels: number) => {
+    const form = new FormData();
+    form.append('audio', new Blob([new Uint8Array(pcmWav(60, sampleRate, channels))], { type: 'audio/wav' }), 'audio.wav');
+    return fetch(origin + '/api/ai/elevenlabs/speech-to-text', { method: 'POST',
+      headers: { Origin: env.APP_ORIGIN, Cookie: bobAgain }, body: form });
+  };
+  const firstTranscription = await transcribe(16000, 1);
+  assert.equal(firstTranscription.status, 200, (await firstTranscription.text()) + serverErrors);
+  assert.equal((await balance(bobAgain)).usedCredits, 36);
+  assert.equal((await transcribe(48000, 2)).status, 200);
+  assert.equal((await balance(bobAgain)).usedCredits, 72);
+  fs.appendFileSync(path.join(data, 'ai-usage.jsonl'), JSON.stringify({ ...usage((await balance(bobAgain)).remainingCredits - 35), userId: 'account:bob' }) + '\n');
+  assert.equal((await balance(bobAgain)).remainingCredits, 35);
+  assert.equal((await transcribe(16000, 1)).status, 429);
+  assert.equal(transcriptionCalls, 2);
+
+  // Exhaust Alice's allowance: all three previously missed routes must stop before validation/model work.
+  fs.appendFileSync(path.join(data, 'ai-usage.jsonl'), JSON.stringify(usage((await balance(reconnected)).remainingCredits)) + '\n');
+  for (const endpoint of ['/api/ai/translate', '/api/ai/translate-language', '/api/ai/audio-design-video', '/api/ai/audio-design-video-preuploaded']) {
+    assert.equal((await request(endpoint, reconnected, { text: 'hello', targetLanguage: 'English' })).status, 429, endpoint);
+  }
+  assert.equal((await balance(reconnected)).usedCredits, 20000);
 });

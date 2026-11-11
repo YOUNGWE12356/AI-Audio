@@ -8,7 +8,6 @@ import ffmpeg from 'ffmpeg-static';
 import {
   allowedPreviewUrl,
   boundedFetch,
-  createTimelineOnlineSfxBatchTracker,
   createOnlineSfxSearchState,
   findAndCaptureTimelineOnlineSfx,
   parseEnvatoSearch,
@@ -413,32 +412,6 @@ test('a timeline web match records one network point without ElevenLabs usage', 
   assert.equal(events[0].model, 'multi-source-preview-timeline');
   assert.equal(events[0].companyPoints, 1);
   assert.equal(events[0].credits, 0);
-});
-
-test('timeline web search charges once per user batch after the first successful match', () => {
-  let timestamp = 1_000;
-  const tracker = createTimelineOnlineSfxBatchTracker({
-    ttlMs: 1_000,
-    now: () => timestamp,
-  });
-
-  assert.equal(tracker.hasBeenBilled('user-a', 'batch-1'), false);
-  // A failed search does not call markSuccessfulBatch, so the batch stays unbilled.
-  assert.equal(tracker.hasBeenBilled('user-a', 'batch-1'), false);
-  assert.equal(tracker.markSuccessfulBatch('user-a', 'batch-1'), true);
-  assert.equal(tracker.hasBeenBilled('user-a', 'batch-1'), true);
-  assert.equal(tracker.markSuccessfulBatch('user-a', 'batch-1'), false);
-
-  assert.equal(tracker.markSuccessfulBatch('user-a', 'batch-2'), true);
-  assert.equal(tracker.markSuccessfulBatch('user-b', 'batch-1'), true);
-
-  // Missing IDs represent independent single-clip operations.
-  assert.equal(tracker.markSuccessfulBatch('user-a', ''), true);
-  assert.equal(tracker.markSuccessfulBatch('user-a', ''), true);
-
-  timestamp += 1_000;
-  assert.equal(tracker.hasBeenBilled('user-a', 'batch-1'), false);
-  assert.equal(tracker.markSuccessfulBatch('user-a', 'batch-1'), true);
 });
 
 test('timeline capture persists a project-safe WAV with source metadata', async () => {

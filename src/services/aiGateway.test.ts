@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { generateAiContent } from './aiGateway';
+import { generateAiContent, generateGptStructuredJson, generateGptToolTurn } from './aiGateway';
+import { setAiUsageRecorder, type AiUsageEvent } from './usageTracking';
 
 const withTokenHub = async (run: () => Promise<void>) => {
   const saved = {
@@ -75,5 +76,39 @@ test('a long requirements request uses its own timeout and can still be cancelle
       globalThis.fetch = async () => { throw new DOMException('timeout', 'TimeoutError'); };
       await assert.rejects(generateAiContent({ contents: 'Generate requirements', timeoutMs: 240_000 }), /240 秒未返回/);
     } finally { AbortSignal.timeout = originalTimeout; }
+  });
+});
+
+test('supplier usage survives incomplete, empty and invalid JSON output without charging failed work twice', async () => {
+  await withTokenHub(async () => {
+    const events: AiUsageEvent[] = [];
+    setAiUsageRecorder(event => events.push(event));
+    const usage = { input_tokens: 300, output_tokens: 200, total_tokens: 500, output_tokens_details: { reasoning_tokens: 40 } };
+    try {
+      for (const body of [
+        { status: 'incomplete', output_text: '{}' }, { output_text: '' }, { output_text: 'invalid json' },
+      ]) {
+        globalThis.fetch = async () => Response.json({ ...body, usage });
+        await assert.rejects(generateAiContent({ contents: 'requirements', config: { responseSchema: { type: 'object' } } }));
+      }
+      globalThis.fetch = async () => Response.json({ output_text: 'invalid json', usage });
+      await assert.rejects(generateGptStructuredJson({ instructions: 'test', input: 'test', schema: {}, schemaName: 'test' }));
+      globalThis.fetch = async () => Response.json({ error: { message: 'upstream failure' }, usage }, { status: 502 });
+      await assert.rejects(generateAiContent({ contents: 'test' }));
+      assert.equal(events.length, 5);
+      for (const event of events) {
+        assert.equal(event.totalTokens, 500); assert.equal(event.reasoningTokens, 40);
+        assert.equal(event.companyPoints, 0); assert.equal(event.outcome, 'failed');
+      }
+      globalThis.fetch = async () => Response.json({ output_text: '{}', output: [], usage });
+      await generateAiContent({ contents: 'test' });
+      await generateGptStructuredJson({ instructions: 'test', input: 'test', schema: {}, schemaName: 'test' });
+      await generateGptToolTurn({ instructions: 'test', input: [], tools: [], signal: new AbortController().signal });
+      assert.equal(events.length, 8);
+      assert.equal(events.reduce((sum, event) => sum + event.totalTokens, 0), 4000);
+      for (const event of events.slice(5)) {
+        assert.ok(event.companyPoints! > 0); assert.equal(event.outcome, 'success');
+      }
+    } finally { setAiUsageRecorder(null); }
   });
 });

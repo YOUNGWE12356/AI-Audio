@@ -11,6 +11,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createMcpAccess, createMcpAccessRouter, isMcpApiAllowed } from './mcpAccess';
 import { createAudioMcp } from './mcpServer';
+import { createSearchBillingBatches } from './searchBillingBatches';
 import { createServerSecurity, currentUserId, currentUploadDirectory } from './serverSecurity';
 
 const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), 't1-audio-mcp-'));
@@ -30,6 +31,7 @@ test('personal tokens persist hashes only, expire and revoke; route scopes exclu
     for (const method of ['GET', 'POST', 'PUT']) assert.equal(isMcpApiAllowed(method, endpoint), false, `${method} ${endpoint}`);
   }
   assert.ok(isMcpApiAllowed('POST', '/api/sfx/online/search'));
+  assert.ok(isMcpApiAllowed('POST', '/api/ai/sfx-batch/search-batches'));
   assert.ok(isMcpApiAllowed('POST', '/api/ai/elevenlabs/voice'));
 });
 
@@ -44,6 +46,9 @@ test('official MCP client: authentication, coverage, real FFmpeg trim, downloads
   app.use('/api/mcp/access', createMcpAccessRouter(access, security.adminExpiresAt));
   app.use(createAudioMcp({ directory: path.join(dir, 'workspaces'), origin, access, ffmpeg: ffmpeg! }));
   let voiceCalls = 0, searchCalls = 0, sfxCalls = 0, batchSearchCalls = 0, batchSearchStatus = 200, sfxStatus = 200;
+  const searchBatches = createSearchBillingBatches();
+  let batchCharges = 0;
+  app.post('/api/ai/sfx-batch/search-batches', (req, res) => res.json(searchBatches.create(currentUserId(), req.body.itemIds)));
   app.get('/api/usage/quota', (_req, res) => res.json({ owner: currentUserId(), remaining: 42 }));
   app.post('/api/ai/sfx-batch/search-query', (req, res) => { assert.equal(req.body.searchQuery, 'door slam'); res.json({ searchQuery: req.body.searchQuery }); });
   app.post('/api/sfx/online/search', (req, res) => { searchCalls++; assert.equal(req.body.query, 'door slam'); fs.rmSync(path.join(currentUploadDirectory(), 'online_sfx_preview.wav'), { force: true }); res.json({ items: [{ id: 'ticket', source: 'envato', sourceUrl: 'https://example.test/item' }] }); });
@@ -53,9 +58,13 @@ test('official MCP client: authentication, coverage, real FFmpeg trim, downloads
     res.json({ url: '/uploads/online_sfx_preview.wav' });
   });
   app.post('/api/ai/elevenlabs/voice', (req, res) => { voiceCalls++; assert.equal(req.body.languageCode, 'zh'); res.type('audio/wav').send(wav); });
-  app.post('/api/ai/sfx-batch/search', (_req, res) => {
+  app.post('/api/ai/sfx-batch/search', (req, res) => {
     batchSearchCalls++;
+    let batch: ReturnType<typeof searchBatches.claim>;
+    try { batch = searchBatches.claim(currentUserId(), req.body.searchBatchId, req.body.searchBatchItemId); }
+    catch { res.status(400).json({ error: '搜索批次无效。' }); return; }
     if (batchSearchStatus !== 200) return res.status(batchSearchStatus).json({ error: '搜索服务失败。' });
+    if (batch.markSuccessful()) batchCharges++;
     res.json({ items: [{ id: 'batch-ticket' }] });
   });
   app.post('/api/ai/sfx-batch/capture', (_req, res) => {
@@ -110,6 +119,14 @@ test('official MCP client: authentication, coverage, real FFmpeg trim, downloads
   const soundArgs = { name: '关门', keywords: '关门', searchQuery: 'door slam', duration: 2 };
   const searched = jsonResult(await client.callTool({ name: 'produce_sound_effect', arguments: soundArgs }));
   assert.equal(searched.method, 'search'); assert.equal(sfxCalls, 0);
+  const chargesBeforeBatch = batchCharges;
+  const searchedBatch = jsonResult(await client.callTool({ name: 'produce_sfx_batch', arguments: { items: [soundArgs, soundArgs] } }));
+  assert.equal(searchedBatch.completedCount, 2);
+  assert.equal(batchCharges, chargesBeforeBatch + 1);
+  const reuse = await fetch(`${base}/api/ai/sfx-batch/search`, { method: 'POST',
+    headers: { authorization: `Bearer ${alice.token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: 'new sound', searchBatchId: searchedBatch.searchBatchId, searchBatchItemId: '0' }) });
+  assert.equal(reuse.status, 400);
   batchSearchStatus = 502;
   const fallback = jsonResult(await client.callTool({ name: 'produce_sound_effect', arguments: soundArgs }));
   assert.equal(fallback.method, 'generate'); assert.equal(fallback.fallback, true); assert.equal(sfxCalls, 1);

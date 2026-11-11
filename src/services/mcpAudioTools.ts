@@ -126,16 +126,19 @@ export function createMcpAudioTools(c: AgentToolContext) {
     description: { ...s, maxLength: 2000 }, searchQuery: s, duration: { ...n, minimum: 0.5, maximum: 30 }, mode: modeSchema };
   const produce = (input: any) => produceMcpSoundEffect(c, input, generation.execute);
   add('produce_sound_effect', `普通音效需求的默认入口。${MCP_SFX_POLICY} 返回method与fallbackReason，告知实际方式。`,
-    { ...soundProperties, searchBatchId: s }, ['name', 'keywords'], produce);
+    soundProperties, ['name', 'keywords'], produce);
   const row = { type: 'object', properties: soundProperties, required: ['name', 'keywords'], additionalProperties: false };
-  add('produce_sfx_batch', `批量制作音效的默认入口。${MCP_SFX_POLICY} 每条mode可覆盖批次模式。搜索复用同一searchBatchId的原有积分规则；先试听，不自动混入视频。`,
-    { mode: modeSchema, items: { type: 'array', items: row, minItems: 1, maxItems: 200 }, searchBatchId: s }, ['items'], async a => {
-      const searchBatchId = a.searchBatchId || randomUUID();
+  add('produce_sfx_batch', `批量制作音效的默认入口。${MCP_SFX_POLICY} 每条mode可覆盖批次模式。本次调用的搜索合计1分，批次由服务端登记，每条只搜索一次；先试听，不自动混入视频。`,
+    { mode: modeSchema, items: { type: 'array', items: row, minItems: 1, maxItems: 200 } }, ['items'], async a => {
+      const searchIds = a.items.flatMap((item: any, index: number) => (item.mode || a.mode || 'auto') === 'generate' ? [] : [String(index)]);
+      const searchBatchId = searchIds.length
+        ? (await c.request('/api/ai/sfx-batch/search-batches', { itemIds: searchIds })).batchId
+        : undefined;
       const items = [];
       for (const [index, item] of a.items.entries()) {
         c.signal.throwIfAborted(); c.progress?.(`制作音效 ${index + 1}/${a.items.length}`);
         try {
-          items.push({ index, name: item.name, ...await produce({ ...item, mode: item.mode || a.mode || 'auto', searchBatchId }) });
+          items.push({ index, name: item.name, ...await produce({ ...item, mode: item.mode || a.mode || 'auto', searchBatchId, searchBatchItemId: String(index) }) });
         } catch (error) {
           c.signal.throwIfAborted();
           items.push({ index, name: item.name, status: 'failed', message: error instanceof Error ? error.message : '处理失败', errorDetails: audioFailureDetails(error) });

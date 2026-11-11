@@ -22,9 +22,9 @@ export function existingBatchSearchQuery(value: string): string | null {
   try { return validateBatchSearchQuery(value); } catch { return null; }
 }
 /** Both actions use the prepared English query for the visible Chinese keywords. */
-export function createBatchSfxRequest(row: Pick<SfxBatchRequirement, 'searchQuery' | 'duration'>, kind: 'search' | 'generate', excludedSources: string[] = [], searchBatchId?: string) {
+export function createBatchSfxRequest(row: Pick<SfxBatchRequirement, 'searchQuery' | 'duration'>, kind: 'search' | 'generate', excludedSources: string[] = [], searchBatchId?: string, searchBatchItemId?: string) {
   const text = validateBatchSearchQuery(row.searchQuery);
-  if (kind === 'search') return { endpoint: '/api/ai/sfx-batch/search', body: { query: text, excludeSourceUrls: excludedSources, searchBatchId } };
+  if (kind === 'search') return { endpoint: '/api/ai/sfx-batch/search', body: { query: text, excludeSourceUrls: excludedSources, searchBatchId, searchBatchItemId } };
   if (!Number.isFinite(row.duration) || row.duration < 0.5 || row.duration > 30) throw new Error('时长应为0.5～30秒。');
   return { endpoint: '/api/ai/elevenlabs/sound-effect', body: { text, duration: row.duration, qualityMode: 'standard', usageSource: 'sfx-batch' } };
 }

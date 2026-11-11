@@ -196,23 +196,36 @@ test('batch search bills one point across rows, charges new clicks and users ind
   }));
   const server = app.listen(0, '127.0.0.1'); await new Promise<void>(resolve => server.once('listening', resolve));
   const url = `http://127.0.0.1:${(server.address() as any).port}/batch/search`;
-  const post = (query: string, searchBatchId?: unknown, owner = 'alice') => fetch(url, { method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-owner': owner }, body: JSON.stringify({ query, searchBatchId }) });
+  const post = (query: string, searchBatchId?: unknown, owner = 'alice', searchBatchItemId = query) => fetch(url, { method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-owner': owner }, body: JSON.stringify({ query, searchBatchId, searchBatchItemId }) });
+  const create = async (itemIds: string[], owner = 'alice') => {
+    const response = await fetch(url.replace(/\/search$/, '/search-batches'), { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-owner': owner }, body: JSON.stringify({ itemIds }) });
+    assert.equal(response.status, 200);
+    return (await response.json()).batchId as string;
+  };
   try {
-    assert.equal((await post('missing', 'click-1')).status, 200);
-    assert.equal((await post('broken', 'click-1')).status, 500);
+    const first = await create(['missing', 'broken', 'door', 'click', 'whoosh', 'impact']);
+    assert.equal((await post('missing', first)).status, 200);
+    assert.equal((await post('broken', first)).status, 500);
     assert.equal(events.length, 0);
-    assert.equal((await post('door', 'click-1')).status, 200);
+    assert.equal((await post('door', first)).status, 200);
     assert.equal(events.length, 1); assert.equal(events[0].companyPoints, 1);
     const afterFirstMatch = reserved;
     balances.set('alice', 0);
-    for (const query of ['click', 'whoosh', 'impact']) assert.equal((await post(query, 'click-1')).status, 200);
+    for (const query of ['click', 'whoosh', 'impact']) assert.equal((await post(query, first)).status, 200);
     assert.equal(events.length, 1); assert.equal(reserved, afterFirstMatch);
-    assert.equal((await post('door', 'click-2')).status, 429);
+    // Neither a reused task nor a new task appended to a paid batch is authorized.
+    assert.equal((await post('different', first, 'alice', 'door')).status, 400);
+    assert.equal((await post('new query', first)).status, 400);
+    const second = await create(['door', 'retry']);
+    assert.equal((await post('door', second)).status, 429);
     balances.set('alice', 1);
-    assert.equal((await post('door', 'click-2')).status, 200);
+    assert.equal((await post('door', second, 'alice', 'retry')).status, 200);
     assert.equal(events.length, 2);
-    assert.equal((await post('door', 'click-1', 'bob')).status, 200);
+    assert.equal((await post('door', second, 'bob')).status, 400);
+    const bobs = await create(['door'], 'bob');
+    assert.equal((await post('door', bobs, 'bob')).status, 200);
     assert.equal(events.length, 3);
     // Legacy single-row calls without a batch ID each count as a new batch.
     assert.equal((await post('door')).status, 200);

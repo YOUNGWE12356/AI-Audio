@@ -73,13 +73,14 @@ const extractText = (response: ResponseBody) => {
     .map(item => item.text!.trim()).filter(Boolean).join('\n');
 };
 
-const trackUsage = (result: ResponseBody, gateway: Gateway) => {
+const trackUsage = (result: ResponseBody, gateway: Gateway, success = true) => {
   const inputTokens = toUsageNumber(result.usage?.input_tokens);
   const outputTokens = toUsageNumber(result.usage?.output_tokens);
   const reasoningTokens = toUsageNumber(result.usage?.output_tokens_details?.reasoning_tokens);
   recordAiUsage({ provider: 'gpt', model: result.model || gateway.model, inputTokens, outputTokens,
     reasoningTokens, totalTokens: toUsageNumber(result.usage?.total_tokens) || inputTokens + outputTokens,
-    credits: 0, companyPoints: estimateGptTokenCompanyPoints({ inputTokens, outputTokens }),
+    credits: 0, companyPoints: success ? estimateGptTokenCompanyPoints({ inputTokens, outputTokens }) : 0,
+    outcome: success ? 'success' : 'failed',
     pricingVersion: GPT_COMPANY_POINT_PRICING_VERSION,
     billingQuantity: inputTokens + outputTokens, billingUnit: 'token' });
   return { inputTokens, outputTokens, reasoningTokens };
@@ -91,8 +92,11 @@ const requestGateway = async (gateway: Gateway, body: Record<string, unknown>, t
     body: JSON.stringify(body), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
   });
   const result = await response.json().catch(() => ({})) as ResponseBody;
-  if (!response.ok) throw Object.assign(new Error(result.error?.message || `AI gateway request failed (${response.status})`), { status: response.status });
-  if (result.status === 'incomplete') throw new Error('模型输出未完成，请缩小任务范围后重试。');
+  if (!response.ok || result.status === 'incomplete') {
+    if (result.usage) trackUsage(result, gateway, false);
+    if (!response.ok) throw Object.assign(new Error(result.error?.message || `AI gateway request failed (${response.status})`), { status: response.status });
+    throw new Error('模型输出未完成，请缩小任务范围后重试。');
+  }
   return result;
 };
 
@@ -120,11 +124,14 @@ export const generateGptStructuredJson = async <T>({ instructions, input, schema
     reasoning: { effort: reasoningEffort }, max_output_tokens: maxOutputTokens,
     text: { format: { type: 'json_schema', name: schemaName.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64), strict: true, schema } },
   }, 60_000);
-  const text = extractText(result);
-  if (!text) throw new Error('GPT gateway returned no structured output.');
-  const value = JSON.parse(text) as T;
-  trackUsage(result, gateway);
-  return { value, model: result.model || gateway.model, provider: gateway.provider };
+  let success = false;
+  try {
+    const text = extractText(result);
+    if (!text) throw new Error('GPT gateway returned no structured output.');
+    const value = JSON.parse(text) as T;
+    success = true;
+    return { value, model: result.model || gateway.model, provider: gateway.provider };
+  } finally { trackUsage(result, gateway, success); }
 };
 
 const collectContent = (value: unknown, parts: InputPart[]): boolean => {
@@ -189,9 +196,13 @@ export const generateAiContent = async (request: AiContentRequest): Promise<AiCo
     throw error;
   }
   const text = extractText(result);
-  if (!text) throw new Error('AI gateway returned no text output.');
-  if (config.responseSchema) JSON.parse(text);
-  const usage = trackUsage(result, gateway);
+  let success = false;
+  let usage: ReturnType<typeof trackUsage>;
+  try {
+    if (!text) throw new Error('AI gateway returned no text output.');
+    if (config.responseSchema) JSON.parse(text);
+    success = true;
+  } finally { usage = trackUsage(result, gateway, success); }
   console.info(`[ai-router] ${hasImage ? 'Vision' : 'Text'} request completed with ${result.model || gateway.model} via ${gateway.provider} in ${Date.now() - startedAt}ms (${usage.inputTokens} input, ${usage.outputTokens} output, ${usage.reasoningTokens} reasoning tokens).`);
   return { text, modelVersion: result.model || gateway.model };
 };

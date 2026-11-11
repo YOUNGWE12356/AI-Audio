@@ -5103,6 +5103,16 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
     onAssistantTaskRunningChange,
   ]);
 
+  const createOnlineSfxSearchBatch = async (itemIds: string[]) => {
+    if (!itemIds.length) return undefined;
+    const response = await fetch('/api/video/sfx-search-batches', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ itemIds }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || '无法创建本轮音效搜索，请重试。');
+    return result.batchId as string;
+  };
+
   // Single timeline clip generator using ElevenLabs API on the server
   const handleGenerateAudioClip = async (
     clipId: string,
@@ -5301,6 +5311,7 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
           voiceName: voiceMetadata.voiceName,
           qualityMode: getElevenLabsQualityMode(),
           onlineSfxBatchId: options.onlineSfxBatchId,
+          onlineSfxItemId: clip.id,
         })
       });
 
@@ -5488,9 +5499,8 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
 
     let completed = 0;
     let failed = 0;
-    const onlineSfxBatchId = `video-sfx-${globalThis.crypto?.randomUUID?.()
-      || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
     try {
+      const onlineSfxBatchId = await createOnlineSfxSearchBatch(candidates.map(clip => clip.id));
       setToast({
         message: `正在生成“${track.name}”的 ${candidates.length} 个音效片段...`,
         type: 'info',
@@ -5517,6 +5527,8 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
       window.setTimeout(() => {
         setToast(current => current?.message.includes(track.name) ? null : current);
       }, 5_000);
+    } catch (error) {
+      setToast({ message: error instanceof Error ? error.message : '无法开始整轨音效制作，请重试。', type: 'error' });
     } finally {
       sfxTrackGenerationLockRef.current = false;
       setSfxTrackGenerationJob(null);
@@ -5644,8 +5656,10 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
       && (!clip.audioUrl || clip.error || clip.voiceDirty || clip.timingDirty));
     if (!candidates.length) return;
     generationBatchLockRef.current = true; setIsBatchGenerating(true);
-    const onlineSfxBatchId = `video-sfx-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`}`;
     try {
+      const onlineSfxBatchId = await createOnlineSfxSearchBatch(candidates
+        .filter(clip => tracksRef.current.find(track => track.id === clip.trackId)?.type === 'sfx')
+        .map(clip => clip.id));
       const result = await generateVideoTracks<TimelineClip>({ clips: candidates,
         track: clip => {
           const type = tracksRef.current.find(track => track.id === clip.trackId)?.type;
@@ -5656,6 +5670,8 @@ export default function VideoSoundtrack({ assistantVideoRequest = null, onAssist
       });
       const failed = Object.values(result).reduce((sum, state) => sum + state.failed, 0);
       setToast({ message: failed ? `本轮生成结束，${failed} 个片段失败；成功音频已保留，可重试未完成片段。` : '各轨音频已生成，可在当前页面试听。满意后再导出。', type: failed ? 'info' : 'success' });
+    } catch (error) {
+      setToast({ message: error instanceof Error ? error.message : '无法开始批量制作，请重试。', type: 'error' });
     } finally { generationBatchLockRef.current = false; setIsBatchGenerating(false); }
   };
 

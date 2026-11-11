@@ -25,7 +25,7 @@ export function isMcpApiAllowed(method: string, endpoint: string) {
     /^\/api\/ai\/(?:translate|translate-language|voice-v[34]-enhance|generate-lyrics|regenerate-lyrics|music-prompt|music-analysis-naming|music-analysis-naming\/audio|batch-voice-image-ocr|optimize-metadata|match-voice|audio-analysis\/(?:metrics|semantic)|audio-design|audio-design-video-keyframes|audio-design\/jobs|sfx-requirements)$/,
     /^\/api\/ai\/music-prompt\/from-visual$/,
     /^\/api\/ai\/elevenlabs\/(?:voice|music|sound-effect|speech-to-text|speech-to-speech|translate-dubbing|audio-isolation)$/,
-    /^\/api\/ai\/sfx-batch\/(?:analyze|search-query|search|capture)$/,
+    /^\/api\/ai\/sfx-batch\/(?:analyze|search-query|search-batches|search|capture)$/,
     /^\/api\/sfx\/(?:online\/(?:search|capture)|library\/upload)$/,
     /^\/api\/video\/(?:analyze|analyze\/jobs|analyze\/jobs\/cancel|generate-clip|mix|preview-compatible|extract-audio-clip|match-similar-voices)$/,
     /^\/api\/audio\/(?:mix-tracks-v2|export-stems)$/,

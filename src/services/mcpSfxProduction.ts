@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import type { AgentToolContext } from './assistantAgentTools';
 import { createOnlineSfxRelevanceMatcher } from './onlineSfxRelevance';
 
@@ -6,7 +5,7 @@ export const MCP_SFX_POLICY = '音效请求默认调用produce_sound_effect（�
 
 export type SfxProductionInput = {
   name: string; keywords: string; description?: string; searchQuery?: string; duration?: number;
-  mode?: 'auto' | 'search' | 'generate'; searchBatchId?: string;
+  mode?: 'auto' | 'search' | 'generate'; searchBatchId?: string; searchBatchItemId?: string;
 };
 
 const canFallBack = (error: any) => {
@@ -44,8 +43,8 @@ export async function produceMcpSoundEffect(c: AgentToolContext, input: SfxProdu
     const prepared = await c.request('/api/ai/sfx-batch/search-query', { keywords: input.keywords,
       searchQuery: input.searchQuery || '', description: input.description || '' });
     searchQuery = prepared.searchQuery;
-    const searchBatchId = input.searchBatchId || randomUUID();
-    const result = await c.request('/api/ai/sfx-batch/search', { query: searchQuery, searchBatchId });
+    const searchBatchId = input.searchBatchId;
+    const result = await c.request('/api/ai/sfx-batch/search', { query: searchQuery, searchBatchId, searchBatchItemId: input.searchBatchItemId });
     if (!Array.isArray(result.items)) throw Object.assign(new Error('搜索服务未返回有效的候选列表。'), { code: 'SFX_SEARCH_UNAVAILABLE' });
     if (!result.items.length && result.sources?.length && result.sources.every((source: any) => source.unavailable)) {
       throw Object.assign(new Error('所有音效搜索来源暂不可用。'), { code: 'SFX_SEARCH_UNAVAILABLE' });

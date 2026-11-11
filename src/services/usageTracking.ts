@@ -8,6 +8,7 @@ export type AiUsageEvent = {
   totalTokens: number;
   credits: number;
   companyPoints?: number;
+  outcome?: 'success' | 'failed';
   pricingVersion?: string;
   billingQuantity?: number;
   billingUnit?: 'character' | 'second' | 'token' | 'request';

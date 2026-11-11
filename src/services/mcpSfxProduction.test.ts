@@ -15,6 +15,7 @@ function harness(options: { searchError?: Error; queryError?: Error; captureErro
     ffmpeg: async () => '', wait: async () => {}, ask: () => {}, finish: () => {}, navigate: () => {},
     request: async (endpoint, args: any) => {
       calls.push(endpoint);
+      if (endpoint.endsWith('/search-batches')) return { batchId: 'server-issued-batch' };
       if (endpoint.endsWith('search-query')) { if (options.queryError) throw options.queryError; return { searchQuery: 'door slam' }; }
       if (endpoint.endsWith('/search')) { if (options.searchError) throw options.searchError; return { items: options.items ?? [{ id: 'one' }, { id: 'two' }], sources: options.sources }; }
       if (endpoint.endsWith('/capture')) { if (options.captureErrors?.[args.id]) throw options.captureErrors[args.id]; return { url: `/uploads/${args.id}.wav` }; }

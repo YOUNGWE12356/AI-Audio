@@ -154,14 +154,12 @@ export const estimateTimedCredits = (
   return Math.max(minimumCredits, Math.ceil((safeDuration / 60) * creditsPerMinute));
 };
 
-export const estimateAudioDurationSecondsFromBlob = (audioFile: File | Blob) => {
-  const size = Number(audioFile.size);
-  if (!Number.isFinite(size) || size <= 0) return undefined;
-  const mimeType = String(audioFile.type || '').toLowerCase();
-  const assumedBitsPerSecond = /wav|wave|pcm|aiff|aif|flac/.test(mimeType)
-    ? 768_000
-    : 128_000;
-  return Math.max(1, size * 8 / assumedBitsPerSecond);
+// The server injects its media probe; Node/FFmpeg code never enters the browser bundle.
+let measureBillableAudioDuration: (audio: Blob) => Promise<number> = async () => {
+  throw Object.assign(new Error('音频计费时长检测服务尚未初始化。'), { status: 503 });
+};
+export const setBillableAudioDurationMeasurer = (measure: (audio: Blob) => Promise<number>) => {
+  measureBillableAudioDuration = measure;
 };
 
 export const wrapElevenLabsPcmAsWav = (pcm: ArrayBuffer | Uint8Array, sampleRate = 48000, channels = 1): Blob => {
@@ -867,6 +865,8 @@ export async function generateSpeechToSpeech(
 
   console.log(`Generating Speech to Speech with voice ID ${voiceId}`);
 
+  const durationSeconds = await measureBillableAudioDuration(audioFile);
+
   const formData = new FormData();
   formData.append("audio", audioFile);
   formData.append("model_id", "eleven_multilingual_sts_v2");
@@ -899,14 +899,14 @@ export async function generateSpeechToSpeech(
 
     recordElevenLabsResponseUsage(response, 'eleven_multilingual_sts_v2', {
       fallbackCredits: estimateTimedCredits(
-        estimateAudioDurationSecondsFromBlob(audioFile),
+        durationSeconds,
         ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE,
       ),
       companyPoints: estimateTimedCompanyPoints(
-        estimateAudioDurationSecondsFromBlob(audioFile),
+        durationSeconds,
         COMPANY_POINTS.audioProcessingPerSecond,
       ),
-      billingQuantity: estimateAudioDurationSecondsFromBlob(audioFile),
+      billingQuantity: durationSeconds,
       billingUnit: 'second',
     });
     return await response.blob();
@@ -979,6 +979,8 @@ export async function isolateAudio(audioFile: File | Blob): Promise<Blob> {
 
   console.log(`Isolating audio / vocals...`);
 
+  const durationSeconds = await measureBillableAudioDuration(audioFile);
+
   const formData = new FormData();
   formData.append("audio", audioFile);
 
@@ -997,14 +999,14 @@ export async function isolateAudio(audioFile: File | Blob): Promise<Blob> {
 
     recordElevenLabsResponseUsage(response, 'audio-isolation', {
       fallbackCredits: estimateTimedCredits(
-        estimateAudioDurationSecondsFromBlob(audioFile),
+        durationSeconds,
         ELEVENLABS_AUDIO_PROCESSING_CREDITS_PER_MINUTE,
       ),
       companyPoints: estimateTimedCompanyPoints(
-        estimateAudioDurationSecondsFromBlob(audioFile),
+        durationSeconds,
         COMPANY_POINTS.audioProcessingPerSecond,
       ),
-      billingQuantity: estimateAudioDurationSecondsFromBlob(audioFile),
+      billingQuantity: durationSeconds,
       billingUnit: 'second',
     });
     return await response.blob();
@@ -1075,6 +1077,8 @@ export async function transcribeSpeech(
 
   console.log("Transcribing speech to text...");
 
+  const durationSeconds = await measureBillableAudioDuration(audioFile);
+
   const formData = new FormData();
   formData.append("file", audioFile, audioFile instanceof File ? audioFile.name : "audio.wav");
   formData.append("model_id", "scribe_v2");
@@ -1102,14 +1106,14 @@ export async function transcribeSpeech(
 
     recordElevenLabsResponseUsage(response, 'scribe_v2', {
       fallbackCredits: estimateTimedCredits(
-        estimateAudioDurationSecondsFromBlob(audioFile),
+        durationSeconds,
         ELEVENLABS_SPEECH_TO_TEXT_CREDITS_PER_MINUTE,
       ),
       companyPoints: estimateTimedCompanyPoints(
-        estimateAudioDurationSecondsFromBlob(audioFile),
+        durationSeconds,
         COMPANY_POINTS.speechToTextPerSecond,
       ),
-      billingQuantity: estimateAudioDurationSecondsFromBlob(audioFile),
+      billingQuantity: durationSeconds,
       billingUnit: 'second',
     });
     return await response.json();
