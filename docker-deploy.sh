@@ -41,6 +41,7 @@ printf '在容器内安装依赖并构建（宿主机不执行 Node）…\n'
 "${DOCKER[@]}" build \
   --build-arg "NODE_IMAGE=${NODE_IMAGE:-node:22-alpine3.23}" \
   --build-arg "APK_MIRROR=${APK_MIRROR:-https://mirrors.aliyun.com/alpine}" \
+  --build-arg "NPM_REGISTRY=${NPM_REGISTRY:-https://registry.npmmirror.com}" \
   -t "$IMAGE" .
 
 # Build must finish before stopping the previous service.

@@ -66,6 +66,8 @@ NODE_IMAGE=docker.m.daocloud.io/library/node:22-alpine3.23 DEPLOY_MODE=docker ba
 
 Docker 镜像源与 APK 软件包源相互独立。构建默认使用阿里云 Alpine 源安装 FFmpeg/Python，保留镜像自带的发行版路径和 main/community 仓库，单次下载超时为 30 秒。若遇到 `APKINDEX.tar.gz` 下载失败或 `v2 database format error`，应检查或切换 APK 源；后续大量 `no such package` / `masked in: --no-network` 可能是索引失败的连带错误。可在部署命令前设置 `APK_MIRROR=https://dl-cdn.alpinelinux.org/alpine` 切回官方源，或指定服务器可访问的其他 Alpine 镜像根地址。
 
+Docker 构建的 npm 源默认使用 `https://registry.npmmirror.com`，安装依赖时单次请求超时 120 秒、最多重试 3 次，关闭安装过程中的 audit/fund 请求。可在部署命令前设置 `NPM_REGISTRY=https://registry.npmjs.org` 切回官方源或指定其他兼容源。锁文件中的 npm 官方源地址会随 registry 配置切换，保留原有版本及 integrity 校验，无需重建锁文件。
+
 容器以当前用户 UID/GID 运行，挂载 `.env`（只读）、`data/`、`uploads/`，支持 SELinux 标签。镜像构建完成后才切换旧服务；健康检查失败时尝试恢复旧容器/原 systemd 服务。Docker 的 `unless-stopped` 策略负责重启，开机恢复还需要 Docker 服务已启用开机启动。改 `.env` 后重跑部署脚本。切换前先手动停止旧 nohup 进程。
 
 容器包含 FFmpeg 和 Python 3；Seed-VC、Demucs 等本地模型、GPU、虚拟环境及模型文件需另行配置，本脚本不迁移宿主机的这些可选组件。

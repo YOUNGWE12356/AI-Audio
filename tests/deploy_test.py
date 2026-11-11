@@ -75,6 +75,11 @@ esac
         result = self.run_deploy(TEST_NODE_EXIT="0", DEPLOY_MODE="docker")
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_npm_registry_is_forwarded_to_docker_build(self):
+        result = self.run_deploy(NPM_REGISTRY="https://registry.example.com")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--build-arg NPM_REGISTRY=https://registry.example.com", self.calls())
+
     def test_remembers_docker_backend(self):
         (self.root / ".deploy").mkdir()
         (self.root / ".deploy/backend").write_text("docker\n")
