@@ -8245,7 +8245,7 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
 
   // --- Global API Error Handler ---
   app.use('/api', (err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-    logEvent('server.ts:8194', 'error', err);
+    logSafeError('api.request.failed', err);
     if (res.headersSent) { res.destroy(); return; }
 
     const isPayloadTooLarge = err?.code === 'LIMIT_FILE_SIZE'
@@ -8253,7 +8253,8 @@ BGM 最多 1 段。SFX 最多 ${sfxClipLimit} 段；优先保证可见声音事�
       || err?.status === 413
       || err?.statusCode === 413;
     const status = isPayloadTooLarge ? 413 : (Number(err?.status || err?.statusCode) >= 400 && Number(err?.status || err?.statusCode) < 600 ? Number(err?.status || err?.statusCode) : 500);
-    return res.status(status).json({ error: publicError(status) });
+    const code = typeof err?.code === 'string' && /^ELEVENLABS_[A-Z_]{1,28}$/.test(err.code) ? err.code : undefined;
+    return res.status(status).json({ error: publicError(status), code });
   });
 
   // --- Vite & SPA integration ---

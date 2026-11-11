@@ -29,9 +29,11 @@ export const currentUploadDirectory = () => {
 };
 
 export function logSafeError(event: string, error?: unknown) {
-  const value = error as { name?: unknown; code?: unknown } | undefined;
+  const value = error as { name?: unknown; code?: unknown; status?: unknown; upstreamStatus?: unknown } | undefined;
   const safeCode = typeof value?.code === 'string' && /^[A-Z0-9_]{1,40}$/.test(value.code) ? value.code : undefined;
-  console.error(JSON.stringify({ event, requestId: context.getStore()?.requestId, code: safeCode }));
+  const httpStatus = (status: unknown) => Number.isInteger(status) && Number(status) >= 400 && Number(status) <= 599 ? status : undefined;
+  console.error(JSON.stringify({ event, requestId: context.getStore()?.requestId, code: safeCode,
+    status: httpStatus(value?.status), upstreamStatus: httpStatus(value?.upstreamStatus) }));
 }
 
 export const publicError = (status: number) => ({

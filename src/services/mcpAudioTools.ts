@@ -6,6 +6,7 @@ import type { AgentTool } from './assistantAgentLoop';
 import { AUDIO_LANGUAGE_REGISTRY } from './languageRegistry';
 import { createAudioEvidence } from '../utils/audioEvidence';
 import { MCP_SFX_POLICY, produceMcpSoundEffect } from './mcpSfxProduction';
+import { audioFailureDetails } from './elevenLabsErrors';
 
 const s = { type: 'string' }, n = { type: 'number' }, b = { type: 'boolean' };
 const strings = { type: 'array', items: s, maxItems: 200 };
@@ -20,7 +21,7 @@ export function createMcpAudioTools(c: AgentToolContext) {
     tools.push({ name, description, parameters: { type: 'object', properties, required, additionalProperties: false }, execute });
   const replace = (name: string, execute: AgentTool['execute']) => { tools.find(t => t.name === name)!.execute = execute; };
   const generation = tools.find(t => t.name === 'generate_sound_effect')!;
-  generation.description = '仅在用户明确要求AI生成音效，或搜索失败需要回退时使用。普通“需要某种音效”请求用produce_sound_effect，默认先搜索。生成支持0.5～30秒。';
+  generation.description = '用户要求AI生成，或本次搜索没有合适音效时使用。普通音效需求用produce_sound_effect先搜索。之前任务失败不代表当前不可生成；以本次调用结果为准，失败应报告，不擅自用程序合成替代。支持0.5～30秒。';
   const image = async (id: string) => {
     const a = c.asset(id);
     if (!a.mimeType.startsWith('image/')) throw new Error('请选择图片。');
@@ -120,14 +121,14 @@ export function createMcpAudioTools(c: AgentToolContext) {
       const job = await c.request('/api/ai/sfx-batch/analyze', { text, files, sourceType, videoDuration, instructions: a.instructions || '', background: true, requestId: randomUUID() });
       return waitJob('/api/ai/sfx-batch/analyze/jobs', job);
     });
-  const modeSchema = { ...choice('auto', 'search', 'generate'), default: 'auto', description: '默认auto先搜索，服务报错时AI生成；明确要求AI生成填generate；只搜索不生成填search。' };
+  const modeSchema = { ...choice('auto', 'search', 'generate'), default: 'auto', description: '默认auto先搜索，无匹配、读取失败或服务错误时AI生成；试听后不合适可用generate继续制作；只搜索填search。' };
   const soundProperties = { name: { ...s, minLength: 1, maxLength: 180 }, keywords: { ...s, minLength: 1, maxLength: 300 },
     description: { ...s, maxLength: 2000 }, searchQuery: s, duration: { ...n, minimum: 0.5, maximum: 30 }, mode: modeSchema };
   const produce = (input: any) => produceMcpSoundEffect(c, input, generation.execute);
-  add('produce_sound_effect', '普通音效需求的默认入口：先联网搜索并采集候选试听；搜索或采集服务报错且没有可用结果时自动AI生成一次。明确要求AI生成时mode=generate直接生成。没有搜索结果、积分不足、权限问题、限流或取消不会触发生成。返回method与fallbackReason，告知实际方式。',
+  add('produce_sound_effect', `普通音效需求的默认入口。${MCP_SFX_POLICY} 返回method与fallbackReason，告知实际方式。`,
     { ...soundProperties, searchBatchId: s }, ['name', 'keywords'], produce);
   const row = { type: 'object', properties: soundProperties, required: ['name', 'keywords'], additionalProperties: false };
-  add('produce_sfx_batch', '批量制作音效的默认入口：每条默认先搜索，遇服务错误且没有可用音效时自动AI生成一次。用户明确要求AI生成才用mode=generate；mode=search仅搜索。每条可指定mode覆盖批次模式，返回实际method及切换原因。搜索复用同一searchBatchId的原有积分规则；先试听，不自动混入视频。',
+  add('produce_sfx_batch', `批量制作音效的默认入口。${MCP_SFX_POLICY} 每条mode可覆盖批次模式。搜索复用同一searchBatchId的原有积分规则；先试听，不自动混入视频。`,
     { mode: modeSchema, items: { type: 'array', items: row, minItems: 1, maxItems: 200 }, searchBatchId: s }, ['items'], async a => {
       const searchBatchId = a.searchBatchId || randomUUID();
       const items = [];
@@ -137,7 +138,7 @@ export function createMcpAudioTools(c: AgentToolContext) {
           items.push({ index, name: item.name, ...await produce({ ...item, mode: item.mode || a.mode || 'auto', searchBatchId }) });
         } catch (error) {
           c.signal.throwIfAborted();
-          items.push({ index, name: item.name, status: 'failed', message: error instanceof Error ? error.message : '处理失败' });
+          items.push({ index, name: item.name, status: 'failed', message: error instanceof Error ? error.message : '处理失败', errorDetails: audioFailureDetails(error) });
         }
       }
       return { searchBatchId, items, completedCount: items.filter(v => v.status === 'completed').length };

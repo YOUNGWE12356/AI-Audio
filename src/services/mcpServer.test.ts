@@ -43,7 +43,7 @@ test('official MCP client: authentication, coverage, real FFmpeg trim, downloads
   const app = express(); app.use('/auth', security.router); app.use(security.authenticate); app.use(security.resourceLimits); app.use(express.json({ limit: '15mb' }));
   app.use('/api/mcp/access', createMcpAccessRouter(access, security.adminExpiresAt));
   app.use(createAudioMcp({ directory: path.join(dir, 'workspaces'), origin, access, ffmpeg: ffmpeg! }));
-  let voiceCalls = 0, searchCalls = 0, sfxCalls = 0, batchSearchCalls = 0, batchSearchStatus = 200;
+  let voiceCalls = 0, searchCalls = 0, sfxCalls = 0, batchSearchCalls = 0, batchSearchStatus = 200, sfxStatus = 200;
   app.get('/api/usage/quota', (_req, res) => res.json({ owner: currentUserId(), remaining: 42 }));
   app.post('/api/ai/sfx-batch/search-query', (req, res) => { assert.equal(req.body.searchQuery, 'door slam'); res.json({ searchQuery: req.body.searchQuery }); });
   app.post('/api/sfx/online/search', (req, res) => { searchCalls++; assert.equal(req.body.query, 'door slam'); fs.rmSync(path.join(currentUploadDirectory(), 'online_sfx_preview.wav'), { force: true }); res.json({ items: [{ id: 'ticket', source: 'envato', sourceUrl: 'https://example.test/item' }] }); });
@@ -62,7 +62,11 @@ test('official MCP client: authentication, coverage, real FFmpeg trim, downloads
     fs.writeFileSync(path.join(currentUploadDirectory(), 'batch-preview.wav'), wav);
     res.json({ url: '/uploads/batch-preview.wav' });
   });
-  app.post('/api/ai/elevenlabs/sound-effect', (_req, res) => { sfxCalls++; res.type('audio/wav').send(wav); });
+  app.post('/api/ai/elevenlabs/sound-effect', (_req, res) => {
+    sfxCalls++;
+    if (sfxStatus !== 200) return res.status(sfxStatus).json({ error: '处理失败', code: 'ELEVENLABS_QUOTA' });
+    res.type('audio/wav').send(wav);
+  });
   const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
   t.after(() => { server.closeAllConnections(); server.close(); });
   const base = `http://127.0.0.1:${(server.address() as any).port}`;
@@ -114,6 +118,13 @@ test('official MCP client: authentication, coverage, real FFmpeg trim, downloads
   assert.equal(explicit.fallback, false); assert.equal(batchSearchCalls, searchesBefore); assert.equal(sfxCalls, 2);
   batchSearchStatus = 429;
   assert.ok((await client.callTool({ name: 'produce_sound_effect', arguments: soundArgs })).isError); assert.equal(sfxCalls, 2);
+  sfxStatus = 503;
+  const failed = await client.callTool({ name: 'produce_sound_effect', arguments: { ...soundArgs, mode: 'generate' } });
+  assert.ok(failed.isError); assert.match(JSON.stringify(failed.content), /ElevenLabs 服务额度不足/);
+  assert.match(JSON.stringify(failed.content), /请求编号/); assert.equal(sfxCalls, 3);
+  sfxStatus = 200;
+  assert.equal(jsonResult(await client.callTool({ name: 'produce_sound_effect', arguments: { ...soundArgs, mode: 'generate' } })).method, 'generate');
+  assert.equal(sfxCalls, 4);
   const args = { tool: 'save_report', arguments: { name: 'result.txt', content: 'done' }, requestId: 'request-1234567890123456' };
   let job = jsonResult(await client.callTool({ name: 'start_audio_job', arguments: args }));
   const again = jsonResult(await client.callTool({ name: 'start_audio_job', arguments: args })); assert.equal(again.id, job.id);

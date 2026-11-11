@@ -53,15 +53,38 @@ test('explicit AI generation skips searching and search-term translation', async
   assert.deepEqual(h.calls, ['/api/ai/elevenlabs/sound-effect']);
 });
 
-test('only-search requests, honest empty searches, bad input, permission and quota failures never trigger AI charges', async () => {
+test('only-search requests, bad input, permission and quota failures never trigger AI charges', async () => {
   const only = harness({ searchError: fail(502) }); await assert.rejects(only.produce({ mode: 'search' })); assert.equal(only.prompts.length, 0);
   const empty = harness({ items: [], sources: [{ unavailable: false }] });
-  assert.equal((await empty.produce()).status, 'no_matches'); assert.equal(empty.prompts.length, 0);
+  assert.equal((await empty.produce({ mode: 'search' })).status, 'no_matches'); assert.equal(empty.prompts.length, 0);
   for (const status of [400, 401, 403, 409, 413, 429]) {
     const h = harness({ searchError: fail(status) }); await assert.rejects(h.produce()); assert.equal(h.prompts.length, 0);
     const captured = harness({ captureErrors: { one: fail(status), two: fail(502) } });
     await assert.rejects(captured.produce()); assert.equal(captured.prompts.length, 0);
   }
+});
+
+test('auto generates once for no results or irrelevant titles, while search-only preserves candidates', async () => {
+  for (const options of [{ items: [] }, { items: [{ id: 'wrong', title: 'Bird chirping' }] }]) {
+    const h = harness(options), result = await h.produce();
+    assert.equal(result.method, 'generate'); assert.equal(result.fallback, true);
+    assert.equal(h.prompts.length, 1); assert.ok(result.fallbackReason);
+    assert.equal(h.calls.filter(v => v.endsWith('/capture')).length, 0);
+  }
+  const h = harness({ items: [{ id: 'preview', title: 'Door slam', source: 'envato', sourceUrl: 'https://elements.envato.com/item' }] });
+  const result = await h.produce();
+  assert.equal(result.method, 'search'); assert.equal(result.candidates[0].source, 'envato');
+  assert.equal(h.prompts.length, 0); assert.match(result.nextAction, /直接用于制作/);
+  const only = harness({ items: [{ id: 'wrong', title: 'Bird chirping' }] });
+  assert.equal((await only.produce({ mode: 'search' })).method, 'search');
+});
+
+test('an empty-search generation failure is not retried or replaced; later requests can generate', async () => {
+  const h = harness({ items: [], generationError: fail(503) });
+  await assert.rejects(h.produce()); assert.equal(h.prompts.length, 1);
+  const subsequent = harness();
+  assert.equal((await subsequent.produce({ mode: 'generate' })).method, 'generate');
+  assert.equal(subsequent.prompts.length, 1);
 });
 
 test('cancellation stops fallback and failed AI generation is not retried', async () => {

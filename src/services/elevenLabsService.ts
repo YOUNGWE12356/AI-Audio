@@ -1,4 +1,5 @@
 import { logEvent } from './safeLogging';
+import { soundEffectProviderError } from './elevenLabsErrors';
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
@@ -309,10 +310,12 @@ export const withElevenLabsApiKey = async <T,>(
     } catch (error: any) {
       lastError = error;
       const message = String(error?.message || error || '');
-      if ((isElevenLabsQuotaErrorMessage(message) || isElevenLabsVoiceNotFoundMessage(message)) && index < apiKeys.length - 1) {
+      if ((error?.code === 'ELEVENLABS_QUOTA' || isElevenLabsQuotaErrorMessage(message) || isElevenLabsVoiceNotFoundMessage(message)) && index < apiKeys.length - 1) {
         logEvent('src/services/elevenLabsService.ts:304', 'warn');
         continue;
       }
+      // Preserve the safe sound-effect category and upstream HTTP status.
+      if (typeof error?.code === 'string' && error.code.startsWith('ELEVENLABS_')) throw error;
       throw new Error(formatElevenLabsErrorMessage(message));
     }
   }
@@ -391,7 +394,7 @@ export async function generateSoundEffect(text: string, duration?: number, optio
       );
 
       if (!response.ok) {
-        throw new Error(await getElevenLabsErrorMessage(response));
+        throw await soundEffectProviderError(response);
       }
       const pcm = await response.arrayBuffer();
       return { response, pcm };

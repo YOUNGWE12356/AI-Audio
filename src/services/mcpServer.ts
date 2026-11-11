@@ -17,15 +17,17 @@ import type { AgentTool } from './assistantAgentLoop';
 import type { AssistantAsset } from './assistantAgentTypes';
 import { replaceAssistantManifest } from './assistantManifest';
 import { MCP_SFX_POLICY } from './mcpSfxProduction';
+import { audioFailureDetails, audioFailureMessage } from './elevenLabsErrors';
 
 type Options = { directory: string; origin: string; ffmpeg: string; access: ReturnType<typeof createMcpAccess> };
 type Job = { id: string; requestId: string; fingerprint: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; tool: string;
-  createdAt: string; updatedAt: string; message?: string; result?: unknown; error?: string };
+  createdAt: string; updatedAt: string; message?: string; result?: unknown; error?: string; errorDetails?: ReturnType<typeof audioFailureDetails> };
 const validId = (id: string) => /^[a-f0-9-]{36}$/i.test(id);
 const mimeFor = (name: string) => ({ '.wav': 'audio/wav', '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.opus': 'audio/ogg', '.aif': 'audio/aiff', '.aiff': 'audio/aiff', '.flac': 'audio/flac', '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.mov': 'video/quicktime', '.mkv': 'video/x-matroska', '.webm': 'video/webm', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.json': 'application/json', '.zip': 'application/zip', '.mid': 'audio/midi' }[path.extname(name).toLowerCase()] || 'text/plain');
 const allowedName = (name: string) => /\.(?:wav|mp3|m4a|aac|ogg|opus|flac|aiff?|mp4|m4v|mov|mkv|webm|png|jpe?g|webp|txt|md|csv|tsv|json|docx|xlsx|zip|mid)$/i.test(name);
 const MAX_FILE = 100 * 1024 * 1024;
 const errorText = (error: unknown) => {
+  if (String((error as { code?: unknown })?.code || '').startsWith('ELEVENLABS_')) return audioFailureMessage(error, '音效生成失败，请稍后重试。');
   if (/^E[A-Z_]+$/.test(String((error as NodeJS.ErrnoException)?.code || ''))) return '文件读取或保存失败，请重试；已有文件保留。';
   return error instanceof Error ? error.message.slice(0, 2000) : '处理失败，请重试。';
 };
@@ -140,7 +142,10 @@ export function createAudioMcp(options: Options) {
       const mime = response.headers.get('content-type') || '';
       if (mime.includes('json')) {
         const result = await response.json();
-        if (!response.ok) throw Object.assign(new Error(`${result.error || '调用失败'} (${response.status}${result.code ? `, ${result.code}` : ''})`), { status: response.status, code: result.code });
+        if (!response.ok) {
+          const details = audioFailureDetails({ status: response.status, code: result.code, requestId: result.requestId || response.headers.get('x-request-id') });
+          throw Object.assign(new Error(audioFailureMessage(details, `${result.error || '调用失败'} (${response.status})`)), details);
+        }
         return result;
       }
       if (!response.ok) throw Object.assign(new Error(`调用失败 (${response.status})`), { status: response.status });
@@ -221,7 +226,7 @@ export function createAudioMcp(options: Options) {
         const selected = backgroundTools.find(t => t.name === a.tool);
         if (!selected) { controllers.delete(job.id); clearTimeout(deadline); clearInterval(revoked); job.status = 'failed'; job.error = '此文件辅助工具请直接调用。'; persist(); return job; }
         void selected.execute(a.arguments).then(result => { job.result = decorate(result); job.status = controller.signal.aborted ? 'cancelled' : 'completed'; }, error => {
-          job.status = controller.signal.aborted ? 'cancelled' : 'failed'; job.error = errorText(error);
+          job.status = controller.signal.aborted ? 'cancelled' : 'failed'; job.error = errorText(error); job.errorDetails = audioFailureDetails(error);
         }).finally(() => { controllers.delete(job.id); clearTimeout(deadline); clearInterval(revoked); persist(); });
         return { ...job };
       });
