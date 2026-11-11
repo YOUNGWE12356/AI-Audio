@@ -38,7 +38,10 @@ fi
 mkdir -p data uploads
 IMAGE="$APP:$(date +%Y%m%d%H%M%S)-$$"
 printf '在容器内安装依赖并构建（宿主机不执行 Node）…\n'
-"${DOCKER[@]}" build --build-arg "NODE_IMAGE=${NODE_IMAGE:-node:22-alpine}" -t "$IMAGE" .
+"${DOCKER[@]}" build \
+  --build-arg "NODE_IMAGE=${NODE_IMAGE:-node:22-alpine3.23}" \
+  --build-arg "APK_MIRROR=${APK_MIRROR:-https://mirrors.aliyun.com/alpine}" \
+  -t "$IMAGE" .
 
 # Build must finish before stopping the previous service.
 SYSTEMD_STOPPED=0

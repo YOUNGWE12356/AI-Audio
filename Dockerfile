@@ -1,7 +1,10 @@
-ARG NODE_IMAGE=node:22-alpine
+ARG NODE_IMAGE=node:22-alpine3.23
 FROM ${NODE_IMAGE} AS base
 WORKDIR /app
-RUN apk add --no-cache ffmpeg python3
+# Keep main/community on the image's Alpine release; only change the mirror.
+ARG APK_MIRROR=https://mirrors.aliyun.com/alpine
+RUN sed -i "s|https\?://dl-cdn.alpinelinux.org/alpine|${APK_MIRROR%/}|g" /etc/apk/repositories \
+    && apk --timeout 30 add --no-cache ffmpeg python3
 # Use the distro FFmpeg instead of downloading a glibc-linked static binary.
 ENV FFMPEG_BIN=/usr/bin/ffmpeg FFMPEG_PATH=/usr/bin/ffmpeg
 
