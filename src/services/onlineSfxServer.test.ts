@@ -227,6 +227,7 @@ test('four approved sources search with real protocols, cache action discovery a
     const url = new URL(String(input));
     requested.push(url.href);
     assert.ok(!url.hostname.includes('freesound'));
+    if (url.hostname === 'www.pond5.com') return new Response('website verification', { status: 403 });
     if (url.hostname === 'elements.envato.com') return new Response(Array.from({ length: 80 }, (_, i) => card(i)).join(''));
     if (url.hostname === 'api.prosoundeffects.com') {
       assert.equal(init?.method, 'POST');
@@ -246,7 +247,7 @@ test('four approved sources search with real protocols, cache action discovery a
   assert.ok(first.sources[0].count >= 30);
   assert.equal(first.sources[2].count, 10);
   assert.ok(first.sources.slice(0, 4).every(source => !source.unavailable));
-  assert.match(first.sources[5].reason || '', /网站验证/);
+  assert.match(first.sources[5].reason || '', /自动重试/);
   assert.equal(ONLINE_SFX_SOURCES.some(source => String(source.id) === 'freesound'), false);
   assert.equal(requested.filter(url => url === epidemicScript).length, 1);
   await searchOnlineSfxSources({ query: 'whoosh', fetcher });
@@ -265,6 +266,64 @@ test('Epidemic never treats homepage recommendations as search and recovers afte
   broken = false;
   const result = await searchOnlineSfxSources({ query: 'whoosh', fetcher });
   assert.equal(result.items[0].source, 'Epidemic Sound');
+});
+
+test('Pond5 is retried after cooldown and a recovered public preview enters the same search session', async () => {
+  const cooldowns = new Map<string, number>();
+  const state = createOnlineSfxSearchState();
+  let blocked = true, pond5Calls = 0;
+  const fetcher: typeof fetch = async input => {
+    const url = new URL(String(input));
+    if (url.hostname !== 'www.pond5.com') return new Response('blocked', { status: 403 });
+    pond5Calls++;
+    assert.equal(url.pathname, '/search');
+    assert.equal(url.searchParams.get('kw'), 'whoosh');
+    assert.equal(url.searchParams.get('media'), 'sfx');
+    return blocked ? new Response('verification', { status: 403 }) : new Response(
+      '<article><h3><a href="/sound-effects/item/123-whoosh">Whoosh</a></h3>'
+      + '<audio src="https://cdn.example.com/whoosh.mp3"></audio></article>');
+  };
+  const first = await searchOnlineSfxSources({ query: 'whoosh', state, fetcher, cooldowns });
+  assert.equal(first.sources[5].unavailable, true);
+  assert.match(first.sources[5].reason || '', /60 秒.*自动重试/);
+  assert.equal(state[5].exhausted, false);
+  assert.equal(pond5Calls, 1);
+  blocked = false;
+  await searchOnlineSfxSources({ query: 'whoosh', state, fetcher, cooldowns });
+  assert.equal(pond5Calls, 1, 'do not hammer a blocked source during cooldown');
+  cooldowns.set('pond5', Date.now() - 1);
+  const recovered = await searchOnlineSfxSources({ query: 'whoosh', state, fetcher, cooldowns });
+  assert.equal(pond5Calls, 2);
+  assert.equal(recovered.sources[5].unavailable, false);
+  assert.equal(recovered.sources[5].count, 1);
+  assert.equal(recovered.items[0].sourceUrl, 'https://www.pond5.com/sound-effects/item/123-whoosh');
+  assert.equal(recovered.items[0].previewUrl, 'https://cdn.example.com/whoosh.mp3');
+  assert.equal(recovered.items[0].source, 'Pond5');
+  assert.equal(ONLINE_SFX_SOURCES.find(source => source.id === 'pond5')?.searchable, true);
+});
+
+test('Pond5 verification with HTTP 200 or unreadable HTML stays retryable, without fake results', async () => {
+  for (const body of ['<html>Please enable JS</html>', '<html>Just a moment: verify you are human</html>']) {
+    const state = createOnlineSfxSearchState(), cooldowns = new Map<string, number>();
+    const result = await searchOnlineSfxSources({ query: 'whoosh', state, cooldowns,
+      fetcher: async () => new Response(body) });
+    assert.equal(result.sources[5].unavailable, true);
+    assert.equal(state[5].exhausted, false);
+    assert.ok((cooldowns.get('pond5') || 0) > Date.now());
+    assert.equal(result.items.length, 0);
+  }
+});
+
+test('Pond5 supplements the forty-percent web group and deduplicates shared previews', () => {
+  const pools = ['envato', 'pse', 'epidemic', 'mixkit', 'web', 'Pond5'].map(name => sampleCandidates(name, 100));
+  const items = mixOnlineSfxCandidates(pools, 100);
+  assert.equal(items.filter(item => item.source === 'envato').length, 30);
+  assert.equal(items.filter(item => ['pse', 'epidemic', 'mixkit'].includes(item.source)).length, 30);
+  assert.equal(items.filter(item => ['web', 'Pond5'].includes(item.source)).length, 40);
+  assert.equal(items.filter(item => item.source === 'Pond5').length, 20);
+  const duplicate = { ...items[0], previewUrl: 'https://cdn.example.com/same.mp3' };
+  const deduped = mixOnlineSfxCandidates([[duplicate], [], [], [], [], [{ ...duplicate, sourceUrl: 'https://www.pond5.com/sound-effects/item/456' }]], 5);
+  assert.equal(deduped.length, 1);
 });
 
 test('all unavailable sources are reported and return no false success candidates', async () => {

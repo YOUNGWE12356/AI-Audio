@@ -20,7 +20,7 @@ import {
 import { recordAiUsage } from './usageTracking';
 import { createOnlineSfxRelevanceMatcher } from './onlineSfxRelevance';
 import { fetchPublicResource, publicHttpsUrl } from './onlineSfxPublicFetch';
-import { searchWebSoundEffects } from './onlineSfxWebSearch';
+import { parseWebAudioPage, searchWebSoundEffects } from './onlineSfxWebSearch';
 
 const runFile = promisify(execFile);
 const PREVIEW_HOST = 'public-assets.content-platform.envatousercontent.com';
@@ -228,7 +228,11 @@ const SEARCH_SOURCES = [
   { id: 'epidemic', name: 'Epidemic Sound', pages: 1, parse: parseEpidemicSearch },
   { id: 'mixkit', name: 'Mixkit', pages: 1, parse: parseMixkitSearch },
   { id: 'web', name: '全网搜索', pages: 1, parse: () => [] as Candidate[] },
+  // Retry public search after a temporary failure; never permanently disable it.
+  { id: 'pond5', name: 'Pond5', pages: 1, parse: (html: string) =>
+    parseWebAudioPage(html, 'https://www.pond5.com/search', 'Pond5') },
 ] as const;
+const pond5Cooldowns = new Map<string, number>();
 type SourceState = { page: number; completed: Set<number>; buffer: Candidate[]; seen: Set<string>; exhausted: boolean };
 export function createOnlineSfxSearchState() {
   return SEARCH_SOURCES.map((): SourceState => ({ page: 1, completed: new Set(), buffer: [], seen: new Set(), exhausted: false }));
@@ -257,7 +261,7 @@ export function mixOnlineSfxCandidates(pools: Candidate[][], limit: number): Can
     }
     return false;
   };
-  const groups = [[0], [1, 2, 3], [4]];
+  const groups = [[0], [1, 2, 3], [4, 5]];
   const targets = onlineSfxGroupTargets(limit);
   for (let group = 0; group < groups.length; group++) {
     let count = 0;
@@ -298,12 +302,19 @@ export async function searchOnlineSfxSources(options: {
   const relevance = createOnlineSfxRelevanceMatcher(options.query);
   const categories = mixkitSearchCategories(options.query);
   const unavailable = new Set<string>();
+  const reasons = new Map<string, string>();
   const attempted = SEARCH_SOURCES.map(() => new Set<number>());
   const deadline = AbortSignal.timeout(16_000);
   const fill = async (index: number, count: number) => {
     const source = SEARCH_SOURCES[index], stream = state[index];
     if (stream.exhausted || deadline.aborted) return;
-    if ((options.cooldowns?.get(source.id) || 0) > Date.now()) { unavailable.add(source.id); return; }
+    const cooldowns = options.cooldowns || (source.id === 'pond5' && !options.fetcher ? pond5Cooldowns : undefined);
+    if ((cooldowns?.get(source.id) || 0) > Date.now()) {
+      unavailable.add(source.id);
+      if (source.id === 'pond5') reasons.set(source.id, '暂不可用，冷却 60 秒后将在后续搜索中自动重试。');
+      return;
+    }
+    if (source.id === 'pond5' && stream.page > 1) { stream.exhausted = true; return; }
     if (source.id === 'epidemic' && stream.page > 1) { stream.exhausted = true; return; }
     if (source.id === 'mixkit' && !categories.length) { stream.exhausted = true; return; }
     const pages = Array.from({ length: Math.max(0, 51 - stream.page) }, (_, i) => stream.page + i)
@@ -333,10 +344,17 @@ export async function searchOnlineSfxSources(options: {
         const html = data.toString('utf8');
         const parsed = source.parse(html);
         if (!parsed.length && /captcha|just a moment|access denied|verify you are human/i.test(html)) throw fail('来源网站要求验证。');
+        if (source.id === 'pond5' && !parsed.length) {
+          // A changed page or JS challenge is not a successful empty catalog.
+          throw fail('Pond5 未返回可读取的公开试听，稍后重试。');
+        }
         return parsed;
       }));
       const fulfilled = results.filter(result => result.status === 'fulfilled');
-      if (!fulfilled.length) throw fail('来源搜索暂不可用。');
+      if (!fulfilled.length) {
+        const rejected = results.find(result => result.status === 'rejected');
+        throw rejected?.reason || fail('来源搜索暂不可用。');
+      }
       return fulfilled.flatMap(result => result.value);
     }));
     let newCandidates = 0;
@@ -359,13 +377,18 @@ export async function searchOnlineSfxSources(options: {
     if (responses.every(response => response.status === 'rejected')) {
       unavailable.add(source.id);
       if (source.id === 'epidemic') epidemicActions.delete(options.fetcher || fetch);
-      options.cooldowns?.set(source.id, Date.now() + 60_000);
+      cooldowns?.set(source.id, Date.now() + 60_000);
+      if (source.id === 'pond5') {
+        const rejected = responses.find(response => response.status === 'rejected');
+        reasons.set(source.id, `${rejected?.reason?.message || '来源暂不可用。'} 60 秒后将在后续搜索中自动重试。`);
+      }
     } else if (stream.page > pages[pages.length - 1] && responses.every(response => response.status === 'fulfilled'
       && (response.value.length === 0 || (source.id === 'mixkit' && !newCandidates)))) stream.exhausted = true;
   };
   for (const stream of state) stream.buffer = stream.buffer.filter(candidate => !excluded.has(candidate.sourceUrl) && relevance(candidate.title) > 0);
   const targets = onlineSfxGroupTargets(limit);
-  const sourceTargets = [targets[0], ...Array(3).fill(Math.ceil(targets[1] / 3)), targets[2]];
+  // Pond5 supplements the web group; keep Envato/three catalogs/web at 30/30/40.
+  const sourceTargets = [targets[0], ...Array(3).fill(Math.ceil(targets[1] / 3)), targets[2], 1];
   await Promise.all(SEARCH_SOURCES.map((source, index) => state[index].buffer.length < sourceTargets[index]
     ? fill(index, source.pages) : Promise.resolve()));
   // Backups are already queried in parallel. Fetch extra pages only if the total
@@ -373,17 +396,17 @@ export async function searchOnlineSfxSources(options: {
   const totalAvailable = state.reduce((sum, stream) => sum + stream.buffer.length, 0);
   const alternateAvailable = state.slice(1, 4).reduce((sum, stream) => sum + stream.buffer.length, 0);
   const totalShort = totalAvailable < limit;
-  const groupShort = [state[0].buffer.length < targets[0], alternateAvailable < targets[1], state[4].buffer.length < targets[2]];
+  const groupShort = [state[0].buffer.length < targets[0], alternateAvailable < targets[1],
+    state[4].buffer.length + state[5].buffer.length < targets[2]];
   if ((totalShort || groupShort.some(Boolean)) && !deadline.aborted) {
-    await Promise.all(SEARCH_SOURCES.map((source, index) => unavailable.has(source.id) || (!totalShort && !groupShort[index === 0 ? 0 : index === 4 ? 2 : 1])
+    await Promise.all(SEARCH_SOURCES.map((source, index) => unavailable.has(source.id) || (!totalShort && !groupShort[index === 0 ? 0 : index >= 4 ? 2 : 1])
       ? Promise.resolve() : fill(index, source.id === 'web' ? 1 : 2)));
   }
   for (const stream of state) stream.buffer.sort((a, b) => relevance(b.title) - relevance(a.title));
   const items = mixOnlineSfxCandidates(state.map(stream => stream.buffer), limit);
   const sources: OnlineSfxSourceStatus[] = SEARCH_SOURCES.map(source => ({ source: source.name,
     count: items.filter(item => source.id === 'web' ? item.source.startsWith('全网 · ') : item.source === source.name).length,
-    unavailable: unavailable.has(source.id) }));
-  sources.push({ source: 'Pond5', count: 0, unavailable: true, reason: '网站验证限制，待官方接口接入' });
+    unavailable: unavailable.has(source.id), ...(reasons.has(source.id) ? { reason: reasons.get(source.id) } : {}) }));
   return { items, sources };
 }
 

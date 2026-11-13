@@ -35,6 +35,23 @@ test('audio extraction pairs gallery titles and links, handles JSON-LD and never
   assert.deepEqual(parseWebAudioPage(html, 'https://mixkit.co/'), []);
 });
 
+test('Pond5 public metadata uses explicit catalog parsing and never pairs another site or private preview', () => {
+  const html = '<script type="application/ld+json">' + JSON.stringify({ '@graph': [
+    { '@type': 'AudioObject', name: 'Door Open', contentUrl: 'https://cdn.example.com/door.mp3',
+      url: 'https://www.pond5.com/sound-effects/item/123-door' },
+    { '@type': 'AudioObject', name: 'Wrong Source', contentUrl: 'https://cdn.example.com/wrong.mp3', url: 'https://other.example.com/sound' },
+    { '@type': 'AudioObject', name: 'Private', contentUrl: 'https://127.0.0.1/audio.mp3' },
+  ] }) + '</script>';
+  const url = 'https://www.pond5.com/search?kw=door&media=sfx';
+  assert.deepEqual(parseWebAudioPage(html, url), []);
+  const parsed = parseWebAudioPage(html, url, 'Pond5');
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].source, 'Pond5');
+  assert.equal(parsed[0].title, 'Door Open');
+  assert.equal(parsed[0].sourceUrl, 'https://www.pond5.com/sound-effects/item/123-door');
+  assert.deepEqual(parseWebAudioPage(html, 'https://pond5.com.evil.example/search', 'Pond5'), []);
+});
+
 test('same-gallery audio receives distinct stable source identities when no item links exist', () => {
   const html = '<article><h3>Whoosh One</h3><audio src="/1.mp3"></audio></article>'
     + '<article><h3>Whoosh Two</h3><audio src="/2.mp3"></audio></article>';

@@ -34,9 +34,11 @@ export function parseWebSearchLinks(html: string, engine: 'duckduckgo' | 'bing')
 }
 
 /** Extract only audio URLs published by the page, paired with the same item's title. */
-export function parseWebAudioPage(html: string, pageUrl: string): OnlineSfxCandidate[] {
+export function parseWebAudioPage(html: string, pageUrl: string, catalog?: 'Pond5'): OnlineSfxCandidate[] {
   const page = publicHttpsUrl(pageUrl);
-  if (!page || !externalHost(page)) return [];
+  const allowedPage = (url: URL) => catalog === 'Pond5'
+    ? /^(?:www\.)?pond5\.com$/.test(url.hostname) : externalHost(url);
+  if (!page || !allowedPage(page)) return [];
   const $ = load(html);
   const items: OnlineSfxCandidate[] = [];
   const seen = new Set<string>();
@@ -47,14 +49,14 @@ export function parseWebAudioPage(html: string, pageUrl: string): OnlineSfxCandi
     const name = title.replace(/\s+/g, ' ').trim().slice(0, 240);
     if (!preview || !name || seen.has(preview.href)) return;
     const source = publicHttpsUrl(link || '', page.href) || new URL(page.href);
-    if (!externalHost(source)) return;
+    if (!allowedPage(source)) return;
     // Gallery pages can expose many distinct audios without individual item URLs.
     if (!link || source.href === page.href || audioPath(source.href)) {
       source.href = page.href;
       source.hash = `audio-${createHash('sha256').update(preview.href).digest('hex').slice(0, 12)}`;
     }
     seen.add(preview.href);
-    items.push({ title: name, author, source: `全网 · ${page.hostname.replace(/^www\./, '')}`,
+    items.push({ title: name, author, source: catalog || `全网 · ${page.hostname.replace(/^www\./, '')}`,
       sourceUrl: source.href, previewUrl: preview.href });
   };
   const selector = 'audio[src], audio source[src], [data-preview-url], [data-audio-url], [data-track-url], a[download], button[onclick]';

@@ -143,8 +143,6 @@ export default function OnlineSfxSearch() {
           {busy && <button type="button" onClick={() => { controller.current?.abort(); setMessage('已停止等待，完成的音效已保留。'); }} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-3 text-xs text-slate-600"><Square className="w-3 h-3" />停止</button>}
           <PointCostHint kind="online-sfx" className="ml-auto" />
         </div>
-        <p className="text-[11px] leading-5 text-slate-500">目标配比：Envato 30% · 其他三库合计 30% · 全网搜索 40%。结果不足或来源异常时自动互补。</p>
-        <p className="text-[11px] leading-5 text-slate-500">采集网站公开试听并转为 48kHz WAV，保留原试听水印，单条最多 60 秒。正式项目请到来源站确认该条素材许可并下载原文件。</p>
         {requiresSoundEffectTranslation(query) && <p className="text-[11px] text-amber-700">中文关键词会先翻译，翻译按 GPT Token 另计（最低 1 分）；联网搜索成功后整批结算 1 分。</p>}
       </form>
     {error && <div role="alert" className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-700"><AlertCircle className="h-4 w-4 shrink-0" />{error}</div>}
