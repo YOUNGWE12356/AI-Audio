@@ -895,7 +895,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   }, []);
 
   const [isServerLibraryReady, setIsServerLibraryReady] = useState(false);
-  const [libraryLoadError, setLibraryLoadError] = useState(false);
+  const [libraryLoadError, setLibraryLoadError] = useState('');
   const serverRevisionRef = useRef(0);
   const draftKeyRef = useRef('');
   const [draftTabId] = useState(() => {
@@ -1058,7 +1058,10 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
 
   const fetchJsonIfAvailable = useCallback(async <T,>(url: string): Promise<T | null> => {
     const response = await fetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
-    if (!response.ok) return null;
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      throw new Error(payload?.error || `加载失败（HTTP ${response.status}），请重试。`);
+    }
 
     const contentType = response.headers.get('content-type') || '';
     if (!contentType.toLowerCase().includes('application/json')) return null;
@@ -1075,7 +1078,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
           categories: CategoryGroup[];
           sounds: SoundEffect[];
         }>('/api/sfx/library/state'),
-        fetchJsonIfAvailable<AudioAssetLibraryStats>('/api/audio-assets/stats'),
+        fetchJsonIfAvailable<AudioAssetLibraryStats>('/api/audio-assets/stats').catch(() => null),
       ]);
       if (libraryState && Array.isArray(libraryState.categories) && Array.isArray(libraryState.sounds)) {
         if (!draftKeyRef.current) {
@@ -1087,14 +1090,14 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
         }
         syncRef.current!.receive(libraryState);
         setIsServerLibraryReady(true);
-        setLibraryLoadError(false);
+        setLibraryLoadError('');
       } else {
-        setLibraryLoadError(true);
+        setLibraryLoadError('服务端未返回有效的音效库数据，请检查服务状态后重试。');
       }
       if (assetStatsData) setServerAssetStats(assetStatsData);
     } catch (err) {
       console.error('Failed to load sfx library database from server:', err);
-      setLibraryLoadError(true);
+      setLibraryLoadError(err instanceof Error ? err.message : '无法读取服务端音效库，请重试。');
     }
   }, [draftTabId, fetchJsonIfAvailable]);
 
@@ -4290,7 +4293,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                 <h3 className="text-xs font-bold text-slate-600">{libraryLoadError && !isServerLibraryReady ? '音效库加载失败' : !isServerLibraryReady ? '正在加载音效库' : '未找到匹配的音效资产'}</h3>
                 <p className="text-[10px] text-slate-500 max-w-sm">
                   {libraryLoadError && !isServerLibraryReady
-                    ? '无法读取服务端音效库，请检查服务状态后重试。'
+                    ? libraryLoadError
                     : !isServerLibraryReady
                       ? '正在同步服务端音效资产。'
                     : '请尝试更改模糊描述、精简高级筛选，或者您可以点击左下角一键“拖入新音效”进行资产扩充！'}

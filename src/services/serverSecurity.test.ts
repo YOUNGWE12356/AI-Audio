@@ -253,6 +253,21 @@ test('real server rejects audited attacks and preserves an authenticated upload/
     assert.equal((await request(url)).status, 401, url);
   }
   const alice = await login('alice'), bob = await login('bob');
+  const libraryState = await request('/api/sfx/library/state', alice);
+  assert.equal(libraryState.status, 200);
+  const emptyLibrary = await libraryState.json();
+  assert.deepEqual(emptyLibrary.categories, []);
+  assert.deepEqual(emptyLibrary.sounds, []);
+  const soundsPath = path.join(directory, 'data', 'sounds.json');
+  assert.equal(fs.existsSync(soundsPath), false, 'reading a new library must not write a manifest');
+  for (const invalid of ['{broken', '{}']) {
+    fs.writeFileSync(soundsPath, invalid);
+    assert.equal((await request('/api/sfx/library/state', alice)).status, 500);
+    assert.equal(fs.readFileSync(soundsPath, 'utf8'), invalid, 'invalid manifests must remain intact');
+  }
+  const storedSounds = [{ id: 'existing-sound', name: 'Existing asset' }];
+  fs.writeFileSync(soundsPath, JSON.stringify(storedSounds));
+  assert.deepEqual((await (await request('/api/sfx/library/state', alice)).json()).sounds, storedSounds);
   const points = await (await request('/api/usage/quota', alice)).json();
   assert.equal(points.user.userId, 'account:alice');
   assert.equal(points.quota.remainingCredits, 5000);

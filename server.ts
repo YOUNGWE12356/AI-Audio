@@ -1327,7 +1327,8 @@ async function startServer() {
     try {
       if (fs.existsSync(soundsFile)) {
         const parsed = JSON.parse(fs.readFileSync(soundsFile, 'utf-8'));
-        if (Array.isArray(parsed)) sounds = parsed;
+        if (!Array.isArray(parsed)) throw new Error('Invalid sound library manifest');
+        sounds = parsed;
       }
     } catch (error) {
       logEvent('server.ts:1283', 'error', error);
@@ -1515,7 +1516,6 @@ async function startServer() {
 
   app.get('/api/sfx/library/state', (req, res) => {
     try {
-      if (!fs.existsSync(soundsFile)) return res.status(503).json({ error: '音效库清单不存在。' });
       const repaired = loadAndRepairLibraryMetadata();
       res.setHeader('Cache-Control', 'no-store');
       return res.json({
@@ -2348,7 +2348,6 @@ async function startServer() {
   // 3. Get Sound Effects
   app.get('/api/sfx/sounds', (req, res) => {
     try {
-      if (!fs.existsSync(soundsFile)) return res.status(503).json({ error: '音效库清单不存在。' });
       const repaired = loadAndRepairLibraryMetadata();
       return res.json(repaired.sounds);
     } catch (err: any) {
