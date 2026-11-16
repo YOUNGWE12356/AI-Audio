@@ -1,3 +1,4 @@
+import { createMediaUrl } from '../services/mediaClient';
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
@@ -72,7 +73,7 @@ const ElevenLabsPlayer = ({
         ? await generateMusic(text, duration)
         : await generateSoundEffect(text, duration);
 
-      const url = URL.createObjectURL(blob);
+      const url = createMediaUrl(blob);
       setAudioUrl(url);
 
       // Auto play

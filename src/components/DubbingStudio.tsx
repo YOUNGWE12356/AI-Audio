@@ -1,3 +1,4 @@
+import { createMediaUrl } from '../services/mediaClient';
 ﻿/**
  * @license
  * SPDX-License-Identifier: Apache-2.0
@@ -628,7 +629,7 @@ const buildBatchVoiceGenerationText = (item: BatchVoiceRequirement) => {
 };
 
 const downloadBlobFile = (blob: Blob, fileName: string) => {
-  const url = URL.createObjectURL(blob);
+  const url = createMediaUrl(blob);
   const link = document.createElement('a');
   link.href = url;
   link.download = fileName;
@@ -856,7 +857,7 @@ export default function DubbingStudio({
     setStsError(null);
     try {
       const blob = await generateSpeechToSpeech(stsFile, stsVoiceRole);
-      const url = URL.createObjectURL(blob);
+      const url = createMediaUrl(blob);
       setStsAudioUrl(url);
 
       const matchedVoice = displayVoices.find(v => v.id === stsVoiceRole);
@@ -1630,7 +1631,7 @@ export default function DubbingStudio({
           ...sharedVoiceOptions,
         },
       );
-      const url = URL.createObjectURL(blob);
+      const url = createMediaUrl(blob);
       updateBatchVoiceItem(id, { status: 'done', audioUrl: url, error: undefined });
       const itemIndex = batchVoiceItems.findIndex(entry => entry.id === id);
       const indexedName = formatBatchVoiceFileName(item, itemIndex >= 0 ? itemIndex : 0, batchVoiceItems, autoNumberStart);

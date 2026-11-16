@@ -3,7 +3,7 @@ import path from 'node:path';
 import { PassThrough, Readable } from 'node:stream';
 import JSZip from 'jszip';
 
-export type SfxArchiveFile = { fileName: string; filePath: string };
+export type SfxArchiveFile = { fileName: string; filePath: string; url?: undefined } | { fileName: string; url: string; filePath?: undefined };
 
 export const safeDownloadFileName = (value: unknown, fallback: string): string => {
   const name = typeof value === 'string' ? value.replace(/[\\/]/g, '_').replace(/[\x00-\x1f\x7f]/g, '').trim() : '';
@@ -21,7 +21,7 @@ export const createSfxArchiveStream = (files: SfxArchiveFile[]) => {
   const zip = new JSZip();
   const usedNames = new Set<string>();
   for (const file of files) {
-    const baseName = safeDownloadFileName(file.fileName, path.basename(file.filePath));
+    const baseName = safeDownloadFileName(file.fileName, path.basename(file.filePath || new URL(file.url!).pathname));
     const extension = path.extname(baseName);
     const stem = extension ? baseName.slice(0, -extension.length) : baseName;
     let archiveName = baseName;
@@ -31,7 +31,15 @@ export const createSfxArchiveStream = (files: SfxArchiveFile[]) => {
     }
     usedNames.add(archiveName.toLowerCase());
     const source = Readable.from((async function* () {
-      yield* fs.createReadStream(file.filePath);
+      if (file.filePath) { yield* fs.createReadStream(file.filePath); return; }
+      const response = await fetch(file.url!, { redirect: 'error', signal: AbortSignal.timeout(120_000), referrerPolicy: 'no-referrer' });
+      if (!response.ok || !response.body) throw new Error('CDN archive source unavailable');
+      let bytes = 0;
+      for await (const chunk of response.body as any) {
+        bytes += chunk.length;
+        if (bytes > 100 * 1024 * 1024) throw new Error('CDN archive source exceeds size limit');
+        yield chunk;
+      }
     })());
     zip.file(archiveName, source, { compression: 'STORE' });
   }

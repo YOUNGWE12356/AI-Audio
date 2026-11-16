@@ -1,4 +1,6 @@
 import { uploadDirectory, type UploadDirectory } from './serverSecurity';
+import { getMediaStorage } from './mediaStorage';
+import { isCdnUrl } from './cdnStorage';
 import express from 'express';
 import multer from 'multer';
 import fs from 'node:fs';
@@ -149,8 +151,26 @@ export function createAssistantAgentRouter(options: Options) {
       if (!result) throw new Error(`文件ID不存在：${id}`);
       return result;
     };
-    const filePath = (a: AssistantAsset) => resolveAssistantUpload(uploadDirectory(options.uploadsDir), a.url);
+    const filePath = (a: AssistantAsset) => {
+      const storage = getMediaStorage();
+      if (storage && isCdnUrl(a.url)) {
+        const relative = storage.relative(state.owner, a.url);
+        if (!relative) throw new Error('文件不存在或无权访问。');
+        return storage.local(state.owner, relative);
+      }
+      return resolveAssistantUpload(uploadDirectory(options.uploadsDir), a.url);
+    };
     const register = async (url: string, name: string, generated = false): Promise<AssistantAsset> => {
+      const storage = getMediaStorage();
+      if (storage && isCdnUrl(url)) {
+        const disk = await storage.importUrl(state.owner, url);
+        const stat = await fs.promises.stat(disk);
+        const existing = state.job.assets.find(item => item.url === url);
+        const item: AssistantAsset = { id: existing?.id || randomUUID(), name: safeAgentName(name), url, mimeType: mimeFor(name), size: stat.size,
+          duration: await options.duration(disk).catch(() => undefined), generated };
+        if (existing) Object.assign(existing, item); else state.job.assets.push(item);
+        persist(state); return item;
+      }
       if (!url.startsWith('/uploads/')) {
         // Only app-owned download routes are allowed. Never forward credentials to external URLs.
         if (!/^\/api\/(?:sfx\/library\/stream\?|audio\/music-separation\/jobs\/[a-f0-9-]+\/stems\/[a-z]+\/download$)/i.test(url)) throw new Error('不支持的文件来源。');
@@ -165,7 +185,8 @@ export function createAssistantAgentRouter(options: Options) {
       const stat = await fs.promises.stat(diskPath);
       if (!stat.isFile() || !stat.size) throw new Error(`产物为空：${name}`);
       const existing = state.job.assets.find(item => item.url === url);
-      const item: AssistantAsset = { id: existing?.id || randomUUID(), name: safeAgentName(name), url, mimeType: mimeFor(name), size: stat.size,
+      const storedUrl = storage ? await storage.publish(state.owner, url) : url;
+      const item: AssistantAsset = { id: existing?.id || randomUUID(), name: safeAgentName(name), url: storedUrl, mimeType: mimeFor(name), size: stat.size,
         duration: await options.duration(diskPath).catch(() => undefined), generated };
       if (existing) Object.assign(existing, item); else state.job.assets.push(item);
       persist(state);
@@ -313,6 +334,8 @@ export function createAssistantAgentRouter(options: Options) {
     };
     void (async () => {
       try {
+        const storage = getMediaStorage();
+        if (storage) for (const a of state.job.assets) if (isCdnUrl(a.url)) await storage.importUrl(state.owner, a.url);
         const tools = createAssistantTools(context);
         const event = (name: string, status: 'running' | 'completed' | 'failed', detail?: string) => {
           const active = [...state.job.events].reverse().find(event => event.tool === name && event.status === 'running');
@@ -437,7 +460,9 @@ export function createAssistantAgentRouter(options: Options) {
       const assets: AssistantAsset[] = [];
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
-        assets.push({ id: randomUUID(), name: safeAgentName(names[i] || f.originalname), url: `/uploads/${f.filename}`, mimeType: f.mimetype || mimeFor(f.originalname), size: f.size,
+        const localUrl = `/uploads/${f.filename}`;
+        const url = getMediaStorage() ? await getMediaStorage()!.publish(owner, localUrl) : localUrl;
+        assets.push({ id: randomUUID(), name: safeAgentName(names[i] || f.originalname), url, mimeType: f.mimetype || mimeFor(f.originalname), size: f.size,
           duration: await options.duration(f.path).catch(() => undefined) });
       }
       // A new instruction can reuse only files belonging to the same owner's previous job.
@@ -450,7 +475,7 @@ export function createAssistantAgentRouter(options: Options) {
         if (prior) {
           messages = getAssistantMessages(prior.job);
           previousInput = prior.input.length ? [...prior.input] : [{ role: 'user', content: JSON.stringify({ previousTask: prior.job.prompt, previousResult: prior.job.answer, error: prior.job.error }) }];
-          for (const a of prior.job.assets) if (fs.existsSync(resolveAssistantUpload(uploadDirectory(options.uploadsDir), a.url))) assets.push(a);
+          for (const a of prior.job.assets) if (isCdnUrl(a.url) || fs.existsSync(resolveAssistantUpload(uploadDirectory(options.uploadsDir), a.url))) assets.push(a);
         }
       }
       const job: AssistantJob = { id: randomUUID(), prompt, messages: [...messages, { id: randomUUID(), role: 'user', content: prompt }], status: 'running', createdAt: now, updatedAt: now, assets, events: [] };
@@ -556,6 +581,7 @@ export function createAssistantAgentRouter(options: Options) {
     const state = lookup(req, res);
     const asset = state?.job.assets.find(item => item.id === req.params.assetId);
     if (!asset) return res.status(404).json({ error: '文件不存在。' });
+    if (isCdnUrl(asset.url)) return res.redirect(302, asset.url);
     return res.download(resolveAssistantUpload(uploadDirectory(options.uploadsDir), asset.url), asset.name);
   });
   return router;

@@ -3,6 +3,9 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
+import os from 'node:os';
+import { configureMediaStorage } from './src/services/mediaStorage';
+import { uploadCdnFile, isCdnUrl } from './src/services/cdnStorage';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { isIP } from 'node:net';
@@ -133,8 +136,9 @@ async function startServer() {
 
   const dataDir = path.join(process.cwd(), 'data');
   const privateUploadsRoot = path.join(dataDir, 'private-uploads');
+  const mediaStorage = configureMediaStorage(dataDir);
   const mcpAccess = createMcpAccess(path.join(dataDir, 'mcp'));
-  const security = createServerSecurity({ privateRoot: privateUploadsRoot, machineIdentity: mcpAccess.authenticate });
+  const security = createServerSecurity({ privateRoot: privateUploadsRoot, uploadRoot: mediaStorage?.cacheRoot, machineIdentity: mcpAccess.authenticate });
   const getUploadsDir = currentUploadDirectory;
   app.use((_req, res, next) => { res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'same-origin'); next(); });
   app.get('/healthz', (_req, res) => res.json({ ok: true }));
@@ -196,6 +200,7 @@ async function startServer() {
 
   // Use JSON middleware with large payload support for categories/sounds state and inline media references.
   app.use(express.json({ limit: '120mb' }));
+  if (mediaStorage) app.use(mediaStorage.middleware(currentUserId));
 
   type UsageActor = {
     userId: string;
@@ -280,7 +285,7 @@ async function startServer() {
     ? path.resolve(process.env.SFX_LIBRARY_DIR)
     : path.join(dataDir, 'sfx-library');
   const libraryOriginalsDir = path.join(libraryDir, 'originals');
-  const libraryTempDir = path.join(libraryDir, 'temp');
+  const libraryTempDir = mediaStorage ? path.join(os.tmpdir(), 'ai-audio-library-uploads') : path.join(libraryDir, 'temp');
   const sfxLibraryAdminPassword = String(
     process.env.SFX_LIBRARY_ADMIN_PASSWORD
       || '',
@@ -992,12 +997,13 @@ async function startServer() {
 
   const cleanupExpiredUploads = async () => {
     if (!UPLOADS_CLEANUP_ENABLED) return;
+    const cleanupRoot = mediaStorage?.cacheRoot || privateUploadsRoot;
     const cutoffTime = Date.now() - UPLOADS_RETENTION_DAYS * 24 * 60 * 60 * 1000;
     let removedFiles = 0;
     let removedBytes = 0;
 
     const visitDirectory = async (directoryPath: string, removeEmptyDirectory: boolean): Promise<void> => {
-      if (!isPathInside(path.dirname(directoryPath), directoryPath) && path.resolve(directoryPath) !== path.resolve(privateUploadsRoot)) {
+      if (!isPathInside(path.dirname(directoryPath), directoryPath) && path.resolve(directoryPath) !== path.resolve(cleanupRoot)) {
         return;
       }
 
@@ -1011,7 +1017,7 @@ async function startServer() {
 
       await Promise.all(entries.map(async (entry) => {
         const entryPath = path.resolve(directoryPath, entry.name);
-        if (!isPathInside(privateUploadsRoot, entryPath)) return;
+        if (!isPathInside(cleanupRoot, entryPath)) return;
         if (entry.isDirectory()) {
           await visitDirectory(entryPath, true);
           return;
@@ -1039,7 +1045,7 @@ async function startServer() {
       }
     };
 
-    await visitDirectory(privateUploadsRoot, false);
+    await visitDirectory(cleanupRoot, false);
     if (removedFiles > 0) {
       console.log(`[uploads-cleanup] Removed ${removedFiles} expired file(s), ${(removedBytes / 1024 / 1024).toFixed(1)} MB; retention=${UPLOADS_RETENTION_DAYS}d.`);
     }
@@ -1486,7 +1492,18 @@ async function startServer() {
   const getIndexedAudioAssets = () => readSfxSounds().map(toIndexedAudioAsset);
 
   // Resolve downloads only within the authenticated account’s private storage.
-  app.get('/uploads/*', (req, res, next) => privateDownload(getUploadsDir(), String(req.params[0] || ''), res, next));
+  app.get('/uploads/*', asyncRoute(async (req, res) => {
+    const relative = String(req.params[0] || '');
+    if (mediaStorage) {
+      const entry = mediaStorage.entries(currentUserId())[relative];
+      if (entry) return res.redirect(302, entry.url);
+      await mediaStorage.materialize(currentUserId(), `/uploads/${relative}`);
+      return res.redirect(302, await mediaStorage.publish(currentUserId(), `/uploads/${relative}`));
+    }
+    return privateDownload(getUploadsDir(), relative, res, error => {
+      if (error) res.destroy(error);
+    });
+  }));
   app.get('/favicon.ico', (_req, res) => res.status(204).end());
 
   app.post('/api/sfx/admin/login', (req, res) => {
@@ -1736,6 +1753,15 @@ async function startServer() {
       }
       const byteCount = await streamRequestToFile(req, tempPath);
       if (byteCount <= 0) return res.status(400).json({ error: '未收到音频文件。' });
+      if (mediaStorage) {
+        const uploadFile = `${tempPath}${extension}`;
+        await fs.promises.rename(tempPath, uploadFile);
+        try {
+          const url = await uploadCdnFile(uploadFile, 'library');
+          return res.json({ success: true, fileName: originalName, originalName, sizeBytes: byteCount,
+            url, previewUrl: url, downloadUrl: url, processingStatus: 'ready' });
+        } finally { await safeUnlink(uploadFile); }
+      }
       await fs.promises.rename(tempPath, finalPath);
 
       const encodedKey = encodeURIComponent(storageKey);
@@ -1753,9 +1779,12 @@ async function startServer() {
       });
     } catch (error: any) {
       await safeUnlink(tempPath);
+      logSafeError('library.cdn.upload.failed', error);
       return res.status(error?.status || 500).json({
-        error: error?.message || '音效库文件上传失败。',
+        error: error?.message || '音效库文件上传失败。', code: error?.code,
       });
+    } finally {
+      await safeUnlink(tempPath);
     }
   }));
 
@@ -1764,6 +1793,7 @@ async function startServer() {
     const byId = new Map(readSfxSounds().map(sound => [sound.id, sound]));
     return ids.map(id => {
       const sound = byId.get(id);
+      if (sound && isCdnUrl(sound.url)) return { fileName: safeDownloadFileName(sound.fileName, '音效.wav'), url: sound.url };
       const filePath = resolveLibraryPath(sound?.storageKey);
       return sound && filePath && fs.existsSync(filePath)
         ? { fileName: safeDownloadFileName(sound.fileName, path.basename(filePath)), filePath }
@@ -2546,8 +2576,17 @@ async function startServer() {
   }));
 
   const sendAudioBlob = async (res: express.Response, blob: Blob) => {
+    const bytes = Buffer.from(await blob.arrayBuffer());
+    if (mediaStorage) {
+      const extension = blob.type.includes('wav') ? '.wav' : blob.type.includes('ogg') ? '.ogg' : '.mp3';
+      const fileName = `generated_${randomUUID()}${extension}`;
+      const file = path.join(getUploadsDir(), fileName);
+      await fs.promises.writeFile(file, bytes);
+      const url = await mediaStorage.publish(currentUserId(), `/uploads/${fileName}`);
+      res.setHeader('X-Audio-CDN-URL', url);
+    }
     res.setHeader('Content-Type', blob.type || 'audio/mpeg');
-    return res.send(Buffer.from(await blob.arrayBuffer()));
+    return res.send(bytes);
   };
 
   app.post('/api/audio/decode', upload.single('media'), asyncRoute(async (req, res) => {

@@ -10,6 +10,8 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { currentUploadDirectory, currentUserId, resolvePrivateDownload, privateDownload } from './serverSecurity';
+import { getMediaStorage } from './mediaStorage';
+import { isCdnUrl } from './cdnStorage';
 import { createMcpAudioTools } from './mcpAudioTools';
 import { isMcpApiAllowed, type createMcpAccess } from './mcpAccess';
 import { safeAgentName, type AgentToolContext } from './assistantAgentTools';
@@ -71,6 +73,14 @@ export function createAudioMcp(options: Options) {
     const headers = { authorization: req.get('authorization')!, origin: options.origin };
     const persist = () => writeJson(path.join(ownerDir(owner), 'assets.json'), assets);
     const filePath = (a: AssistantAsset) => {
+      const storage = getMediaStorage();
+      if (storage && isCdnUrl(a.url)) {
+        const relative = storage.relative(owner, a.url);
+        if (!relative) throw new Error('文件不存在或无权访问。');
+        const file = storage.local(owner, relative);
+        if (!fs.existsSync(file)) throw new Error('文件尚未加载，请重试。');
+        return file;
+      }
       if (!a.url.startsWith('/uploads/')) throw new Error('无效文件。');
       const relative = decodeURIComponent(a.url.slice('/uploads/'.length));
       const existing = resolvePrivateDownload(directory, relative);
@@ -87,6 +97,20 @@ export function createAudioMcp(options: Options) {
       return result;
     };
     const register = async (url: string, name: string, generated = true): Promise<AssistantAsset> => {
+      const storage = getMediaStorage();
+      if (storage && isCdnUrl(url)) {
+        const file = await storage.importUrl(owner, url);
+        const stat = fs.statSync(file);
+        const existing = assets.find(a => a.url === url);
+        const value: AssistantAsset = { id: existing?.id || randomUUID(), name: safeAgentName(name), url, mimeType: mimeFor(name), size: stat.size,
+          generated, duration: /^(?:audio|video)\//.test(mimeFor(name)) ? await probeDuration(options.ffmpeg, file, signal) : undefined };
+        try {
+          const source = JSON.parse(fs.readFileSync(`${file}.source.json`, 'utf8'));
+          value.metadata = Object.fromEntries(['source', 'sourceUrl', 'title', 'querySource', 'capturedAt'].filter(key => typeof source[key] === 'string').map(key => [key, source[key]]));
+        } catch { /* Generated audio has no external provenance. */ }
+        if (existing) Object.assign(existing, value); else assets.push(value);
+        persist(); return value;
+      }
       if (!url.startsWith('/uploads/')) {
         if (!/^\/api\/sfx\/library\/stream\?key=/.test(url)) throw new Error('不支持的产物来源。');
         const response = await fetch(`${localOrigin}${url}`, { headers, signal, redirect: 'error' });
@@ -109,7 +133,8 @@ export function createAudioMcp(options: Options) {
         return copied;
       }
       const existing = assets.find(a => a.url === url);
-      const value: AssistantAsset = { id: existing?.id || randomUUID(), name: safeAgentName(name), url, mimeType: mimeFor(name), size: stat.size,
+      const storedUrl = storage ? await storage.publish(owner, url) : url;
+      const value: AssistantAsset = { id: existing?.id || randomUUID(), name: safeAgentName(name), url: storedUrl, mimeType: mimeFor(name), size: stat.size,
         generated, duration: /^(?:audio|video)\//.test(mimeFor(name)) ? await probeDuration(options.ffmpeg, disk, signal) : undefined };
       if (existing) Object.assign(existing, value); else assets.push(value);
       persist(); return value;
@@ -134,7 +159,11 @@ export function createAudioMcp(options: Options) {
       const form = body instanceof FormData;
       let payload: BodyInit | undefined;
       const outgoing: Record<string, string> = { ...headers, ...extraHeaders };
-      if (method === 'RAW') { payload = await fs.promises.readFile(filePath(asset(String((body as any).rawAssetId)))); outgoing['content-type'] = 'application/octet-stream'; }
+      if (method === 'RAW') {
+        const source = asset(String((body as any).rawAssetId));
+        if (getMediaStorage() && isCdnUrl(source.url)) await getMediaStorage()!.importUrl(owner, source.url);
+        payload = await fs.promises.readFile(filePath(source)); outgoing['content-type'] = 'application/octet-stream';
+      }
       else if (form) payload = body;
       else if (body) { payload = JSON.stringify(body); outgoing['content-type'] = 'application/json'; }
       const response = await fetch(`${localOrigin}${endpoint}`, { method: verb, headers: outgoing, body: payload,
@@ -234,7 +263,16 @@ export function createAudioMcp(options: Options) {
     add('cancel_audio_job', '停止本人的后台任务，已完成的文件保留；已发生的上游消耗按原积分规则记录。', { jobId: { type: 'string' } }, ['jobId'], async a => {
       const job = readJob(owner, a.jobId); controllers.get(job.id)?.abort(); return { id: job.id, cancellationRequested: job.status === 'running', status: job.status };
     });
-    return tools;
+    return tools.map(tool => ({ ...tool, execute: async args => {
+      const storage = getMediaStorage();
+      if (storage) {
+        const parameters = JSON.stringify(args);
+        for (const asset of c.assets) {
+          if (isCdnUrl(asset.url) && parameters.includes(JSON.stringify(asset.id))) await storage.importUrl(owner, asset.url);
+        }
+      }
+      return tool.execute(args);
+    } }));
   };
   router.all('/mcp', async (req, res, next) => {
     if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); return res.status(405).json({ jsonrpc: '2.0', id: null, error: { code: -32000, message: 'Use POST with Streamable HTTP.' } }); }
@@ -275,6 +313,7 @@ export function createAudioMcp(options: Options) {
   router.get('/api/mcp/files/:id', (req, res, next) => {
     const asset = ownerAssets(currentUserId()).find(a => a.id === req.params.id);
     if (!asset) return res.status(404).json({ error: '文件不存在或无权访问。' });
+    if (isCdnUrl(asset.url)) return res.redirect(302, asset.url);
     return privateDownload(currentUploadDirectory(), decodeURIComponent(asset.url.slice('/uploads/'.length)), res, next, asset.name);
   });
   return router;

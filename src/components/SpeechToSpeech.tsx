@@ -1,3 +1,4 @@
+import { createMediaUrl } from '../services/mediaClient';
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
@@ -303,8 +304,8 @@ export default function SpeechToSpeech({
         generateSpeechToSpeech(stsFile, stsVoiceRole),
         generateSpeechToSpeech(stsFile, stsVoiceRole),
       ]);
-      const urlA = URL.createObjectURL(blobA);
-      const urlB = URL.createObjectURL(blobB);
+      const urlA = createMediaUrl(blobA);
+      const urlB = createMediaUrl(blobB);
       setStsAudioUrl(urlA);
 
       const matchedVoice = displayVoices.find(v => v.id === stsVoiceRole);

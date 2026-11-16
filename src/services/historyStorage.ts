@@ -1,10 +1,9 @@
 import type { HistoryItem } from '../types';
+import { persistMediaUrl, uploadMediaBlob } from './mediaClient';
 
 const DB_NAME = 'ai-audio-history-v1';
 const STORE_NAME = 'entries';
 const METADATA_KEY = 'ai-audio-history-metadata-v1';
-const MAX_BINARY_ENTRIES = 50;
-const MAX_BINARY_BYTES = 500 * 1024 * 1024;
 
 type StoredHistoryEntry = {
   id: string;
@@ -13,7 +12,6 @@ type StoredHistoryEntry = {
   attachmentBlobs?: Blob[];
 };
 
-const blobCache = new Map<string, Blob>();
 
 const canUseIndexedDb = () => typeof window !== 'undefined' && 'indexedDB' in window;
 
@@ -67,7 +65,7 @@ export async function loadPersistentHistory(): Promise<HistoryItem[]> {
         });
         return {
           ...item,
-          ...(stored?.blob ? { url: URL.createObjectURL(stored.blob) } : {}),
+          ...(stored?.blob && !item.url?.startsWith('https://') ? { url: URL.createObjectURL(stored.blob) } : {}),
           ...(attachments ? { attachments } : {}),
         };
       });
@@ -79,78 +77,27 @@ export async function loadPersistentHistory(): Promise<HistoryItem[]> {
 }
 
 export async function persistHistory(items: HistoryItem[]): Promise<void> {
-  try {
-    window.localStorage.setItem(METADATA_KEY, JSON.stringify(items.map(item => ({
-      ...item,
-      // Blob URLs are tab-scoped; IndexedDB (when available) restores the file.
-      // Keep the metadata record usable in browsers without IndexedDB.
-      ...(item.url?.startsWith('blob:') ? { url: '' } : {}),
-    }))));
-  } catch {
-    // Storage quota or privacy mode should not interrupt generation.
-  }
+  // Upload first. A failed upload leaves the previous persisted history intact.
+  const saved = await Promise.all(items.map(async item => ({
+    ...item,
+    url: await persistMediaUrl(item.url, item.title),
+    attachments: item.attachments ? await Promise.all(item.attachments.map(async ({ file, ...attachment }) => ({
+      ...attachment,
+      url: file ? await uploadMediaBlob(file, attachment.name) : attachment.url,
+    }))) : undefined,
+  })));
+  window.localStorage.setItem(METADATA_KEY, JSON.stringify(saved));
   if (!canUseIndexedDb()) return;
   const database = await openDatabase();
   try {
-    const entries: StoredHistoryEntry[] = [];
-    let binaryEntryCount = 0;
-    let binaryBytes = 0;
-    for (const item of items) {
-      const entry: StoredHistoryEntry = {
-        id: item.id,
-        item: {
-          ...item,
-          attachments: item.attachments?.map(({ file: _file, ...metadata }) => metadata),
-        },
-      };
-      if (item.url.startsWith('blob:') && binaryEntryCount < MAX_BINARY_ENTRIES) {
-        try {
-          const cachedBlob = blobCache.get(item.url);
-          if (cachedBlob) {
-            if (binaryBytes + cachedBlob.size <= MAX_BINARY_BYTES) {
-              entry.blob = cachedBlob;
-              binaryEntryCount += 1;
-              binaryBytes += cachedBlob.size;
-            }
-          } else {
-            const response = await fetch(item.url);
-            if (response.ok) {
-              const blob = await response.blob();
-              blobCache.set(item.url, blob);
-              if (binaryBytes + blob.size <= MAX_BINARY_BYTES) {
-                entry.blob = blob;
-                binaryEntryCount += 1;
-                binaryBytes += blob.size;
-              }
-            }
-          }
-        } catch {
-          // A revoked object URL can no longer be copied; keep its metadata.
-        }
-      }
-      const attachmentFiles = item.attachments?.map(attachment => attachment.file).filter(Boolean) as File[] | undefined;
-      if (attachmentFiles && attachmentFiles.length > 0 && binaryBytes < MAX_BINARY_BYTES) {
-        const available = MAX_BINARY_BYTES - binaryBytes;
-        const attachmentBytes = attachmentFiles.reduce((total, file) => total + file.size, 0);
-        // Keep attachment indexes aligned with metadata; skip the whole set if
-        // it would exceed the remaining budget.
-        if (attachmentBytes <= available) {
-          entry.attachmentBlobs = attachmentFiles;
-          binaryBytes += attachmentBytes;
-        }
-      }
-      entries.push(entry);
-    }
     await new Promise<void>((resolve, reject) => {
       const transaction = database.transaction(STORE_NAME, 'readwrite');
       const store = transaction.objectStore(STORE_NAME);
       store.clear();
-      entries.forEach(entry => store.put(entry));
+      saved.forEach(item => store.put({ id: item.id, item }));
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error || new Error('Unable to write history storage'));
       transaction.onabort = () => reject(transaction.error || new Error('Unable to write history storage'));
     });
-  } finally {
-    database.close();
-  }
+  } finally { database.close(); }
 }

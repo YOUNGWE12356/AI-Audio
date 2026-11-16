@@ -228,7 +228,7 @@ test('real server rejects audited attacks and preserves an authenticated upload/
   fs.writeFileSync(path.join(directory, '.env'), 'LEAK_SENTINEL=private-test-value');
   const serverPath = fileURLToPath(new URL('../../server.ts', import.meta.url));
   const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), serverPath], { cwd: directory,
-    env: { ...process.env, NODE_ENV: 'production', PORT: String(port), APP_ORIGIN: origin, AUTH_USERS_JSON: accounts,
+    env: { ...process.env, NODE_ENV: 'production', MEDIA_STORAGE_MODE: 'local', PORT: String(port), APP_ORIGIN: origin, AUTH_USERS_JSON: accounts,
       SFX_LIBRARY_ADMIN_PASSWORD: adminPassword, UPLOADS_CLEANUP_ENABLED: 'false',
       OPENAI_API_KEY: '', ARK_API_KEY: '', TOKENHUB_API_KEY: '', ELEVENLABS_API_KEY: '', ELEVENLABS_FALLBACK_API_KEY: '', ELEVENLABS_API_KEYS: '' },
     stdio: ['ignore', 'pipe', 'pipe'] });

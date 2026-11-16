@@ -1,3 +1,4 @@
+import { createMediaUrl } from './services/mediaClient';
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
@@ -182,9 +183,12 @@ export default function App() {
     };
   }, []);
 
+  const historySaveQueue = useRef<Promise<void>>(Promise.resolve());
   useEffect(() => {
     if (!historyHydrated) return;
-    void persistHistory(historyList).catch(() => undefined);
+    historySaveQueue.current = historySaveQueue.current.then(() => persistHistory(historyList)).catch(error => {
+      console.error('Failed to save history media to CDN:', error);
+    });
   }, [historyHydrated, historyList]);
 
   // Audio Director States
@@ -725,8 +729,8 @@ export default function App() {
           ...sharedVoiceOptions,
         },
       );
-      const urlA = URL.createObjectURL(blobA);
-      const urlB = URL.createObjectURL(blobB);
+      const urlA = createMediaUrl(blobA);
+      const urlB = createMediaUrl(blobB);
       
       // Auto-set standard URL to Option A for direct back-compatibility/default play controls if needed
       setStandaloneVoiceAudioUrl(urlA);
@@ -834,7 +838,7 @@ export default function App() {
           const durationLabel = `${Number(result.duration.toFixed(2))}秒`;
           const details = `${durationLabel} · 48kHz WAV${result.generationPrompt !== prompt ? ' · 已自动英译' : ''}`;
           const option = {
-            url: URL.createObjectURL(result.blob),
+            url: createMediaUrl(result.blob),
             title: `${baseTitle}（版本 ${result.version}）`,
             prompt, timestamp, details, duration: result.duration,
           };
@@ -923,7 +927,7 @@ export default function App() {
         );
         return {
           id,
-          url: URL.createObjectURL(blob),
+          url: createMediaUrl(blob),
           title: `${baseTitle}（版本 ${id}）`,
           prompt,
           timestamp,
@@ -1371,7 +1375,7 @@ export default function App() {
     ].join('\n');
     
     const blob = new Blob(['\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
+    const url = createMediaUrl(blob);
     const link = document.createElement('a');
     link.setAttribute('href', url);
     link.setAttribute('download', `${scheme.title || '音频排程表'}.csv`);

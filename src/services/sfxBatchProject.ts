@@ -1,9 +1,11 @@
 import { batchFileStem, uniqueBatchFileNames, type SfxBatchRequirement } from './sfxBatch';
+import { createMediaUrl, persistMediaUrl, readMediaBlob, rememberMediaUrl, uploadMediaBlob } from './mediaClient';
 import type { AudioDownloadRange } from './audioRangeExport';
 export type BatchVersion = {
   id: string; title: string; kind: 'search' | 'generate'; source?: string; sourceUrl?: string; ticketId?: string;
   url?: string; blob?: Blob; duration?: number; draftRange?: AudioDownloadRange | null;
   confirmedBlob?: Blob; confirmedRange?: AudioDownloadRange;
+  confirmedUrl?: string;
 };
 export type BatchRow = SfxBatchRequirement & {
   selected: boolean; versions: BatchVersion[]; activeVersionId?: string; confirmedVersionId?: string; confirmedVersionIds?: string[];
@@ -43,7 +45,7 @@ export function unconfirmBatchVersion(row: BatchRow, id: string): BatchRow {
     ...(row.placedVersionId === id ? { placedVersionId: undefined } : {}),
     status: ids.length ? '已确认音效' : row.versions.length ? '待试听与确认' : '待制作',
     versions: row.versions.map(version => version.id === id
-      ? { ...version, confirmedBlob: undefined, confirmedRange: undefined } : version) };
+      ? { ...version, confirmedBlob: undefined, confirmedUrl: undefined, confirmedRange: undefined } : version) };
 }
 export function updateBatchVersionRange(row: BatchRow, id: string, range: AudioDownloadRange | null): BatchRow {
   const version = row.versions.find(version => version.id === id);
@@ -93,7 +95,7 @@ export function restoreBatchProjectRow(row: BatchRow): BatchRow {
   return { ...row, error,
     status: error ? '制作失败，可重试' : confirmedVersion(row) ? '已确认剪辑' : row.versions.length ? '待试听与确认' : '待制作',
     versions: row.versions.map(v => ({ ...v,
-      url: v.blob ? URL.createObjectURL(v.blob) : v.url?.startsWith('/uploads/') ? v.url : undefined })),
+      url: v.blob ? createMediaUrl(v.blob) : /^(?:https:\/\/|\/uploads\/)/.test(v.url || '') ? v.url : undefined })),
   };
 }
 export async function loadBatchProject(): Promise<BatchRow[]> {
@@ -103,16 +105,26 @@ export async function loadBatchProject(): Promise<BatchRow[]> {
       const req = db.transaction('project').objectStore('project').get('current');
       req.onsuccess = () => resolve(Array.isArray(req.result) ? req.result : []); req.onerror = () => reject(req.error);
     });
-    return rows.map(restoreBatchProjectRow);
+    return Promise.all(rows.map(async row => restoreBatchProjectRow({ ...row, versions: await Promise.all(row.versions.map(async version => ({
+      ...version,
+      confirmedBlob: version.confirmedBlob || (version.confirmedUrl ? await fetch(version.confirmedUrl, { referrerPolicy: 'no-referrer' }).then(response => {
+        if (!response.ok) throw new Error('已确认音效加载失败，请检查网络后重试。');
+        return readMediaBlob(response);
+      }) : undefined),
+    }))) })));
   } finally { db.close(); }
 }
 export async function saveBatchProject(rows: BatchRow[]) {
+  const saved = await Promise.all(rows.map(async row => ({ ...row, versions: await Promise.all(row.versions.map(async ({ blob, confirmedBlob, ...version }) => ({
+    ...version,
+    url: blob ? await uploadMediaBlob(blob, `${row.name}.wav`) : version.url ? await persistMediaUrl(version.url, row.name) : undefined,
+    confirmedUrl: confirmedBlob ? await uploadMediaBlob(confirmedBlob, `${row.name}_confirmed.wav`) : version.confirmedUrl,
+  }))) })));
   const db = await open();
   try {
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction('project', 'readwrite');
-      tx.objectStore('project').put(rows.map(row => ({ ...row, versions: row.versions.map(v => ({ ...v,
-        url: v.url?.startsWith('blob:') ? undefined : v.url })) })), 'current');
+      tx.objectStore('project').put(saved, 'current');
       tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error);
     });
   } finally { db.close(); }
@@ -120,19 +132,27 @@ export async function saveBatchProject(rows: BatchRow[]) {
 export async function loadBatchVideo(): Promise<BatchVideoAsset | null> {
   const db = await open();
   try {
-    return await new Promise((resolve, reject) => {
+    const video = await new Promise<any>((resolve, reject) => {
       const req = db.transaction('project').objectStore('project').get('video');
-      req.onsuccess = () => resolve(req.result?.file instanceof Blob ? req.result : null);
+      req.onsuccess = () => resolve(req.result || null);
       req.onerror = () => reject(req.error);
     });
+    if (!video || video.file instanceof Blob) return video;
+    if (!video.url) return null;
+    const response = await fetch(video.url, { referrerPolicy: 'no-referrer' });
+    if (!response.ok) throw new Error('视频加载失败，请检查网络后重试。');
+    const file = new File([await readMediaBlob(response)], video.name, { type: video.type });
+    rememberMediaUrl(file, video.url);
+    return { id: video.id, file };
   } finally { db.close(); }
 }
 export async function saveBatchVideo(video: BatchVideoAsset | null) {
+  const saved = video ? { id: video.id, name: video.file.name, type: video.file.type, url: await uploadMediaBlob(video.file, video.file.name) } : null;
   const db = await open();
   try {
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction('project', 'readwrite');
-      if (video) tx.objectStore('project').put(video, 'video');
+      if (saved) tx.objectStore('project').put(saved, 'video');
       else tx.objectStore('project').delete('video');
       tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error);
     });

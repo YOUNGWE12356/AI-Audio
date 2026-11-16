@@ -1266,8 +1266,8 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     const sourceUrl = getAudioDownloadUrl(sound);
     let downloadUrl = sourceUrl;
     try {
-      if (sound.storageKey) {
-        const response = await fetch(sourceUrl);
+      if (sound.storageKey || /^https:\/\//.test(sourceUrl)) {
+        const response = await fetch(sourceUrl, { referrerPolicy: 'no-referrer' });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         downloadUrl = URL.createObjectURL(await response.blob());
       }
@@ -3092,15 +3092,6 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
       if (isSuccess) {
         item.status = 'saving';
         
-        let slug = 'foley';
-        if (item.category === '角色与拟音') slug = 'foley';
-        else if (item.category === '武器与战斗') slug = 'weapons';
-        else if (item.category === '魔法与奇幻') slug = 'magic';
-        else if (item.category === '怪兽与生物') slug = 'creatures';
-        else if (item.category === '环境与声景') slug = 'ambient';
-        else if (item.category === '系统与界面') slug = 'ui';
-        else if (item.category === '全部音乐') slug = 'music';
-
         const fileUrl = finalFileUrl || (item.originalFile ? URL.createObjectURL(item.originalFile) : 'https://assets.mixkit.co/active_storage/sfx/2568/2568-84.wav');
 
         const newSound: SoundEffect = {
@@ -3117,15 +3108,15 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
           sampleRate: '48.0 kHz',
           channels: Math.random() > 0.4 ? 'Stereo' : 'Mono',
           designer: 'AD_Design (音效师)',
-          path: item.category === '全部音乐' ? `assets/music/${slug}/${cleanFilenameOnServer || item.fileName}` : `assets/sfx/${slug}/${cleanFilenameOnServer || item.fileName}`,
+          path: fileUrl,
           url: fileUrl,
           storageKey: storageKey || undefined,
           previewUrl: previewUrl || undefined,
           downloadUrl: downloadUrl || undefined,
-          processingStatus: storageKey ? 'ready' : undefined,
+          processingStatus: finalFileUrl ? 'ready' : undefined,
         };
 
-        if (item.originalFile && !storageKey) {
+        if (item.originalFile && !finalFileUrl) {
           uploadedFilesRef.current[newSound.fileName] = item.originalFile;
           uploadedFilesRef.current[newSound.name] = item.originalFile;
           saveFileToDB(newSound.fileName, item.originalFile);

@@ -1,4 +1,6 @@
 import { logEvent } from './safeLogging';
+import { getMediaStorage } from './mediaStorage';
+import { isCdnUrl } from './cdnStorage';
 import { uploadDirectory, currentUserId, type UploadDirectory } from './serverSecurity';
 import { randomUUID } from 'node:crypto';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
@@ -369,12 +371,18 @@ export function createMusicSeparationRouter({
     'cancelled',
   ]);
 
-  const getManifestPath = (directoryPath: string) => path.resolve(directoryPath, JOB_MANIFEST_FILE);
+  const getManifestPath = (directoryPath: string) => {
+    const storage = getMediaStorage();
+    if (!storage) return path.resolve(directoryPath, JOB_MANIFEST_FILE);
+    const folder = path.join(storage.dataDir, 'media-jobs', path.basename(path.dirname(directoryPath)));
+    fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
+    return path.join(folder, `${path.basename(directoryPath)}.json`);
+  };
 
   const persistJob = (job: MusicSeparationJob) => {
     if (!fs.existsSync(job.directoryPath)) return;
     const manifestPath = getManifestPath(job.directoryPath);
-    if (!isPathInside(job.directoryPath, manifestPath)) return;
+    if (!getMediaStorage() && !isPathInside(job.directoryPath, manifestPath)) return;
     const temporaryPath = `${manifestPath}.${process.pid}.tmp`;
     const { childProcess: _childProcess, ...serializableJob } = job;
     const persisted: PersistedMusicSeparationJob = { version: 1, ...serializableJob };
@@ -419,17 +427,17 @@ export function createMusicSeparationRouter({
           || path.basename(fileName) !== fileName
           || !filePath
           || !isPathInside(outputDir, filePath)
-          || !fs.existsSync(filePath)
+          || (!isCdnUrl(stem.audioUrl) && !fs.existsSync(filePath))
         ) return [];
-        const stemStat = fs.statSync(filePath);
+        const stemSize = isCdnUrl(stem.audioUrl) ? Number(stem.size) || 0 : fs.statSync(filePath).size;
         const persistedWaveform = normalizeWaveform(stem.waveform);
-        const waveInfo = persistedWaveform.length === 0 ? readWaveInfo(filePath) : null;
+        const waveInfo = persistedWaveform.length === 0 && fs.existsSync(filePath) ? readWaveInfo(filePath) : null;
         return [{
           id: idValue,
           name: typeof stem.name === 'string' ? stem.name : STEM_LABELS[idValue as keyof typeof STEM_LABELS],
           fileName,
-          audioUrl: `/uploads/${encodeURIComponent(path.basename(directoryPath))}/stems/${encodeURIComponent(fileName)}`,
-          size: stemStat.size,
+          audioUrl: isCdnUrl(stem.audioUrl) ? String(stem.audioUrl) : `/uploads/${encodeURIComponent(path.basename(directoryPath))}/stems/${encodeURIComponent(fileName)}`,
+          size: stemSize,
           duration: asFiniteNumber(stem.duration),
           sampleRate: asFiniteNumber(stem.sampleRate, 44_100),
           rmsDb: typeof stem.rmsDb === 'number' && Number.isFinite(stem.rmsDb) ? stem.rmsDb : null,
@@ -440,12 +448,13 @@ export function createMusicSeparationRouter({
         }];
       }) : [];
       const zipPath = path.resolve(directoryPath, `music-stems-${id}.zip`);
-      if (status === 'completed' && (stems.length === 0 || !fs.existsSync(zipPath))) return null;
+      if (status === 'completed' && (stems.length === 0 || (!isCdnUrl(raw.zipUrl) && !fs.existsSync(zipPath)))) return null;
       const rawSourcePath = typeof raw.sourcePath === 'string' ? path.resolve(raw.sourcePath) : '';
       const sourcePath = rawSourcePath && isPathInside(directoryPath, rawSourcePath)
         ? rawSourcePath
         : path.resolve(directoryPath, 'source');
-      const directoryStat = fs.statSync(directoryPath);
+      fs.mkdirSync(directoryPath, { recursive: true });
+      const directoryStat = fs.statSync(manifestPath);
       const job: MusicSeparationJob = {
         id, owner: currentUserId(),
         mode: raw.mode === 'vocals' ? 'vocals' : 'stems',
@@ -465,7 +474,7 @@ export function createMusicSeparationRouter({
         duration: raw.duration === undefined ? undefined : asFiniteNumber(raw.duration),
         sampleRate: raw.sampleRate === undefined ? undefined : asFiniteNumber(raw.sampleRate, 44_100),
         stems,
-        zipUrl: status === 'completed' ? `/api/audio/music-separation/jobs/${id}/download` : undefined,
+        zipUrl: status === 'completed' ? (isCdnUrl(raw.zipUrl) ? String(raw.zipUrl) : `/api/audio/music-separation/jobs/${id}/download`) : undefined,
       };
       jobs.set(jobKey(id), job);
       persistJob(job);
@@ -836,6 +845,12 @@ export function createMusicSeparationRouter({
         stems: deliveredStems,
       });
       await generateZip(job, zipPath);
+      const mediaStorage = getMediaStorage();
+      let zipUrl = `/api/audio/music-separation/jobs/${job.id}/download`;
+      if (mediaStorage) {
+        for (const stem of job.stems) stem.audioUrl = await mediaStorage.publish(job.owner, stem.audioUrl);
+        zipUrl = await mediaStorage.publish(job.owner, `/uploads/${path.basename(job.directoryPath)}/${path.basename(zipPath)}`);
+      }
       if (job.cancelRequested) throw Object.assign(new Error('任务已取消。'), { code: 'JOB_CANCELLED' });
       await fs.promises.unlink(normalizedInputPath).catch(() => undefined);
       updateJob(job, {
@@ -843,7 +858,7 @@ export function createMusicSeparationRouter({
         stage: 'completed',
         progress: 100,
         message: job.mode === 'vocals' ? '本地人声分离完成' : `高质量分轨完成，共生成 ${stems.length} 条有效轨道`,
-        zipUrl: `/api/audio/music-separation/jobs/${job.id}/download`,
+        zipUrl,
       });
     } catch (error) {
       const isCancelled = job.cancelRequested || (error as { code?: string })?.code === 'JOB_CANCELLED';
@@ -1033,6 +1048,7 @@ export function createMusicSeparationRouter({
     }
     const stem = job.stems.find(item => item.id === stemId);
     if (!stem) return res.status(404).json({ error: '人声分离音轨不存在。' });
+    if (isCdnUrl(stem.audioUrl)) return res.redirect(302, stem.audioUrl);
     const filePath = path.resolve(job.directoryPath, 'stems', stem.fileName);
     if (!isPathInside(job.directoryPath, filePath) || !fs.existsSync(filePath)) {
       return res.status(404).json({ error: '音轨文件已失效，请重新处理。' });
@@ -1043,6 +1059,7 @@ export function createMusicSeparationRouter({
   router.get('/jobs/:id/download', (req, res, next) => {
     const job = getJob(req.params.id);
     if (!job || job.status !== 'completed') return res.status(404).json({ error: '分轨压缩包尚未生成。' });
+    if (isCdnUrl(job.zipUrl)) return res.redirect(302, job.zipUrl!);
     const zipPath = path.resolve(job.directoryPath, `music-stems-${job.id}.zip`);
     if (!isPathInside(job.directoryPath, zipPath) || !fs.existsSync(zipPath)) {
       return res.status(404).json({ error: '分轨压缩包已失效，请重新处理。' });

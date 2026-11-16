@@ -1,3 +1,4 @@
+import { createMediaUrl, readMediaBlob } from '../services/mediaClient';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown, Download, FileUp, Loader2, Plus, RotateCcw, Search, Sparkles, Trash2, X } from 'lucide-react';
 import BatchSfxInspector from './BatchSfxInspector';
@@ -27,7 +28,7 @@ async function api(path: string, body: unknown, timeout = 150_000) {
       throw new Error(data.error || data.message || `请求失败（${response.status}）`);
     }
     // Consume the body before releasing the timeout.
-    return path.includes('sound-effect') ? await response.blob() : await response.json();
+    return path.includes('sound-effect') ? await readMediaBlob(response) : await response.json();
   } catch (error) {
     if (controller.signal.aborted) throw new Error('请求超时，请稍后重试；生成请求不会自动重复扣费。');
     throw error;
@@ -87,8 +88,8 @@ export default function BatchSfxStudio({ active = true, inputRequest = null }: {
       saved.forEach(r => r.versions.forEach(v => { if (v.url?.startsWith('blob:')) urls.current.add(v.url); }));
       setRows(saved); setActiveRowId(saved[0]?.id || ''); setSourceExpanded(!saved.length);
       setVideoAsset(video); if (video) setFile(video.file);
-    }).catch(() => { if (mounted) setStorageWarning('浏览器存储不可用，离开页面后本次制作可能丢失，请及时下载。'); })
-      .finally(() => { if (mounted) setHydrated(true); });
+      setHydrated(true);
+    }).catch(() => { if (mounted) setStorageWarning('已保存工程加载失败，请检查网络后刷新重试。原有工程不会被空白内容覆盖。'); });
     return () => { mounted = false; stopRef.current = true; urls.current.forEach(url => URL.revokeObjectURL(url)); };
   }, []);
   useEffect(() => {
@@ -114,7 +115,7 @@ export default function BatchSfxStudio({ active = true, inputRequest = null }: {
     if (!hydrated || clearing) return;
     const timer = setTimeout(() => {
       projectSaveTimer.current = null;
-      projectSaveQueue.current = projectSaveQueue.current.then(() => saveBatchProject(rows)).catch(() => setStorageWarning('本地保存失败，可能存储空间不足，请及时下载已确认音效。'));
+      projectSaveQueue.current = projectSaveQueue.current.then(() => saveBatchProject(rows)).catch(() => setStorageWarning('素材保存到 CDN 失败，请检查网络后重试；已确认音效仍可下载。'));
     }, 700);
     projectSaveTimer.current = timer;
     return () => clearTimeout(timer);
@@ -134,10 +135,10 @@ export default function BatchSfxStudio({ active = true, inputRequest = null }: {
   const patchVersion = (rowId: string, versionId: string, update: (v: BatchVersion) => BatchVersion) => {
     patchRow(rowId, row => ({ ...row, versions: row.versions.map(v => v.id === versionId ? update(v) : v) }));
   };
-  const ownUrl = (blob: Blob) => { const url = URL.createObjectURL(blob); urls.current.add(url); return url; };
+  const ownUrl = (blob: Blob) => { const url = createMediaUrl(blob); urls.current.add(url); return url; };
   const storeVideo = (video: BatchVideoAsset | null) => {
     setVideoAsset(video); setVideoDuration(0);
-    videoSaveQueue.current = videoSaveQueue.current.then(() => saveBatchVideo(video)).catch(() => setStorageWarning('视频本地保存失败，请重新上传视频；音效需求和已制作音频会继续保存。'));
+    videoSaveQueue.current = videoSaveQueue.current.then(() => saveBatchVideo(video)).catch(() => setStorageWarning('视频保存到 CDN 失败，请检查网络后重新上传；已制作音频仍保留。'));
   };
   const clearWorkspace = async () => {
     if (busyRef.current || !hydrated || zipping || clearing) return;
@@ -235,13 +236,13 @@ export default function BatchSfxStudio({ active = true, inputRequest = null }: {
   const capture = async (rowId: string, version: BatchVersion) => {
     if (version.blob && version.url) return;
     patchRow(rowId, { status: '正在读取试听音频…' });
-    const result = await api('/api/ai/sfx-batch/capture', { id: version.ticketId }, 65_000);
+    const result = version.url && /^https:\/\//.test(version.url) ? { url: version.url } : await api('/api/ai/sfx-batch/capture', { id: version.ticketId }, 65_000);
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 35_000);
     let blob: Blob;
     try {
       const response = await fetch(result.url, { signal: controller.signal });
       if (!response.ok) throw new Error('试听音频下载失败，请重新搜索。');
-      blob = await response.blob();
+      blob = await readMediaBlob(response);
     } finally { clearTimeout(timer); }
     const url = ownUrl(blob);
     patchVersion(rowId, version.id, v => ({ ...v, blob, url }));

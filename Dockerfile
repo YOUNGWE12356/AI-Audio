@@ -17,6 +17,7 @@ RUN npm ci --include=dev --no-audit --no-fund \
 COPY index.html metadata.json tsconfig.json vite.config.ts server.ts ./
 COPY src ./src
 COPY tests ./tests
+COPY scripts ./scripts
 COPY tools ./tools
 RUN npm run check && npm prune --omit=dev --no-audit --no-fund
 

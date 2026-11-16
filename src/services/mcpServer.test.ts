@@ -13,6 +13,7 @@ import { createMcpAccess, createMcpAccessRouter, isMcpApiAllowed } from './mcpAc
 import { createAudioMcp } from './mcpServer';
 import { createSearchBillingBatches } from './searchBillingBatches';
 import { createServerSecurity, currentUserId, currentUploadDirectory } from './serverSecurity';
+import { configureMediaStorage, MediaStorage } from './mediaStorage';
 
 const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), 't1-audio-mcp-'));
 const user = (id: string) => ({ id: `account:${id}`, displayName: id, identitySource: 'account' as const });
@@ -35,14 +36,31 @@ test('personal tokens persist hashes only, expire and revoke; route scopes exclu
   assert.ok(isMcpApiAllowed('POST', '/api/ai/elevenlabs/voice'));
 });
 
-test('official MCP client: authentication, coverage, real FFmpeg trim, downloads, job deduplication and account isolation', async t => {
+for (const cdn of [false, true]) test(`official MCP client (${cdn ? 'CDN' : 'local'}): authentication, FFmpeg trim, downloads, jobs and account isolation`, async t => {
   const dir = temp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const previousDomain = process.env.QINIU_CDN_DOMAIN;
+  const domain = 'https://cdn.example.test';
+  process.env.QINIU_CDN_DOMAIN = domain;
+  const remote = new Map<string, Buffer>();
+  const storage = cdn ? new MediaStorage(path.join(dir, 'data'), async file => {
+    const url = `${domain}/ai-audio/${path.basename(file)}`;
+    remote.set(url, fs.readFileSync(file)); return url;
+  }, async (url, file) => {
+    assert(remote.has(url)); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, remote.get(url)!);
+  }) : undefined;
+  configureMediaStorage(path.join(dir, 'data'), storage || null);
+  t.after(() => {
+    configureMediaStorage(dir, null);
+    if (storage) fs.rmSync(storage.cacheRoot, { recursive: true, force: true });
+    if (previousDomain === undefined) delete process.env.QINIU_CDN_DOMAIN; else process.env.QINIU_CDN_DOMAIN = previousDomain;
+  });
   const origin = 'https://audio.example.test', password = 'test-account-only-long-password', salt = randomBytes(16);
   const passwordHash = `scrypt$${salt.toString('hex')}$${scryptSync(password, salt, 64, { N: 32768, maxmem: 64 * 1024 * 1024 }).toString('hex')}`;
   const access = createMcpAccess(path.join(dir, 'mcp'));
-  const security = createServerSecurity({ privateRoot: path.join(dir, 'private'), machineIdentity: access.authenticate,
+  const security = createServerSecurity({ privateRoot: path.join(dir, 'private'), uploadRoot: storage?.cacheRoot, machineIdentity: access.authenticate,
     env: { APP_ORIGIN: origin, AUTH_USERS_JSON: JSON.stringify([{ id: 'alice', displayName: 'alice', passwordHash }]) } });
   const app = express(); app.use('/auth', security.router); app.use(security.authenticate); app.use(security.resourceLimits); app.use(express.json({ limit: '15mb' }));
+  if (storage) app.use(storage.middleware(currentUserId));
   app.use('/api/mcp/access', createMcpAccessRouter(access, security.adminExpiresAt));
   app.use(createAudioMcp({ directory: path.join(dir, 'workspaces'), origin, access, ffmpeg: ffmpeg! }));
   let voiceCalls = 0, searchCalls = 0, sfxCalls = 0, batchSearchCalls = 0, batchSearchStatus = 200, sfxStatus = 200;
@@ -103,10 +121,14 @@ test('official MCP client: authentication, coverage, real FFmpeg trim, downloads
   const processed = jsonResult(await client.callTool({ name: 'process_audio', arguments: { assetId: uploaded.id, name: 'trim.wav', start: .2, duration: .3 } })).asset;
   assert.ok(processed.size > 1000 && processed.size < wav.length);
   assert.equal(processed.duration, .3);
+  if (storage) {
+    assert.match(processed.url, /^https:\/\/cdn\.example\.test\//);
+    fs.rmSync(storage.cacheRoot, { recursive: true, force: true });
+  }
   const read = jsonResult(await client.callTool({ name: 'read_asset', arguments: { assetId: processed.id, length: 100 } })); assert.equal(Buffer.from(read.base64, 'base64').toString('ascii', 0, 4), 'RIFF');
   assert.ok((await other.callTool({ name: 'read_asset', arguments: { assetId: processed.id } })).isError);
   assert.ok((await client.callTool({ name: 'process_audio', arguments: { assetId: uploaded.id, name: 'bad', start: -2 } })).isError);
-  const download = await fetch(`${base}/api/mcp/files/${processed.id}`, { headers: { authorization: `Bearer ${alice.token}` } }); assert.equal(download.status, 200);
+  const download = await fetch(`${base}/api/mcp/files/${processed.id}`, { headers: { authorization: `Bearer ${alice.token}` }, redirect: 'manual' }); assert.equal(download.status, cdn ? 302 : 200);
   assert.equal((await fetch(`${base}/api/mcp/files/${processed.id}`, { headers: { authorization: `Bearer ${bob.token}` } })).status, 404);
   const form = new FormData(); form.append('file', new Blob([wav]), 'another.wav');
   const multipart = await fetch(`${base}/api/mcp/files`, { method: 'POST', headers: { authorization: `Bearer ${alice.token}` }, body: form }); assert.equal(multipart.status, 200);

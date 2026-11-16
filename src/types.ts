@@ -36,6 +36,7 @@ export interface HistoryItem {
     type?: string;
     size?: number;
     file?: File;
+    url?: string;
   }>;
 }
 

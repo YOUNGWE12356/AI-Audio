@@ -72,6 +72,22 @@ Docker 构建的 npm 源默认使用 `https://registry.npmmirror.com`，安装�
 
 容器包含 FFmpeg 和 Python 3；Seed-VC、Demucs 等本地模型、GPU、虚拟环境及模型文件需另行配置，本脚本不迁移宿主机的这些可选组件。
 
+##### 音频 CDN 存储
+
+默认使用七牛，上传方式与 `kakavideogenerator` 一致。在服务器 `.env` 配置 `QINIU_ACCESS_KEY`、`QINIU_SECRET_KEY`、`QINIU_BUCKET`、`QINIU_CDN_DOMAIN`；密钥只在服务端使用。默认桶和域名为 `xroom` / `https://xroom.afunapp.com`，可沿用参考工程的四项配置。CDN 需允许网页域名的跨域 GET/Range 请求，用于波形分析、剪辑和下载。
+
+音效库、普通上传、生成音频及 MCP 产物存到 `ai-audio/` 前缀下。项目 `data/` 保存 CDN 链接、分类、任务和账号清单；浏览器历史和批量工程也只保存链接。FFmpeg 使用操作系统临时目录的工作副本，丢失后按 CDN 链接恢复。清理任务不删除 CDN 对象。上传失败会返回 `CDN_UPLOAD_FAILED`，不将临时本地文件当作成功结果。`MEDIA_STORAGE_MODE=local` 仅供无七牛配置的本地开发和测试使用。
+
+旧的 `data/private-uploads` 和音效库 `originals` 需要迁移。先备份并停止服务，再在项目根目录执行（构建产物已包含迁移工具，不需要安装开发依赖）：
+
+```bash
+node dist/server/migrate-cdn.cjs                         # 只统计，不上传
+node dist/server/migrate-cdn.cjs --apply                 # 上传并更新清单，保留原文件
+node dist/server/migrate-cdn.cjs --apply --remove-local  # 全部清单更新成功后移除已迁移原文件
+```
+
+开发环境也可执行 `npm run storage:migrate -- --apply`。Docker 环境使用当前应用镜像运行上述 `node` 命令，同时按部署脚本挂载 `.env`、`data/` 和旧的 `SFX_LIBRARY_DIR`（如有）；迁移期间停止应用容器，完成后再启动。迁移工具按账号保留归属，为修改的 JSON 清单留下 `.pre-cdn.bak`，失败时保留原始音频。本地开发目录目前没有待迁移音频；生产数据需要在生产服务器执行迁移。
+
 ##### systemd 管理命令
 
 ```bash
@@ -159,7 +175,7 @@ powershell -ExecutionPolicy Bypass -File tools/music-separation/setup-music-sepa
 - 页面制作会持续上报当前片段进度与连接心跳；右下角助手在生成、等待下一步、重连期间持续显示工作状态。暂停或失败会停止动画并显示具体原因。页面超过3分钟失联会明确结束当前步骤，不会无限静默等待。
 - 视频时间线上重叠的系统音效片段，在分析、助手编辑和打开工程时会自动分配到多条音效轨；不会改变原有时间点或丢弃已生成音频。
 - 日常运行使用 `npm run build` 后 `npm start`，默认提供正式构建，不监听源码变化、不触发热刷新。`npm run dev` 仅用于需要热更新的开发调试。
-- 任务记录保存在 `data/assistant-jobs`，产物保存在 `data/private-uploads`。不保存第三方密钥和管理员Cookie。进程重启中断的任务会明确标记失败并保留产物，避免重复付费生成。
+- 任务记录保存在 `data/assistant-jobs`，产物保存到七牛 CDN，`data/media` 保存账号对应的 CDN 链接清单。FFmpeg 工作文件使用系统临时目录；清理临时文件不影响 CDN 产物。不保存第三方密钥和管理员Cookie。进程重启中断的任务会明确标记失败并保留产物，避免重复付费生成。
 - 模型只能调用明确注册的工具，不能执行任意HTTP或命令。原有同源API继续检查用户额度与音效库管理员权限；每轮规划也检查额度。
 - 支持真实的等待、文件依赖、时间线秒数和完成校验；视频混音同时交付可编辑工程。
 - 视频配声通过 `video_workspace` 在“视频声音制作”页面执行导入、画面分析、片段编辑/合成和混音导出，复用手动按钮的相同函数和工程状态。聊天只接收指令和汇报进度，产物在对应页面预览、编辑和导出。页面执行通过命令领取/结果回执推进，未完成时不会进入依赖步骤；同一操作刷新重连复用服务端结果，避免重复生成。

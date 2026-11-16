@@ -61,7 +61,7 @@ test('original points use persisted allowances and actual usage, protect concurr
   const port = (allocator.address() as any).port;
   await new Promise<void>(resolve => allocator.close(() => resolve()));
   const origin = `http://127.0.0.1:${port}`;
-  const env = { ...process.env, NODE_ENV: 'production', PORT: String(port), APP_ORIGIN: 'https://company-points.example.test', DATA_DIR: data,
+  const env = { ...process.env, NODE_ENV: 'production', MEDIA_STORAGE_MODE: 'local', PORT: String(port), APP_ORIGIN: 'https://company-points.example.test', DATA_DIR: data,
     AUTH_USERS_JSON: JSON.stringify(profiles.map((p, i) => ({ id: ['alice', 'bob'][i], displayName: p.displayName, passwordHash }))),
     FEISHU_AUTH_ENABLED: 'false', SFX_LIBRARY_ADMIN_PASSWORD: adminPassword, UPLOADS_CLEANUP_ENABLED: 'false',
     ELEVENLABS_QUOTA_ENABLED: 'true', ELEVENLABS_API_KEY: 'fixture-only', ELEVENLABS_FALLBACK_API_KEY: '', ELEVENLABS_API_KEYS: '',

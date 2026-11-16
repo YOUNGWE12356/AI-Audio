@@ -1,4 +1,5 @@
 import { logEvent } from './safeLogging';
+import { readMediaBlob } from './mediaClient';
 import { soundEffectProviderError } from './elevenLabsErrors';
 /**
  * @license
@@ -230,7 +231,7 @@ async function requestBlob(path: string, init: RequestInit, timeoutMs?: number):
       }
       throw new Error(formatElevenLabsErrorMessage(message));
     }
-    return await response.blob();
+    return await readMediaBlob(response);
   };
   return timeoutMs
     ? withAudioRequestTimeout(readResponse, timeoutMs, '音效请求超时，已停止等待，请稍后重试。')

@@ -74,7 +74,7 @@ export async function verifyPassword(password: string, encoded: string) {
   return timingSafeEqual(actual, Buffer.from(match[2], 'hex'));
 }
 
-export function createServerSecurity(options: { privateRoot: string; env?: NodeJS.ProcessEnv; now?: () => number; fetcher?: typeof fetch; machineIdentity?: (req: express.Request) => McpIdentity | null }) {
+export function createServerSecurity(options: { privateRoot: string; uploadRoot?: string; env?: NodeJS.ProcessEnv; now?: () => number; fetcher?: typeof fetch; machineIdentity?: (req: express.Request) => McpIdentity | null }) {
   const env = options.env || process.env;
   assertPrivateEnvironment(env);
   const now = options.now || Date.now;
@@ -194,7 +194,7 @@ export function createServerSecurity(options: { privateRoot: string; env?: NodeJ
     const userId = machine?.id || `${session!.user.feishu ? 'feishu' : 'account'}:${session!.user.id}`;
     if (!apiLimit(userId)) return res.status(429).json({ error: publicError(429) });
     const enter = () => {
-      const directory = path.join(options.privateRoot, createHash('sha256').update(userId).digest('hex'));
+      const directory = path.join(options.uploadRoot || options.privateRoot, createHash('sha256').update(userId).digest('hex'));
       fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
       res.locals.authUser = machine || { id: userId, displayName: session!.user.displayName, identitySource: session!.user.feishu ? 'feishu' : 'account' };
       res.locals.machineIdentity = machine;
