@@ -16,6 +16,7 @@ RUN npm ci --include=dev --no-audit --no-fund \
     --fetch-retries=3 --fetch-timeout=120000
 COPY index.html metadata.json tsconfig.json vite.config.ts server.ts ./
 COPY src ./src
+COPY tests ./tests
 COPY tools ./tools
 RUN npm run check && npm prune --omit=dev --no-audit --no-fund
 
