@@ -7,7 +7,7 @@ import { SFX_BATCH_MAX_ROWS } from './sfxBatch';
 const original: BatchRow = { id: 'manual', videoId: 'video', time: 16.5, endTime: 19.5, duration: 3,
   name: 'Manual', description: '', keywords: '', searchQuery: '', scene: '', selected: true,
   versions: [{ id: 'audio', kind: 'search', title: 'Saved', blob: new Blob(['saved audio']), confirmedBlob: new Blob(['trim']), confirmedRange: { start: 0, end: 1 } }],
-  confirmedVersionId: 'audio', placedVersionId: 'audio', activeVersionId: 'audio', excludedSources: ['previous'], status: '已确认' };
+  confirmedVersionId: 'audio', confirmedVersionIds: ['audio'], placedVersionId: 'audio', activeVersionId: 'audio', excludedSources: ['previous'], status: '已确认' };
 const requirements = [0, 1].map(i => ({ id: `result-${i}`, name: `Card Flip ${i}`, time: 17, endTime: 17.5, duration: 0.5,
   description: `独立声源${i}的详细描述`, keywords: '翻牌', searchQuery: 'card flip', scene: '上方与下方卡牌' }));
 
@@ -19,6 +19,7 @@ test('range review preserves hand-drawn boundaries and audio, inserts independen
   assert.deepEqual([result[1].time, result[1].endTime, result[1].duration], [16.5, 19.5, 3]);
   assert.equal(result[1].versions, original.versions); assert.equal(result[1].activeVersionId, 'audio');
   assert.equal(result[1].confirmedVersionId, undefined); assert.equal(result[1].placedVersionId, undefined);
+  assert.deepEqual(result[1].confirmedVersionIds, []);
   assert.equal(result[1].name, 'Card_Flip_0'); assert.equal(result[1].description, requirements[0].description);
   assert.deepEqual([result[2].time, result[2].endTime], [17, 17.5]);
   assert.equal(result[2].videoId, 'video'); assert.deepEqual(result[2].versions, []);

@@ -3,9 +3,9 @@ import { generateAiContent, SchemaType, ThinkingLevel } from './aiGateway';
 import { setClientIdentityHeader } from './clientIdentity';
 import { normalizeAudioDesignSfxSchemes } from '../utils/audioDesignNaming';
 import { AUDIO_METRICS_MIME, AUDIO_EVIDENCE_RULES, validateAudioEvidence, type AudioMetricEvidence } from '../utils/audioEvidence';
-import { isBgmImportFileName, normalizeRequirementEngineeringNames, normalizeUcsImportFileName, normalizeUcsRequirementItems, UCS_CATALOG_PROMPT, UCS_CATALOG_VERSION } from './ucsNaming';
+import { isBgmImportFileName, normalizeRequirementEngineeringNames, normalizeUcsImportFileName, UCS_CATALOG_PROMPT, UCS_CATALOG_VERSION } from './ucsNaming';
 import { generateRequirementsInBackground } from './sfxRequirementsClient';
-import { repairRequirementUcsNames } from './sfxRequirementNaming';
+import { simplifyRequirementNames } from './requirementNames';
 import { generateAudioDesignInBackground } from './audioDesignJobsClient';
 import { AUDIO_DESIGN_MODEL_TIMEOUT_MS } from './audioDesignJobs';
 
@@ -1361,7 +1361,7 @@ export async function generateSfxRequirements(
   const isJinnProject = normalizedProjectName === 'jinn';
   const isAvatarProject = normalizedProjectName === 'avatar';
   const isSunnyIslandProject = ['小岛有晴天', 'sunny_island', 'sunny island'].includes(normalizedProjectName);
-  const useUcsSfxNaming = !normalizedProjectName && templateType.startsWith('game_sfx_');
+  const useSimpleSfxNaming = !normalizedProjectName && templateType.startsWith('game_sfx_');
 
   // Avatar names are a strict five-row template. Generate them locally when
   // the user supplied an explicit costume name and ID, so a long AI response
@@ -1391,7 +1391,7 @@ export async function generateSfxRequirements(
       该模板主要包含以下字段，请在输出 JSON 时填充：
       - index (序号): 整数，从1开始递增。
       - audio_type (类型): 必须填写 "SFX"、"BGM" 或 "VO"。音效为 SFX，背景音乐为 BGM，角色台词/旁白/字幕配音为 VO。
-      - filename (文件命名): ${useUcsSfxNaming ? 'SFX 使用 Sfx_CatID_FXName，例如 Sfx_UIClick_Confirm、Sfx_FEETHmn_Wood_Heavy；Sfx_ 是必需的工程前缀，CatID 从下方 UCS 8.2.1 分类中选择。FXName 通常仅保留 1-3 个必要英文关键词，用下划线分隔、禁止空格，避免重复 CatID 已表达的类别。BGM/VO 仍用 Bgm_/Vo_ 工程命名。' : '采用下划线英文命名规范，且每个单词首字母大写。例如 Sfx_Ui_Confirm, Bgm_Battle_Loop。对象、动作只保留必要关键词，详细听感写入 description。'}只有同一基础音效存在多个变体/随机样本时才添加尾号；如果该类型只有一个音效，不要添加尾号。
+      - filename (文件命名): 采用下划线英文命名规范，且每个单词首字母大写。例如 Sfx_Ui_Confirm, Bgm_Battle_Loop。对象、动作只保留必要关键词，详细听感写入 description。只有同一基础音效存在多个变体/随机样本时才添加尾号；如果该类型只有一个音效，不要添加尾号。
       - duration_logic (时长&播放逻辑): 声效时长描述及触发/播放逻辑，例如 "1s, 单次播放", "10s, 循环播放", "3s, 随机多样本触发"。
       - scene (应用场景): 说明具体对象、动作/交互、触发节点及必要的结束条件；例如“设置页确认按钮点击且操作被接受时触发一次，与按钮按下反馈同步”，禁止只写“UI界面”或“游戏中”。
       - description (描述): 按实际要听到的声音行为描述声源/材质、起音、主体变化和尾音，再按需要补充力度、速度、层次与空间；用 2-3 个简洁分句给出可制作的方向，避免只有“清脆、震撼、有质感”等形容词。
@@ -1430,7 +1430,7 @@ export async function generateSfxRequirements(
       【游戏音效需求表模板参考2（应用到FMOD,WWISE音频中间件引擎的需求表）】
       该模板主要包含以下字段，请在输出 JSON 时填充：
       - index (序号): 整数，从1开始递增。
-      - filename (文件命名): ${isJinnProject ? 'Jinn 资源工程名，严格遵循文末 Jinn 项目命名规范。' : isAvatarProject ? 'Avatar 服装音频名，只能使用文末 Avatar 固定模板。' : isSunnyIslandProject ? '小岛有晴天资源名，严格遵循文末小岛有晴天项目命名规范。' : useUcsSfxNaming ? 'SFX 使用 Sfx_CatID_FXName，例如 Sfx_UIClick_Confirm、Sfx_FEETHmn_Wood_Heavy。保留 Sfx_ 工程前缀和真实 UCS CatID，FXName 通常仅保留 1-3 个必要英文关键词，用下划线分隔、禁止空格，避免重复类别；仅同一音效多个变体才加编号。' : '采用下划线英文命名规范，且每个单词首字母大写。如 Sfx_Player_Dash。只有同一基础音效存在多个变体/随机样本时才使用 _01/_02/_03，例如 Sfx_Footstep_Grass_01。'}
+      - filename (文件命名): ${isJinnProject ? 'Jinn 资源工程名，严格遵循文末 Jinn 项目命名规范。' : isAvatarProject ? 'Avatar 服装音频名，只能使用文末 Avatar 固定模板。' : isSunnyIslandProject ? '小岛有晴天资源名，严格遵循文末小岛有晴天项目命名规范。' : '采用下划线英文命名规范，且每个单词首字母大写。如 Sfx_Player_Dash。只有同一基础音效存在多个变体/随机样本时才使用 _01/_02/_03，例如 Sfx_Footstep_Grass_01。'}
        - event_name (事件命名): ${isJinnProject ? 'Jinn ID 事件名必须逐字复制 filename，不使用 event:/、Event_、SFX_ 或 Play_ 前缀；多个编号资源也保留与 filename 相同的编号。' : isAvatarProject ? 'Avatar ID 事件名必须逐字复制 filename，只能使用文末 Avatar 固定模板，不使用 event:/ 路径。' : isSunnyIslandProject ? '小岛有晴天事件名优先沿用同一资源命名；除非参考表明确不同，否则与 filename 保持一致。' : '音频中间件事件路径规范。如 "event:/SFX/Player/dash" 或 "Play_sfx_player_dash"；只有多个变体时才在末尾编号。'}
       - duration (时长): 预估的时长，如 "0.5s", "12s", "loop"。
       - scene (应用场景): 写明具体声源、动作/状态、动画或交互触发节点；持续声补充开始/停止条件，与 playback_logic 的单次/循环及 2D/3D 保持一致。无依据时不要捏造秒数或帧号。
@@ -1645,15 +1645,13 @@ export async function generateSfxRequirements(
 
     2. **文件名命名优化与直接保留**：
        - 如果用户输入或上传的参考文件/草稿表格中**本身就带有文件命名或名称**（如 \`sfx_click\`, \`bg_battle\`, \`刀剑砍击声\` 等）：
-         - ${isJinnProject ? '必须按 Jinn 参考规范优化为 PascalCase 分段命名，并优先保留素材中已经出现的 Item、Loot、Weapon、Monster、对象名和动作词。' : isAvatarProject ? '必须按 Avatar 固定模板生成小写 audio_avatar_show 或 audio_avatar_bgm 命名，并保留服装名、服装 ID 与性别/双人后缀；禁止任何其他格式。' : isSunnyIslandProject ? '必须按小岛有晴天参考规范保留 Ani、Tool、Pet、Char、Music、Npc、FWSH 前缀、数字 ID 和动作词；多变体才追加 `_[序号]`，配音可使用 CloseA01、Collect01 等组合。' : useUcsSfxNaming ? 'SFX 保留原名描述语义，统一使用 Sfx_CatID_FXName，CatID 取下方真实 UCS 分类；BGM/VO 保持现有工程命名。' : '必须使用下划线分隔的英文命名，并确保每个单词首字母大写（如 `Sfx_Ui_Button_Click`）；多变体时才追加 `_[序号]`。'}
+         - ${isJinnProject ? '必须按 Jinn 参考规范优化为 PascalCase 分段命名，并优先保留素材中已经出现的 Item、Loot、Weapon、Monster、对象名和动作词。' : isAvatarProject ? '必须按 Avatar 固定模板生成小写 audio_avatar_show 或 audio_avatar_bgm 命名，并保留服装名、服装 ID 与性别/双人后缀；禁止任何其他格式。' : isSunnyIslandProject ? '必须按小岛有晴天参考规范保留 Ani、Tool、Pet、Char、Music、Npc、FWSH 前缀、数字 ID 和动作词；多变体才追加 `_[序号]`，配音可使用 CloseA01、Collect01 等组合。' : '必须使用下划线分隔的英文命名，并确保每个单词首字母大写（如 `Sfx_Ui_Button_Click`）；多变体时才追加 `_[序号]`。'}
          - 如果用户提供的命名已经相当成熟、合理或带有特定的版本代号，你应当**直接使用和保留**给到的命名；
          - 确保优化的命名与原始名称的意图保持强关联，不得凭空捏造全新的无关名称。
 
     3. **专业化设计与规范**：
-       ${isJinnProject ? JINN_NAMING_GUIDE : isAvatarProject ? AVATAR_NAMING_GUIDE : isSunnyIslandProject ? SUNNY_ISLAND_NAMING_GUIDE : useUcsSfxNaming ? `- **UCS ${UCS_CATALOG_VERSION} 音效分类命名**：只有 SFX 行使用 Sfx_CatID_FXName，例如 Sfx_UIClick_Confirm。Sfx_ 为固定工程前缀，仅添加一次；CatID 必须从下方完整目录逐字选择并保留精确大小写，按声音本身所属类别选择，不能编造 CatID。FXName 通常只用 1-3 个必要英文关键词，不重复类别信息；英文单词以下划线分隔，禁止空格（例如 Sfx_FEETHmn_Wood_Heavy）；同一基础音效多个变体才追加 _01、_02 等编号。未提供 CreatorID 或 SourceID，不要编造这两个字段。BGM 和 VO 不是 UCS 音效分类，继续使用 Bgm_[Scene]_[StyleOrState] 与 Vo_[SpeakerOrRole]_[Intent]。中间件 event_name 仍保持现有事件路径规则，不照抄文件名。
-       - **UCS ${UCS_CATALOG_VERSION} 分类目录 (CatID:Category/SubCategory)**：${UCS_CATALOG_PROMPT}
-       - **语义准确**：优先根据应用场景和声音内容选分类；如果没有可靠分类，不要随便填 Misc，明确无法分类。` : `- **工程化文件命名 (filename)**：禁止用中文命名文件。所有文件名必须使用下划线分隔，并确保每个单词首字母大写。
-         格式：\`[Sfx / Bgm / Vo]_[模块]_[动作/角色]_[描述]\`；只有同一基础音效/台词存在多个变体、随机样本、连号资产时，才追加 \`_[序号]\`。
+       ${isJinnProject ? JINN_NAMING_GUIDE : isAvatarProject ? AVATAR_NAMING_GUIDE : isSunnyIslandProject ? SUNNY_ISLAND_NAMING_GUIDE : `- **工程化文件命名 (filename)**：禁止用中文命名文件。所有文件名必须使用下划线分隔，并确保每个单词首字母大写。
+         格式：\`[Sfx / Bgm / Vo]_[对象/模块]_[动作]\`，按需保留材质、力度、数量等差异；需求表禁止使用 OBJBook、FEETHmn、MAGSpel、WHSH 等 UCS 分类代码。只有同一基础音效/台词存在多个变体、随机样本、连号资产时，才追加 \`_[序号]\`。
          例如：单个确认点击用 \`Sfx_Ui_Confirm\`，单个战斗 BGM 用 \`Bgm_Battle_Loop\`，单句旁白用 \`Vo_Narrator_Intro\`；多个脚步随机样本才用 \`Sfx_Footstep_Grass_01\`、\`Sfx_Footstep_Grass_02\`、\`Sfx_Footstep_Grass_03\`。
        - **命名必须简约、明确、语义准确**：filename 必须优先从“应用场景/触发时机”里提取真实模块、页面、对象和动作；“描述”只用于理解音色、材质、情绪和制作方式，不能把描述里的装饰性词汇误当成文件名主体。
          命名优先级：应用场景/触发时机 > 原始名称 > 描述。除非“应用场景”明确说是金币、奖励、宝箱、道具拾取，否则不要因为描述中出现“金色闪光、金币质感、奖励感”等词，就在 filename 里加入 \`gold\`、\`coin\`、\`reward\`。
@@ -1684,7 +1682,7 @@ export async function generateSfxRequirements(
           ? '当前项目：小岛有晴天。严格执行上方“小岛有晴天项目命名规范（优先级最高）”，不得回退到通用命名。'
         : projectName
           ? `当前项目：${projectName}。请优先参考该项目的专有命名习惯；目前尚未提供该项目的具体规则，不要凭空捏造专有词汇，先沿用通用工程命名规范，并保留项目名称作为上下文。`
-          : `当前未指定项目，${useUcsSfxNaming ? `SFX 使用 Sfx_ 工程前缀加 UCS ${UCS_CATALOG_VERSION} 分类命名，BGM/VO 沿用工程命名。` : '请使用通用工程命名规范。'}`}
+          : '当前未指定项目，请使用直观的英文工程命名，例如 Sfx_Book_Drop、Sfx_Footstep_Wood_Walk、Sfx_Magic_Book_Summon。需求表不是音效库，禁止添加 UCS 分类代码。'}
 
     用户输入要求：${inputText || "请根据上传参考文件生成；如果没有参考文件，则自动生成该类型游戏的标准专业需求表"}
   `;
@@ -1725,8 +1723,8 @@ export async function generateSfxRequirements(
     }
     options.onProgress?.('AI 已返回结果，正在校验命名和表格内容。');
     const items = Array.isArray(parsed.items) ? parsed.items : [];
-    const checkedItems = useUcsSfxNaming
-      ? await repairRequirementUcsNames(items, templateType, options)
+    const checkedItems = useSimpleSfxNaming
+      ? simplifyRequirementNames(items, templateType)
       : normalizeRequirementEngineeringNames(items);
     const sourceItemCount = Number.parseInt(String(parsed.sourceItemCount ?? 0), 10);
     return {

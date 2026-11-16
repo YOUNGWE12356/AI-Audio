@@ -85,7 +85,10 @@ export function uniqueBatchFileNames(names: string[]) {
   return names.map((name, index) => {
     const stem = batchFileStem(name, `Sfx_${index + 1}`);
     let candidate = `${stem}.wav`, suffix = 2;
-    while (used.has(candidate.toLocaleLowerCase())) candidate = `${stem}_${suffix++}.wav`;
+    while (used.has(candidate.toLocaleLowerCase())) {
+      const ending = `_${suffix++}`;
+      candidate = `${stem.slice(0, 100 - ending.length)}${ending}.wav`;
+    }
     used.add(candidate.toLocaleLowerCase()); return candidate;
   });
 }

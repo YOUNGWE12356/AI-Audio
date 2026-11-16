@@ -6,8 +6,8 @@ import BatchSfxCostHint from './BatchSfxCostHint';
 import PointCostHint from './PointCostHint';
 import { isBatchSfxDurationValid, needsBatchSearchQuery } from '../services/sfxBatchBilling';
 import { analyzeBatchRequirements, prepareSfxBatchInput, resolveBatchSearchQuery, saveBatchDownload, SFX_BATCH_ACCEPT, validateSfxBatchFile } from '../services/sfxBatchClient';
-import { batchFileStem, batchQuerySource, batchRequirementsCsv, createBatchSfxRequest, SFX_BATCH_MAX_ROWS, uniqueBatchFileNames } from '../services/sfxBatch';
-import { batchId, clearBatchWorkspace, confirmedVersion, loadBatchProject, loadBatchVideo, saveBatchVideo, sameBatchRange, saveBatchProject, type BatchRow, type BatchVersion, type BatchVideoAsset } from '../services/sfxBatchProject';
+import { batchFileStem, batchQuerySource, batchRequirementsCsv, createBatchSfxRequest, SFX_BATCH_MAX_ROWS } from '../services/sfxBatch';
+import { batchId, clearBatchWorkspace, confirmedVersion, confirmedVersions, confirmBatchVersion, unconfirmBatchVersion, updateBatchVersionRange, batchAudioExports, batchExportRequirements, loadBatchProject, loadBatchVideo, saveBatchVideo, saveBatchProject, type BatchRow, type BatchVersion, type BatchVideoAsset } from '../services/sfxBatchProject';
 import { batchTimeRange, batchOccurrenceRange, updateBatchOccurrence, isBatchPoint } from '../services/batchVideoTimeline';
 import { readGeneratedSoundEffectDuration } from '../utils/soundEffectAudio';
 import type { AudioDownloadRange } from '../services/audioRangeExport';
@@ -298,47 +298,45 @@ export default function BatchSfxStudio({ active = true, inputRequest = null }: {
     finally { busyRef.current = false; setBusy(false); }
   };
   const onRange = (rowId: string, versionId: string, range: AudioDownloadRange | null) => {
-    patchRow(rowId, row => {
-      const version = row.versions.find(v => v.id === versionId);
-      if (!version || sameBatchRange(version.draftRange, range, version.duration || version.confirmedRange?.end)) return row;
-      const invalidate = !!version.confirmedBlob && !sameBatchRange(range, version.confirmedRange, version.duration || version.confirmedRange?.end);
-      return { ...row, status: invalidate ? '剪辑已修改，请重新确认' : row.status, versions: row.versions.map(v => v.id === versionId
-        ? { ...v, draftRange: range, ...(invalidate ? { confirmedBlob: undefined, confirmedRange: undefined } : {}) } : v) };
-    });
+    patchRow(rowId, row => updateBatchVersionRange(row, versionId, range));
   };
   const confirm = (rowId: string, versionId: string, blob: Blob, range: AudioDownloadRange) => {
-    patchRow(rowId, row => ({ ...row, confirmedVersionId: versionId, status: '已确认音效', error: undefined, versions: row.versions.map(v => v.id === versionId
-      ? { ...v, confirmedBlob: blob, confirmedRange: range, draftRange: range } : v) }));
-    setMessage('音效已确认，这条需求已完成选用；可以下载或继续制作下一条。');
+    patchRow(rowId, row => confirmBatchVersion(row, versionId, blob, range));
+    setMessage('音效已确认；可以继续确认其他候选，多个音效会自动编号下载。');
   };
-  const csv = () => batchRequirementsCsv(rows.map(row => {
-    const range = confirmedVersion(row)?.confirmedRange;
+  const csv = (rowId?: string) => batchRequirementsCsv(batchExportRequirements(rows).filter(row => !rowId || row.id === rowId).map(row => {
     const videoRange = row.videoId === videoAsset?.id ? batchTimeRange(row, videoDuration) : null;
-    return { ...row, ...(videoRange ? { endTime: videoRange.end } : {}), confirmedDuration: range ? Number((range.end - range.start).toFixed(3)) : undefined };
+    return { ...row, ...(videoRange ? { endTime: videoRange.end } : {}) };
   }));
   const downloadTable = () => saveBatchDownload(new Blob([csv()], { type: 'text/csv;charset=utf-8' }), '音效需求表.csv');
-  const ready = rows.filter(row => confirmedVersion(row));
-  const zip = async () => {
+  const ready = batchAudioExports(rows);
+  const confirmedRowCount = rows.filter(row => confirmedVersions(row).length > 0).length;
+  const zip = async (rowId?: string) => {
     if (!ready.length || zipping) return;
+    const entries = ready.filter(entry => !rowId || entry.row.id === rowId);
+    if (!entries.length) return;
     setZipping(true); setError('');
     try {
       const JSZip = (await import('jszip')).default, archive = new JSZip();
-      const names = uniqueBatchFileNames(ready.map(row => row.name));
-      ready.forEach((row, index) => archive.file(names[index], confirmedVersion(row)!.confirmedBlob!));
-      archive.file('音效需求表.csv', csv());
-      archive.file('素材来源.txt', ready.map((row, index) => {
-        const version = confirmedVersion(row)!;
-        return `${names[index]}\n${version.kind === 'generate' ? 'AI 生成' : `${version.source || ''}\n${version.sourceUrl || ''}`}`;
+      entries.forEach(entry => archive.file(entry.name, entry.version.confirmedBlob!));
+      archive.file('音效需求表.csv', csv(rowId));
+      archive.file('素材来源.txt', entries.map(({ name, version }) => {
+        return `${name}\n${version.kind === 'generate' ? 'AI 生成' : `${version.source || ''}\n${version.sourceUrl || ''}`}`;
       }).join('\n\n') + '\n\n搜索素材请遵守对应来源的许可要求。');
-      saveBatchDownload(await archive.generateAsync({ type: 'blob', compression: 'STORE' }), '批量音效.zip');
-      setMessage(`已打包 ${ready.length} 条已确认音效${rows.length > ready.length ? `，另有 ${rows.length - ready.length} 条未确认，未包含在音频包中` : ''}。`);
+      saveBatchDownload(await archive.generateAsync({ type: 'blob', compression: 'STORE' }), rowId ? `${batchFileStem(entries[0].row.name)}.zip` : '批量音效.zip');
+      setMessage(`已打包 ${entries.length} 个已确认音效${!rowId && rows.length > confirmedRowCount ? `，另有 ${rows.length - confirmedRowCount} 条需求未确认，未包含在音频包中` : ''}。`);
     } catch (e) { setError(errorText(e)); } finally { setZipping(false); }
   };
   const selectedRows = rows.filter(row => row.selected);
+  const downloadRow = (rowId: string) => {
+    const entries = ready.filter(entry => entry.row.id === rowId);
+    if (entries.length === 1) saveBatchDownload(entries[0].version.confirmedBlob!, entries[0].name);
+    else if (entries.length > 1) void zip(rowId);
+  };
   const selectedIds = selectedRows.map(row => row.id);
   const activeRow = rows.find(row => row.id === activeRowId) || rows[0];
   const activeVersion = activeRow?.versions.find(v => v.id === activeRow.activeVersionId);
-  const chosenVersion = activeRow ? confirmedVersion(activeRow) : undefined;
+  const chosenVersions = ready.filter(entry => entry.row.id === activeRow?.id);
   const locked = busy || clearing || !hydrated;
   const selectRow = (id: string) => {
     setActiveOccurrenceIndex(0);
@@ -354,13 +352,15 @@ export default function BatchSfxStudio({ active = true, inputRequest = null }: {
   };
   const showTimelineDetails = timelineDetails && !!videoAsset && activeRow?.videoId === videoAsset.id;
   const activeRange = activeRow && activeRow.videoId === videoAsset?.id ? batchOccurrenceRange(activeRow, activeOccurrenceIndex, videoDuration) : null;
-  const inspector = <BatchSfxInspector row={activeRow} index={activeRow ? rows.indexOf(activeRow) : 0} version={activeVersion} chosen={chosenVersion} locked={locked} inline={showTimelineDetails} range={activeRange} hasVideo={!!videoAsset}
+  const inspector = <BatchSfxInspector row={activeRow} index={activeRow ? rows.indexOf(activeRow) : 0} version={activeVersion} confirmed={chosenVersions} locked={locked} inline={showTimelineDetails} range={activeRange} hasVideo={!!videoAsset}
     activeAudioId={activeAudioId} setActiveAudioId={setActiveAudioId} onClose={() => setTimelineDetails(false)}
     onEdit={update => { if (activeRow) patchRow(activeRow.id, update); }}
     onRun={kind => { if (activeRow) void run(kind, [activeRow.id]); }}
     onSelectVersion={version => { if (activeRow) void selectVersion(activeRow.id, version); }}
     onDecoded={duration => { if (activeRow && activeVersion) patchVersion(activeRow.id, activeVersion.id, v => v.duration === duration ? v : { ...v, duration }); }}
     onRange={range => { if (activeRow && activeVersion) onRange(activeRow.id, activeVersion.id, range); }}
+    onUnconfirm={id => { if (activeRow) patchRow(activeRow.id, row => unconfirmBatchVersion(row, id)); }}
+    onDownload={entry => saveBatchDownload(entry.version.confirmedBlob!, entry.name)}
     onConfirm={(blob, range) => { if (activeRow && activeVersion) confirm(activeRow.id, activeVersion.id, blob, range); }} />;
 
   return <div className="space-y-5">
@@ -417,7 +417,7 @@ export default function BatchSfxStudio({ active = true, inputRequest = null }: {
     </div>
     <div className={`grid gap-5 items-start ${showTimelineDetails ? '' : 'xl:grid-cols-[minmax(0,1fr)_350px] 2xl:grid-cols-[minmax(0,1fr)_400px]'}`}>
       <section aria-label="音效需求表" className="min-w-0 rounded-2xl border border-slate-200 bg-white overflow-hidden">
-        <div className="flex flex-wrap justify-between items-center gap-2 p-4 border-b border-slate-100 text-xs text-slate-600"><h3 className="font-bold text-slate-800">音效需求表 <span className="ml-1 font-normal text-slate-400">{rows.length} 条</span></h3><span>批量勾选 {selectedIds.length} · 已确认音效 {ready.length}/{rows.length}</span></div>
+        <div className="flex flex-wrap justify-between items-center gap-2 p-4 border-b border-slate-100 text-xs text-slate-600"><h3 className="font-bold text-slate-800">音效需求表 <span className="ml-1 font-normal text-slate-400">{rows.length} 条</span></h3><span>批量勾选 {selectedIds.length} · 已确认 {confirmedRowCount}/{rows.length} 条需求 · {ready.length} 个音效</span></div>
         <div className="max-h-[680px] overflow-auto">
           <table className="w-full min-w-[760px] table-fixed border-collapse text-left text-xs">
             <caption className="sr-only">可编辑音效需求表，选择一行后在右侧试听与剪辑</caption>
@@ -430,7 +430,7 @@ export default function BatchSfxStudio({ active = true, inputRequest = null }: {
               {!rows.length && <tr><td colSpan={6} className="p-10 text-center text-slate-400">{hydrated ? '上传素材分析，或新增一条音效需求。' : '正在恢复本地项目…'}</td></tr>}
               {rows.map((row, index) => <tr key={row.id} aria-selected={activeRow?.id === row.id} onClick={() => selectRow(row.id)} onFocus={e => { if (e.target.matches('input, textarea')) selectRow(row.id); }} className={`align-top transition-colors ${activeRow?.id === row.id ? 'bg-emerald-50/60' : 'hover:bg-slate-50/60'}`}>
                 <td className={`px-3 py-3 border-l-2 ${activeRow?.id === row.id ? 'border-emerald-500' : 'border-transparent'}`}><input type="checkbox" aria-label={`选择音效${index + 1}`} checked={row.selected} disabled={locked} onChange={e => patchRow(row.id, { selected: e.target.checked })} /><button aria-label={`试听音效${index + 1}`} className={`mt-3 block text-[11px] font-semibold ${activeRow?.id === row.id ? 'text-emerald-700' : 'text-slate-400'}`} onClick={() => selectRow(row.id)}>{String(index + 1).padStart(2, '0')}</button></td>
-                <td className="px-2 py-3"><input aria-label={`音效${index + 1}命名`} title={row.name} className={`${inputClass} !px-2 font-medium`} value={row.name} disabled={locked} onChange={e => patchRow(row.id, { name: e.target.value })} onBlur={() => patchRow(row.id, { name: batchFileStem(row.name) })} />{confirmedVersion(row) ? <span className="mt-3 inline-flex items-center gap-1 rounded-md bg-emerald-100 px-2 py-1 text-[10px] font-semibold text-emerald-700"><Check size={12} />已确认音效</span> : <p className="mt-3 text-[10px] leading-4 text-slate-500">{row.status}</p>}<button className="mt-2 block text-[11px] font-semibold text-emerald-700 hover:underline" onClick={() => selectRow(row.id)}>试听 / 剪辑{row.versions.length ? ` · ${row.versions.length} 版` : ''}</button>{row.error && <p title={row.error} className="mt-2 line-clamp-2 text-[10px] text-red-600">{row.error}</p>}</td>
+                <td className="px-2 py-3"><input aria-label={`音效${index + 1}命名`} title={row.name} className={`${inputClass} !px-2 font-medium`} value={row.name} disabled={locked} onChange={e => patchRow(row.id, { name: e.target.value })} onBlur={() => patchRow(row.id, { name: batchFileStem(row.name) })} />{confirmedVersions(row).length ? <span className="mt-3 inline-flex items-center gap-1 rounded-md bg-emerald-100 px-2 py-1 text-[10px] font-semibold text-emerald-700"><Check size={12} />已确认 {confirmedVersions(row).length} 个</span> : <p className="mt-3 text-[10px] leading-4 text-slate-500">{row.status}</p>}<button className="mt-2 block text-[11px] font-semibold text-emerald-700 hover:underline" onClick={() => selectRow(row.id)}>试听 / 剪辑{row.versions.length ? ` · ${row.versions.length} 版` : ''}</button>{row.error && <p title={row.error} className="mt-2 line-clamp-2 text-[10px] text-red-600">{row.error}</p>}</td>
                 <td className="px-2 py-3"><textarea aria-label={`音效${index + 1}描述`} className={`${inputClass} !px-2 resize-y min-h-[60px]`} rows={2} value={row.description} disabled={locked} onChange={e => patchRow(row.id, { description: e.target.value })} /><label className="mt-2 block text-[10px] text-slate-400">场景 / 时间点<input aria-label={`音效${index + 1}场景`} className={`${inputClass} mt-1 !px-2`} value={row.scene} disabled={locked} onChange={e => patchRow(row.id, { scene: e.target.value })} /></label>{!!row.occurrences?.length && <p className="mt-2 text-[10px] text-emerald-700" title={[{ time: row.time, endTime: row.endTime }, ...row.occurrences].map(point => `${point.time}—${point.endTime} 秒`).join('；')}>同一音效复用 {row.occurrences.length + 1} 次，时间轴保留全部位置</p>}</td>
                 <td className="px-2 py-3"><textarea aria-label={`音效${index + 1}关键词`} rows={2} placeholder="用中文填写，例如：木门吱呀" className={`${inputClass} !px-2 resize-y min-h-[60px]`} value={row.keywords} disabled={locked} onChange={e => patchRow(row.id, { keywords: e.target.value })} /><p className="mt-2 text-[10px] text-slate-400">搜索或生成时自动转换为英文</p></td>
                 <td className="px-2 py-3"><input aria-label={`音效${index + 1}时长`} type="number" min="0.5" max="30" step="0.1" className={`${inputClass} !px-1.5 tabular-nums`} value={Number.isFinite(row.duration) ? row.duration : ''} disabled={locked} onChange={e => patchRow(row.id, { duration: e.target.value === '' ? NaN : Number(e.target.value) })} />{videoAsset && <>
@@ -440,7 +440,7 @@ export default function BatchSfxStudio({ active = true, inputRequest = null }: {
                 <td className="px-2 py-3 space-y-2">
                   <button aria-label={`搜索音效${index + 1}`} title={row.versions.some(v => v.kind === 'search') ? '再次搜索' : '搜索'} className={`${buttonClass} w-full !px-1.5`} disabled={locked} onClick={() => void run('search', [row.id])}><Search size={12} />搜索</button>
                   <button aria-label={`生成音效${index + 1}`} title={row.versions.some(v => v.kind === 'generate') ? '再次生成' : '生成'} className={`${buttonClass} w-full !px-1.5`} disabled={locked || !isBatchSfxDurationValid(row.duration)} onClick={() => void run('generate', [row.id])}><Sparkles size={12} />生成</button>
-                  <div className="flex justify-between gap-1"><button aria-label={`下载音效${index + 1}`} title="下载已确认音效" className={`${buttonClass} !p-2`} disabled={!confirmedVersion(row)} onClick={() => saveBatchDownload(confirmedVersion(row)!.confirmedBlob!, `${batchFileStem(row.name)}.wav`)}><Download size={13} /></button><button className={`${buttonClass} !p-2 hover:!text-red-500`} aria-label={`删除音效${index + 1}`} title="删除需求" disabled={locked} onClick={() => setRows(current => current.filter(r => r.id !== row.id))}><Trash2 size={13} /></button></div>
+                  <div className="flex justify-between gap-1"><button aria-label={`下载音效${index + 1}`} title={confirmedVersions(row).length > 1 ? '打包下载此需求的全部已确认音效' : '下载已确认音效'} className={`${buttonClass} !p-2`} disabled={!confirmedVersion(row) || zipping} onClick={() => downloadRow(row.id)}><Download size={13} /></button><button className={`${buttonClass} !p-2 hover:!text-red-500`} aria-label={`删除音效${index + 1}`} title="删除需求" disabled={locked} onClick={() => setRows(current => current.filter(r => r.id !== row.id))}><Trash2 size={13} /></button></div>
                 </td>
               </tr>)}
             </tbody>

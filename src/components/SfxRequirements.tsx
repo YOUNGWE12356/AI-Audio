@@ -7,6 +7,7 @@ import React, { useRef, useState, useEffect } from 'react';
 import { useNativeAssistantTool } from '../services/useNativeAssistantTool';
 import { reportAssistantWorkspaceProgress } from '../services/assistantWorkspaceClient';
 import { normalizeRequirementEngineeringNames } from '../services/ucsNaming';
+import { simplifyRequirementNames } from '../services/requirementNames';
 import { 
   Upload, 
   FileText, 
@@ -512,8 +513,8 @@ const normalizeRequirementFilenames = (items: any[]) => items.map((item) => {
   };
 });
 
-const simplifySingletonFilenameSuffixes = (items: any[], preserveUcs = false) => {
-  const normalizedItems = preserveUcs ? items : normalizeRequirementFilenames(items);
+const simplifySingletonFilenameSuffixes = (items: any[], simpleNames = false) => {
+  const normalizedItems = simpleNames ? simplifyRequirementNames(items, 'game_sfx_general') : normalizeRequirementFilenames(items);
   const baseNameCounts = new Map<string, number>();
   normalizedItems.forEach((item) => {
     const filename = typeof item?.filename === 'string' ? item.filename.trim() : '';
@@ -554,8 +555,9 @@ const normalizeGeneralEngineeringName = (value: unknown) => {
   return capitalizeEngineeringNameSegments(normalized);
 };
 
-const normalizeGeneralRequirementItems = (items: any[], preserveUcs = false) => items.map((item) => {
-  if (preserveUcs && inferGeneralAudioType(item) === 'SFX') return item;
+const normalizeGeneralRequirementItems = (items: any[], simpleNames = false) => (simpleNames
+  ? simplifyRequirementNames(items, 'game_sfx_general') : items).map((item) => {
+  if (simpleNames && inferGeneralAudioType(item) === 'SFX') return item;
   const filename = normalizeGeneralEngineeringName(item?.filename);
   const normalizedItem = {
     ...item,
@@ -810,7 +812,8 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
         : nextRowsOrUpdater;
       return {
         ...prev,
-        [type]: normalizeRequirementEngineeringNames(nextRows),
+        [type]: !selectedProject && type.startsWith('game_sfx_')
+          ? simplifyRequirementNames(nextRows, type) : normalizeRequirementEngineeringNames(nextRows),
       };
     });
     if (typeof isDraft === 'boolean') {
@@ -1227,8 +1230,8 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
         setSuccessMessage('没有追加新需求：本次没有识别到区别于当前表格的新条目。请补充新的文字描述或上传新的参考文件后再继续添加。');
         setSuccess(true);
       } else if (response && Array.isArray(response.items) && response.items.length > 0) {
-        const preserveUcs = !requestProject && requestTemplateType.startsWith('game_sfx_');
-        const normalizedItems = simplifySingletonFilenameSuffixes(response.items, preserveUcs);
+        const simpleNames = !requestProject && requestTemplateType.startsWith('game_sfx_');
+        const normalizedItems = simplifySingletonFilenameSuffixes(response.items, simpleNames);
         const projectAwareItems = requestProject === 'jinn'
           ? normalizeJinnRequirementItems(response.items)
           : requestProject === 'avatar'
@@ -1256,7 +1259,7 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
             ? normalizeAvatarRequirementItems(mergedItems)
             : requestProject === 'sunny_island'
               ? normalizeSunnyIslandRequirementItems(mergedItems)
-            : normalizeGeneralRequirementItems(mergedItems, preserveUcs);
+            : normalizeGeneralRequirementItems(mergedItems, simpleNames);
         if (mode === 'append') {
           const uniqueGeneratedItems = filterNewRequirementItems(generatedItems, requestExistingRows, requestTemplateType);
           const duplicateCount = Math.max(0, generatedItems.length - uniqueGeneratedItems.length);

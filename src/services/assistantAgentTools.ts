@@ -181,7 +181,7 @@ export function createAssistantTools(c: AgentToolContext): AgentTool[] {
     if (!a.mimeType.startsWith('image/')) throw new Error('请选择截图。');
     return c.request('/api/ai/batch-voice-image-ocr', { image: { mimeType: a.mimeType, data: (await fs.readFile(c.filePath(a))).toString('base64'), fileName: a.name } });
   });
-  add('sound_requirements', '生成音效/配音需求表。默认通用游戏音效模板，遵循UCS命名。可输入文字或截图，返回结构化表。',
+  add('sound_requirements', '生成音效/配音需求表。默认通用游戏音效模板，使用直观的英文对象/动作命名（如 Sfx_Book_Drop），不添加音效库的 UCS 分类代码。可输入文字或截图，返回结构化表。',
     { inputText: str, imageAssetId: str, templateType: choice('game_sfx_general', 'game_sfx_middleware', 'voiceover_general', 'voiceover_multilang'), projectName: str }, [], async a => {
       let screenshot: any = null;
       if (a.imageAssetId) {

@@ -1,4 +1,4 @@
-import type { SfxBatchRequirement } from './sfxBatch';
+import { batchFileStem, uniqueBatchFileNames, type SfxBatchRequirement } from './sfxBatch';
 import type { AudioDownloadRange } from './audioRangeExport';
 export type BatchVersion = {
   id: string; title: string; kind: 'search' | 'generate'; source?: string; sourceUrl?: string; ticketId?: string;
@@ -6,7 +6,7 @@ export type BatchVersion = {
   confirmedBlob?: Blob; confirmedRange?: AudioDownloadRange;
 };
 export type BatchRow = SfxBatchRequirement & {
-  selected: boolean; versions: BatchVersion[]; activeVersionId?: string; confirmedVersionId?: string;
+  selected: boolean; versions: BatchVersion[]; activeVersionId?: string; confirmedVersionId?: string; confirmedVersionIds?: string[];
   status: string; error?: string; excludedSources: string[];
   videoId?: string; placedVersionId?: string;
   rangeReviewParentId?: string; rangeReviewFingerprint?: string;
@@ -14,7 +14,69 @@ export type BatchRow = SfxBatchRequirement & {
 };
 export type BatchVideoAsset = { id: string; file: File };
 export const batchId = () => globalThis.crypto?.randomUUID?.() || `batch-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-export function confirmedVersion(row: BatchRow) { return row.versions.find(v => v.id === row.confirmedVersionId && v.confirmedBlob); }
+export function confirmedVersions(row: BatchRow): BatchVersion[] {
+  // Old projects may retain blobs from previously replaced choices. Only migrate
+  // the explicit singleton selection, never every historical confirmed blob.
+  const ids = row.confirmedVersionIds ?? (row.confirmedVersionId ? [row.confirmedVersionId] : []);
+  const versions = new Map(row.versions.map(version => [version.id, version]));
+  return [...new Set(ids)].flatMap(id => {
+    const version = versions.get(id);
+    return version?.confirmedBlob ? [version] : [];
+  });
+}
+// Video placement keeps its primary choice while downloads include every choice.
+export function confirmedVersion(row: BatchRow) {
+  const versions = confirmedVersions(row);
+  return versions.find(version => version.id === row.confirmedVersionId) || versions[0];
+}
+export function confirmBatchVersion(row: BatchRow, id: string, blob: Blob, range: AudioDownloadRange): BatchRow {
+  if (!row.versions.some(version => version.id === id)) return row;
+  const ids = [...new Set([...confirmedVersions(row).map(version => version.id), id])];
+  return { ...row, confirmedVersionIds: ids, confirmedVersionId: confirmedVersion(row)?.id || id,
+    status: '已确认音效', error: undefined, versions: row.versions.map(version => version.id === id
+      ? { ...version, confirmedBlob: blob, confirmedRange: range, draftRange: range } : version) };
+}
+export function unconfirmBatchVersion(row: BatchRow, id: string): BatchRow {
+  const ids = confirmedVersions(row).filter(version => version.id !== id).map(version => version.id);
+  return { ...row, confirmedVersionIds: ids,
+    confirmedVersionId: ids.includes(row.confirmedVersionId || '') ? row.confirmedVersionId : ids[0],
+    ...(row.placedVersionId === id ? { placedVersionId: undefined } : {}),
+    status: ids.length ? '已确认音效' : row.versions.length ? '待试听与确认' : '待制作',
+    versions: row.versions.map(version => version.id === id
+      ? { ...version, confirmedBlob: undefined, confirmedRange: undefined } : version) };
+}
+export function updateBatchVersionRange(row: BatchRow, id: string, range: AudioDownloadRange | null): BatchRow {
+  const version = row.versions.find(version => version.id === id);
+  if (!version || sameBatchRange(version.draftRange, range, version.duration || version.confirmedRange?.end)) return row;
+  const next = version.confirmedBlob && !sameBatchRange(range, version.confirmedRange, version.duration || version.confirmedRange?.end)
+    ? unconfirmBatchVersion(row, id) : row;
+  return { ...next, versions: next.versions.map(version => version.id === id ? { ...version, draftRange: range } : version) };
+}
+export type BatchAudioExport = { row: BatchRow; version: BatchVersion; name: string };
+export function batchAudioExports(rows: BatchRow[]): BatchAudioExport[] {
+  const entries = rows.flatMap(row => {
+    const versions = confirmedVersions(row);
+    return versions.map((version, index) => {
+      const suffix = versions.length > 1 ? `_${index + 1}` : '';
+      return { row, version, name: `${batchFileStem(row.name).slice(0, 100 - suffix.length)}${suffix}` };
+    });
+  });
+  const names = uniqueBatchFileNames(entries.map(entry => entry.name));
+  return entries.map((entry, index) => ({ ...entry, name: names[index] }));
+}
+export function batchExportRequirements(rows: BatchRow[]) {
+  const byRow = new Map<string, BatchAudioExport[]>();
+  for (const entry of batchAudioExports(rows)) {
+    const entries = byRow.get(entry.row.id) || [];
+    entries.push(entry); byRow.set(entry.row.id, entries);
+  }
+  return rows.flatMap(row => {
+    const entries = byRow.get(row.id);
+    return entries?.length ? entries.map(({ name, version }) => ({ ...row, name: name.replace(/\.wav$/i, ''),
+      confirmedDuration: version.confirmedRange ? Number((version.confirmedRange.end - version.confirmedRange.start).toFixed(3)) : undefined }))
+      : [{ ...row, confirmedDuration: undefined }];
+  });
+}
 export function sameBatchRange(a?: AudioDownloadRange | null, b?: AudioDownloadRange | null, duration = 0) {
   return Math.abs((a?.start || 0) - (b?.start || 0)) < 0.0001 && Math.abs((a?.end ?? duration) - (b?.end ?? duration)) < 0.0001;
 }

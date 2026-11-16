@@ -3,7 +3,7 @@ import { AlertCircle, Check, ExternalLink, Globe, Loader2, Search, Square, Rotat
 import GeneratedAudioPlayer, { sanitizeAudioFileName } from './GeneratedAudioPlayer';
 import PointCostHint from './PointCostHint';
 import { prepareSoundEffectPrompt, requiresSoundEffectTranslation } from '../services/sfxPromptService';
-import type { CapturedOnlineSfx, OnlineSfxItem, OnlineSfxSourceStatus } from '../services/onlineSfxTypes';
+import type { CapturedOnlineSfx, OnlineSfxItem } from '../services/onlineSfxTypes';
 
 type Row = OnlineSfxItem & { status: 'waiting' | 'capturing' | 'ready' | 'failed'; result?: CapturedOnlineSfx; error?: string };
 const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} 秒`;
@@ -27,7 +27,6 @@ export default function OnlineSfxSearch() {
   const [elapsed, setElapsed] = useState(0);
   const [searchMs, setSearchMs] = useState<number | null>(null);
   const [batchNumber, setBatchNumber] = useState(0);
-  const [sources, setSources] = useState<OnlineSfxSourceStatus[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const controller = useRef<AbortController | null>(null);
   const started = useRef(0);
@@ -74,8 +73,7 @@ export default function OnlineSfxSearch() {
     if (!query.trim() || busy) return;
     const current = new AbortController(); controller.current = current;
     started.current = Date.now(); setBusy(true); setRows([]); setError(''); setElapsed(0); setSearchMs(null); setSearchQuery('');
-    setSources([]);
-    setMessage(requiresSoundEffectTranslation(query) ? '正在将音效关键词翻译为英文…' : '正在并行搜索多个音效网站…');
+    setMessage(requiresSoundEffectTranslation(query) ? '正在将音效关键词翻译为英文…' : '正在搜索音效…');
     try {
       const trimmedQuery = query.trim();
       const queryKey = normalizeQuery(trimmedQuery);
@@ -85,12 +83,12 @@ export default function OnlineSfxSearch() {
         translations.current.set(queryKey, english);
       }
       current.signal.throwIfAborted();
-      setSearchQuery(english); setMessage('正在并行搜索 Envato、PSE、Epidemic、Mixkit 和全网公开试听…');
+      setSearchQuery(english); setMessage('正在搜索音效…');
       const continued = searchHistory.current.key === queryKey;
       const page = continued ? searchHistory.current.nextPage : 1;
       const batch = continued ? searchHistory.current.nextBatch : 1;
       const seen = continued ? searchHistory.current.seen : new Set<string>();
-      const response = await post<{ items: OnlineSfxItem[]; sources?: OnlineSfxSourceStatus[]; page: number; nextPage: number; elapsedMs: number; message?: string }>(
+      const response = await post<{ items: OnlineSfxItem[]; page: number; nextPage: number; elapsedMs: number; message?: string }>(
         'search',
         { query: english, page, excludeSourceUrls: Array.from(seen) },
         current.signal,
@@ -99,7 +97,6 @@ export default function OnlineSfxSearch() {
       next.forEach(item => seen.add(item.sourceUrl));
       searchHistory.current = { key: queryKey, nextPage: response.nextPage, nextBatch: batch + 1, seen };
       setRows(next); setSearchMs(response.elapsedMs); setBatchNumber(batch);
-      setSources(response.sources || []);
       setMessage(next.length ? '搜索完成，正在后台采集试听；完成的音效可立即播放。' : response.message || '没有找到匹配音效。');
       let cursor = 0;
       // Three bounded workers publish each playable result without waiting for
@@ -149,7 +146,6 @@ export default function OnlineSfxSearch() {
     {(message || rows.length > 0) && <div role="status" aria-live="polite" className="rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-xs text-emerald-800 space-y-1">
       <p>{message}</p><p className="text-[11px] text-slate-600">已就绪 {ready} / {rows.length} · 失败 {failed} · 本次耗时 {seconds(elapsed)}{searchMs !== null ? ` · 搜索 ${seconds(searchMs)}` : ''}</p>
       {searchQuery && <p className="break-words text-[11px] text-slate-500">搜索词：{searchQuery}{batchNumber > 0 ? ` · 第 ${batchNumber} 批` : ''}</p>}
-      {sources.length > 0 && <p className="break-words text-[11px] text-slate-600">{sources.map(source => `${source.source} ${source.count} 条${source.reason ? `（${source.reason}）` : source.unavailable ? '（暂不可用，已启用其他来源）' : ''}`).join(' · ')}</p>}
     </div>}
     <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
       {rows.map((row, index) => <article key={row.id} style={{ contentVisibility: 'auto', containIntrinsicSize: '560px' }} className="min-w-0 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm space-y-3">

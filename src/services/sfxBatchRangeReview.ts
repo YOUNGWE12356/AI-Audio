@@ -28,7 +28,7 @@ export function applyBatchRangeReview(rows: BatchRow[], id: string, videoId: str
   }
   const updated: BatchRow = { ...original, ...first, id: original.id, name: batchFileStem(first.name),
     time: range.start, endTime: range.end, duration: Math.max(0.5, Math.min(30, range.end - range.start)),
-    confirmedVersionId: undefined, placedVersionId: undefined, error: undefined,
+    confirmedVersionId: undefined, confirmedVersionIds: [], placedVersionId: undefined, error: undefined,
     status: '范围分析完成，待制作或重新确认音效' };
   const added: BatchRow[] = additions.map(item => {
     const row: BatchRow = { ...item, id: batchId(), name: batchFileStem(item.name), videoId, selected: true,

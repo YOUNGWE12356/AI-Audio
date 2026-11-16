@@ -46,7 +46,7 @@ test('valid names, BGM and VO need no repair; cancellation prevents any AI reque
   await assert.rejects(repairRequirementUcsNames(source, 'game_sfx_general', { signal: controller.signal, generate: (async () => { throw new Error('must not request'); }) as any }), { name: 'AbortError' });
 });
 
-test('screenshot generation performs one visual read then repairs only the fifth filename, preserving all 15 source rows', async t => {
+test('requirements generate readable names in one visual read without UCS repair calls, preserving all source rows', async t => {
   let calls = 0;
   t.mock.method(globalThis, 'fetch', async (_url: any, options: any) => {
     calls++;
@@ -54,6 +54,9 @@ test('screenshot generation performs one visual read then repairs only the fifth
     const schema = body.text.format.schema;
     if (schema.properties.items) {
       assert.ok(Array.isArray(body.input));
+      const prompt = JSON.stringify(body.input);
+      assert.match(prompt, /需求表禁止使用/);
+      assert.doesNotMatch(prompt, /UCS 8\.2\.1 分类目录/);
       return Response.json({ output_text: JSON.stringify({ items: source, sourceItemCount: 15 }) });
     }
     assert.ok(schema.properties.repairs);
@@ -65,8 +68,9 @@ test('screenshot generation performs one visual read then repairs only the fifth
   try {
     const result = await generateSfxRequirements('', { mimeType: 'image/png', data: 'fixture-base64' }, 'game_sfx_general');
     assert.equal(result.sourceItemCount, 15); assert.equal(result.items.length, 15);
-    assert.equal(result.items[4].filename, 'Sfx_UIClick_Reward');
+    assert.equal(result.items[0].filename, 'Sfx_Click_Button_1');
+    assert.equal(result.items[4].filename, source[4].filename);
     assert.deepEqual(result.items[4].description, source[4].description);
-    assert.equal(calls, 2);
+    assert.equal(calls, 1);
   } finally { if (previous === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previous; }
 });
