@@ -1378,6 +1378,8 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
 
   // Custom Confirmation Dialog state
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [deletingSoundId, setDeletingSoundId] = useState<string | null>(null);
+  const deletingSoundRef = useRef(false);
   const [customDialog, setCustomDialog] = useState<{
     isOpen: boolean;
     title: string;
@@ -1428,6 +1430,56 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
     } catch (error) {
       showCustomAlert('保存未完成', (error as Error).message);
     }
+  };
+
+  const deleteSingleSound = async (sound: SoundEffect) => {
+    if (deletingSoundRef.current) return;
+    deletingSoundRef.current = true;
+    setDeletingSoundId(sound.id);
+    try {
+      await flushLibrary();
+      const response = await fetch('/api/sfx/library/sound', {
+        method: 'DELETE',
+        headers: getSfxLibraryAdminHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ soundId: sound.id, baseRevision: serverRevisionRef.current }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (response.status === 401 || response.status === 403) {
+        clearSfxLibraryAdminState();
+        setIsAuthorized(false);
+        setIsDirectoryManageMode(false);
+        throw new Error('管理权限已过期，请重新开启“管理”后再删除。');
+      }
+      if (response.status === 409 || payload.code === 'LIBRARY_SOUND_NOT_FOUND') {
+        await loadServerData();
+        throw new Error('音效库已更新，已刷新列表，请核对后重新确认删除。');
+      }
+      if (!response.ok || payload.success !== true) throw new Error(payload.error || '删除音效失败，请稍后重试。');
+      syncRef.current!.receive(payload);
+      if (stateRef.current.selectedSoundId === sound.id) {
+        audioPlayerRef.current?.pause();
+        stopAudioProgressSync();
+        setIsPlaying(false);
+        setSelectedSoundId(payload.sounds[0]?.id || '');
+        setIsPropertiesPanelOpen(false);
+      }
+      showCustomAlert('删除完成', `已删除音效“${displaySfxLibraryFileName(sound.fileName || sound.name)}”。`);
+    } catch (error: any) {
+      showCustomAlert('删除失败', error?.message || '删除音效失败，请稍后重试。');
+    } finally {
+      deletingSoundRef.current = false;
+      setDeletingSoundId(null);
+    }
+  };
+
+  const handleDeleteSound = (sound: SoundEffect) => {
+    if (!checkOwnerPermission() || deletingSoundRef.current) return;
+    showCustomConfirm(
+      '确定要删除这个音效吗？',
+      `将从共享音效库永久删除“${displaySfxLibraryFileName(sound.fileName || sound.name)}”及其音频文件，其他成员也将无法使用。此操作无法恢复；其他音效和目录不受影响。`,
+      () => { void deleteSingleSound(sound); },
+      { tone: 'danger', confirmLabel: '永久删除' },
+    );
   };
 
   const handleAddSound = async () => {
@@ -4416,6 +4468,19 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                           title={isFavorite ? '取消收藏' : '加入收藏'}
                         >
                           <Heart className={`h-3.5 w-3.5 ${isFavorite ? 'fill-current' : ''}`} />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`删除音效 ${sound.name}`}
+                          disabled={deletingSoundId !== null || isUploading || isAiBatchOptimizing}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleDeleteSound(sound);
+                          }}
+                          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-slate-300 transition-colors hover:bg-rose-50 hover:text-rose-600 disabled:cursor-wait disabled:opacity-40"
+                          title={deletingSoundId === sound.id ? '正在删除…' : '删除音效'}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
                         </button>
                         <SoundRatingControl
                           soundId={sound.id}

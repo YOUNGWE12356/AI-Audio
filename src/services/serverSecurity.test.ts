@@ -279,6 +279,46 @@ test('real server rejects audited attacks and preserves an authenticated upload/
   assert.equal((await request('/api/usage/quotas', alice)).status, 200);
   assert.equal((await request('/api/points/admin', bob)).status, 403);
   assert.equal((await request('/api/usage/quotas', alice, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 400);
+  // Single-sound deletion must remove the row and media together without
+  // touching other records, directories, shared files or external paths.
+  const libraryUpload = await request('/api/sfx/library/upload', alice, { method: 'POST',
+    headers: { 'Content-Type': 'audio/wav', 'x-filename': 'delete-fixture.wav' }, body: 'delete-fixture-audio' });
+  assert.equal(libraryUpload.status, 200);
+  const libraryFile = await libraryUpload.json();
+  const deleteRows = [...storedSounds,
+    { id: 'delete-one', name: 'First reference', storageKey: libraryFile.storageKey },
+    { id: 'delete-two', name: 'Second reference', storageKey: libraryFile.storageKey },
+    { id: 'external', name: 'External audio', url: 'https://example.test/audio.wav' },
+    { id: 'invalid-path', name: 'Invalid path', storageKey: '../../.env' },
+    { id: 'missing-file', name: 'Missing media', storageKey: 'originals/absent.wav' }];
+  const deleteCategories = [{ id: 'untouched-directory', name: 'Keep directory', subCategories: [] }];
+  const beforeSave = await (await request('/api/sfx/library/state', alice)).json();
+  const savedLibrary = await request('/api/sfx/library/state', alice, { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...beforeSave, categories: deleteCategories, sounds: deleteRows }) });
+  assert.equal(savedLibrary.status, 200);
+  let deleteRevision = (await savedLibrary.json()).revision;
+  const deleteRequest = (soundId: string, baseRevision: number | undefined = deleteRevision, cookie = alice) => request('/api/sfx/library/sound', cookie,
+    { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ soundId, baseRevision }) });
+  assert.equal((await deleteRequest('delete-one', deleteRevision, '')).status, 401);
+  assert.equal((await deleteRequest('delete-one', deleteRevision, bob)).status, 403);
+  assert.equal((await deleteRequest('delete-one', deleteRevision - 1)).status, 409);
+  assert.equal((await deleteRequest('delete-one', NaN)).status, 400);
+  assert.equal((await deleteRequest('absent')).status, 404);
+  assert.equal((await deleteRequest('invalid-path')).status, 400);
+  assert.equal(await (await request(libraryFile.url, alice)).text(), 'delete-fixture-audio');
+  assert.deepEqual(JSON.parse(fs.readFileSync(soundsPath, 'utf8')), deleteRows);
+  for (const id of ['delete-one', 'delete-two', 'external', 'missing-file']) {
+    const removed = await deleteRequest(id);
+    assert.equal(removed.status, 200);
+    const snapshot = await removed.json(); deleteRevision = snapshot.revision;
+    assert.ok(!snapshot.sounds.some((sound: any) => sound.id === id));
+    assert.deepEqual(snapshot.categories, deleteCategories);
+    assert.ok(snapshot.sounds.some((sound: any) => sound.id === 'existing-sound'));
+    if (id === 'delete-one') assert.equal((await request(libraryFile.url, alice)).status, 200, 'shared audio remains playable');
+    if (id === 'delete-two') assert.equal((await request(libraryFile.url, alice)).status, 404, 'last reference removes media');
+  }
+  assert.deepEqual((await (await request('/api/sfx/library/state', alice)).json()).sounds,
+    [storedSounds[0], deleteRows.find(sound => sound.id === 'invalid-path')]);
   const failedGeneration = await request('/api/ai/elevenlabs/sound-effect', alice, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'test' }) });
   assert.ok(failedGeneration.status >= 400);
   const refunded = await (await request('/api/usage/quota', alice)).json();

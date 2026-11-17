@@ -1589,6 +1589,64 @@ async function startServer() {
     }
   });
 
+  app.delete('/api/sfx/library/sound', requireSfxLibraryAdmin, (req, res) => {
+    const soundId = typeof req.body?.soundId === 'string' ? req.body.soundId : '';
+    const baseRevision = req.body?.baseRevision;
+    if (!soundId || !Number.isSafeInteger(baseRevision)) {
+      return res.status(400).json({ error: '删除音效参数无效，请刷新后重试。' });
+    }
+    let moved: { source: string; backup: string } | undefined;
+    const temporaryManifest = `${soundsFile}.${randomUUID()}.tmp`;
+    try {
+      const current = loadAndRepairLibraryMetadata();
+      if (baseRevision !== sfxLibraryRevision) {
+        return res.status(409).json({ error: '音效库已更新，请核对最新内容后重新确认删除。',
+          revision: sfxLibraryRevision, categories: current.categories, sounds: current.sounds });
+      }
+      const target = current.sounds.find((sound: any) => sound?.id === soundId);
+      if (!target) return res.status(404).json({ code: 'LIBRARY_SOUND_NOT_FOUND', error: '该音效已不存在，请刷新列表。' });
+      const retainedSounds = current.sounds.filter((sound: any) => sound?.id !== soundId);
+      if (target.storageKey) {
+        const source = resolveLibraryPath(target.storageKey);
+        if (!source) return res.status(400).json({ error: '音效存储路径无效，未执行删除。' });
+        if (fs.existsSync(source)) {
+          const realSource = fs.realpathSync(source);
+          if (!isPathInside(fs.realpathSync(libraryDir), realSource) || !fs.lstatSync(source).isFile()) {
+            return res.status(400).json({ error: '音效存储路径无效，未执行删除。' });
+          }
+          const shared = retainedSounds.some((sound: any) => {
+            const other = resolveLibraryPath(sound?.storageKey);
+            return other && fs.existsSync(other) && fs.realpathSync(other) === realSource;
+          });
+          if (!shared) {
+            const backup = `${source}.deleting-${randomUUID()}`;
+            fs.renameSync(source, backup);
+            moved = { source, backup };
+          }
+        }
+      }
+      // Keep this transaction synchronous so another library write cannot enter
+      // between the revision check, media move and atomic manifest replacement.
+      fs.writeFileSync(temporaryManifest, JSON.stringify(retainedSounds, null, 2), { encoding: 'utf-8', flag: 'wx' });
+      fs.renameSync(temporaryManifest, soundsFile);
+    } catch (error) {
+      if (moved) {
+        try { fs.renameSync(moved.backup, moved.source); }
+        catch (restoreError) { logEvent('library-sound-delete:restore', 'error', restoreError); }
+      }
+      try { fs.unlinkSync(temporaryManifest); } catch { /* No temporary manifest may have been written. */ }
+      logEvent('library-sound-delete', 'error', error);
+      return res.status(500).json({ error: '删除音效失败，请刷新列表后重试。' });
+    }
+    if (moved) {
+      try { fs.unlinkSync(moved.backup); }
+      catch (error) { logEvent('library-sound-delete:cleanup', 'warn', error); }
+    }
+    const revision = notifySfxLibraryChanged('sound-deleted');
+    const current = loadAndRepairLibraryMetadata();
+    return res.json({ success: true, revision, categories: current.categories, sounds: current.sounds });
+  });
+
   app.delete('/api/sfx/library/folder', requireSfxLibraryAdmin, asyncRoute(async (req, res) => {
     const kind = req.body?.kind === 'category' || req.body?.kind === 'subcategory' || req.body?.kind === 'childcategory'
       ? req.body.kind as 'category' | 'subcategory' | 'childcategory'
