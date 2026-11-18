@@ -160,8 +160,8 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700">
             <ShieldCheck className="h-5 w-5" />
           </div>
-          <h1 className="mt-4 text-lg font-bold text-slate-900">设置访问验证</h1>
-          <p className="mt-1 text-xs leading-5 text-slate-500">输入管理密码后才能查看用量统计和系统设置。</p>
+          <h1 className="mt-4 text-lg font-bold text-slate-900">数据管理访问验证</h1>
+          <p className="mt-1 text-xs leading-5 text-slate-500">输入管理密码后才能查看用量统计和管理数据。</p>
           <button type="button" onClick={handleLogout} className="mt-3 text-sm text-slate-600">退出登录</button>
           {logoutError && <p role="alert">{logoutError}</p>}
 
@@ -188,7 +188,7 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
             className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 py-2.5 text-xs font-bold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <LockKeyhole className="h-4 w-4" />
-            {isVerifying ? '正在验证...' : '验证并进入设置'}
+            {isVerifying ? '正在验证...' : '验证并进入数据管理'}
           </button>
         </section>
       </div>
@@ -199,7 +199,7 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
     <div className="mx-auto w-full max-w-7xl p-4 sm:p-6 lg:p-8">
       <header className="flex items-center justify-between gap-4 border-b border-slate-200 pb-5">
         <div>
-          <h1 className="text-xl font-bold text-slate-900">设置</h1>
+          <h1 className="text-xl font-bold text-slate-900">数据管理</h1>
           <p className="mt-1 text-xs text-slate-500">用量统计与本地数据管理</p>
         </div>
         <button
@@ -208,7 +208,7 @@ export default function SettingsComponent({ onKeysUpdated }: SettingsProps) {
           className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 hover:bg-slate-50"
         >
           <LogOut className="h-4 w-4" />
-          退出设置
+          退出数据管理
         </button>
       </header>
 

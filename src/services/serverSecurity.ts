@@ -7,6 +7,7 @@ import { assertPrivateEnvironment } from './serverEnvironment';
 import { createFeishuLogin, readFeishuAuthConfig, type FeishuUser } from './feishuAuthServer';
 import { publicRequirementsFailure } from './sfxRequirementsErrors';
 import type { McpIdentity } from './mcpAccess';
+import { requestLimitMessage, safeRetryAfterMs } from './requestLimitErrors';
 export { assertPrivateEnvironment } from './serverEnvironment';
 
 const deriveKey = (password: string, salt: Buffer) => new Promise<Buffer>((resolve, reject) => {
@@ -101,6 +102,9 @@ export function createServerSecurity(options: { privateRoot: string; uploadRoot?
   const accountLimit = createRateLimiter(20, 15 * 60_000);
   const apiLimit = createRateLimiter(600, 60_000);
   const inflight = new Map<string, number>();
+  // MCP envelopes make authenticated internal API calls. Counting both in the
+  // same pool lets a few queued tools block the search that would release them.
+  const mcpInflight = new Map<string, number>();
   let passwordChecks = 0;
   const router = express.Router();
   const sessionToken = (req: express.Request) => {
@@ -192,7 +196,9 @@ export function createServerSecurity(options: { privateRoot: string; uploadRoot?
       return res.status(401).json({ code: 'AUTH_REQUIRED', error: publicError(401) });
     }
     const userId = machine?.id || `${session!.user.feishu ? 'feishu' : 'account'}:${session!.user.id}`;
-    if (!apiLimit(userId)) return res.status(429).json({ error: publicError(429) });
+    if (!apiLimit(userId)) return res.set('Retry-After', '60').status(429).json({
+      code: 'API_RATE_LIMIT', error: requestLimitMessage('API_RATE_LIMIT', publicError(429)), retryAfterMs: 60_000,
+    });
     const enter = () => {
       const directory = path.join(options.uploadRoot || options.privateRoot, createHash('sha256').update(userId).digest('hex'));
       fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -203,7 +209,9 @@ export function createServerSecurity(options: { privateRoot: string; uploadRoot?
       res.setHeader('Cache-Control', 'no-store');
       const originalJson = res.json.bind(res);
       if (req.path !== '/mcp') res.json = ((body: any) => originalJson(res.statusCode >= 400
-        ? { error: publicError(res.statusCode), code: /^[A-Z0-9_]+$/.test(body?.code || '') ? body.code : undefined, requestId }
+        ? { error: requestLimitMessage(body?.code, publicError(res.statusCode)),
+          code: /^[A-Z0-9_]+$/.test(body?.code || '') ? body.code : undefined, requestId,
+          ...(safeRetryAfterMs(body?.retryAfterMs) ? { retryAfterMs: safeRetryAfterMs(body.retryAfterMs) } : {}) }
         : sanitizeResponse(body))) as typeof res.json;
       context.run({ userId, directory, requestId }, next);
     };
@@ -216,10 +224,12 @@ export function createServerSecurity(options: { privateRoot: string; uploadRoot?
   const resourceLimits: express.RequestHandler = (req, res, next) => {
     if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
     const id = currentUserId();
-    if ((inflight.get(id) || 0) >= 4 || [...inflight.values()].reduce((sum, count) => sum + count, 0) >= 16) return res.status(429).json({ error: publicError(429) });
-    inflight.set(id, (inflight.get(id) || 0) + 1);
+    const active = req.path === '/mcp' ? mcpInflight : inflight;
+    if ((active.get(id) || 0) >= 4 || [...active.values()].reduce((sum, count) => sum + count, 0) >= 16)
+      return res.set('Retry-After', '1').status(429).json({ code: 'REQUEST_CONCURRENCY_LIMIT', retryAfterMs: 1000 });
+    active.set(id, (active.get(id) || 0) + 1);
     let done = false;
-    const release = () => { if (!done) { done = true; const remaining = (inflight.get(id) || 1) - 1; if (remaining) inflight.set(id, remaining); else inflight.delete(id); } };
+    const release = () => { if (!done) { done = true; const remaining = (active.get(id) || 1) - 1; if (remaining) active.set(id, remaining); else active.delete(id); } };
     res.once('finish', release); res.once('close', release);
     // Check before body parsing/model work. Never follow links while counting storage.
     const checkStorage = async () => {
@@ -227,16 +237,19 @@ export function createServerSecurity(options: { privateRoot: string; uploadRoot?
       let bytes = 0, files = 0;
       const visit = async (directory: string): Promise<void> => {
         for (const entry of await fs.promises.readdir(directory, { withFileTypes: true })) {
-          if (++files > 20_000) throw Object.assign(new Error('Storage limit exceeded'), { status: 429 });
+          if (++files > 20_000) throw Object.assign(new Error('Storage limit exceeded'), { status: 429, code: 'STORAGE_LIMIT_EXCEEDED' });
           const file = path.join(directory, entry.name);
           if (entry.isDirectory()) await visit(file);
           else if (entry.isFile()) bytes += (await fs.promises.stat(file)).size;
-          if (bytes > 1024 * 1024 * 1024) throw Object.assign(new Error('Storage limit exceeded'), { status: 429 });
+          if (bytes > 1024 * 1024 * 1024) throw Object.assign(new Error('Storage limit exceeded'), { status: 429, code: 'STORAGE_LIMIT_EXCEEDED' });
         }
       };
       await visit(currentUploadDirectory());
     };
-    void checkStorage().then(() => next(), next);
+    void checkStorage().then(() => next(), error => {
+      if (error?.code === 'STORAGE_LIMIT_EXCEEDED') return res.status(429).json({ code: error.code });
+      next(error);
+    });
   };
   const isAdmin = (req: express.Request) => {
     if (req.get('authorization')) return (options.machineIdentity?.(req)?.adminUntil || 0) > now();

@@ -76,8 +76,14 @@ for (const cdn of [false, true]) test(`official MCP client (${cdn ? 'CDN' : 'loc
     res.json({ url: '/uploads/online_sfx_preview.wav' });
   });
   app.post('/api/ai/elevenlabs/voice', (req, res) => { voiceCalls++; assert.equal(req.body.languageCode, 'zh'); res.type('audio/wav').send(wav); });
-  app.post('/api/ai/sfx-batch/search', (req, res) => {
+  let busyResponses = 0, activeSearches = 0, maxActiveSearches = 0;
+  app.post('/api/ai/sfx-batch/search', async (req, res) => {
     batchSearchCalls++;
+    if (busyResponses-- > 0) return res.set('Retry-After', '1').status(429).json({
+      error: 'busy', code: 'SFX_SEARCH_BUSY', retryAfterMs: 1000 });
+    activeSearches++; maxActiveSearches = Math.max(maxActiveSearches, activeSearches);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    activeSearches--;
     let batch: ReturnType<typeof searchBatches.claim>;
     try { batch = searchBatches.claim(currentUserId(), req.body.searchBatchId, req.body.searchBatchItemId); }
     catch { res.status(400).json({ error: '搜索批次无效。' }); return; }
@@ -141,6 +147,15 @@ for (const cdn of [false, true]) test(`official MCP client (${cdn ? 'CDN' : 'loc
   const soundArgs = { name: '关门', keywords: '关门', searchQuery: 'door slam', duration: 2 };
   const searched = jsonResult(await client.callTool({ name: 'produce_sound_effect', arguments: soundArgs }));
   assert.equal(searched.method, 'search'); assert.equal(sfxCalls, 0);
+  const concurrent = await Promise.all(Array.from({ length: 4 }, () =>
+    client.callTool({ name: 'produce_sound_effect', arguments: soundArgs })));
+  assert.ok(concurrent.every(result => jsonResult(result).method === 'search'));
+  assert.equal(maxActiveSearches, 1, 'four MCP envelopes queue without starving their nested API calls');
+  const beforeRetry = batchSearchCalls;
+  busyResponses = 1;
+  const retried = jsonResult(await client.callTool({ name: 'produce_sound_effect', arguments: soundArgs }));
+  assert.equal(retried.method, 'search'); assert.equal(batchSearchCalls, beforeRetry + 2);
+  assert.equal(sfxCalls, 0, 'safe 429 metadata survives authenticated HTTP and prevents unnecessary generation');
   const chargesBeforeBatch = batchCharges;
   const searchedBatch = jsonResult(await client.callTool({ name: 'produce_sfx_batch', arguments: { items: [soundArgs, soundArgs] } }));
   assert.equal(searchedBatch.completedCount, 2);

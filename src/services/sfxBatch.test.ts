@@ -173,6 +173,48 @@ test('search tickets are owner-scoped; concurrent capture deduplicates and conve
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); await fs.rm(directory, { recursive: true, force: true }); }
 });
 
+test('search busy is tagged before admission; retrying the same batch item succeeds without a duplicate charge', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'sfx-busy-'));
+  const events: AiUsageEvent[] = [];
+  setAiUsageRecorder(event => events.push(event));
+  let started!: () => void, unlock!: () => void, reserved = 0;
+  const entered = new Promise<void>(resolve => { started = resolve; });
+  const gate = new Promise<void>(resolve => { unlock = resolve; });
+  const app = express(); app.use(express.json());
+  app.use('/batch', createSfxBatchRouter({
+    uploadsDir: dir, jobsDir: dir, ffmpeg: ffmpeg!, owner: () => 'alice',
+    reserve: () => { reserved++; return () => {}; }, run: (_req, _res, work) => { void work(); },
+    search: async () => { started(); await gate; return { items: [{ title: 'Door', source: 'test',
+      sourceUrl: 'https://example.com/door', previewUrl: 'https://example.com/door.mp3', author: '' }], sources: [] }; },
+  }));
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise<void>(resolve => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${(server.address() as any).port}/batch`;
+  const post = (endpoint: string, body: any) => fetch(base + endpoint, { method: 'POST',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  let first: Promise<Response> | undefined;
+  try {
+    const batch = await (await post('/search-batches', { itemIds: ['one', 'two'] })).json();
+    first = post('/search', { query: 'door', searchBatchId: batch.batchId, searchBatchItemId: 'one' });
+    await entered;
+    const args = { query: 'door', searchBatchId: batch.batchId, searchBatchItemId: 'two' };
+    const blocked = await post('/search', args);
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.headers.get('Retry-After'), '1');
+    assert.equal((await blocked.json()).code, 'SFX_SEARCH_BUSY');
+    assert.equal(reserved, 1);
+    unlock(); assert.equal((await first).status, 200);
+    assert.equal((await post('/search', args)).status, 200);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].companyPoints, 1);
+    assert.equal(reserved, 1);
+  } finally {
+    unlock(); await first?.catch(() => {}); setAiUsageRecorder(null);
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('batch search bills one point across rows, charges new clicks and users independently, and skips empty or failed searches', async () => {
   const events: AiUsageEvent[] = [];
   const balances = new Map([['alice', 1], ['bob', 1]]);

@@ -30,6 +30,7 @@ export type AgentToolContext = {
   review?: (args: Args) => void;
   navigate: (tab: string) => void;
   progress?: (message: string) => void;
+  queueSfxSearch?: <T>(work: () => Promise<T>) => Promise<T>;
   workspace?: (action: AssistantWorkspaceCommand['action'], args: Args, workspace?: AssistantWorkspaceCommand['workspace']) => Promise<any>;
   runInWorkspace?: (name: string, args: Args, execute: () => Promise<unknown>) => Promise<unknown>;
 };

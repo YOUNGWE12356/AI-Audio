@@ -82,7 +82,7 @@ export default function Sidebar({ currentTab, setCurrentTab, isMobileOpen, onMob
     { id: 'audio-tools' as const, label: '音频工具', icon: SlidersHorizontal },
     { id: 'sfx-requirements' as const, label: '音效需求表', icon: ClipboardList },
     { id: 'sfx-library' as const, label: '音效库', icon: Database },
-    { id: 'settings' as const, label: '设置', icon: Settings },
+    { id: 'settings' as const, label: '数据管理', icon: Settings },
   ];
 
   React.useEffect(() => {

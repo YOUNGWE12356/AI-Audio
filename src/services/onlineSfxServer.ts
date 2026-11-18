@@ -693,7 +693,7 @@ export function createOnlineSfxRouter(options: {
         logEvent('src/services/onlineSfxServer.ts:684', 'warn', error);
       });
       if (searching >= 4 || tickets.size >= 600 || Date.now() - (searches.get(owner) || 0) < 5000) {
-        return res.status(429).json({ error: '搜索较频繁，请稍后重试。' });
+        return res.set('Retry-After', '5').status(429).json({ code: 'SFX_SEARCH_BUSY', retryAfterMs: 5000, error: '搜索较频繁，请稍后重试。' });
       }
       if (options.reserve) {
         releaseReservation = options.reserve(req, res, ONLINE_SFX_BATCH_COMPANY_POINTS) || undefined;
@@ -741,7 +741,7 @@ export function createOnlineSfxRouter(options: {
       if (!ticket || ticket.owner !== options.owner(req, res)) return res.status(404).json({ error: '搜索结果已过期，请重新搜索。' });
       if (ticket.captured) return res.json(ticket.captured);
       if (ticket.pending) return res.json(await ticket.pending);
-      if (capturing >= 6) return res.status(429).json({ error: '采集任务繁忙，请稍后重试该条音效。' });
+      if (capturing >= 6) return res.set('Retry-After', '1').status(429).json({ code: 'SFX_CAPTURE_BUSY', retryAfterMs: 1000, error: '采集任务繁忙，请稍后重试该条音效。' });
       capturing++;
       const work = async () => {
         const started = Date.now();

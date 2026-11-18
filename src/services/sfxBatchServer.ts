@@ -210,7 +210,8 @@ export function createSfxBatchRouter(options: {
         const input = normalizeBatchSearchQueryInput(req.body);
         const existing = existingBatchSearchQuery(input.searchQuery);
         if (existing) { res.json({ searchQuery: existing }); return; }
-        if (queryPreparations.has(owner) || queryPreparations.size >= 4) throw fail('正在提炼英文搜索词，请等待当前步骤完成。', 429);
+        if (queryPreparations.has(owner) || queryPreparations.size >= 4)
+          throw Object.assign(fail('正在提炼英文搜索词，请等待当前步骤完成。', 429), { code: 'SFX_QUERY_BUSY', retryAfterMs: 1000 });
         release = options.reserve(req, res, 0.1); if (!release) return;
         queryPreparations.add(owner); locked = true;
         const searchQuery = await prepareBatchSearchQuery(input, controller.signal, options.generateQuery);
@@ -236,9 +237,10 @@ export function createSfxBatchRouter(options: {
       let query: string;
       try { query = validateBatchSearchQuery(typeof req.body?.query === 'string' ? req.body.query : ''); }
       catch (error) { throw fail(error instanceof Error ? error.message : '请填写1～2个英文搜索词。'); }
-      if (searches.has(owner) || searches.size >= 4) throw fail('搜索任务正在进行，请等待本条完成。', 429);
+      if (searches.has(owner) || searches.size >= 4)
+        throw Object.assign(fail('搜索任务正在进行，请等待本条完成。', 429), { code: 'SFX_SEARCH_BUSY', retryAfterMs: 1000 });
       for (const [id, ticket] of tickets) if (!ticket.pending && Date.now() - ticket.at > 30 * 60_000) tickets.delete(id);
-      if (tickets.size >= 600) throw fail('搜索结果较多，请稍后再试。', 429);
+      if (tickets.size >= 600) throw Object.assign(fail('搜索结果较多，请稍后再试。', 429), { code: 'SFX_SEARCH_CAPACITY', retryAfterMs: 1000 });
       const batch = searchBatches.claim(owner, req.body?.searchBatchId, req.body?.searchBatchItemId);
       if (!batch.hasBeenBilled) {
         release = options.reserve(req, res, 1); if (!release) return;
@@ -263,7 +265,7 @@ export function createSfxBatchRouter(options: {
       if (!ticket || ticket.owner !== options.owner(req, res) || Date.now() - ticket.at > 30 * 60_000) throw fail('候选结果已过期，请重新搜索。', 404);
       if (ticket.result) { res.json(ticket.result); return; }
       if (ticket.pending) { res.json(await ticket.pending); return; }
-      if (captures >= 4) throw fail('试听转换繁忙，请稍后重试。', 429);
+      if (captures >= 4) throw Object.assign(fail('试听转换繁忙，请稍后重试。', 429), { code: 'SFX_CAPTURE_BUSY', retryAfterMs: 1000 });
       captures++;
       ticket.pending = (async () => {
         let temp: string | undefined;
@@ -289,7 +291,9 @@ export function createSfxBatchRouter(options: {
   });
   router.use((error: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (res.headersSent) return next(error);
-    res.status(Number(error?.status) || 500).json({ error: error?.message || '批量音效处理失败，请重试。' });
+    if (error?.retryAfterMs) res.set('Retry-After', String(Math.ceil(error.retryAfterMs / 1000)));
+    res.status(Number(error?.status) || 500).json({ error: error?.message || '批量音效处理失败，请重试。',
+      code: error?.code, retryAfterMs: error?.retryAfterMs });
   });
   return router;
 }

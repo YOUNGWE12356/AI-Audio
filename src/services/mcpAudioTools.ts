@@ -6,6 +6,7 @@ import type { AgentTool } from './assistantAgentLoop';
 import { AUDIO_LANGUAGE_REGISTRY } from './languageRegistry';
 import { createAudioEvidence } from '../utils/audioEvidence';
 import { MCP_SFX_POLICY, produceMcpSoundEffect } from './mcpSfxProduction';
+import { createSfxRetryRequest } from './mcpSfxReliability';
 import { audioFailureDetails } from './elevenLabsErrors';
 
 const s = { type: 'string' }, n = { type: 'number' }, b = { type: 'boolean' };
@@ -16,6 +17,10 @@ export const MCP_EXCLUDED_TOOLS = new Set(['audio_to_midi', 'clone_voice', 'loca
 
 /** Remote tools share the production implementations, including billing. */
 export function createMcpAudioTools(c: AgentToolContext) {
+  const queuedSearch = <T>(work: (request: AgentToolContext['request']) => Promise<T>) => {
+    const run = () => work(createSfxRetryRequest(c));
+    return c.queueSfxSearch ? c.queueSfxSearch(run) : run();
+  };
   const tools = createAssistantTools(c).filter(t => !MCP_EXCLUDED_TOOLS.has(t.name));
   const add = (name: string, description: string, properties: Record<string, any>, required: string[], execute: AgentTool['execute']) =>
     tools.push({ name, description, parameters: { type: 'object', properties, required, additionalProperties: false }, execute });
@@ -97,18 +102,18 @@ export function createMcpAudioTools(c: AgentToolContext) {
     }
   });
   add('prepare_sfx_query', '将中文关键词提炼成1～2个可搜索的英文声音词。已有英文搜索词直接复用，不翻译整段描述。',
-    { keywords: s, description: s, searchQuery: s }, ['keywords'], a => c.request('/api/ai/sfx-batch/search-query', a));
+    { keywords: s, description: s, searchQuery: s }, ['keywords'], a => queuedSearch(request => request('/api/ai/sfx-batch/search-query', a)));
   add('search_online_sound_effects', '复用AI音效联网搜索：Envato30%、其他三库合计30%、全网40%，来源故障互补。中文关键词自动转换成简短英文。返回候选ID和来源，接着capture_online_sound_effect采集试听。换关键词后旧候选可能失效，先采集需要的结果。',
-    { keywords: s, searchQuery: s, page: { type: 'integer', minimum: 1, maximum: 50 }, excludeSourceUrls: strings }, ['keywords'], async a => {
-      const { searchQuery } = await c.request('/api/ai/sfx-batch/search-query', { keywords: a.keywords, searchQuery: a.searchQuery || '' });
-      return { ...await c.request('/api/sfx/online/search', { query: searchQuery, page: a.page || 1, excludeSourceUrls: a.excludeSourceUrls }), searchQuery };
-    });
+    { keywords: s, searchQuery: s, page: { type: 'integer', minimum: 1, maximum: 50 }, excludeSourceUrls: strings }, ['keywords'], a => queuedSearch(async request => {
+      const { searchQuery } = await request('/api/ai/sfx-batch/search-query', { keywords: a.keywords, searchQuery: a.searchQuery || '' });
+      return { ...await request('/api/sfx/online/search', { query: searchQuery, page: a.page || 1, excludeSourceUrls: a.excludeSourceUrls }), searchQuery };
+    }));
   add('capture_online_sound_effect', '采集上一步搜索候选的公开试听，保留原来源、水印及许可信息；返回可编辑文件。',
-    { id: s, name: s }, ['id'], async a => {
-      const result = await c.request('/api/sfx/online/capture', { id: a.id });
+    { id: s, name: s }, ['id'], a => queuedSearch(async request => {
+      const result = await request('/api/sfx/online/capture', { id: a.id });
       const url = result.audioUrl || result.url;
       return { ...result, asset: await c.register(url, a.name || '联网音效.wav', false) };
-    });
+    }));
   add('analyze_sfx_batch', '从视频、需求表截图、文档或文字整理逐条音效需求（描述、关键词、时长、命名、时间范围），与批量制作页同一分析流程。文档可TXT/CSV/XLSX/DOCX，传assetId；视频保留密集动作采样。',
     { assetId: s, text: s, instructions: s }, [], async a => {
       let files: any[] = [], text = a.text || '', sourceType = 'table', videoDuration: number | undefined;

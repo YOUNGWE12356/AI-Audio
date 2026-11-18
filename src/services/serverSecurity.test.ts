@@ -135,6 +135,33 @@ test('response filtering never returns raw nested errors and the limiter enforce
   } finally { console.error = original; }
 });
 
+test('authenticated errors distinguish quota, search busy and storage limits without exposing raw text', async t => {
+  const directory = temp(); t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const security = createServerSecurity({ privateRoot: path.join(directory, 'uploads'),
+    env: { APP_ORIGIN: origin, AUTH_USERS_JSON: accounts } });
+  const app = express(); app.use('/auth', security.router);
+  app.use(security.authenticate, security.resourceLimits, express.json());
+  app.post('/api/limited/:kind', (req, res) => res.status(429).json({
+    code: req.params.kind, error: 'SECRET_SENTINEL', retryAfterMs: req.params.kind === 'SFX_SEARCH_BUSY' ? 1000 : -100,
+  }));
+  const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const base = `http://127.0.0.1:${(server.address() as any).port}`;
+  const login = await fetch(base + '/auth/login', { method: 'POST', headers: { origin, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: 'alice', password }) });
+  const cookie = login.headers.get('set-cookie')!.split(';')[0];
+  for (const [code, message] of [['COMPANY_POINTS_EXCEEDED', /积分不足/], ['SFX_SEARCH_BUSY', /搜索繁忙/],
+    ['STORAGE_LIMIT_EXCEEDED', /存储空间/], ['UNKNOWN_ERROR', /请求过于频繁或额度不足/]] as const) {
+    const response = await fetch(base + '/api/limited/' + code, { method: 'POST', headers: { cookie, origin } });
+    assert.equal(response.status, 429);
+    const body = await response.json();
+    assert.equal(body.code, code); assert.match(body.error, message);
+    assert.equal(body.retryAfterMs, code === 'SFX_SEARCH_BUSY' ? 1000 : undefined);
+    assert.match(body.requestId, /^[a-f0-9-]{36}$/);
+    assert.doesNotMatch(JSON.stringify(body), /SECRET_SENTINEL/);
+  }
+});
+
 test('authenticated middleware isolates files/jobs, revokes sessions and rejects active uploads', async t => {
   const directory = temp(); t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   let now = Date.now();

@@ -19,6 +19,8 @@ import type { AgentTool } from './assistantAgentLoop';
 import type { AssistantAsset } from './assistantAgentTypes';
 import { replaceAssistantManifest } from './assistantManifest';
 import { MCP_SFX_POLICY } from './mcpSfxProduction';
+import { createMcpSfxSearchQueue } from './mcpSfxReliability';
+import { requestLimitMessage, safeRetryAfterMs } from './requestLimitErrors';
 import { audioFailureDetails, audioFailureMessage } from './elevenLabsErrors';
 
 type Options = { directory: string; origin: string; ffmpeg: string; access: ReturnType<typeof createMcpAccess> };
@@ -49,6 +51,7 @@ export function createAudioMcp(options: Options) {
   const validators = new Map<string, ReturnType<typeof ajv.compile>>();
   const assetsByOwner = new Map<string, AssistantAsset[]>();
   const controllers = new Map<string, AbortController>();
+  const queueSfxSearch = createMcpSfxSearchQueue();
   const ownerDir = (owner: string) => {
     const dir = path.join(options.directory, createHash('sha256').update(owner).digest('hex'));
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); return dir;
@@ -173,7 +176,9 @@ export function createAudioMcp(options: Options) {
         const result = await response.json();
         if (!response.ok) {
           const details = audioFailureDetails({ status: response.status, code: result.code, requestId: result.requestId || response.headers.get('x-request-id') });
-          throw Object.assign(new Error(audioFailureMessage(details, `${result.error || '调用失败'} (${response.status})`)), details);
+          const retryAfterMs = safeRetryAfterMs(result.retryAfterMs) || safeRetryAfterMs(Number(response.headers.get('retry-after')) * 1000);
+          throw Object.assign(new Error(audioFailureMessage(details,
+            requestLimitMessage(details.code, `${result.error || '调用失败'} (${response.status})`))), details, { retryAfterMs });
         }
         return result;
       }
@@ -183,6 +188,9 @@ export function createAudioMcp(options: Options) {
       return { audioUrl: output.url, asset: output };
     };
     return { assets, signal, request, asset, filePath, register, save, progress,
+      queueSfxSearch: work => queueSfxSearch(owner, signal, async () => {
+        signal.throwIfAborted(); return work();
+      }),
       ffmpeg: args => new Promise((resolve, reject) => execFile(options.ffmpeg, ['-nostdin', ...args.flatMap(arg => arg === '-i' ? [...mediaInputOptions, arg] : [arg])],
         { signal, timeout: 30 * 60_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
           if (error) reject(new Error(signal.aborted ? '任务已停止。' : '音频处理失败，请检查素材和参数。'));
