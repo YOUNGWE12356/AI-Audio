@@ -14,6 +14,7 @@ import { createAudioMcp } from './mcpServer';
 import { createSearchBillingBatches } from './searchBillingBatches';
 import { createServerSecurity, currentUserId, currentUploadDirectory } from './serverSecurity';
 import { configureMediaStorage, MediaStorage } from './mediaStorage';
+import { MCP_EXECUTION_POLICY_VERSION, mcpFailureResult, withMcpExecutionPolicy } from './mcpExecutionPolicy';
 
 const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), 't1-audio-mcp-'));
 const user = (id: string) => ({ id: `account:${id}`, displayName: id, identitySource: 'account' as const });
@@ -117,7 +118,11 @@ for (const cdn of [false, true]) test(`official MCP client (${cdn ? 'CDN' : 'loc
   const names = (await client.listTools()).tools.map(t => t.name);
   for (const name of ['generate_speech', 'generate_speech_batch', 'generate_music', 'generate_sound_effect', 'produce_sound_effect', 'sound_requirements', 'analyze_sfx_batch', 'produce_sfx_batch', 'search_online_sound_effects', 'capture_online_sound_effect', 'audio_design', 'analyze_video', 'analyze_audio', 'process_audio', 'mix_timeline', 'export_timeline_stems', 'library_search', 'library_import', 'start_audio_job']) assert.ok(names.includes(name), name);
   for (const name of ['clone_voice', 'clone_dialogue', 'local_separation', 'audio_to_midi', 'open_module']) assert.ok(!names.includes(name), name);
-  const info = jsonResult(await client.callTool({ name: 'engine_status', arguments: { module: 'quota' } })); assert.equal(info.owner, 'account:alice');
+  // This client never calls inspect_tools: cached schemas still get current policy.
+  const infoResponse = await client.callTool({ name: 'engine_status', arguments: { module: 'quota' } });
+  const info = jsonResult(infoResponse); assert.equal(info.owner, 'account:alice');
+  assert.equal(info.executionPolicy.version, MCP_EXECUTION_POLICY_VERSION);
+  assert.deepEqual(infoResponse.structuredContent, info);
   const wav = Buffer.alloc(44 + 48000 * 2); wav.write('RIFF'); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8); wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(48000, 24); wav.writeUInt32LE(96000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(wav.length - 44, 40);
   for (let i = 0; i < 48000; i++) wav.writeInt16LE(Math.round(Math.sin(i * 2 * Math.PI * 440 / 48000) * 10000), 44 + i * 2);
   const uploaded = jsonResult(await client.callTool({ name: 'upload_asset', arguments: { name: '测试.wav', base64: wav.toString('base64') } })).asset;
@@ -134,6 +139,10 @@ for (const cdn of [false, true]) test(`official MCP client (${cdn ? 'CDN' : 'loc
   const read = jsonResult(await client.callTool({ name: 'read_asset', arguments: { assetId: processed.id, length: 100 } })); assert.equal(Buffer.from(read.base64, 'base64').toString('ascii', 0, 4), 'RIFF');
   assert.ok((await other.callTool({ name: 'read_asset', arguments: { assetId: processed.id } })).isError);
   assert.ok((await client.callTool({ name: 'process_audio', arguments: { assetId: uploaded.id, name: 'bad', start: -2 } })).isError);
+  const invalid = await client.callTool({ name: 'process_audio', arguments: { assetId: uploaded.id, name: 'bad', start: 'invalid' } });
+  assert.ok(invalid.isError);
+  assert.equal((invalid.structuredContent as any).errorDetails.code, 'MCP_INVALID_ARGUMENTS');
+  assert.equal((invalid.structuredContent as any).serverGuidance.action, 'stop');
   const download = await fetch(`${base}/api/mcp/files/${processed.id}`, { headers: { authorization: `Bearer ${alice.token}` }, redirect: 'manual' }); assert.equal(download.status, cdn ? 302 : 200);
   assert.equal((await fetch(`${base}/api/mcp/files/${processed.id}`, { headers: { authorization: `Bearer ${bob.token}` } })).status, 404);
   const form = new FormData(); form.append('file', new Blob([wav]), 'another.wav');
@@ -147,6 +156,8 @@ for (const cdn of [false, true]) test(`official MCP client (${cdn ? 'CDN' : 'loc
   const soundArgs = { name: '关门', keywords: '关门', searchQuery: 'door slam', duration: 2 };
   const searched = jsonResult(await client.callTool({ name: 'produce_sound_effect', arguments: soundArgs }));
   assert.equal(searched.method, 'search'); assert.equal(sfxCalls, 0);
+  assert.equal(searched.serverGuidance.action, 'preview');
+  assert.equal(searched.executionPolicy.version, MCP_EXECUTION_POLICY_VERSION);
   const concurrent = await Promise.all(Array.from({ length: 4 }, () =>
     client.callTool({ name: 'produce_sound_effect', arguments: soundArgs })));
   assert.ok(concurrent.every(result => jsonResult(result).method === 'search'));
@@ -159,6 +170,7 @@ for (const cdn of [false, true]) test(`official MCP client (${cdn ? 'CDN' : 'loc
   const chargesBeforeBatch = batchCharges;
   const searchedBatch = jsonResult(await client.callTool({ name: 'produce_sfx_batch', arguments: { items: [soundArgs, soundArgs] } }));
   assert.equal(searchedBatch.completedCount, 2);
+  assert.equal(searchedBatch.serverGuidance.action, 'review_batch');
   assert.equal(batchCharges, chargesBeforeBatch + 1);
   const reuse = await fetch(`${base}/api/ai/sfx-batch/search`, { method: 'POST',
     headers: { authorization: `Bearer ${alice.token}`, 'Content-Type': 'application/json' },
@@ -167,6 +179,7 @@ for (const cdn of [false, true]) test(`official MCP client (${cdn ? 'CDN' : 'loc
   batchSearchStatus = 502;
   const fallback = jsonResult(await client.callTool({ name: 'produce_sound_effect', arguments: soundArgs }));
   assert.equal(fallback.method, 'generate'); assert.equal(fallback.fallback, true); assert.equal(sfxCalls, 1);
+  assert.equal(fallback.serverGuidance.action, 'preview');
   const searchesBefore = batchSearchCalls;
   const explicit = jsonResult(await client.callTool({ name: 'produce_sound_effect', arguments: { ...soundArgs, mode: 'generate' } }));
   assert.equal(explicit.fallback, false); assert.equal(batchSearchCalls, searchesBefore); assert.equal(sfxCalls, 2);
@@ -175,12 +188,18 @@ for (const cdn of [false, true]) test(`official MCP client (${cdn ? 'CDN' : 'loc
   sfxStatus = 503;
   const failed = await client.callTool({ name: 'produce_sound_effect', arguments: { ...soundArgs, mode: 'generate' } });
   assert.ok(failed.isError); assert.match(JSON.stringify(failed.content), /ElevenLabs 服务额度不足/);
+  assert.equal((failed.structuredContent as any).errorDetails.code, 'ELEVENLABS_QUOTA');
+  assert.equal((failed.structuredContent as any).serverGuidance.action, 'stop');
+  assert.equal((failed.structuredContent as any).executionPolicy.version, MCP_EXECUTION_POLICY_VERSION);
   assert.match(JSON.stringify(failed.content), /请求编号/); assert.equal(sfxCalls, 3);
   sfxStatus = 200;
   assert.equal(jsonResult(await client.callTool({ name: 'produce_sound_effect', arguments: { ...soundArgs, mode: 'generate' } })).method, 'generate');
   assert.equal(sfxCalls, 4);
   const args = { tool: 'save_report', arguments: { name: 'result.txt', content: 'done' }, requestId: 'request-1234567890123456' };
   let job = jsonResult(await client.callTool({ name: 'start_audio_job', arguments: args }));
+  assert.equal(job.serverGuidance.action, 'poll_job');
+  assert.equal(job.serverGuidance.arguments.jobId, job.id);
+  assert.equal(job.executionPolicyVersion, MCP_EXECUTION_POLICY_VERSION);
   const again = jsonResult(await client.callTool({ name: 'start_audio_job', arguments: args })); assert.equal(again.id, job.id);
   for (let i = 0; i < 20 && job.status === 'running'; i++) job = jsonResult(await client.callTool({ name: 'get_audio_job', arguments: { jobId: job.id } }));
   assert.equal(job.status, 'completed');
@@ -188,4 +207,54 @@ for (const cdn of [false, true]) test(`official MCP client (${cdn ? 'CDN' : 'loc
   assert.ok((await client.callTool({ name: 'start_audio_job', arguments: { ...args, arguments: { name: 'different.txt', content: 'different' } } })).isError);
   access.revoke('account:alice', alice.id);
   assert.equal((await fetch(`${base}/api/mcp/files/${processed.id}`, { headers: { authorization: `Bearer ${alice.token}` } })).status, 401);
+});
+
+test('policy results preserve cached-client fields, original task identity and historical execution versions', () => {
+  const row = { index: 0, status: 'completed', method: 'search', asset: { id: 'existing-asset' } };
+  const failed = { index: 1, status: 'failed', errorDetails: { status: 429, code: 'COMPANY_POINTS_EXCEEDED' } };
+  const original = { id: 'original-job', requestId: 'original-request', tool: 'produce_sfx_batch', status: 'completed',
+    executionPolicyVersion: 'older-policy', result: { items: [row, failed], completedCount: 1 } };
+  const updated = withMcpExecutionPolicy('get_audio_job', original);
+  assert.equal(updated.id, original.id); assert.equal(updated.requestId, original.requestId);
+  assert.equal(updated.executionPolicyVersion, 'older-policy');
+  assert.equal(updated.executionPolicy.scope, 'current_server_calls');
+  assert.equal(updated.result.completedCount, 1); assert.deepEqual(updated.result.items[0], row);
+  assert.equal(updated.result.items[1].serverGuidance.action, 'stop');
+  assert.equal(updated.serverGuidance.action, 'review_batch');
+  assert.equal((original.result.items[1] as any).serverGuidance, undefined, 'reading must not rewrite saved history');
+  const legacy = withMcpExecutionPolicy('get_audio_job', { ...original, executionPolicyVersion: undefined });
+  assert.equal(legacy.executionPolicyVersion, undefined, 'do not invent the execution version of legacy jobs');
+  assert.equal(withMcpExecutionPolicy('get_audio_job', { status: 'completed', tool: 'save_report', result: null }).result, null);
+  const running = withMcpExecutionPolicy('get_audio_job', { id: 'same-job', status: 'running', tool: 'produce_sfx_batch' });
+  assert.equal(running.serverGuidance.action, 'poll_job');
+  assert.deepEqual(running.serverGuidance.arguments, { jobId: 'same-job' });
+  assert.equal(running.serverGuidance.repeatExecution, false);
+  const noMatches = withMcpExecutionPolicy('produce_sound_effect', { method: 'search', status: 'no_matches', candidates: [] });
+  assert.equal(noMatches.serverGuidance.action, 'stop', 'explicit only-search never recommends a paid fallback');
+  const chunk = { base64: 'YWJj', offset: 0, nextOffset: 3, eof: true, asset: { id: 'source' } };
+  const read = withMcpExecutionPolicy('read_asset', chunk);
+  for (const key of Object.keys(chunk)) assert.deepEqual(read[key], chunk[key]);
+});
+
+test('current error guidance distinguishes limits, keeps safe diagnostics and never orders an automatic paid repeat', () => {
+  const requestId = 'a9b0351f-7d3a-4a41-8d05-20dcbb438882';
+  for (const [code, status, action] of [
+    ['COMPANY_POINTS_EXCEEDED', 429, 'stop'], ['STORAGE_LIMIT_EXCEEDED', 429, 'stop'],
+    ['ELEVENLABS_QUOTA', 503, 'stop'], ['ELEVENLABS_RATE_LIMIT', 429, 'stop'],
+    ['API_RATE_LIMIT', 429, 'wait'], ['REQUEST_CONCURRENCY_LIMIT', 429, 'wait'],
+    ['MCP_JOB_BUSY', 429, 'wait'], [undefined, 429, 'stop'], [undefined, 401, 'stop'],
+    ['MCP_INVALID_ARGUMENTS', 400, 'stop'], [undefined, 502, 'stop'],
+  ] as const) {
+    const result = mcpFailureResult({ code, status, requestId, retryAfterMs: 60000 }, 'safe public message');
+    assert.equal(result.serverGuidance.action, action, code);
+    assert.equal(result.serverGuidance.repeatExecution, false);
+    assert.equal(result.errorDetails.requestId, requestId);
+    assert.equal(result.errorDetails.code, code);
+    assert.equal(result.errorDetails.status, status);
+    assert.equal(result.executionPolicy.version, MCP_EXECUTION_POLICY_VERSION);
+  }
+  const unsafe = mcpFailureResult({ code: 'secret prompt', status: '429', requestId: 'secret token', retryAfterMs: Infinity }, 'safe');
+  assert.equal(unsafe.errorDetails.code, undefined); assert.equal(unsafe.errorDetails.status, undefined);
+  assert.equal(unsafe.errorDetails.requestId, undefined); assert.equal(unsafe.errorDetails.retryAfterMs, undefined);
+  assert.equal(unsafe.serverGuidance.action, 'stop');
 });

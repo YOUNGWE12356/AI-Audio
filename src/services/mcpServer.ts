@@ -22,10 +22,11 @@ import { MCP_SFX_POLICY } from './mcpSfxProduction';
 import { createMcpSfxSearchQueue } from './mcpSfxReliability';
 import { requestLimitMessage, safeRetryAfterMs } from './requestLimitErrors';
 import { audioFailureDetails, audioFailureMessage } from './elevenLabsErrors';
+import { MCP_EXECUTION_POLICY_VERSION, mcpFailureResult, withMcpExecutionPolicy } from './mcpExecutionPolicy';
 
 type Options = { directory: string; origin: string; ffmpeg: string; access: ReturnType<typeof createMcpAccess> };
 type Job = { id: string; requestId: string; fingerprint: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; tool: string;
-  createdAt: string; updatedAt: string; message?: string; result?: unknown; error?: string; errorDetails?: ReturnType<typeof audioFailureDetails> };
+  createdAt: string; updatedAt: string; executionPolicyVersion?: string; message?: string; result?: unknown; error?: string; errorDetails?: ReturnType<typeof audioFailureDetails> };
 const validId = (id: string) => /^[a-f0-9-]{36}$/i.test(id);
 const mimeFor = (name: string) => ({ '.wav': 'audio/wav', '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.opus': 'audio/ogg', '.aif': 'audio/aiff', '.aiff': 'audio/aiff', '.flac': 'audio/flac', '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.mov': 'video/quicktime', '.mkv': 'video/x-matroska', '.webm': 'video/webm', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.json': 'application/json', '.zip': 'application/zip', '.mid': 'audio/midi' }[path.extname(name).toLowerCase()] || 'text/plain');
 const allowedName = (name: string) => /\.(?:wav|mp3|m4a|aac|ogg|opus|flac|aiff?|mp4|m4v|mov|mkv|webm|png|jpe?g|webp|txt|md|csv|tsv|json|docx|xlsx|zip|mid)$/i.test(name);
@@ -209,7 +210,7 @@ export function createAudioMcp(options: Options) {
     const key = JSON.stringify(tool.parameters);
     let validator = validators.get(key);
     if (!validator) { validator = ajv.compile(tool.parameters); validators.set(key, validator); }
-    if (!validator(args)) throw new Error(`参数无效：${ajv.errorsText(validator.errors)}。`);
+    if (!validator(args)) throw Object.assign(new Error(`参数无效：${ajv.errorsText(validator.errors)}。`), { code: 'MCP_INVALID_ARGUMENTS', status: 400 });
   };
   const readJob = (owner: string, id: string): Job => {
     if (!validId(id)) throw new Error('任务不存在或无权访问。');
@@ -249,8 +250,8 @@ export function createAudioMcp(options: Options) {
         const jobs = fs.readdirSync(dir).filter(f => validId(f.slice(0, -5)) && f.endsWith('.json')).map(f => readJob(owner, f.slice(0, -5)));
         const existing = jobs.find(j => j.requestId === a.requestId);
         if (existing) { if (existing.fingerprint !== fingerprint) throw new Error('此requestId已用于不同的参数。'); return existing; }
-        if (jobs.filter(j => j.status === 'running').length >= 2 || controllers.size >= 8) throw new Error('后台任务繁忙，请等待当前任务完成。');
-        const job: Job = { id: randomUUID(), requestId: a.requestId, fingerprint, tool: a.tool, status: 'running', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+        if (jobs.filter(j => j.status === 'running').length >= 2 || controllers.size >= 8) throw Object.assign(new Error('后台任务繁忙，请等待当前任务完成。'), { code: 'MCP_JOB_BUSY', status: 429, retryAfterMs: 1000 });
+        const job: Job = { id: randomUUID(), requestId: a.requestId, fingerprint, tool: a.tool, status: 'running', executionPolicyVersion: MCP_EXECUTION_POLICY_VERSION, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
         const file = path.join(dir, `${job.id}.json`), controller = new AbortController();
         const persist = () => { job.updatedAt = new Date().toISOString(); writeJson(file, job); };
         persist(); controllers.set(job.id, controller);
@@ -296,11 +297,12 @@ export function createAudioMcp(options: Options) {
         const tools = createTools(req, extra.signal), tool = tools.find(t => t.name === request.params.name);
         if (!tool) throw new Error('该功能未开放。');
         const args = request.params.arguments || {}; validate(tool, args);
-        const result = decorate(await tool.execute(args));
-        const structured = result && typeof result === 'object' && !Array.isArray(result) ? result : { result };
+        const structured = withMcpExecutionPolicy(tool.name, decorate(await tool.execute(args)));
         return { content: [{ type: 'text', text: JSON.stringify(structured) }], structuredContent: structured };
       } catch (error) {
-        return { isError: true, content: [{ type: 'text', text: errorText(error) }] };
+        const structured = mcpFailureResult(error, errorText(error));
+        // Preserve the readable first error block for existing clients.
+        return { isError: true, content: [{ type: 'text', text: structured.error }, { type: 'text', text: JSON.stringify(structured) }], structuredContent: structured };
       }
     });
     try { await server.connect(transport); await transport.handleRequest(req, res, req.body); }
