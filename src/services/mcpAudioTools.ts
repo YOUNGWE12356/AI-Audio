@@ -5,9 +5,10 @@ import { createAssistantTools, type AgentToolContext } from './assistantAgentToo
 import type { AgentTool } from './assistantAgentLoop';
 import { AUDIO_LANGUAGE_REGISTRY } from './languageRegistry';
 import { createAudioEvidence } from '../utils/audioEvidence';
-import { MCP_SFX_POLICY, produceMcpSoundEffect } from './mcpSfxProduction';
+import { MCP_SFX_LONG_INPUT_GUIDANCE, MCP_SFX_POLICY, produceMcpSoundEffect } from './mcpSfxProduction';
 import { createSfxRetryRequest } from './mcpSfxReliability';
 import { audioFailureDetails } from './elevenLabsErrors';
+import { MCP_SFX_INTENT_LIMITS } from './sfxBatchSearchQuery';
 
 const s = { type: 'string' }, n = { type: 'number' }, b = { type: 'boolean' };
 const strings = { type: 'array', items: s, maxItems: 200 };
@@ -102,11 +103,20 @@ export function createMcpAudioTools(c: AgentToolContext) {
       if (c.signal.aborted) await c.request('/api/video/analyze/jobs/cancel', { requestId }, 'CANCEL').catch(() => undefined);
     }
   });
-  add('prepare_sfx_query', '将中文关键词提炼成1～2个可搜索的英文声音词。已有英文搜索词直接复用，不翻译整段描述。',
-    { keywords: s, description: s, searchQuery: s }, ['keywords'], a => queuedSearch(request => request('/api/ai/sfx-batch/search-query', a)));
+  const prepareQuery = async (request: AgentToolContext['request'], input: { keywords: string; description?: string; searchQuery?: string }) => {
+    const result = await request('/api/ai/sfx-batch/search-query', { ...input, intentMode: 'search' });
+    if (result.clarification) return { status: 'needs_clarification', question: result.clarification };
+    return result;
+  };
+  add('prepare_sfx_query', '简短英文词直接复用，简短中文词转成英文。多关键词或完整描述提炼为1～2个英文声音词。',
+    { keywords: s, description: s, searchQuery: s }, ['keywords'], a => queuedSearch(request => prepareQuery(request, {
+      keywords: a.keywords, description: a.description, searchQuery: a.searchQuery,
+    })));
   add('search_online_sound_effects', '复用AI音效联网搜索：Envato30%、其他三库合计30%、全网40%，来源故障互补。中文关键词自动转换成简短英文。返回候选ID和来源，接着capture_online_sound_effect采集试听。换关键词后旧候选可能失效，先采集需要的结果。',
     { keywords: s, searchQuery: s, page: { type: 'integer', minimum: 1, maximum: 50 }, excludeSourceUrls: strings }, ['keywords'], a => queuedSearch(async request => {
-      const { searchQuery } = await request('/api/ai/sfx-batch/search-query', { keywords: a.keywords, searchQuery: a.searchQuery || '' });
+      const prepared = await prepareQuery(request, { keywords: a.keywords, searchQuery: a.searchQuery || '' });
+      if (prepared.status === 'needs_clarification') return prepared;
+      const { searchQuery } = prepared;
       return { ...await request('/api/sfx/online/search', { query: searchQuery, page: a.page || 1, excludeSourceUrls: a.excludeSourceUrls }), searchQuery };
     }));
   add('capture_online_sound_effect', '采集上一步搜索候选的公开试听，保留原来源、水印及许可信息；返回可编辑文件。',
@@ -128,9 +138,9 @@ export function createMcpAudioTools(c: AgentToolContext) {
       return waitJob('/api/ai/sfx-batch/analyze/jobs', job);
     });
   const modeSchema = { ...choice('auto', 'search', 'generate'), default: 'auto', description: '默认auto先搜索，无匹配、读取失败或服务错误时AI生成；试听后不合适可用generate继续制作；只搜索填search。' };
-  const soundProperties = { name: { ...s, minLength: 1, maxLength: 180 }, keywords: { ...s, minLength: 1, maxLength: 300 },
-    description: { ...s, maxLength: 2000, description: '保留用户的原始中文场景和想听到的声音，服务端会自动理解。' },
-    searchQuery: { ...s, description: '可选英文检索提示。仅当用户明确锁定此词时把 exactSearchQuery 设为 true。' },
+  const soundProperties = { name: { ...s, minLength: 1, maxLength: 180 }, keywords: { ...s, minLength: 1, maxLength: MCP_SFX_INTENT_LIMITS.keywords },
+    description: { ...s, maxLength: MCP_SFX_INTENT_LIMITS.description, description: MCP_SFX_LONG_INPUT_GUIDANCE },
+    searchQuery: { ...s, description: '可选检索词。短英文词可直接使用，复杂需求中的有效英文词可作为备用。用户明确要求锁定英文词时设置 exactSearchQuery。' },
     exactSearchQuery: { ...b, description: '按用户指定的1～2个英文词原样检索，关闭自动改词与备用检索。' },
     duration: { ...n, minimum: 0.5, maximum: 30 }, mode: modeSchema };
   const produce = (input: any) => produceMcpSoundEffect(c, input, generateRawSound);

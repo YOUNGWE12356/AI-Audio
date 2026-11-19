@@ -125,14 +125,33 @@ test('downloaded requirements have one Chinese keyword column without the intern
 test('query preparation endpoint validates, accounts for AI work and never starts a search on failure', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'sfx-batch-query-test-'));
   let generated = 0, reserved = 0, released = 0, searched = 0, badOutput = false;
+  let lastIntentPrompt = '', lastIntentTimeout = 0;
+  const studioChunks: string[] = [];
   const app = express(); app.use(express.json());
   app.use('/batch', createSfxBatchRouter({ uploadsDir: directory, jobsDir: path.join(directory, 'jobs'), ffmpeg: '',
     owner: req => String(req.headers['x-owner'] || 'unknown'),
     reserve: () => { reserved++; return () => { released++; }; }, run: (_req, _res, work) => { void work(); },
     generateQuery: (async request => {
       generated++;
-      if (String(request.contents).includes('"intentMode":"auto"')) return { text: JSON.stringify({ searchQuery: 'coin pickup', alternateQuery: 'reward chime',
-        generationPrompt: 'One crisp, rising coin chime. No music.', soundDetails: '清脆的单次上扬金币声', clarification: '', suggestedDuration: 0.8 }) };
+      const contents = String(request.contents);
+      if (contents.includes('"chunk":')) {
+        const { summary, chunk } = JSON.parse(contents.split('\n').at(-1)!);
+        studioChunks.push(chunk);
+        return { text: JSON.stringify({ summary: summary + (chunk.includes('不要人声') ? '不要人声。' : '领取金币。') }) };
+      }
+      if (contents.includes('"intentMode":')) {
+        lastIntentPrompt = contents;
+        lastIntentTimeout = request.timeoutMs || 0;
+        if (contents.includes('"description":"在草地上走路的声音"')) {
+          return { text: JSON.stringify({ searchQuery: 'grass footsteps', alternateQuery: 'grass walking' }) };
+        }
+        return { text: JSON.stringify({ searchQuery: 'coin pickup', alternateQuery: 'reward chime',
+          generationPrompt: 'One crisp, rising coin chime. No music.', soundDetails: '清脆的单次上扬金币声', clarification: '', suggestedDuration: 0.8 }) };
+      }
+      if (contents.includes('简短中文音效关键词')) {
+        assert.match(contents, /关键词数据："金币掉落"/);
+        return { text: JSON.stringify({ searchQuery: 'coin drop' }) };
+      }
       return { text: JSON.stringify({ searchQuery: badOutput ? '翻牌' : 'card flip' }) };
     }) as typeof import('./aiGateway').generateAiContent,
     search: (async options => { searched++; assert.equal(options.query, 'card flip'); return { items: [] }; }) as any,
@@ -144,6 +163,14 @@ test('query preparation endpoint validates, accounts for AI work and never start
     assert.equal((await post('/search-query', manual, 'unknown')).status, 401);
     assert.equal((await post('/search-query', {})).status, 400); assert.equal(reserved, 0);
     assert.deepEqual(await (await post('/search-query', { searchQuery: 'click' })).json(), { searchQuery: 'click' });
+    for (const [keywords, expected] of [['Game Over', 'Game Over'], ['游戏失败', 'game over'], ['游戏胜利', 'game win']]) {
+      for (const intentMode of ['auto', 'search']) {
+        const response = await post('/search-query', { intentMode, keywords, description: keywords });
+        assert.equal(response.status, 200);
+        assert.deepEqual(await response.json(), { searchQuery: expected });
+      }
+    }
+    assert.deepEqual(await (await post('/search-query', { intentMode: 'auto', searchQuery: 'game over', keywords: '游戏失败' })).json(), { searchQuery: 'game over' });
     assert.equal(generated, 0); assert.equal(reserved, 0);
     const translated = await post('/search-query', manual); assert.equal(translated.status, 200);
     const result = await translated.json(); assert.equal(result.searchQuery, 'card flip');
@@ -154,9 +181,42 @@ test('query preparation endpoint validates, accounts for AI work and never start
     assert.equal(searched, 1); assert.equal(reserved, released);
     const prepared = await (await post('/search-query', { intentMode: 'auto', searchQuery: 'beep', keywords: '提示音', description: '领金币时叮一下', duration: 2 })).json();
     assert.equal(prepared.searchQuery, 'coin pickup');
-    assert.equal(prepared.alternateQuery, 'reward chime');
+    assert.equal(prepared.alternateQuery, 'beep', 'retain the original explicit query as the alternate');
     assert.match(prepared.generationPrompt, /No music/);
     assert.equal(prepared.suggestedDuration, undefined, 'never override an explicit duration');
+    const shortIntentTimeout = lastIntentTimeout;
+    const translation = await (await post('/search-query', { intentMode: 'search', keywords: '金币掉落' })).json();
+    assert.deepEqual(translation, { searchQuery: 'coin drop' });
+    const walking = await (await post('/search-query', { intentMode: 'search', description: '在草地上走路的声音' })).json();
+    assert.equal(walking.searchQuery, 'grass footsteps');
+    assert.equal(walking.alternateQuery, 'grass walking');
+    assert.match(lastIntentPrompt, /地面材质/);
+    const multiple = await (await post('/search-query', { intentMode: 'search', keywords: 'wood door creak' })).json();
+    assert.equal(multiple.alternateQuery, 'reward chime', 'multiple keywords go through intent preparation');
+    const twoSounds = await (await post('/search-query', { intentMode: 'search', keywords: '游戏失败 游戏胜利' })).json();
+    assert.equal(twoSounds.alternateQuery, 'reward chime', 'multiple sound subjects are not treated as one alias');
+    const longDescription = '游戏界面设定和流程。'.repeat(500) + '最后只要一声金币提示，不要背景音乐和人声。';
+    const longResult = await post('/search-query', { intentMode: 'auto', keywords: longDescription, description: longDescription });
+    assert.equal(longResult.status, 200);
+    assert.equal((await longResult.json()).searchQuery, 'coin pickup');
+    assert.ok(lastIntentPrompt.includes(longDescription), 'the complete description, including its final constraints, reaches the model');
+    assert.equal(lastIntentPrompt.split(longDescription).length, 2, 'the duplicated input is only sent once');
+    assert.ok(lastIntentTimeout > shortIntentTimeout);
+    const callsBeforeOversized = generated;
+    const oversized = await post('/search-query', { intentMode: 'auto', keywords: '金币', description: '字'.repeat(12_001) });
+    assert.equal(oversized.status, 400);
+    assert.match((await oversized.json()).error, /按声音事件拆分/);
+    assert.equal(generated, callsBeforeOversized);
+    const studioDescription = '描述整个界面和反馈过程。'.repeat(1500) + '最后只需要一声金币提示，不要人声。';
+    const webQuery = await post('/search-query', { intentMode: 'search', studioDescription });
+    assert.equal(webQuery.status, 200);
+    assert.equal((await webQuery.json()).searchQuery, 'coin pickup');
+    assert.equal(studioChunks.join(''), studioDescription);
+    assert.match(lastIntentPrompt, /不要人声/);
+    const webGeneration = await post('/search-query', { intentMode: 'generate', studioDescription, duration: 3 });
+    assert.equal(webGeneration.status, 200);
+    assert.match((await webGeneration.json()).generationPrompt, /crisp/);
+    assert.match(lastIntentPrompt, /"duration":3/);
     const callsBeforeExact = generated;
     assert.deepEqual(await (await post('/search-query', { intentMode: 'search', exactSearchQuery: true, searchQuery: 'coin pickup' })).json(), { searchQuery: 'coin pickup' });
     assert.equal(generated, callsBeforeExact);

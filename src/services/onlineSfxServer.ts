@@ -672,7 +672,7 @@ export function createOnlineSfxRouter(options: {
       const owner = options.owner(req, res);
       if (!owner || owner === 'unknown') return res.status(401).json({ error: '无法识别当前会话，请刷新后重试。' });
       const query = typeof req.body?.query === 'string' ? req.body.query.trim() : '';
-      if (!query || query.length > 160) return res.status(400).json({ error: '请输入 1～160 字的音效关键词。' });
+      if (!query || query.length > 160) return res.status(400).json({ error: '缺少可用的音效检索词，请重新提炼描述。' });
       const page = Number(req.body?.page ?? 1);
       if (!Number.isSafeInteger(page) || page < 1 || page > 50) {
         return res.status(400).json({ error: '搜索批次无效，请重新开始搜索。' });
@@ -719,7 +719,7 @@ export function createOnlineSfxRouter(options: {
           return res.json({ items: [], sources, page, nextPage: session.nextPage, elapsedMs: Date.now() - started,
             message: page > 1
               ? '当前关键词暂时没有更多未展示的音效，请换一个关键词再试。'
-              : '没有找到可采集的试听，请换用简短英文关键词或打开来源搜索。' });
+              : '没有找到可采集的试听，可以补充声音来源或动作后再搜。' });
         }
         const items = candidates.map(({ previewUrl, ...candidate }) => {
           const item = { ...candidate, id: randomUUID() };

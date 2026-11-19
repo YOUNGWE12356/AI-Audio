@@ -161,6 +161,9 @@ for (const cdn of [false, true]) test(`official MCP client (${cdn ? 'CDN' : 'loc
   assert.equal(searched.method, 'search'); assert.equal(sfxCalls, 0);
   assert.equal(searched.serverGuidance.action, 'preview');
   assert.equal(searched.executionPolicy.version, MCP_EXECUTION_POLICY_VERSION);
+  const longTextArgs = { ...soundArgs, keywords: '关门。'.repeat(120), description: '场景背景。'.repeat(500) + '结尾不要音乐。' };
+  const longInput = jsonResult(await client.callTool({ name: 'produce_sound_effect', arguments: longTextArgs }));
+  assert.equal(longInput.method, 'search');
   const concurrent = await Promise.all(Array.from({ length: 4 }, () =>
     client.callTool({ name: 'produce_sound_effect', arguments: soundArgs })));
   assert.ok(concurrent.every(result => jsonResult(result).method === 'search'));

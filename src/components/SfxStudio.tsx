@@ -9,6 +9,7 @@ import { HistoryItem } from '../types';
 import GeneratedAudioPlayer, { sanitizeAudioFileName } from './GeneratedAudioPlayer';
 import PointCostHint from './PointCostHint';
 import { requiresSoundEffectTranslation } from '../services/sfxPromptService';
+import { needsStudioGenerationIntent } from '../services/sfxStudioIntentClient';
 import type { SfxBatchInputRequest } from '../utils/requirementTableTransfer';
 const OnlineSfxSearch = lazy(() => import('./OnlineSfxSearch'));
 const BatchSfxStudio = lazy(() => import('./BatchSfxStudio'));
@@ -103,14 +104,16 @@ export default function SfxStudio({
         <div className="lg:col-span-7 space-y-5">
           <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-5 shadow-sm">
             <div className="space-y-2">
-              <label className="text-xs font-bold text-slate-700 block uppercase tracking-wider">音效场景描述</label>
+              <label htmlFor="standalone-sfx-prompt" className="text-xs font-bold text-slate-700 block uppercase tracking-wider">音效场景描述</label>
               <textarea
+                id="standalone-sfx-prompt"
                 disabled={standaloneLoading}
                 value={standalonePrompt}
                 onChange={(e) => setStandalonePrompt(e.target.value)}
                 placeholder="例如：雨夜里远处雷声、细雨打在树叶上、脚步声慢慢靠近"
                 className="w-full h-32 bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs text-slate-800 focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500 transition-all resize-none placeholder-slate-400"
               />
+              <p className="text-[11px] text-slate-500">可以粘贴完整描述。系统会提炼长描述里的声音重点，并保留动作顺序、音色和排除要求。</p>
             </div>
 
             <div className="space-y-2 pt-2">
@@ -177,7 +180,8 @@ export default function SfxStudio({
                 durationSeconds={standaloneDuration}
                 outputs={2}
               /> : <span>音效按实际时长结算：2 分 / 秒 / 版本，共 2 版</span>}
-              {requiresSoundEffectTranslation(standalonePrompt) && <span>描述翻译另计积分，按实际用量结算</span>}
+              {needsStudioGenerationIntent(standalonePrompt) ? <span>描述提炼按 AI 实际用量结算</span>
+                : requiresSoundEffectTranslation(standalonePrompt) && <span>描述翻译另计积分，按实际用量结算</span>}
             </div>
             <button
               onClick={handleStandaloneGenerate}

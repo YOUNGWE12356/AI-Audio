@@ -34,3 +34,11 @@ test('match word boundaries and plurals; ignore generic sound descriptions', () 
   assert.ok(createOnlineSfxRelevanceMatcher('whoosh')('Fast woosh') > 0);
   assert.equal(createOnlineSfxRelevanceMatcher('water sound effect')('Hard pop sound effect'), 0);
 });
+
+test('match the surface under footsteps without treating nearby scenery as audible', () => {
+  const score = createOnlineSfxRelevanceMatcher('grass footsteps');
+  assert.ok(score('Footsteps on grass') > 0);
+  assert.ok(score('Walking on grass') > 0);
+  assert.equal(score('Footsteps on gravel near grass'), 0);
+  assert.equal(score('Footsteps near grass'), 0);
+});

@@ -12,7 +12,7 @@ import { createSearchBillingBatches } from './searchBillingBatches';
 import { createSfxRequirementsJobs } from './sfxRequirementsJobs';
 import { existingBatchSearchQuery, normalizeBatchRequirements, validateBatchSearchQuery, SFX_BATCH_MAX_ROWS } from './sfxBatch';
 import { normalizeBatchSearchQueryInput, prepareBatchSearchQuery } from './sfxBatchSearchQuery';
-import { isSfxDuration, prepareMcpSfxIntent } from './mcpSfxIntent';
+import { directSfxSearchQuery, isSfxDuration, prepareMcpSfxIntent, prepareStudioSfxIntent } from './mcpSfxIntent';
 import { normalizeMusicVisualInput } from './musicVisualPrompt';
 import { batchVideoSegments, batchVideoOverview, mergeBatchVideoRequirements, SFX_BATCH_VIDEO_MAX_FRAMES, SFX_BATCH_VIDEO_CONCURRENCY, SFX_BATCH_VIDEO_JOB_TIMEOUT_MS } from './sfxBatchVideoAnalysis';
 import { batchRangeReviewPrompt } from './sfxBatchRangePrompt';
@@ -208,22 +208,38 @@ export function createSfxBatchRouter(options: {
       res.once('close', cancel);
       try {
         if (!owner || owner === 'unknown') throw fail('无法识别当前用户，请刷新后重试。', 401);
-        const input = normalizeBatchSearchQueryInput(req.body);
-        const existing = existingBatchSearchQuery(input.searchQuery);
         const intentMode = req.body?.intentMode;
         const usesIntent = intentMode === 'auto' || intentMode === 'search' || intentMode === 'generate';
+        const studioDescription = (intentMode === 'search' || intentMode === 'generate') && typeof req.body?.studioDescription === 'string'
+          ? req.body.studioDescription : undefined;
+        if (studioDescription !== undefined && !studioDescription.trim()) throw fail('请填写想要的音效。');
+        const input = studioDescription === undefined ? normalizeBatchSearchQueryInput(req.body, usesIntent) : undefined;
+        const existing = existingBatchSearchQuery(input?.searchQuery || '');
         const exactSearchQuery = req.body?.exactSearchQuery === true;
         if (existing && (!usesIntent || (intentMode === 'search' && exactSearchQuery))) {
           res.json({ searchQuery: existing }); return;
+        }
+        if (input && (intentMode === 'search' || intentMode === 'auto') && !exactSearchQuery) {
+          const searchQuery = directSfxSearchQuery(input);
+          if (searchQuery) {
+            res.json({ searchQuery });
+            return;
+          }
         }
         if (queryPreparations.has(owner) || queryPreparations.size >= 4)
           throw Object.assign(fail('正在提炼英文搜索词，请等待当前步骤完成。', 429), { code: 'SFX_QUERY_BUSY', retryAfterMs: 1000 });
         release = options.reserve(req, res, 0.1); if (!release) return;
         queryPreparations.add(owner); locked = true;
-        const result = usesIntent
-          ? await prepareMcpSfxIntent({ ...input, intentMode, exactSearchQuery,
-            duration: isSfxDuration(req.body?.duration) ? req.body.duration : undefined }, controller.signal, options.generateQuery)
-          : { searchQuery: await prepareBatchSearchQuery(input, controller.signal, options.generateQuery) };
+        const duration = isSfxDuration(req.body?.duration) ? req.body.duration : undefined;
+        let result;
+        if (studioDescription !== undefined && (intentMode === 'search' || intentMode === 'generate')) {
+          result = await prepareStudioSfxIntent(studioDescription, intentMode, duration,
+            AbortSignal.any([controller.signal, AbortSignal.timeout(95_000)]), options.generateQuery);
+        } else if (input && usesIntent) {
+          result = await prepareMcpSfxIntent({ ...input, intentMode, exactSearchQuery, duration }, controller.signal, options.generateQuery);
+        } else {
+          result = { searchQuery: await prepareBatchSearchQuery(input!, controller.signal, options.generateQuery) };
+        }
         if (!controller.signal.aborted) res.json(result);
       } catch (error) { if (!controller.signal.aborted) next(error); }
       finally { if (locked) queryPreparations.delete(owner); release?.(); res.off('close', cancel); }

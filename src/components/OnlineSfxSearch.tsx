@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { AlertCircle, Check, ExternalLink, Globe, Loader2, Search, Square, RotateCcw } from 'lucide-react';
 import GeneratedAudioPlayer, { sanitizeAudioFileName } from './GeneratedAudioPlayer';
 import PointCostHint from './PointCostHint';
-import { prepareSoundEffectPrompt, requiresSoundEffectTranslation } from '../services/sfxPromptService';
+import { exactStudioSearchQuery, resolveStudioSearchQuery } from '../services/sfxStudioIntentClient';
 import type { CapturedOnlineSfx, OnlineSfxItem } from '../services/onlineSfxTypes';
 
 type Row = OnlineSfxItem & { status: 'waiting' | 'capturing' | 'ready' | 'failed'; result?: CapturedOnlineSfx; error?: string };
@@ -31,7 +31,7 @@ export default function OnlineSfxSearch() {
   const controller = useRef<AbortController | null>(null);
   const started = useRef(0);
   const mounted = useRef(true);
-  const translations = useRef(new Map<string, string>());
+  const preparedSearches = useRef(new Map<string, string>());
   const searchHistory = useRef<{ key: string; nextPage: number; nextBatch: number; seen: Set<string> }>({ key: '', nextPage: 1, nextBatch: 1, seen: new Set() });
   useEffect(() => {
     mounted.current = true;
@@ -73,14 +73,17 @@ export default function OnlineSfxSearch() {
     if (!query.trim() || busy) return;
     const current = new AbortController(); controller.current = current;
     started.current = Date.now(); setBusy(true); setRows([]); setError(''); setElapsed(0); setSearchMs(null); setSearchQuery('');
-    setMessage(requiresSoundEffectTranslation(query) ? '正在将音效关键词翻译为英文…' : '正在搜索音效…');
+    setMessage('正在理解音效描述…');
     try {
       const trimmedQuery = query.trim();
       const queryKey = normalizeQuery(trimmedQuery);
-      let english = translations.current.get(queryKey);
+      let english = preparedSearches.current.get(queryKey);
       if (!english) {
-        english = await prepareSoundEffectPrompt(trimmedQuery);
-        translations.current.set(queryKey, english);
+        const prepared = await resolveStudioSearchQuery(trimmedQuery, current.signal);
+        current.signal.throwIfAborted();
+        if (prepared.clarification) { setMessage(prepared.clarification); return; }
+        english = prepared.searchQuery!;
+        preparedSearches.current.set(queryKey, english);
       }
       current.signal.throwIfAborted();
       setSearchQuery(english); setMessage('正在搜索音效…');
@@ -130,9 +133,10 @@ export default function OnlineSfxSearch() {
   return <div className="space-y-5">
       <form onSubmit={search} className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm space-y-4">
         <div className="flex items-center gap-2 text-sm font-bold text-slate-800"><Globe className="w-4 h-4 text-emerald-600" />搜索音效</div>
-        <label htmlFor="online-sfx-query" className="block text-xs font-bold text-slate-700">音效关键词</label>
-        <input id="online-sfx-query" value={query} onChange={event => setQuery(event.target.value)} maxLength={160} disabled={busy}
-          placeholder="例如：魔法转场、木门吱呀、whoosh" className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500" />
+        <label htmlFor="online-sfx-query" className="block text-xs font-bold text-slate-700">想找什么音效？</label>
+        <textarea id="online-sfx-query" value={query} onChange={event => setQuery(event.target.value)} rows={3} disabled={busy}
+          placeholder="例如：领金币时清脆地叮一下，声音轻微上扬，尾音短" className="w-full resize-y rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500" />
+        <p className="text-[11px] text-slate-500">可以直接描述场景和声音，系统会提炼成 1～2 个英文检索词。</p>
         <div className="flex flex-wrap items-center gap-2">
           <button disabled={busy || !query.trim()} type="submit" className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-xs font-bold text-white hover:bg-emerald-700 disabled:opacity-50">
             {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}{busy ? '搜索 / 采集中' : repeatsCurrentQuery ? '再搜一批（最多 100 条）' : '搜索并采集（最多 100 条）'}
@@ -140,7 +144,7 @@ export default function OnlineSfxSearch() {
           {busy && <button type="button" onClick={() => { controller.current?.abort(); setMessage('已停止等待，完成的音效已保留。'); }} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-3 text-xs text-slate-600"><Square className="w-3 h-3" />停止</button>}
           <PointCostHint kind="online-sfx" className="ml-auto" />
         </div>
-        {requiresSoundEffectTranslation(query) && <p className="text-[11px] text-amber-700">中文关键词会先翻译，翻译按 GPT Token 另计（最低 1 分）；联网搜索成功后整批结算 1 分。</p>}
+        {query.trim() && !exactStudioSearchQuery(query) && <p className="text-[11px] text-amber-700">描述提炼按 AI 实际用量结算。</p>}
       </form>
     {error && <div role="alert" className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-700"><AlertCircle className="h-4 w-4 shrink-0" />{error}</div>}
     {(message || rows.length > 0) && <div role="status" aria-live="polite" className="rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-xs text-emerald-800 space-y-1">

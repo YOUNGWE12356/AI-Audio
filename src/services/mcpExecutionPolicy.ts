@@ -1,7 +1,7 @@
 import { audioFailureDetails } from './elevenLabsErrors';
 import { safeRetryAfterMs } from './requestLimitErrors';
 
-export const MCP_EXECUTION_POLICY_VERSION = '2026-11-19.1';
+export const MCP_EXECUTION_POLICY_VERSION = '2026-11-19.2';
 
 // Returned on every call, including to clients that never refresh inspect_tools.
 // This describes the current server, not the version that ran a historical job.
@@ -13,7 +13,7 @@ export const MCP_EXECUTION_POLICY = {
     auto: 'server_search_then_generate_once_if_unavailable',
     searchBusy: 'server_queue_and_bounded_retry',
     explicitMode: 'preserve_search_or_generate',
-    intent: 'interpret_description_with_one_alternate_query',
+    intent: 'preserve_short_queries_or_interpret_detailed_requests',
   },
   paidRetry: 'never_automatic',
   export: 'preview_first_export_on_user_request',
@@ -37,6 +37,7 @@ export function mcpFailureGuidance(error: unknown): Guidance {
   if (details.code === 'STORAGE_LIMIT_EXCEEDED') return guide('stop', '请先整理存储空间；不要重复制作。');
   if (details.status === 401 || details.status === 403 || details.code === 'ELEVENLABS_AUTH') return guide('stop', '请先解决登录或权限问题；不要切换付费功能重试。');
   if (details.code === 'ELEVENLABS_QUOTA') return guide('stop', '上游服务额度不足，请联系管理员；不要重复生成。');
+  if (details.code === 'SFX_INTENT_UNAVAILABLE') return guide('stop', '保留原描述和已有文件。可请用户确认本条声音目标，或用 analyze_sfx_batch 按事件整理需求。');
   if (details.code === 'MCP_INVALID_ARGUMENTS' || details.status === 400 || details.status === 422) return guide('stop', '请检查本次参数或描述，调整前不要重复执行。');
   const retryAfterMs = safeRetryAfterMs((error as { retryAfterMs?: unknown })?.retryAfterMs);
   if (['API_RATE_LIMIT', 'REQUEST_CONCURRENCY_LIMIT', 'MCP_JOB_BUSY'].includes(details.code || '')) {

@@ -22,6 +22,7 @@ import {
 } from './services/aiService';
 import { generateMusic, generateVoice } from './services/elevenLabsService';
 import { generateSoundEffectVersions } from './services/sfxGeneration';
+import { needsStudioGenerationIntent, resolveStudioGenerationPrompt } from './services/sfxStudioIntentClient';
 import { FileItem, HistoryItem, TabType } from './types';
 import { ELEVENLABS_VOICES, VoiceItem } from './data/voices';
 import { fetchPlatformHealth } from './services/platformService';
@@ -823,11 +824,13 @@ export default function App() {
     try {
       const prompt = standalonePrompt.trim();
       const requestedDuration = standaloneDurationMode === 'fixed' ? standaloneDuration : undefined;
+      const analysisNeeded = needsStudioGenerationIntent(prompt);
+      const generationInput = analysisNeeded ? await resolveStudioGenerationPrompt(prompt, requestedDuration) : prompt;
       const baseTitle = `独立音效 - ${prompt.substring(0, 20)}${prompt.length > 20 ? '...' : ''}`;
       const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 16);
       const batchId = createClientTaskId();
       const results = await generateSoundEffectVersions({
-        prompt,
+        prompt: generationInput,
         duration: requestedDuration,
         qualityMode: elevenLabsQualityMode,
         onResult: result => {
@@ -836,7 +839,8 @@ export default function App() {
             return;
           }
           const durationLabel = `${Number(result.duration.toFixed(2))}秒`;
-          const details = `${durationLabel} · 48kHz WAV${result.generationPrompt !== prompt ? ' · 已自动英译' : ''}`;
+          const preparationLabel = analysisNeeded ? ' · 已提炼声音描述' : result.generationPrompt !== prompt ? ' · 已自动英译' : '';
+          const details = `${durationLabel} · 48kHz WAV${preparationLabel}`;
           const option = {
             url: createMediaUrl(result.blob),
             title: `${baseTitle}（版本 ${result.version}）`,

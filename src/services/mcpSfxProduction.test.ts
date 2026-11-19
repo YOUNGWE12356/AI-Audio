@@ -85,6 +85,22 @@ test('vague requests ask a question before search, and do not trigger paid gener
   assert.equal(h.prompts.length, 0);
 });
 
+test('long input is summarized for both explicit generation and automatic fallback', async () => {
+  const description = '游戏界面和动画背景。'.repeat(350) + '单次清脆叮声，不要音乐。';
+  const generationPrompt = 'One crisp chime. No music.';
+  for (const mode of ['auto', 'generate'] as const) {
+    const h = harness({ items: [], intent: { searchQuery: 'reward chime', generationPrompt } });
+    const result = await h.produce({ description, mode });
+    assert.equal(result.method, 'generate');
+    assert.equal(h.bodies[0].description, description);
+    assert.equal(h.prompts[0].text, generationPrompt);
+  }
+  const failed = harness({ queryError: fail(504) });
+  await assert.rejects(failed.produce({ description, searchQuery: 'beep' }), { code: 'SFX_INTENT_UNAVAILABLE' });
+  assert.equal(failed.calls.length, 1);
+  assert.equal(failed.prompts.length, 0);
+});
+
 test('only-search requests, bad input, permission and quota failures never trigger AI charges', async () => {
   const only = harness({ searchError: fail(502) }); await assert.rejects(only.produce({ mode: 'search' })); assert.equal(only.prompts.length, 0);
   const empty = harness({ items: [], sources: [{ unavailable: false }] });

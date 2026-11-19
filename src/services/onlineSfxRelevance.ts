@@ -55,7 +55,10 @@ export function createOnlineSfxRelevanceMatcher(query: string) {
   return (title: string) => {
     // A location is not necessarily audible: "birds chirping near the river"
     // is not evidence of water, unlike "river flowing with birds".
-    const foreground = title.split(/\b(?:near|beside|next to|surrounded by|on|at|in|by)\b/i)[0];
+    const [subject, relation, detail] = title.split(/\b(near|beside|next to|surrounded by|on|at|in|by)\b/i);
+    // For footsteps, the surface after "on" is often part of the sound itself.
+    const foreground = relation?.toLowerCase() === 'on' && /\b(?:footsteps?|footfalls?|walking|running)\b/i.test(subject)
+      ? `${subject} ${detail}` : subject;
     const titleWords = new Set(words(foreground).map(stem));
     let matched = 0, exact = 0;
     for (let index = 0; index < groups.length; index++) {
