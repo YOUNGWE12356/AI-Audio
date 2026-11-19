@@ -26,6 +26,7 @@ export function createMcpAudioTools(c: AgentToolContext) {
     tools.push({ name, description, parameters: { type: 'object', properties, required, additionalProperties: false }, execute });
   const replace = (name: string, execute: AgentTool['execute']) => { tools.find(t => t.name === name)!.execute = execute; };
   const generation = tools.find(t => t.name === 'generate_sound_effect')!;
+  const generateRawSound = generation.execute;
   generation.description = '用户要求AI生成，或本次搜索没有合适音效时使用。普通音效需求用produce_sound_effect先搜索。之前任务失败不代表当前不可生成；以本次调用结果为准，失败应报告，不擅自用程序合成替代。支持0.5～30秒。';
   const image = async (id: string) => {
     const a = c.asset(id);
@@ -128,12 +129,23 @@ export function createMcpAudioTools(c: AgentToolContext) {
     });
   const modeSchema = { ...choice('auto', 'search', 'generate'), default: 'auto', description: '默认auto先搜索，无匹配、读取失败或服务错误时AI生成；试听后不合适可用generate继续制作；只搜索填search。' };
   const soundProperties = { name: { ...s, minLength: 1, maxLength: 180 }, keywords: { ...s, minLength: 1, maxLength: 300 },
-    description: { ...s, maxLength: 2000 }, searchQuery: s, duration: { ...n, minimum: 0.5, maximum: 30 }, mode: modeSchema };
-  const produce = (input: any) => produceMcpSoundEffect(c, input, generation.execute);
+    description: { ...s, maxLength: 2000, description: '保留用户的原始中文场景和想听到的声音，服务端会自动理解。' },
+    searchQuery: { ...s, description: '可选英文检索提示。仅当用户明确锁定此词时把 exactSearchQuery 设为 true。' },
+    exactSearchQuery: { ...b, description: '按用户指定的1～2个英文词原样检索，关闭自动改词与备用检索。' },
+    duration: { ...n, minimum: 0.5, maximum: 30 }, mode: modeSchema };
+  const produce = (input: any) => produceMcpSoundEffect(c, input, generateRawSound);
+  generation.execute = async a => {
+    // Match the former generation tool's duration clamp for existing callers.
+    const duration = typeof a.duration === 'number' && Number.isFinite(a.duration) ? Math.min(30, Math.max(.5, a.duration)) : undefined;
+    const output = await produce({ name: a.name, keywords: '', description: a.prompt, duration, mode: 'generate' });
+    if (!('result' in output)) return output;
+    const result = output.result as Record<string, unknown>;
+    return { ...result, soundDetails: output.soundDetails, generationPrompt: output.generationPrompt, requestedDuration: output.requestedDuration };
+  };
   add('produce_sound_effect', `普通音效需求的默认入口。${MCP_SFX_POLICY} 返回method与fallbackReason，告知实际方式。`,
     soundProperties, ['name', 'keywords'], produce);
   const row = { type: 'object', properties: soundProperties, required: ['name', 'keywords'], additionalProperties: false };
-  add('produce_sfx_batch', `批量制作音效的默认入口。${MCP_SFX_POLICY} 每条mode可覆盖批次模式。本次调用的搜索合计1分，批次由服务端登记，每条只搜索一次；先试听，不自动混入视频。`,
+  add('produce_sfx_batch', `批量制作音效的默认入口。${MCP_SFX_POLICY} 每条mode可覆盖批次模式。搜索沿用批次1分规则，首词无候选时可在条目内试一个备用词；先试听。`,
     { mode: modeSchema, items: { type: 'array', items: row, minItems: 1, maxItems: 200 } }, ['items'], async a => {
       const searchIds = a.items.flatMap((item: any, index: number) => (item.mode || a.mode || 'auto') === 'generate' ? [] : [String(index)]);
       const searchBatchId = searchIds.length

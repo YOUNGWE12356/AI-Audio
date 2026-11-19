@@ -129,7 +129,12 @@ test('query preparation endpoint validates, accounts for AI work and never start
   app.use('/batch', createSfxBatchRouter({ uploadsDir: directory, jobsDir: path.join(directory, 'jobs'), ffmpeg: '',
     owner: req => String(req.headers['x-owner'] || 'unknown'),
     reserve: () => { reserved++; return () => { released++; }; }, run: (_req, _res, work) => { void work(); },
-    generateQuery: (async () => { generated++; return { text: JSON.stringify({ searchQuery: badOutput ? '翻牌' : 'card flip' }) }; }) as any,
+    generateQuery: (async request => {
+      generated++;
+      if (String(request.contents).includes('"intentMode":"auto"')) return { text: JSON.stringify({ searchQuery: 'coin pickup', alternateQuery: 'reward chime',
+        generationPrompt: 'One crisp, rising coin chime. No music.', soundDetails: '清脆的单次上扬金币声', clarification: '', suggestedDuration: 0.8 }) };
+      return { text: JSON.stringify({ searchQuery: badOutput ? '翻牌' : 'card flip' }) };
+    }) as typeof import('./aiGateway').generateAiContent,
     search: (async options => { searched++; assert.equal(options.query, 'card flip'); return { items: [] }; }) as any,
   }));
   const server = app.listen(0, '127.0.0.1'); await new Promise<void>(resolve => server.once('listening', resolve));
@@ -146,6 +151,15 @@ test('query preparation endpoint validates, accounts for AI work and never start
     assert.equal((await post('/search', { query: result.searchQuery })).status, 200); assert.equal(searched, 1);
     badOutput = true;
     assert.equal((await post('/search-query', manual)).status, 502);
+    assert.equal(searched, 1); assert.equal(reserved, released);
+    const prepared = await (await post('/search-query', { intentMode: 'auto', searchQuery: 'beep', keywords: '提示音', description: '领金币时叮一下', duration: 2 })).json();
+    assert.equal(prepared.searchQuery, 'coin pickup');
+    assert.equal(prepared.alternateQuery, 'reward chime');
+    assert.match(prepared.generationPrompt, /No music/);
+    assert.equal(prepared.suggestedDuration, undefined, 'never override an explicit duration');
+    const callsBeforeExact = generated;
+    assert.deepEqual(await (await post('/search-query', { intentMode: 'search', exactSearchQuery: true, searchQuery: 'coin pickup' })).json(), { searchQuery: 'coin pickup' });
+    assert.equal(generated, callsBeforeExact);
     assert.equal(searched, 1); assert.equal(reserved, released);
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); await fs.rm(directory, { recursive: true, force: true }); }
 });

@@ -217,6 +217,7 @@ test('search busy is tagged before admission; retrying the same batch item succe
 
 test('batch search bills one point across rows, charges new clicks and users independently, and skips empty or failed searches', async () => {
   const events: AiUsageEvent[] = [];
+  const executedQueries: string[] = [];
   const balances = new Map([['alice', 1], ['bob', 1]]);
   let reserved = 0, released = 0;
   setAiUsageRecorder(event => events.push(event));
@@ -232,14 +233,15 @@ test('batch search bills one point across rows, charges new clicks and users ind
     },
     run: (_req, _res, work) => { void work(); },
     search: (async ({ query }) => {
+      executedQueries.push(query);
       if (query === 'broken') throw new Error('source unavailable');
       return { items: query === 'missing' ? [] : [{ title: query, source: 'test', sourceUrl: `https://example.com/${query}`, previewUrl: 'https://example.com/audio' }] };
     }) as typeof import('./onlineSfxServer').searchOnlineSfxSources,
   }));
   const server = app.listen(0, '127.0.0.1'); await new Promise<void>(resolve => server.once('listening', resolve));
   const url = `http://127.0.0.1:${(server.address() as any).port}/batch/search`;
-  const post = (query: string, searchBatchId?: unknown, owner = 'alice', searchBatchItemId = query) => fetch(url, { method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-owner': owner }, body: JSON.stringify({ query, searchBatchId, searchBatchItemId }) });
+  const post = (query: string, searchBatchId?: unknown, owner = 'alice', searchBatchItemId = query, alternateQuery?: string) => fetch(url, { method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-owner': owner }, body: JSON.stringify({ query, searchBatchId, searchBatchItemId, alternateQuery }) });
   const create = async (itemIds: string[], owner = 'alice') => {
     const response = await fetch(url.replace(/\/search$/, '/search-batches'), { method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-owner': owner }, body: JSON.stringify({ itemIds }) });
@@ -276,6 +278,17 @@ test('batch search bills one point across rows, charges new clicks and users ind
     assert.equal((await post('door', {})).status, 400);
     assert.equal((await post('door', 'x'.repeat(129))).status, 400);
     assert.equal(events.reduce((sum, event) => sum + (event.companyPoints || 0), 0), 5);
+    const fallbackBatch = await create(['missing', 'click']);
+    const beforeAlternate = executedQueries.length;
+    assert.equal((await post('missing', fallbackBatch, 'alice', 'missing', 'overly long query')).status, 400);
+    const alternate = await (await post('missing', fallbackBatch, 'alice', 'missing', 'reward chime')).json();
+    assert.deepEqual(alternate.attemptedQueries, ['missing', 'reward chime']);
+    assert.equal(alternate.usedQuery, 'reward chime');
+    assert.equal(alternate.items[0].title, 'reward chime');
+    assert.equal((await post('click', fallbackBatch, 'alice', 'click', 'button')).status, 200);
+    assert.equal((await post('missing', fallbackBatch, 'alice', 'missing', 'reward chime')).status, 400);
+    assert.deepEqual(executedQueries.slice(beforeAlternate), ['missing', 'reward chime', 'click']);
+    assert.equal(events.length, 6, 'both terms and both rows share one added billing event');
     assert.equal(reserved, released);
   } finally { setAiUsageRecorder(null); await new Promise<void>(resolve => server.close(() => resolve())); }
 });

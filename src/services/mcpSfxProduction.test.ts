@@ -6,8 +6,8 @@ import type { AgentToolContext } from './assistantAgentTools';
 
 const input = { name: '关门', keywords: '关门', description: '厚重木门缓慢关上，沉闷撞击，轻微房间混响', duration: 2 };
 const fail = (status: number) => Object.assign(new Error(`搜索或采集失败 (${status})`), { status });
-function harness(options: { searchError?: Error; queryError?: Error; captureErrors?: Record<string, Error>; items?: any[]; sources?: any[]; generationError?: Error } = {}) {
-  const controller = new AbortController(), calls: string[] = [], prompts: any[] = [];
+function harness(options: { searchError?: Error; queryError?: Error; captureErrors?: Record<string, Error>; items?: any[]; sources?: any[]; generationError?: Error; intent?: Record<string, unknown>; usedQuery?: string } = {}) {
+  const controller = new AbortController(), calls: string[] = [], prompts: any[] = [], bodies: any[] = [];
   const assets: any[] = [];
   const c: AgentToolContext = {
     assets, signal: controller.signal, asset: id => assets.find(v => v.id === id), filePath: () => '', save: async () => { throw Error('unused'); },
@@ -15,9 +15,11 @@ function harness(options: { searchError?: Error; queryError?: Error; captureErro
     ffmpeg: async () => '', wait: async () => {}, ask: () => {}, finish: () => {}, navigate: () => {},
     request: async (endpoint, args: any) => {
       calls.push(endpoint);
+      bodies.push(args);
       if (endpoint.endsWith('/search-batches')) return { batchId: 'server-issued-batch' };
-      if (endpoint.endsWith('search-query')) { if (options.queryError) throw options.queryError; return { searchQuery: 'door slam' }; }
-      if (endpoint.endsWith('/search')) { if (options.searchError) throw options.searchError; return { items: options.items ?? [{ id: 'one' }, { id: 'two' }], sources: options.sources }; }
+      if (endpoint.endsWith('search-query')) { if (options.queryError) throw options.queryError; return options.intent ?? { searchQuery: 'door slam' }; }
+      if (endpoint.endsWith('/search')) { if (options.searchError) throw options.searchError; return { items: options.items ?? [{ id: 'one' }, { id: 'two' }], sources: options.sources,
+        ...(options.usedQuery ? { usedQuery: options.usedQuery, attemptedQueries: [args.query, options.usedQuery] } : {}) }; }
       if (endpoint.endsWith('/capture')) { if (options.captureErrors?.[args.id]) throw options.captureErrors[args.id]; return { url: `/uploads/${args.id}.wav` }; }
       if (endpoint.endsWith('sound-effect')) { prompts.push(args); if (options.generationError) throw options.generationError; return { audioUrl: '/uploads/generated.wav' }; }
       throw Error(`Unexpected endpoint ${endpoint}`);
@@ -25,7 +27,7 @@ function harness(options: { searchError?: Error; queryError?: Error; captureErro
   };
   const tools = createMcpAudioTools(c);
   const produce = (args: Record<string, any> = {}) => tools.find(t => t.name === 'produce_sound_effect')!.execute({ ...input, ...args }) as Promise<any>;
-  return { c, controller, calls, prompts, produce, tools };
+  return { c, controller, calls, prompts, produce, tools, bodies };
 }
 
 test('ordinary sound requests default to search; partial preview errors keep usable results without generating', async () => {
@@ -47,11 +49,40 @@ test('search outages and wholly broken previews fall back once, retaining the fu
   }
 });
 
-test('explicit AI generation skips searching and search-term translation', async () => {
-  const h = harness({ queryError: fail(502) });
+test('explicit AI generation prepares an audio prompt without querying a search source', async () => {
+  const generationPrompt = 'A single slow closing of a heavy wooden door, with a dull impact and a little room reverb.';
+  const h = harness({ intent: { generationPrompt, suggestedDuration: 1 } });
   const result = await h.produce({ mode: 'generate' });
   assert.equal(result.method, 'generate'); assert.equal(result.fallback, false);
-  assert.deepEqual(h.calls, ['/api/ai/elevenlabs/sound-effect']);
+  assert.deepEqual(h.calls, ['/api/ai/sfx-batch/search-query', '/api/ai/elevenlabs/sound-effect']);
+  assert.equal(h.bodies[0].intentMode, 'generate');
+  assert.equal(h.prompts[0].text, generationPrompt);
+  assert.equal(h.prompts[0].duration, 2, 'honor the user’s explicit duration');
+  const direct = await h.tools.find(t => t.name === 'generate_sound_effect')!.execute({ name: input.name, prompt: input.description }) as any;
+  assert.equal(direct.assets.length, 1);
+  assert.equal(h.prompts[1].duration, 1);
+});
+
+test('MCP uses the server corrected query and reports the actual alternate result', async () => {
+  const h = harness({ intent: { searchQuery: 'coin pickup', alternateQuery: 'reward chime', generationPrompt: 'A short, bright chime.' },
+    usedQuery: 'reward chime', items: [{ id: 'plain', title: 'Reward chime' }, { id: 'bright', title: 'Bright reward chime' }] });
+  const response = await h.produce({ keywords: '提示音', searchQuery: 'beep', description: '领金币时叮一下，清脆一点，尾巴短' });
+  assert.equal(response.method, 'search');
+  assert.equal(h.bodies[1].query, 'coin pickup');
+  assert.equal(h.bodies[1].alternateQuery, 'reward chime');
+  assert.equal(response.searchQuery, 'reward chime');
+  assert.deepEqual(response.attemptedQueries, ['coin pickup', 'reward chime']);
+  assert.equal(response.candidates[0].id, 'bright');
+  assert.equal(h.prompts.length, 0);
+});
+
+test('vague requests ask a question before search, and do not trigger paid generation', async () => {
+  const h = harness({ intent: { clarification: '用在按钮、领奖还是转场？' } });
+  const output = await h.produce({ keywords: '高级感', description: '给我做个高级一点的声音' });
+  assert.equal(output.status, 'needs_clarification');
+  assert.match(output.question, /领奖/);
+  assert.deepEqual(h.calls, ['/api/ai/sfx-batch/search-query']);
+  assert.equal(h.prompts.length, 0);
 });
 
 test('only-search requests, bad input, permission and quota failures never trigger AI charges', async () => {

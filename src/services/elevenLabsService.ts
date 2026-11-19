@@ -77,11 +77,11 @@ interface ElevenLabsMusicOptions extends ElevenLabsGenerationOptions {
 }
 // Officially documented high-quality v2 output format.
 export const ELEVENLABS_MUSIC_OUTPUT_FORMAT = 'mp3_48000_192';
-// Sound Effects currently exposes one model. Request the highest-quality
-// uncompressed format and wrap the raw PCM response as WAV for playback.
-export const ELEVENLABS_SOUND_MODEL = 'eleven_text_to_sound_v2';
+// Use the current Sound Effects model and request the highest-quality
+// uncompressed format, then wrap the raw PCM response as WAV for playback.
+export const ELEVENLABS_SOUND_MODEL = 'eleven_text_to_sound_v3';
 export const ELEVENLABS_SOUND_OUTPUT_FORMAT = 'pcm_48000';
-// Sound Effects v2 returns interleaved stereo PCM, unlike mono TTS PCM.
+// Sound Effects returns interleaved stereo PCM, unlike mono TTS PCM.
 export const ELEVENLABS_SOUND_CHANNELS = SOUND_EFFECT_CHANNELS;
 const SOUND_EFFECT_GENERATION_TIMEOUT_MS = 120_000;
 // Direct callers may also need up to 90 seconds for server-side translation.

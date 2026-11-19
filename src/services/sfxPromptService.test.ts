@@ -50,7 +50,7 @@ test('full English description, punctuation, sequence and final exclusions reach
   const blob = await generateSoundEffect(prompt, 4, { qualityMode: 'pro' });
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].body, {
-    model_id: 'eleven_text_to_sound_v2', text: prompt, duration_seconds: 4, prompt_influence: 0.45,
+    model_id: 'eleven_text_to_sound_v3', text: prompt, duration_seconds: 4, prompt_influence: 0.45,
   });
   assert.equal(blob.type, 'audio/wav');
   const bytes = await blob.arrayBuffer();
@@ -207,7 +207,8 @@ test('batch translates Chinese once and both failed versions settle with explici
   assert.equal(results.filter(result => result.status === 'fulfilled').length, 2);
   globalThis.fetch = (async () => Response.json({ detail: 'test rejected' }, { status: 500 })) as typeof fetch;
   const failed = await generateSoundEffectVersions({ prompt: 'A door.', qualityMode: 'pro', onResult: () => undefined });
-  assert.ok(failed.every(result => result.status === 'rejected' && result.error === 'test rejected'));
+  assert.ok(failed.every(result => result.status === 'rejected'
+    && result.error === 'ElevenLabs 音效服务暂时失败，请稍后重试。'));
 });
 
 test('generation timeout covers the body stream and never retries a timed-out paid request', async t => {

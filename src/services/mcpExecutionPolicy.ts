@@ -1,7 +1,7 @@
 import { audioFailureDetails } from './elevenLabsErrors';
 import { safeRetryAfterMs } from './requestLimitErrors';
 
-export const MCP_EXECUTION_POLICY_VERSION = '2026-11-18.1';
+export const MCP_EXECUTION_POLICY_VERSION = '2026-11-19.1';
 
 // Returned on every call, including to clients that never refresh inspect_tools.
 // This describes the current server, not the version that ran a historical job.
@@ -13,6 +13,7 @@ export const MCP_EXECUTION_POLICY = {
     auto: 'server_search_then_generate_once_if_unavailable',
     searchBusy: 'server_queue_and_bounded_retry',
     explicitMode: 'preserve_search_or_generate',
+    intent: 'interpret_description_with_one_alternate_query',
   },
   paidRetry: 'never_automatic',
   export: 'preview_first_export_on_user_request',
@@ -20,7 +21,7 @@ export const MCP_EXECUTION_POLICY = {
 } as const;
 
 type Guidance = {
-  action: 'continue' | 'poll_job' | 'preview' | 'review_batch' | 'stop' | 'wait';
+  action: 'continue' | 'poll_job' | 'preview' | 'review_batch' | 'clarify' | 'stop' | 'wait';
   repeatExecution: false;
   message: string;
   tool?: string;
@@ -63,10 +64,13 @@ export function withMcpExecutionPolicy(tool: string, value: unknown): Record<str
   }
   if (actualTool === 'produce_sfx_batch') {
     const items = Array.isArray(actualResult.items) ? actualResult.items : [];
-    guidance = guide('review_batch', '逐条检查本次结果，先试听成功音效；保留已完成文件，失败条目不自动重做，不要重跑整个批次。');
+    guidance = guide('review_batch', '先试听已完成音效，向用户确认需要补充描述的条目。后续只处理用户补充或确认的条目。');
     // Keep diagnostics and guidance next to each failed row, including saved jobs.
     actualResult = { ...actualResult, items: items.map((item: any) => item.status === 'failed'
-      ? { ...item, serverGuidance: mcpFailureGuidance(item.errorDetails) } : item) };
+      ? { ...item, serverGuidance: mcpFailureGuidance(item.errorDetails) }
+      : item.status === 'needs_clarification' ? { ...item, serverGuidance: guide('clarify', item.question) } : item) };
+  } else if (actualResult.status === 'needs_clarification') {
+    guidance = guide('clarify', actualResult.question);
   } else if (actualResult.status === 'no_matches') {
     guidance = guide('stop', '本次只搜索未找到匹配音效，请调整关键词或询问用户；不自动切换AI生成。');
   } else if (actualResult.method === 'search' || actualResult.method === 'generate'

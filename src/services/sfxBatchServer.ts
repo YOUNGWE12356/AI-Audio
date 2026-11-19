@@ -12,6 +12,7 @@ import { createSearchBillingBatches } from './searchBillingBatches';
 import { createSfxRequirementsJobs } from './sfxRequirementsJobs';
 import { existingBatchSearchQuery, normalizeBatchRequirements, validateBatchSearchQuery, SFX_BATCH_MAX_ROWS } from './sfxBatch';
 import { normalizeBatchSearchQueryInput, prepareBatchSearchQuery } from './sfxBatchSearchQuery';
+import { isSfxDuration, prepareMcpSfxIntent } from './mcpSfxIntent';
 import { normalizeMusicVisualInput } from './musicVisualPrompt';
 import { batchVideoSegments, batchVideoOverview, mergeBatchVideoRequirements, SFX_BATCH_VIDEO_MAX_FRAMES, SFX_BATCH_VIDEO_CONCURRENCY, SFX_BATCH_VIDEO_JOB_TIMEOUT_MS } from './sfxBatchVideoAnalysis';
 import { batchRangeReviewPrompt } from './sfxBatchRangePrompt';
@@ -209,13 +210,21 @@ export function createSfxBatchRouter(options: {
         if (!owner || owner === 'unknown') throw fail('无法识别当前用户，请刷新后重试。', 401);
         const input = normalizeBatchSearchQueryInput(req.body);
         const existing = existingBatchSearchQuery(input.searchQuery);
-        if (existing) { res.json({ searchQuery: existing }); return; }
+        const intentMode = req.body?.intentMode;
+        const usesIntent = intentMode === 'auto' || intentMode === 'search' || intentMode === 'generate';
+        const exactSearchQuery = req.body?.exactSearchQuery === true;
+        if (existing && (!usesIntent || (intentMode === 'search' && exactSearchQuery))) {
+          res.json({ searchQuery: existing }); return;
+        }
         if (queryPreparations.has(owner) || queryPreparations.size >= 4)
           throw Object.assign(fail('正在提炼英文搜索词，请等待当前步骤完成。', 429), { code: 'SFX_QUERY_BUSY', retryAfterMs: 1000 });
         release = options.reserve(req, res, 0.1); if (!release) return;
         queryPreparations.add(owner); locked = true;
-        const searchQuery = await prepareBatchSearchQuery(input, controller.signal, options.generateQuery);
-        if (!controller.signal.aborted) res.json({ searchQuery });
+        const result = usesIntent
+          ? await prepareMcpSfxIntent({ ...input, intentMode, exactSearchQuery,
+            duration: isSfxDuration(req.body?.duration) ? req.body.duration : undefined }, controller.signal, options.generateQuery)
+          : { searchQuery: await prepareBatchSearchQuery(input, controller.signal, options.generateQuery) };
+        if (!controller.signal.aborted) res.json(result);
       } catch (error) { if (!controller.signal.aborted) next(error); }
       finally { if (locked) queryPreparations.delete(owner); release?.(); res.off('close', cancel); }
     });
@@ -235,8 +244,13 @@ export function createSfxBatchRouter(options: {
     try {
       if (!owner || owner === 'unknown') throw fail('无法识别当前用户，请刷新后重试。', 401);
       let query: string;
+      let alternateQuery: string | undefined;
       try { query = validateBatchSearchQuery(typeof req.body?.query === 'string' ? req.body.query : ''); }
       catch (error) { throw fail(error instanceof Error ? error.message : '请填写1～2个英文搜索词。'); }
+      if (typeof req.body?.alternateQuery === 'string' && req.body.alternateQuery.trim()) {
+        try { alternateQuery = validateBatchSearchQuery(req.body.alternateQuery); }
+        catch { throw fail('备用搜索词应为1～2个英文单词。'); }
+      }
       if (searches.has(owner) || searches.size >= 4)
         throw Object.assign(fail('搜索任务正在进行，请等待本条完成。', 429), { code: 'SFX_SEARCH_BUSY', retryAfterMs: 1000 });
       for (const [id, ticket] of tickets) if (!ticket.pending && Date.now() - ticket.at > 30 * 60_000) tickets.delete(id);
@@ -248,14 +262,23 @@ export function createSfxBatchRouter(options: {
       searches.add(owner); locked = true;
       const excluded = new Set<string>(Array.isArray(req.body?.excludeSourceUrls)
         ? req.body.excludeSourceUrls.filter((value: unknown) => typeof value === 'string').slice(0, 500) : []);
-      const result = await (options.search || searchOnlineSfxSources)({ query, excluded, limit: 4, cooldowns });
+      const search = options.search || searchOnlineSfxSources;
+      let usedQuery = query;
+      let result = await search({ query, excluded, limit: 4, cooldowns });
+      // Both terms share one admission, one batch item and one billing decision.
+      if (!res.destroyed && !result.items.length && alternateQuery && alternateQuery.toLowerCase() !== query.toLowerCase()
+        && !(result.sources?.length && result.sources.every(source => source.unavailable))) {
+        usedQuery = alternateQuery;
+        result = await search({ query: usedQuery, excluded, limit: 4, cooldowns });
+      }
       const items = result.items.map(candidate => {
         const id = randomUUID();
         tickets.set(id, { ...candidate, owner, at: Date.now() });
         return { id, title: candidate.title, source: candidate.source, sourceUrl: candidate.sourceUrl };
       });
       if (items.length && batch.markSuccessful()) recordOnlineSfxBatchUsage();
-      res.json({ items, sources: result.sources, message: items.length ? '' : '未找到匹配音效，可修改搜索词再搜或使用 AI 生成。' });
+      res.json({ items, sources: result.sources, ...(alternateQuery ? { usedQuery, attemptedQueries: usedQuery === query ? [query] : [query, usedQuery] } : {}),
+        message: items.length ? '' : '未找到匹配音效，可修改搜索词再搜或使用 AI 生成。' });
     } catch (error) { next(error); }
     finally { if (locked) searches.delete(owner); release?.(); }
   });

@@ -69,7 +69,10 @@ for (const cdn of [false, true]) test(`official MCP client (${cdn ? 'CDN' : 'loc
   let batchCharges = 0;
   app.post('/api/ai/sfx-batch/search-batches', (req, res) => res.json(searchBatches.create(currentUserId(), req.body.itemIds)));
   app.get('/api/usage/quota', (_req, res) => res.json({ owner: currentUserId(), remaining: 42 }));
-  app.post('/api/ai/sfx-batch/search-query', (req, res) => { assert.equal(req.body.searchQuery, 'door slam'); res.json({ searchQuery: req.body.searchQuery }); });
+  app.post('/api/ai/sfx-batch/search-query', (req, res) => {
+    if (req.body.intentMode === 'generate') return res.json({ generationPrompt: 'A single firm door slam.' });
+    assert.equal(req.body.searchQuery, 'door slam'); res.json({ searchQuery: req.body.searchQuery });
+  });
   app.post('/api/sfx/online/search', (req, res) => { searchCalls++; assert.equal(req.body.query, 'door slam'); fs.rmSync(path.join(currentUploadDirectory(), 'online_sfx_preview.wav'), { force: true }); res.json({ items: [{ id: 'ticket', source: 'envato', sourceUrl: 'https://example.test/item' }] }); });
   app.post('/api/sfx/online/capture', (_req, res) => {
     const file = path.join(currentUploadDirectory(), 'online_sfx_preview.wav'); fs.writeFileSync(file, wav);
