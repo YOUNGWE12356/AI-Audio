@@ -60,17 +60,22 @@ export function createOnlineSfxRelevanceMatcher(query: string) {
     const foreground = relation?.toLowerCase() === 'on' && /\b(?:footsteps?|footfalls?|walking|running)\b/i.test(subject)
       ? `${subject} ${detail}` : subject;
     const titleWords = new Set(words(foreground).map(stem));
+    // A generated compound such as "dressshoe" can be written as "dress shoes"
+    // in a catalog. Join adjacent title words, rather than dropping the qualifier.
+    const titleTokens = words(foreground).map(stem);
+    const compounds = new Set(titleTokens.slice(0, -1).map((word, index) => word + titleTokens[index + 1]));
+    const hasTerm = (word: string) => titleWords.has(word) || compounds.has(word);
     let matched = 0, exact = 0;
     for (let index = 0; index < groups.length; index++) {
-      if ([...groups[index]].some(word => titleWords.has(word))) matched++;
-      if (titleWords.has(terms[index])) exact++;
+      if ([...groups[index]].some(hasTerm)) matched++;
+      if (hasTerm(terms[index])) exact++;
     }
     if (matched < required) return 0;
     // For long requests, never let several style/action words substitute for
     // the explicitly requested sound source.
     const sourceTerms = new Set(['water', 'liquid', 'rain', 'wave', 'wood', 'wooden', 'metal', 'bird', 'dog', 'cat',
       'footstep', 'explosion', 'fire', 'door', 'wind', 'glass', 'car', 'bell', 'gun', 'sword', 'piano']);
-    if (terms.some((term, index) => sourceTerms.has(term) && ![...groups[index]].some(word => titleWords.has(word)))) return 0;
+    if (terms.some((term, index) => sourceTerms.has(term) && ![...groups[index]].some(hasTerm))) return 0;
     return exact * 2 + matched;
   };
 }

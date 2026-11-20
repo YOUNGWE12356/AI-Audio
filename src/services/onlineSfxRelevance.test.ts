@@ -42,3 +42,13 @@ test('match the surface under footsteps without treating nearby scenery as audib
   assert.equal(score('Footsteps on gravel near grass'), 0);
   assert.equal(score('Footsteps near grass'), 0);
 });
+
+test('generated compounds match separated catalog words without losing the sound qualifier', () => {
+  const score = createOnlineSfxRelevanceMatcher('dressshoe footsteps');
+  assert.ok(score('Footsteps Dress Shoes - Interior Mens Dress Shoes Walking On Tile') > 0);
+  assert.ok(score('Dress-shoe footsteps walking in a hall') > 0);
+  assert.equal(score('Footsteps Sneakers Walking'), 0);
+  assert.equal(score('Dress Shoes Dropping On Floor'), 0);
+  assert.equal(score('Birds near dress shoes and footsteps'), 0);
+  assert.ok(createOnlineSfxRelevanceMatcher('wooddoor creak')('Wood door creaking') > 0);
+});

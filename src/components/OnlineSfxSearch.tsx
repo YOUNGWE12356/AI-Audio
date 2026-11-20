@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { AlertCircle, Check, ExternalLink, Globe, Loader2, Search, Square, RotateCcw } from 'lucide-react';
 import GeneratedAudioPlayer, { sanitizeAudioFileName } from './GeneratedAudioPlayer';
 import PointCostHint from './PointCostHint';
-import { exactStudioSearchQuery, resolveStudioSearchQuery } from '../services/sfxStudioIntentClient';
+import { exactStudioSearchQuery, resolveStudioSearchQuery, searchStudioSfx, type StudioSearchPlan } from '../services/sfxStudioIntentClient';
 import type { CapturedOnlineSfx, OnlineSfxItem } from '../services/onlineSfxTypes';
 
 type Row = OnlineSfxItem & { status: 'waiting' | 'capturing' | 'ready' | 'failed'; result?: CapturedOnlineSfx; error?: string };
@@ -31,8 +31,8 @@ export default function OnlineSfxSearch() {
   const controller = useRef<AbortController | null>(null);
   const started = useRef(0);
   const mounted = useRef(true);
-  const preparedSearches = useRef(new Map<string, string>());
-  const searchHistory = useRef<{ key: string; nextPage: number; nextBatch: number; seen: Set<string> }>({ key: '', nextPage: 1, nextBatch: 1, seen: new Set() });
+  const preparedSearches = useRef(new Map<string, StudioSearchPlan>());
+  const searchHistory = useRef<{ key: string; usedQuery: string; nextPage: number; nextBatch: number; seen: Set<string> }>({ key: '', usedQuery: '', nextPage: 1, nextBatch: 1, seen: new Set() });
   useEffect(() => {
     mounted.current = true;
     const cleanupOnPageHide = () => {
@@ -77,28 +77,30 @@ export default function OnlineSfxSearch() {
     try {
       const trimmedQuery = query.trim();
       const queryKey = normalizeQuery(trimmedQuery);
-      let english = preparedSearches.current.get(queryKey);
-      if (!english) {
-        const prepared = await resolveStudioSearchQuery(trimmedQuery, current.signal);
+      let prepared = preparedSearches.current.get(queryKey);
+      if (!prepared) {
+        prepared = await resolveStudioSearchQuery(trimmedQuery, current.signal);
         current.signal.throwIfAborted();
         if (prepared.clarification) { setMessage(prepared.clarification); return; }
-        english = prepared.searchQuery!;
-        preparedSearches.current.set(queryKey, english);
+        preparedSearches.current.set(queryKey, prepared);
       }
       current.signal.throwIfAborted();
-      setSearchQuery(english); setMessage('正在搜索音效…');
       const continued = searchHistory.current.key === queryKey;
+      const english = continued ? searchHistory.current.usedQuery : prepared.searchQuery!;
+      setSearchQuery(english); setMessage('正在搜索音效…');
       const page = continued ? searchHistory.current.nextPage : 1;
       const batch = continued ? searchHistory.current.nextBatch : 1;
       const seen = continued ? searchHistory.current.seen : new Set<string>();
-      const response = await post<{ items: OnlineSfxItem[]; page: number; nextPage: number; elapsedMs: number; message?: string }>(
-        'search',
-        { query: english, page, excludeSourceUrls: Array.from(seen) },
+      const { result: response, usedQuery } = await searchStudioSfx(
+        { searchQuery: english, alternateQuery: continued ? undefined : prepared.alternateQuery },
+        searchTerm => post<{ items: OnlineSfxItem[]; page: number; nextPage: number; elapsedMs: number; message?: string }>(
+          'search', { query: searchTerm, page: searchTerm === english ? page : 1, excludeSourceUrls: Array.from(seen) }, current.signal),
         current.signal,
+        searchTerm => { setSearchQuery(searchTerm); setMessage('正在尝试同一音效的备用检索词…'); },
       );
       const next: Row[] = response.items.map(item => ({ ...item, status: 'waiting' }));
       next.forEach(item => seen.add(item.sourceUrl));
-      searchHistory.current = { key: queryKey, nextPage: response.nextPage, nextBatch: batch + 1, seen };
+      searchHistory.current = { key: next.length ? queryKey : '', usedQuery, nextPage: response.nextPage, nextBatch: batch + 1, seen };
       setRows(next); setSearchMs(response.elapsedMs); setBatchNumber(batch);
       setMessage(next.length ? '搜索完成，正在后台采集试听；完成的音效可立即播放。' : response.message || '没有找到匹配音效。');
       let cursor = 0;
