@@ -10,6 +10,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
   ONLINE_SFX_BATCH_COMPANY_POINTS,
+  ONLINE_SFX_GROUP_WEIGHTS,
   ONLINE_SFX_MAX_RESULTS,
   ONLINE_SFX_PRICING_VERSION,
   onlineSfxSearchUrl,
@@ -18,7 +19,7 @@ import {
   type OnlineSfxCandidate,
 } from './onlineSfxTypes';
 import { recordAiUsage } from './usageTracking';
-import { createOnlineSfxRelevanceMatcher } from './onlineSfxRelevance';
+import { createOnlineSfxRelevanceMatcher, onlineSfxAlternateObjectQuery } from './onlineSfxRelevance';
 import { fetchPublicResource, publicHttpsUrl } from './onlineSfxPublicFetch';
 import { parseWebAudioPage, searchWebSoundEffects } from './onlineSfxWebSearch';
 
@@ -239,7 +240,7 @@ export function createOnlineSfxSearchState() {
 }
 
 export function onlineSfxGroupTargets(limit: number) {
-  const weights = [0.3, 0.3, 0.4];
+  const weights = ONLINE_SFX_GROUP_WEIGHTS;
   const targets = weights.map(weight => Math.floor(weight * limit));
   const order = weights.map((weight, index) => ({ index, remainder: weight * limit - targets[index] }))
     .sort((a, b) => b.remainder - a.remainder || a.index - b.index);
@@ -293,15 +294,19 @@ export function mixOnlineSfxCandidates(pools: Candidate[][], limit: number): Can
 export async function searchOnlineSfxSources(options: {
   query: string; state?: ReturnType<typeof createOnlineSfxSearchState>; limit?: number;
   excluded?: Set<string>; fetcher?: typeof fetch;
+  excludedPreviewUrls?: Set<string>;
   cooldowns?: Map<string, number>;
   webSearch?: typeof searchWebSoundEffects;
 }) {
   const state = options.state || createOnlineSfxSearchState();
   const limit = Math.min(ONLINE_SFX_MAX_RESULTS, Math.max(1, options.limit || ONLINE_SFX_MAX_RESULTS));
   const excluded = options.excluded || new Set<string>();
+  const eligible = (candidate: Candidate) => !excluded.has(candidate.sourceUrl)
+    && !options.excludedPreviewUrls?.has(candidate.previewUrl);
   const relevance = createOnlineSfxRelevanceMatcher(options.query);
   const categories = mixkitSearchCategories(options.query);
   const unavailable = new Set<string>();
+  const responsive = new Set<string>();
   const reasons = new Map<string, string>();
   const attempted = SEARCH_SOURCES.map(() => new Set<number>());
   const deadline = AbortSignal.timeout(16_000);
@@ -363,6 +368,7 @@ export async function searchOnlineSfxSources(options: {
     for (let i = 0; i < responses.length; i++) {
       const response = responses[i];
       if (response.status !== 'fulfilled') continue;
+      responsive.add(source.id);
       stream.completed.add(pages[i]);
       while (stream.completed.delete(stream.page)) stream.page++;
       for (const candidate of response.value) {
@@ -371,10 +377,10 @@ export async function searchOnlineSfxSources(options: {
         stream.seen.add(candidate.sourceUrl);
         if (candidate.previewUrl) stream.seen.add(audioKey);
         newCandidates++;
-        if (!excluded.has(candidate.sourceUrl) && relevance(candidate.title) > 0) stream.buffer.push(candidate);
+        if (eligible(candidate) && relevance(candidate.title) > 0) stream.buffer.push(candidate);
       }
     }
-    if (responses.every(response => response.status === 'rejected')) {
+    if (!responsive.has(source.id) && responses.every(response => response.status === 'rejected')) {
       unavailable.add(source.id);
       if (source.id === 'epidemic') epidemicActions.delete(options.fetcher || fetch);
       cooldowns?.set(source.id, Date.now() + 60_000);
@@ -385,7 +391,7 @@ export async function searchOnlineSfxSources(options: {
     } else if (stream.page > pages[pages.length - 1] && responses.every(response => response.status === 'fulfilled'
       && (response.value.length === 0 || (source.id === 'mixkit' && !newCandidates)))) stream.exhausted = true;
   };
-  for (const stream of state) stream.buffer = stream.buffer.filter(candidate => !excluded.has(candidate.sourceUrl) && relevance(candidate.title) > 0);
+  for (const stream of state) stream.buffer = stream.buffer.filter(candidate => eligible(candidate) && relevance(candidate.title) > 0);
   const targets = onlineSfxGroupTargets(limit);
   // Pond5 supplements the web group; keep Envato/three catalogs/web at 30/30/40.
   const sourceTargets = [targets[0], ...Array(3).fill(Math.ceil(targets[1] / 3)), targets[2], 1];
@@ -604,14 +610,16 @@ export function createOnlineSfxRouter(options: {
   uploadsDir: UploadDirectory; ffmpeg: string;
   owner: (req: express.Request, res: express.Response) => string;
   reserve?: (req: express.Request, res: express.Response, points: number) => (() => void) | null;
+  search?: typeof searchOnlineSfxSources;
 }) {
   const router = express.Router();
   type Ticket = { item: OnlineSfxItem; previewUrl: string; owner: string; at: number;
     pending?: Promise<unknown>; captured?: unknown; fileName?: string; directory?: string; discarded?: boolean };
   const tickets = new Map<string, Ticket>();
   const searches = new Map<string, number>();
-  const sessions = new Map<string, { query: string; nextPage: number; at: number; state: ReturnType<typeof createOnlineSfxSearchState> }>();
+  const sessions = new Map<string, { query: string; usedQuery: string; nextPage: number; at: number; state: ReturnType<typeof createOnlineSfxSearchState> }>();
   const cooldowns = new Map<string, number>();
+  const searchSources = options.search || searchOnlineSfxSources;
   let searching = 0, capturing = 0;
 
   const removeTicketFiles = async (ticket: Ticket) => {
@@ -704,7 +712,7 @@ export function createOnlineSfxRouter(options: {
       try {
         let session = sessions.get(owner);
         if (page === 1) {
-          session = { query, nextPage: 1, at: Date.now(), state: createOnlineSfxSearchState() };
+          session = { query, usedQuery: query, nextPage: 1, at: Date.now(), state: createOnlineSfxSearchState() };
           sessions.set(owner, session);
           while (sessions.size > 64) sessions.delete(sessions.keys().next().value!);
         }
@@ -712,7 +720,19 @@ export function createOnlineSfxRouter(options: {
           return res.status(409).json({ error: '搜索批次已过期，请刷新后重新搜索。' });
         }
         session.at = Date.now();
-        const { items: candidates, sources } = await searchOnlineSfxSources({ query, state: session.state, excluded, cooldowns });
+        let result = await searchSources({ query: session.usedQuery, state: session.state, excluded, cooldowns });
+        const alternate = page === 1 && !result.items.length && !result.sources.every(source => source.unavailable)
+          ? onlineSfxAlternateObjectQuery(query) : undefined;
+        if (alternate && !res.destroyed) {
+          const alternateState = createOnlineSfxSearchState();
+          const expanded = await searchSources({ query: alternate, state: alternateState, excluded, cooldowns });
+          if (expanded.items.length) {
+            session.usedQuery = alternate;
+            session.state = alternateState;
+            result = expanded;
+          }
+        }
+        const { items: candidates, sources } = result;
         if (!candidates.length && sources.every(source => source.unavailable)) throw fail('所有音效来源暂不可用，请稍后重试。');
         session.nextPage = page + 1;
         if (!candidates.length) {

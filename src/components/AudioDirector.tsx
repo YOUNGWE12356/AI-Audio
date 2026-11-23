@@ -310,6 +310,7 @@ const filmDemoResult: AudioDesignResult = {
 };
 
 interface AudioDirectorProps {
+  active: boolean;
   files: FileItem[];
   setFiles: React.Dispatch<React.SetStateAction<FileItem[]>>;
   requirements: string;
@@ -344,6 +345,7 @@ interface AudioDirectorProps {
 }
 
 export default function AudioDirector({
+  active,
   files,
   setFiles,
   requirements,
@@ -469,10 +471,11 @@ export default function AudioDirector({
   };
 
   const handlePaste = (e: React.ClipboardEvent | ClipboardEvent) => {
-    if (isUploading || e.defaultPrevented) return;
+    if (!active || isUploading || e.defaultPrevented) return;
     const view = document.getElementById('audiodirector-view');
     if (!view || view.closest('[hidden]') || !view.getClientRects().length) return;
-    const clipboardData = e.clipboardData as DataTransfer;
+    const clipboardData = e.clipboardData as DataTransfer | null;
+    if (!clipboardData) return;
     const pastedFiles = Array.from(clipboardData.items || [])
       .filter(item => item.kind === 'file')
       .map(item => item.getAsFile());
@@ -497,10 +500,11 @@ export default function AudioDirector({
   };
 
   useEffect(() => {
+    if (!active) return;
     const handleWindowPaste = (event: ClipboardEvent) => handlePaste(event);
     window.addEventListener('paste', handleWindowPaste);
     return () => window.removeEventListener('paste', handleWindowPaste);
-  }, [isUploading]);
+  }, [active, isUploading]);
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();

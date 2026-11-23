@@ -43,6 +43,7 @@ const PROJECT_OPTIONS: Array<{ id: Exclude<ProjectOption, ''>; name: string }> =
 ];
 
 interface SfxRequirementsProps {
+  active: boolean;
   hasAiTextModel: boolean;
   assistantRequest?: AssistantRequirementsRequest | null;
   onBatchSfxRequest: (text: string) => void;
@@ -695,7 +696,7 @@ const normalizeAvatarRequirementItems = (items: any[]) => items.map((item) => {
   return normalizedItem;
 });
 
-export default function SfxRequirements({ hasAiTextModel, assistantRequest = null, onBatchSfxRequest }: SfxRequirementsProps) {
+export default function SfxRequirements({ active, hasAiTextModel, assistantRequest = null, onBatchSfxRequest }: SfxRequirementsProps) {
   const [templateType, setTemplateType] = useState<TemplateType>('game_sfx_general');
   const [selectedProject, setSelectedProject] = useState<ProjectOption>('');
   const [columnWidthsByTemplate, setColumnWidthsByTemplate] = useState<Record<TemplateType, number[]>>(DEFAULT_COLUMN_WIDTHS);
@@ -946,9 +947,11 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
   };
 
   const handlePasteScreenshot = (e: React.ClipboardEvent | ClipboardEvent) => {
+    if (!active || e.defaultPrevented) return;
     const imageFile = getClipboardImageFile(e.clipboardData);
     if (!imageFile) return;
     e.preventDefault();
+    e.stopPropagation();
     processReferenceFile(imageFile, 'paste');
   };
 
@@ -964,12 +967,14 @@ export default function SfxRequirements({ hasAiTextModel, assistantRequest = nul
   };
 
   useEffect(() => {
+    // Visited workspaces stay mounted to preserve their uploads and form state.
+    if (!active) return;
     const handleWindowPaste = (event: ClipboardEvent) => {
       handlePasteScreenshot(event);
     };
     window.addEventListener('paste', handleWindowPaste);
     return () => window.removeEventListener('paste', handleWindowPaste);
-  }, [screenshotPreview]);
+  }, [active, screenshotPreview]);
 
   // Table rows actions
   const handleCellChange = (rowIndex: number, key: string, value: string | number) => {

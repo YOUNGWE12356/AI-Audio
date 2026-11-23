@@ -1474,6 +1474,7 @@ export default function App() {
             {visitedTabs.has('audio-director') && (
               <section hidden={currentTab !== 'audio-director'} className="min-h-full">
                 <AudioDirector
+                  active={currentTab === 'audio-director'}
                   files={files}
                   setFiles={setFiles}
                   requirements={requirements}
@@ -1613,6 +1614,7 @@ export default function App() {
             {visitedTabs.has('sfx-requirements') && (
               <section hidden={currentTab !== 'sfx-requirements'} className="min-h-full">
                 <SfxRequirements
+                  active={currentTab === 'sfx-requirements'}
                   hasAiTextModel={hasAiTextModel}
                   assistantRequest={assistantRequirementsRequest}
                   onBatchSfxRequest={handleBatchSfxInputRequest}

@@ -1,6 +1,9 @@
 // Conservative metadata matching, not audio recognition. A site's category/tag
 // alone cannot establish that an effect matches the requested sound.
-const words = (text: string) => text.normalize('NFKC').toLowerCase().match(/[a-z]+/g) || [];
+const words = (text: string) => text.normalize('NFKC').toLowerCase()
+  .replace(/\bbook[\s_-]*shel(?:f|ves)\b/g, 'bookshelf')
+  .replace(/\bbook[\s_-]*cases?\b/g, 'bookcase')
+  .match(/[a-z]+/g) || [];
 const stem = (word: string) => {
   if (word.endsWith('ies') && word.length > 4) return word.slice(0, -3) + 'y';
   if (word.endsWith('ing') && word.length > 5) {
@@ -43,8 +46,17 @@ const RELATED: Record<string, string[]> = {
   click: ['clicking'],
   door: ['doors'],
   wind: ['gust', 'howling'],
+  bookshelf: ['bookcase'],
+  bookcase: ['bookshelf'],
 };
 const alternatives = (term: string) => new Set([term, ...(RELATED[term] || []).map(stem)]);
+
+export function onlineSfxAlternateObjectQuery(query: string) {
+  const terms = words(query);
+  if (terms.length !== 1) return;
+  if (terms[0] === 'bookshelf') return 'bookcase';
+  if (terms[0] === 'bookcase') return 'bookshelf';
+}
 
 export function createOnlineSfxRelevanceMatcher(query: string) {
   const terms = [...new Set(words(query).map(stem).filter(word => !STOP_WORDS.has(word)))];

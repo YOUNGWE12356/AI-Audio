@@ -142,6 +142,9 @@ test('query preparation endpoint validates, accounts for AI work and never start
       if (contents.includes('"intentMode":')) {
         lastIntentPrompt = contents;
         lastIntentTimeout = request.timeoutMs || 0;
+        if (contents.includes('"description":"角色打开旧木门的声音"')) {
+          return { text: JSON.stringify({ searchQuery: 'door creak', alternateQuery: 'wood creak', clarification: '是哪种木门？' }) };
+        }
         if (contents.includes('"description":"在草地上走路的声音"')) {
           return { text: JSON.stringify({ searchQuery: 'grass footsteps', alternateQuery: 'grass walking' }) };
         }
@@ -207,6 +210,18 @@ test('query preparation endpoint validates, accounts for AI work and never start
     assert.equal(oversized.status, 400);
     assert.match((await oversized.json()).error, /按声音事件拆分/);
     assert.equal(generated, callsBeforeOversized);
+    const callsBeforeEvent = generated;
+    const event = await post('/search-query', { intentMode: 'search', studioDescription: 'Bookshelf_Complete' });
+    assert.equal(event.status, 200);
+    assert.deepEqual(await event.json(), { searchQuery: 'completion chime', alternateQuery: 'success chime' });
+    assert.equal(generated, callsBeforeEvent, 'explicit completion events need no model call');
+    const bestEffort = await post('/search-query', { intentMode: 'search', studioDescription: '角色打开旧木门的声音' });
+    assert.equal(bestEffort.status, 200);
+    const bestEffortPlan = await bestEffort.json();
+    assert.equal(bestEffortPlan.searchQuery, 'door creak');
+    assert.equal(bestEffortPlan.alternateQuery, 'wood creak');
+    assert.equal(bestEffortPlan.clarification, undefined);
+    assert.match(lastIntentPrompt, /不要追问/);
     const studioDescription = '描述整个界面和反馈过程。'.repeat(1500) + '最后只需要一声金币提示，不要人声。';
     const webQuery = await post('/search-query', { intentMode: 'search', studioDescription });
     assert.equal(webQuery.status, 200);

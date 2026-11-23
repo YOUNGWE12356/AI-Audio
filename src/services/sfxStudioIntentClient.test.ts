@@ -20,6 +20,16 @@ test('description preparation retains the alternate query while explicit English
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test('web search ignores a model question when the response contains a usable query', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => Response.json({ alternateQuery: 'success chime', clarification: '是哪种完成音？' })) as typeof fetch;
+  try {
+    const plan = await resolveStudioSearchQuery('Bookshelf_Complete', new AbortController().signal);
+    assert.equal(plan.searchQuery, 'success chime');
+    assert.equal(plan.alternateQuery, undefined);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test('an empty primary search tries one alternate and reports the query that produced audio', async () => {
   const queries: string[] = [], progress: string[] = [];
   const plan = { searchQuery: 'dressshoe footsteps', alternateQuery: 'leather footsteps' };

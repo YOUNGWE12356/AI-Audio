@@ -11,8 +11,81 @@ import { sameBatchRange, confirmedVersion, restoreBatchProjectRow, type BatchRow
 import { validateSfxBatchFile, readSfxBatchDocument } from './sfxBatchClient';
 import { waitForRequirementsJob } from './sfxRequirementsClient';
 import { setAiUsageRecorder, type AiUsageEvent } from './usageTracking';
+import { isUnavailableBatchPreview, orderBatchPreviews } from './sfxBatchPreview';
 
 const requirement = { name: 'Door Open.wav', description: '木门缓慢打开，木轴吱呀，短尾音，无音乐', keywords: '木门 打开', searchQuery: 'door creak', duration: 2.5, scene: '第5秒开门' };
+
+test('batch preview selection balances healthy sources across rows and skips only candidate-level errors', () => {
+  const candidates = ['Envato Elements', 'Pro Sound Effects', '全网 · first.example', '全网 · second.example'].map(source => ({ source }));
+  const picked = new Map<string, number>();
+  const selected = Array.from({ length: 10 }, () => {
+    const [{ source }] = orderBatchPreviews(candidates, picked);
+    picked.set(source, (picked.get(source) || 0) + 1);
+    return source;
+  });
+  assert.equal(selected[0], 'Envato Elements');
+  assert.deepEqual(candidates.map(({ source }) => picked.get(source)), [3, 3, 2, 2]);
+  assert.deepEqual(orderBatchPreviews(candidates.slice(0, 1), picked), candidates.slice(0, 1));
+  for (const code of ['SFX_PREVIEW_EXPIRED', 'SFX_PREVIEW_UNAVAILABLE']) assert.ok(isUnavailableBatchPreview({ code }));
+  for (const code of ['AUTH_REQUIRED', 'STORAGE_LIMIT_EXCEEDED', 'SFX_CAPTURE_BUSY', 'CDN_UPLOAD_FAILED']) assert.equal(isUnavailableBatchPreview({ code }), false);
+});
+
+test('web batch search fills a short list from an alternate and a continuation without duplicate clips or charges', async () => {
+  const events: AiUsageEvent[] = [];
+  const calls: Parameters<NonNullable<Parameters<typeof createSfxBatchRouter>[0]['search']>>[0][] = [];
+  const candidate = (id: string, source: string, audio = id) => ({ title: id, source, author: '',
+    sourceUrl: `https://example.com/${id}`, previewUrl: `https://example.com/${audio}.mp3` });
+  const primary = candidate('wood creak', 'Envato Elements');
+  const catalog = candidate('wood squeak', 'Pro Sound Effects');
+  const web = candidate('wooden squeak', '全网 · example.com');
+  const continuation = candidate('wooden creak', '全网 · other.example');
+  const excluded = candidate('old result', 'Envato Elements');
+  let reservations = 0;
+  setAiUsageRecorder(event => events.push(event));
+  const app = express();
+  app.use(express.json());
+  app.use('/batch', createSfxBatchRouter({ uploadsDir: os.tmpdir(), jobsDir: os.tmpdir(), ffmpeg: ffmpeg!, owner: () => 'alice',
+    reserve: () => { reservations++; return () => {}; }, run: (_req, _res, work) => { void work(); },
+    search: async options => {
+      calls.push(options);
+      const { query, excludedPreviewUrls } = options;
+      if (query === 'wood squeak') return { items: [candidate('mirror', '全网 · example.com', primary.title), excluded, catalog, web], sources: [] };
+      if (query === 'wind') return { items: [primary], sources: [] };
+      if (query === 'completion chime' || query === 'finish chime') return { items: [], sources: [] };
+      if (query === 'success chime') return { items: [candidate('success chime', 'Envato Elements')], sources: [] };
+      return { items: [excludedPreviewUrls?.size ? continuation : primary], sources: [] };
+    },
+  }));
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise<void>(resolve => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${(server.address() as any).port}/batch`;
+  const post = (route: string, body: unknown) => fetch(base + route, { method: 'POST',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  try {
+    const { batchId } = await (await post('/search-batches', { itemIds: ['wood', 'wind'] })).json();
+    const response = await post('/search', { query: 'wood creak', alternateQuery: 'wood squeak', fillCandidates: true,
+      searchBatchId: batchId, searchBatchItemId: 'wood', excludeSourceUrls: [excluded.sourceUrl] });
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.deepEqual(result.items.map((item: any) => item.title), [primary.title, catalog.title, web.title, continuation.title]);
+    assert.deepEqual(result.attemptedQueries, ['wood creak', 'wood squeak']);
+    assert.equal(calls[0].state, calls[2].state);
+    assert.ok(calls[1].excludedPreviewUrls?.has(primary.previewUrl));
+    const scarcity = await (await post('/search', { query: 'wind', fillCandidates: true,
+      searchBatchId: batchId, searchBatchItemId: 'wind' })).json();
+    assert.equal(scarcity.items.length, 1);
+    assert.deepEqual(calls.map(call => call.query), ['wood creak', 'wood squeak', 'wood creak', 'wind', 'wind']);
+    assert.equal(reservations, 1);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].companyPoints, 1);
+    for (const alternateQuery of [undefined, 'finish chime']) {
+      const result = await (await post('/search', { query: 'completion chime', alternateQuery, fillCandidates: true })).json();
+      assert.equal(result.usedQuery, 'success chime');
+      assert.deepEqual(result.items.map((item: any) => item.title), ['success chime']);
+      assert.deepEqual(result.attemptedQueries, ['completion chime', ...(alternateQuery ? [alternateQuery] : []), 'success chime']);
+    }
+  } finally { setAiUsageRecorder(null); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
 test('search and generation require the prepared internal query rather than sending raw Chinese', () => {
   for (const kind of ['search', 'generate'] as const) {
     const request = createBatchSfxRequest(requirement, kind);
@@ -153,8 +226,16 @@ test('search tickets are owner-scoped; concurrent capture deduplicates and conve
   const app = express(); app.use(express.json());
   app.use('/batch', createSfxBatchRouter({ uploadsDir: path.join(directory, 'uploads'), jobsDir: path.join(directory, 'jobs'), ffmpeg: ffmpeg!,
     owner: req => String(req.headers['x-owner'] || 'unknown'), reserve: () => () => { released++; }, run: (_req, _res, work) => { void work(); },
-    search: (async options => { assert.equal(options.query, 'wood door'); return { items: [{ title: 'Door', author: '', source: 'test', previewUrl: 'https://example.com/audio', sourceUrl: 'https://example.com/door' }] }; }) as any,
-    fetchPreview: async () => { fetched++; return { data: audio, type: 'audio/wav' }; },
+    search: async options => {
+      assert.equal(options.query, 'wood door');
+      return { sources: [], items: ['stale', 'valid'].map(label => ({ title: `Door ${label}`, author: '', source: 'test',
+        previewUrl: `https://example.com/${label}.wav`, sourceUrl: `https://example.com/${label}` })) };
+    },
+    fetchPreview: async url => {
+      if (url.endsWith('/stale.wav')) throw Object.assign(new Error('Upstream unavailable'), { status: 403 });
+      fetched++;
+      return { data: audio, type: 'audio/wav' };
+    },
   }));
   app.use((err: any, _req: any, res: any, _next: any) => res.status(err.status || 500).json({ error: err.message }));
   const server = app.listen(0, '127.0.0.1'); await new Promise<void>(resolve => server.once('listening', resolve));
@@ -164,8 +245,15 @@ test('search tickets are owner-scoped; concurrent capture deduplicates and conve
     const invalid = await post('/search', { query: '' }); assert.equal(invalid.status, 400); assert.match((await invalid.json()).error, /自动转换/);
     const longQuery = await post('/search', { query: 'soft wooden door creak' }); assert.equal(longQuery.status, 400); assert.match((await longQuery.json()).error, /1～2/); assert.equal(released, 0);
     assert.equal((await post('/search', { query: 'wood door' }, 'unknown')).status, 401);
-    const result = await (await post('/search', { query: 'wood door' })).json(); const id = result.items[0].id;
-    assert.equal(released, 1); assert.equal((await post('/capture', { id }, 'bob')).status, 404);
+    const result = await (await post('/search', { query: 'wood door' })).json();
+    const [stale, { id }] = result.items;
+    assert.equal(released, 1);
+    const unauthorized = await post('/capture', { id }, 'bob');
+    assert.equal(unauthorized.status, 404);
+    assert.equal((await unauthorized.json()).code, 'SFX_PREVIEW_EXPIRED');
+    const unavailable = await post('/capture', { id: stale.id });
+    assert.equal(unavailable.status, 502);
+    assert.equal((await unavailable.json()).code, 'SFX_PREVIEW_UNAVAILABLE');
     const captured = await Promise.all([post('/capture', { id }), post('/capture', { id })]);
     const outputs = await Promise.all(captured.map(r => r.json())); assert.equal(outputs[0].url, outputs[1].url); assert.equal(fetched, 1);
     const wav = await fs.readFile(path.join(directory, outputs[0].url));

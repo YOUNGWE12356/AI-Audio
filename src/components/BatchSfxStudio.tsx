@@ -6,13 +6,15 @@ import BatchSfxVideo from './BatchSfxVideo';
 import BatchSfxCostHint from './BatchSfxCostHint';
 import PointCostHint from './PointCostHint';
 import { isBatchSfxDurationValid, needsBatchSearchQuery } from '../services/sfxBatchBilling';
-import { analyzeBatchRequirements, prepareSfxBatchInput, resolveBatchSearchQuery, saveBatchDownload, SFX_BATCH_ACCEPT, validateSfxBatchFile } from '../services/sfxBatchClient';
+import { analyzeBatchRequirements, prepareSfxBatchInput, resolveBatchSearchPlan, saveBatchDownload, SFX_BATCH_ACCEPT, validateSfxBatchFile } from '../services/sfxBatchClient';
 import { batchFileStem, batchQuerySource, batchRequirementsCsv, createBatchSfxRequest, SFX_BATCH_MAX_ROWS } from '../services/sfxBatch';
 import { batchId, clearBatchWorkspace, confirmedVersion, confirmedVersions, confirmBatchVersion, unconfirmBatchVersion, updateBatchVersionRange, batchAudioExports, batchExportRequirements, loadBatchProject, loadBatchVideo, saveBatchVideo, saveBatchProject, type BatchRow, type BatchVersion, type BatchVideoAsset } from '../services/sfxBatchProject';
 import { batchTimeRange, batchOccurrenceRange, updateBatchOccurrence, isBatchPoint } from '../services/batchVideoTimeline';
 import { readGeneratedSoundEffectDuration } from '../utils/soundEffectAudio';
 import type { AudioDownloadRange } from '../services/audioRangeExport';
 import { requirementsErrorText as errorText } from '../services/sfxRequirementsErrors';
+import { requestLimitMessage } from '../services/requestLimitErrors';
+import { isUnavailableBatchPreview, orderBatchPreviews } from '../services/sfxBatchPreview';
 import type { SfxBatchInputRequest } from '../utils/requirementTableTransfer';
 
 const inputClass = 'w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 focus:border-emerald-500 focus:outline-none';
@@ -25,7 +27,7 @@ async function api(path: string, body: unknown, timeout = 150_000) {
     const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal });
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
-      throw new Error(data.error || data.message || `请求失败（${response.status}）`);
+      throw Object.assign(new Error(data.error || data.message || `请求失败（${response.status}）`), { code: data.code });
     }
     // Consume the body before releasing the timeout.
     return path.includes('sound-effect') ? await readMediaBlob(response) : await response.json();
@@ -126,7 +128,7 @@ export default function BatchSfxStudio({ active = true, inputRequest = null }: {
       if (row.id !== id) return row;
       const next = typeof update === 'function' ? update(row) : { ...row, ...update };
       if (batchQuerySource(next) !== batchQuerySource(row)) {
-        return { ...next, searchQuery: '', searchQuerySource: undefined, excludedSources: [], error: undefined,
+        return { ...next, searchQuery: '', searchQuerySource: undefined, alternateSearchQuery: undefined, excludedSources: [], error: undefined,
           status: confirmedVersion(next) ? '已确认音效' : next.versions.length ? '待试听与确认' : '待制作' };
       }
       return next;
@@ -236,43 +238,65 @@ export default function BatchSfxStudio({ active = true, inputRequest = null }: {
   const capture = async (rowId: string, version: BatchVersion) => {
     if (version.blob && version.url) return;
     patchRow(rowId, { status: '正在读取试听音频…' });
-    const result = version.url && /^https:\/\//.test(version.url) ? { url: version.url } : await api('/api/ai/sfx-batch/capture', { id: version.ticketId }, 65_000);
+    const result = version.url ? { url: version.url } : await api('/api/ai/sfx-batch/capture', { id: version.ticketId }, 65_000);
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 35_000);
     let blob: Blob;
     try {
       const response = await fetch(result.url, { signal: controller.signal });
-      if (!response.ok) throw new Error('试听音频下载失败，请重新搜索。');
+      if ([403, 404, 410].includes(response.status) && version.kind === 'search') {
+        const code = version.url ? 'SFX_PREVIEW_EXPIRED' : 'SFX_PREVIEW_UNAVAILABLE';
+        throw Object.assign(new Error(requestLimitMessage(code, '')), { code });
+      }
+      if (!response.ok) throw new Error(response.status === 401 ? '登录已失效，请重新登录。' : '试听音频下载失败，请稍后重试。');
       blob = await readMediaBlob(response);
     } finally { clearTimeout(timer); }
     const url = ownUrl(blob);
     patchVersion(rowId, version.id, v => ({ ...v, blob, url }));
     patchRow(rowId, { status: '待试听与确认' });
   };
-  const makeRow = async (row: BatchRow, kind: 'search' | 'generate', searchBatchId?: string) => {
+  const makeRow = async (row: BatchRow, kind: 'search' | 'generate', searchBatchId: string | undefined, pickedSources: Map<string, number>) => {
     if (kind === 'generate' && !isBatchSfxDurationValid(row.duration)) throw new Error('时长应为0.5～30秒。');
     if (needsBatchSearchQuery(row)) patchRow(row.id, { status: '正在自动转换关键词…', error: undefined });
-    const searchQuery = await resolveBatchSearchQuery(row);
-    patchRow(row.id, { searchQuery, searchQuerySource: batchQuerySource(row) });
+    const { searchQuery, alternateQuery } = await resolveBatchSearchPlan(row, kind === 'search');
+    patchRow(row.id, { searchQuery, searchQuerySource: batchQuerySource(row),
+      ...(kind === 'search' ? { alternateSearchQuery: alternateQuery } : {}) });
     const request = createBatchSfxRequest({ ...row, searchQuery }, kind, row.excludedSources, searchBatchId, row.id);
     patchRow(row.id, { status: kind === 'search' ? '正在搜索…' : '正在生成音效…', error: undefined });
     if (kind === 'search') {
-      const result = await api(request.endpoint, request.body, 65_000);
+      const result = await api(request.endpoint, { ...request.body, fillCandidates: true, alternateQuery }, 65_000);
       if (!result.items?.length) throw new Error(result.message || '没有找到新的相关素材，请修改搜索词后重试。');
       const versions: BatchVersion[] = result.items.map((item: any) => ({ id: batchId(), title: item.title, source: item.source, sourceUrl: item.sourceUrl, ticketId: item.id, kind: 'search' }));
       patchRow(row.id, current => ({ ...current, versions: [...current.versions, ...versions], activeVersionId: versions[0].id,
         excludedSources: [...new Set([...current.excludedSources, ...versions.map(v => v.sourceUrl!).filter(Boolean)])] }));
-      await capture(row.id, versions[0]);
+      let expired = 0;
+      for (const version of orderBatchPreviews(versions, pickedSources)) {
+        if (stopRef.current) return false;
+        try {
+          await capture(row.id, version);
+          patchRow(row.id, { activeVersionId: version.id });
+          const source = version.source || '';
+          pickedSources.set(source, (pickedSources.get(source) || 0) + 1);
+          return true;
+        } catch (error) {
+          if (!isUnavailableBatchPreview(error)) throw error;
+          if ((error as { code?: string }).code === 'SFX_PREVIEW_EXPIRED') expired++;
+        }
+      }
+      throw new Error(expired === versions.length ? requestLimitMessage('SFX_PREVIEW_EXPIRED', '')
+        : '本条候选的公开试听均无法读取，请重新搜索这条需求。');
     } else {
       const blob = await api(request.endpoint, request.body) as Blob;
       const duration = await readGeneratedSoundEffectDuration(blob);
       const version: BatchVersion = { id: batchId(), title: `生成版本 ${row.versions.filter(v => v.kind === 'generate').length + 1}`, kind, blob, url: ownUrl(blob), duration };
       patchRow(row.id, current => ({ ...current, versions: [...current.versions, version], activeVersionId: version.id, status: '待试听与确认' }));
+      return true;
     }
   };
   const run = async (kind: 'search' | 'generate', ids: string[]) => {
     if (busyRef.current || !ids.length) return;
     busyRef.current = true; stopRef.current = false; setBusy(true); setQueueing(true); setError('');
     let completed = 0, failed = 0;
+    const pickedSources = new Map<string, number>();
     try {
       const searchBatchId = kind === 'search'
         ? (await api('/api/ai/sfx-batch/search-batches', { itemIds: ids })).batchId as string
@@ -281,7 +305,10 @@ export default function BatchSfxStudio({ active = true, inputRequest = null }: {
         if (stopRef.current) break;
         const row = rowsRef.current.find(r => r.id === id); if (!row) continue;
         setActiveRowId(id); setActiveOccurrenceIndex(0); setMessage(`${kind === 'search' ? '搜索' : '生成'} ${completed + failed + 1}/${ids.length}：${row.name}`);
-        try { await makeRow(row, kind, searchBatchId); completed++; }
+        try {
+          if (await makeRow(row, kind, searchBatchId, pickedSources)) completed++;
+          else { patchRow(id, { status: '待试听与确认' }); break; }
+        }
         catch (e) { failed++; patchRow(id, { status: '制作失败，可重试', error: errorText(e) }); }
         finally { window.dispatchEvent(new Event('ai-audio:usage-updated')); }
       }
@@ -292,10 +319,13 @@ export default function BatchSfxStudio({ active = true, inputRequest = null }: {
   const selectVersion = async (rowId: string, version: BatchVersion) => {
     if (busyRef.current) return;
     setActiveAudioId(null); patchRow(rowId, { activeVersionId: version.id, error: undefined });
-    if (version.url) return;
+    if (version.url && (version.blob || version.kind === 'generate')) return;
     busyRef.current = true; setBusy(true); setMessage(`正在读取候选：${version.title}`);
     try { await capture(rowId, version); setMessage('候选音频已就绪，请试听并点击“确认音效”完成选用。'); }
-    catch (e) { patchRow(rowId, { status: '试听读取失败', error: errorText(e) }); setMessage(''); }
+    catch (e) {
+      if (version.url && isUnavailableBatchPreview(e)) patchVersion(rowId, version.id, v => ({ ...v, url: undefined }));
+      patchRow(rowId, { status: '试听读取失败', error: errorText(e) }); setMessage('');
+    }
     finally { busyRef.current = false; setBusy(false); }
   };
   const onRange = (rowId: string, versionId: string, range: AudioDownloadRange | null) => {

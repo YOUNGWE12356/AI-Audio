@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createOnlineSfxRelevanceMatcher } from './onlineSfxRelevance';
+import { createOnlineSfxRelevanceMatcher, onlineSfxAlternateObjectQuery } from './onlineSfxRelevance';
 
 test('water rejects the reported click and other unrelated effects despite broad site categories', () => {
   const score = createOnlineSfxRelevanceMatcher('water');
@@ -51,4 +51,17 @@ test('generated compounds match separated catalog words without losing the sound
   assert.equal(score('Dress Shoes Dropping On Floor'), 0);
   assert.equal(score('Birds near dress shoes and footsteps'), 0);
   assert.ok(createOnlineSfxRelevanceMatcher('wooddoor creak')('Wood door creaking') > 0);
+});
+
+test('bookshelf searches recognize equivalent shelf and bookcase titles without broadening to other objects', () => {
+  const score = createOnlineSfxRelevanceMatcher('Bookshelf');
+  assert.ok(score('Wooden bookcase creaking') > 0);
+  assert.ok(score('Book-shelves shifting') > 0);
+  assert.ok(score('Book shelf rattle') > 0);
+  assert.ok(score('Bookshelf shifting') > score('Bookcase shifting'));
+  assert.equal(score('Wooden chair creaking'), 0);
+  assert.equal(score('Paper turning near the bookcase'), 0);
+  assert.ok(createOnlineSfxRelevanceMatcher('bookcase')('Bookshelves shifting') > 0);
+  assert.equal(onlineSfxAlternateObjectQuery('Book Shelf'), 'bookcase');
+  assert.equal(onlineSfxAlternateObjectQuery('Bookshelf creak'), undefined);
 });

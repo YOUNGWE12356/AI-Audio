@@ -7,11 +7,14 @@ import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { generateAiContent, SchemaType as T } from './aiGateway';
-import { boundedFetch, searchOnlineSfxSources, recordOnlineSfxBatchUsage } from './onlineSfxServer';
+import { createOnlineSfxSearchState, downloadOnlineSfxPreview, onlineSfxGroupTargets, searchOnlineSfxSources, recordOnlineSfxBatchUsage } from './onlineSfxServer';
+import { onlineSfxGroupIndex, type OnlineSfxCandidate } from './onlineSfxTypes';
+import { onlineSfxAlternateObjectQuery } from './onlineSfxRelevance';
+import { requestLimitMessage } from './requestLimitErrors';
 import { createSearchBillingBatches } from './searchBillingBatches';
 import { createSfxRequirementsJobs } from './sfxRequirementsJobs';
 import { existingBatchSearchQuery, normalizeBatchRequirements, validateBatchSearchQuery, SFX_BATCH_MAX_ROWS } from './sfxBatch';
-import { normalizeBatchSearchQueryInput, prepareBatchSearchQuery } from './sfxBatchSearchQuery';
+import { normalizeBatchSearchQueryInput, prepareBatchSearchPlan } from './sfxBatchSearchQuery';
 import { directSfxSearchQuery, isSfxDuration, prepareMcpSfxIntent, prepareStudioSfxIntent } from './mcpSfxIntent';
 import { normalizeMusicVisualInput } from './musicVisualPrompt';
 import { batchVideoSegments, batchVideoOverview, mergeBatchVideoRequirements, SFX_BATCH_VIDEO_MAX_FRAMES, SFX_BATCH_VIDEO_CONCURRENCY, SFX_BATCH_VIDEO_JOB_TIMEOUT_MS } from './sfxBatchVideoAnalysis';
@@ -22,6 +25,41 @@ import { analyzeBatchTable, type BatchSourceRow, type BatchTableContext } from '
 import { batchSoundReusePrompt, consolidateBatchVideoSounds } from './sfxBatchSoundReuse';
 const runFile = promisify(execFile);
 const fail = (message: string, status = 400) => Object.assign(new Error(message), { status });
+const BATCH_SEARCH_CANDIDATES = 4;
+const equivalentSearchWords = new Map([
+  ['whoosh', 'swoosh'], ['swoosh', 'whoosh'], ['woosh', 'whoosh'], ['swish', 'whoosh'],
+  ['footsteps', 'footfalls'], ['footfalls', 'footsteps'], ['creak', 'creaking'], ['crackle', 'crackling'],
+  ['bookshelf', 'bookcase'], ['bookcase', 'bookshelf'],
+]);
+const equivalentSearchPhrases = new Map([
+  ['completion chime', 'success chime'], ['complete chime', 'success chime'],
+  ['success chime', 'completion chime'],
+]);
+
+function batchAlternateQuery(query: string) {
+  const normalized = query.toLowerCase();
+  return equivalentSearchPhrases.get(normalized) || onlineSfxAlternateObjectQuery(normalized)
+    || normalized.replace(/[a-z]+/g, word => equivalentSearchWords.get(word) || word);
+}
+
+function appendBatchCandidates(items: OnlineSfxCandidate[], additional: OnlineSfxCandidate[], excluded: Set<string>) {
+  const seenSources = new Set([...excluded, ...items.map(item => item.sourceUrl)]);
+  const seenAudio = new Set(items.map(item => item.previewUrl));
+  const remaining = [...additional];
+  const missing = onlineSfxGroupTargets(BATCH_SEARCH_CANDIDATES);
+  for (const item of items) missing[onlineSfxGroupIndex(item.source)]--;
+  while (remaining.length && items.length < BATCH_SEARCH_CANDIDATES) {
+    const preferred = remaining.findIndex(item => missing[onlineSfxGroupIndex(item.source)] > 0);
+    const [item] = remaining.splice(Math.max(preferred, 0), 1);
+    if (seenSources.has(item.sourceUrl) || seenAudio.has(item.previewUrl)) continue;
+    items.push(item);
+    seenSources.add(item.sourceUrl);
+    seenAudio.add(item.previewUrl);
+    missing[onlineSfxGroupIndex(item.source)]--;
+  }
+}
+const previewFailure = (code: 'SFX_PREVIEW_EXPIRED' | 'SFX_PREVIEW_UNAVAILABLE', status: number) =>
+  Object.assign(fail(requestLimitMessage(code, ''), status), { code });
 
 export function normalizeSfxBatchInput(body: any) {
   const text = typeof body?.text === 'string' ? body.text.trim() : '';
@@ -182,7 +220,7 @@ export function createSfxBatchRouter(options: {
   reserve: (req: express.Request, res: express.Response, points: number) => (() => void) | null;
   run: (req: express.Request, res: express.Response, work: () => Promise<void>) => void;
   search?: typeof searchOnlineSfxSources;
-  fetchPreview?: typeof boundedFetch;
+  fetchPreview?: typeof downloadOnlineSfxPreview;
   generateQuery?: typeof generateAiContent;
 }) {
   const router = express.Router();
@@ -238,7 +276,7 @@ export function createSfxBatchRouter(options: {
         } else if (input && usesIntent) {
           result = await prepareMcpSfxIntent({ ...input, intentMode, exactSearchQuery, duration }, controller.signal, options.generateQuery);
         } else {
-          result = { searchQuery: await prepareBatchSearchQuery(input!, controller.signal, options.generateQuery) };
+          result = await prepareBatchSearchPlan(input!, controller.signal, options.generateQuery, { includeAlternate: req.body?.includeAlternate === true });
         }
         if (!controller.signal.aborted) res.json(result);
       } catch (error) { if (!controller.signal.aborted) next(error); }
@@ -279,13 +317,55 @@ export function createSfxBatchRouter(options: {
       const excluded = new Set<string>(Array.isArray(req.body?.excludeSourceUrls)
         ? req.body.excludeSourceUrls.filter((value: unknown) => typeof value === 'string').slice(0, 500) : []);
       const search = options.search || searchOnlineSfxSources;
+      const fillCandidates = req.body?.fillCandidates === true && !res.locals.machineIdentity;
+      const state = fillCandidates ? createOnlineSfxSearchState() : undefined;
       let usedQuery = query;
-      let result = await search({ query, excluded, limit: 4, cooldowns });
-      // Both terms share one admission, one batch item and one billing decision.
-      if (!res.destroyed && !result.items.length && alternateQuery && alternateQuery.toLowerCase() !== query.toLowerCase()
+      let result = await search({ query, excluded, limit: BATCH_SEARCH_CANDIDATES, cooldowns, state });
+      const attemptedQueries = [query];
+      if (fillCandidates) {
+        const assets: OnlineSfxCandidate[] = [];
+        appendBatchCandidates(assets, result.items, excluded);
+        const sourceStatus = new Map(result.sources?.map(source => [source.source, source]));
+        const findMore = async (term: string, nextState?: typeof state) => {
+          if (res.destroyed || assets.length >= BATCH_SEARCH_CANDIDATES) return;
+          if (!attemptedQueries.includes(term)) attemptedQueries.push(term);
+          const more = await search({ query: term, state: nextState, cooldowns, limit: BATCH_SEARCH_CANDIDATES,
+            excluded: new Set([...excluded, ...assets.map(asset => asset.sourceUrl)]),
+            excludedPreviewUrls: new Set(assets.map(asset => asset.previewUrl)),
+          }).catch(error => { if (!assets.length) throw error; return undefined; });
+          if (!more) return;
+          if (!assets.length && more.items.length) usedQuery = term;
+          appendBatchCandidates(assets, more.items, excluded);
+          for (const source of more.sources || []) {
+            const previous = sourceStatus.get(source.source);
+            if (!previous || previous.unavailable) sourceStatus.set(source.source, source);
+          }
+        };
+        const equivalent = batchAlternateQuery(query);
+        const backup = alternateQuery && alternateQuery.toLowerCase() !== query.toLowerCase() ? alternateQuery : equivalent;
+        const sourcesUnavailable = result.sources?.length && result.sources.every(source => source.unavailable);
+        if (!sourcesUnavailable) {
+          if (backup.toLowerCase() !== query.toLowerCase()) await findMore(backup);
+          if (!assets.length && equivalent.toLowerCase() !== query.toLowerCase()
+            && equivalent.toLowerCase() !== backup.toLowerCase()) {
+            await findMore(equivalent);
+          } else {
+            await findMore(query, state);
+          }
+        }
+        result = { items: assets, sources: [...sourceStatus.values()].map(source => ({ ...source,
+          count: assets.filter(asset => source.source === '全网搜索' ? asset.source.startsWith('全网 · ') : asset.source === source.source).length,
+        })) };
+      // Non-web callers use the alternate only when the primary has no candidates.
+      } else if (!res.destroyed && !result.items.length && alternateQuery && alternateQuery.toLowerCase() !== query.toLowerCase()
         && !(result.sources?.length && result.sources.every(source => source.unavailable))) {
         usedQuery = alternateQuery;
-        result = await search({ query: usedQuery, excluded, limit: 4, cooldowns });
+        attemptedQueries.push(usedQuery);
+        result = await search({ query: usedQuery, excluded, limit: BATCH_SEARCH_CANDIDATES, cooldowns });
+      }
+      if (!result.items.length && result.sources?.length && result.sources.every(source => source.unavailable)) {
+        const code = 'SFX_SOURCES_UNAVAILABLE';
+        throw Object.assign(fail(requestLimitMessage(code, ''), 502), { code });
       }
       const items = result.items.map(candidate => {
         const id = randomUUID();
@@ -293,7 +373,7 @@ export function createSfxBatchRouter(options: {
         return { id, title: candidate.title, source: candidate.source, sourceUrl: candidate.sourceUrl };
       });
       if (items.length && batch.markSuccessful()) recordOnlineSfxBatchUsage();
-      res.json({ items, sources: result.sources, ...(alternateQuery ? { usedQuery, attemptedQueries: usedQuery === query ? [query] : [query, usedQuery] } : {}),
+      res.json({ items, sources: result.sources, ...(alternateQuery || fillCandidates ? { usedQuery, attemptedQueries } : {}),
         message: items.length ? '' : '未找到匹配音效，可修改搜索词再搜或使用 AI 生成。' });
     } catch (error) { next(error); }
     finally { if (locked) searches.delete(owner); release?.(); }
@@ -301,7 +381,9 @@ export function createSfxBatchRouter(options: {
   router.post('/capture', async (req, res, next) => {
     try {
       const ticket = tickets.get(String(req.body?.id || ''));
-      if (!ticket || ticket.owner !== options.owner(req, res) || Date.now() - ticket.at > 30 * 60_000) throw fail('候选结果已过期，请重新搜索。', 404);
+      if (!ticket || ticket.owner !== options.owner(req, res) || Date.now() - ticket.at > 30 * 60_000) {
+        throw previewFailure('SFX_PREVIEW_EXPIRED', 404);
+      }
       if (ticket.result) { res.json(ticket.result); return; }
       if (ticket.pending) { res.json(await ticket.pending); return; }
       if (captures >= 4) throw Object.assign(fail('试听转换繁忙，请稍后重试。', 429), { code: 'SFX_CAPTURE_BUSY', retryAfterMs: 1000 });
@@ -309,13 +391,16 @@ export function createSfxBatchRouter(options: {
       ticket.pending = (async () => {
         let temp: string | undefined;
         try {
-          const { data, type } = await (options.fetchPreview || boundedFetch)(ticket.previewUrl, 20 * 1024 * 1024, AbortSignal.timeout(25_000));
-          if (/text\/|application\/(?:json|xml)/i.test(type) || data.length < 32) throw fail('来源未返回有效试听音频。', 502);
+          const { data, type } = await (options.fetchPreview || downloadOnlineSfxPreview)(ticket.previewUrl, 20 * 1024 * 1024, AbortSignal.timeout(25_000))
+            .catch(() => { throw previewFailure('SFX_PREVIEW_UNAVAILABLE', 502); });
+          if (/text\/|application\/(?:json|xml)/i.test(type) || data.length < 32) throw previewFailure('SFX_PREVIEW_UNAVAILABLE', 502);
           temp = await fs.mkdtemp(path.join(os.tmpdir(), 'batch-sfx-'));
           const input = path.join(temp, 'preview.mp3'), output = path.join(temp, 'preview.wav');
           await fs.writeFile(input, data);
-          await runFile(options.ffmpeg, ['-nostdin', '-hide_banner', '-loglevel', 'error', '-i', input, '-vn', '-t', '60',
-            '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', '-y', output], { windowsHide: true, timeout: 30_000, maxBuffer: 1024 * 1024 });
+          await runFile(options.ffmpeg, ['-nostdin', '-hide_banner', '-loglevel', 'error', '-protocol_whitelist', 'file,pipe',
+            '-format_whitelist', 'mp3,wav,ogg,mov,flac,aac', '-i', input, '-vn', '-t', '60',
+            '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', '-y', output], { windowsHide: true, timeout: 30_000, maxBuffer: 1024 * 1024 })
+            .catch(error => { if (typeof error.code !== 'number') throw error; throw previewFailure('SFX_PREVIEW_UNAVAILABLE', 502); });
           const filename = `batch_sfx_${randomUUID()}.wav`;
           await fs.mkdir(uploadDirectory(options.uploadsDir), { recursive: true });
           await fs.copyFile(output, path.join(uploadDirectory(options.uploadsDir), filename));

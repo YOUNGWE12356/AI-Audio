@@ -13,6 +13,7 @@ export type BatchRow = SfxBatchRequirement & {
   videoId?: string; placedVersionId?: string;
   rangeReviewParentId?: string; rangeReviewFingerprint?: string;
   searchQuerySource?: string;
+  alternateSearchQuery?: string;
 };
 export type BatchVideoAsset = { id: string; file: File };
 export const batchId = () => globalThis.crypto?.randomUUID?.() || `batch-${Date.now()}-${Math.random().toString(36).slice(2)}`;

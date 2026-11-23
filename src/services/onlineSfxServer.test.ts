@@ -4,10 +4,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import test from 'node:test';
+import express from 'express';
 import ffmpeg from 'ffmpeg-static';
 import {
   allowedPreviewUrl,
   boundedFetch,
+  createOnlineSfxRouter,
   createOnlineSfxSearchState,
   findAndCaptureTimelineOnlineSfx,
   parseEnvatoSearch,
@@ -146,6 +148,26 @@ test('a full web failure has a cooldown and healthy catalogs fill all places', a
   const second = await searchOnlineSfxSources({ query: 'whoosh', fetcher, state, cooldowns, webSearch });
   assert.equal(second.items.length, 100);
   assert.equal(webCalls, 1);
+});
+
+test('one failed supplemental web page does not put a responsive source in cooldown', async () => {
+  const cooldowns = new Map<string, number>();
+  const queries: string[] = [];
+  const fetcher: typeof fetch = async () => new Response('blocked', { status: 403 });
+  const webSearch: NonNullable<Parameters<typeof searchSources>[0]['webSearch']> = async ({ query, page }) => {
+    queries.push(`${query}:${page}`);
+    if (page > 1) throw new DOMException('Supplement timed out', 'TimeoutError');
+    return [{ title: query, source: '全网 · sounds.example.com', author: '',
+      sourceUrl: `https://sounds.example.com/${query}`, previewUrl: `https://sounds.example.com/${query}.mp3` }];
+  };
+  const search = (query: string) => searchOnlineSfxSources({ query, limit: 4, fetcher, cooldowns, webSearch });
+  const first = await search('whoosh');
+  assert.equal(first.items.length, 1);
+  assert.equal(first.sources.find(source => source.source === '全网搜索')?.unavailable, false);
+  assert.equal(cooldowns.has('web'), false);
+  const second = await search('wind');
+  assert.equal(second.items[0]?.title, 'wind');
+  assert.deepEqual(queries, ['whoosh:1', 'whoosh:2', 'wind:1', 'wind:2']);
 });
 
 test('parallel search tolerates a failed primary, fills from backups and skips it during cooldown', async () => {
@@ -456,6 +478,54 @@ test('a successful search batch records one network point with a request billing
     billingQuantity: 1,
     billingUnit: 'request',
   }]);
+});
+
+test('web searches try the object synonym in the same batch only after an empty original search', async t => {
+  const now = Date.now();
+  let elapsed = 0;
+  t.mock.method(Date, 'now', () => now + elapsed);
+  const events: AiUsageEvent[] = [];
+  const attempts: Array<{ query: string; state?: ReturnType<typeof createOnlineSfxSearchState> }> = [];
+  const reservations: number[] = [];
+  setAiUsageRecorder(event => events.push(event));
+  t.after(() => setAiUsageRecorder(null));
+  const app = express();
+  app.use(express.json());
+  app.use(createOnlineSfxRouter({
+    uploadsDir: () => os.tmpdir(), ffmpeg: '', owner: req => String(req.headers['x-owner']),
+    reserve: (_req, _res, points) => { reservations.push(points); return () => {}; },
+    search: async ({ query, state }) => {
+      attempts.push({ query, state });
+      return {
+        items: /^(?:bookcase|water)$/.test(query) ? sampleCandidates('Envato Elements', 1) : [],
+        sources: [{ source: 'Envato Elements', count: 0, unavailable: query === 'BOOKSHELF' }],
+      };
+    },
+  }));
+  const server = app.listen(0, '127.0.0.1');
+  t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+  await new Promise<void>(resolve => server.once('listening', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  const post = (query: string, page: number, owner = 'one') => fetch(`http://127.0.0.1:${address.port}/search`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-owner': owner }, body: JSON.stringify({ query, page }),
+  });
+
+  const first = await post('Bookshelf', 1);
+  assert.equal(first.status, 200);
+  assert.equal((await first.json()).items.length, 1);
+  assert.deepEqual(attempts.map(attempt => attempt.query), ['Bookshelf', 'bookcase']);
+  assert.notEqual(attempts[0].state, attempts[1].state);
+  assert.deepEqual(reservations, [1]);
+  assert.deepEqual(events.map(event => event.companyPoints), [1]);
+
+  elapsed = 6000;
+  assert.equal((await post('Bookshelf', 2)).status, 200);
+  assert.equal(attempts[2].query, 'bookcase');
+  assert.equal(attempts[2].state, attempts[1].state);
+  assert.equal((await post('water', 1, 'two')).status, 200);
+  assert.equal((await post('BOOKSHELF', 1, 'three')).status, 502);
+  assert.deepEqual(attempts.map(attempt => attempt.query), ['Bookshelf', 'bookcase', 'bookcase', 'water', 'BOOKSHELF']);
 });
 
 test('a timeline web match records one network point without ElevenLabs usage', () => {

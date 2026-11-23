@@ -8,7 +8,7 @@ export const exactStudioSearchQuery = (value: string) => {
 
 export const needsStudioGenerationIntent = (value: string) => value.trim().length > 160;
 
-export type StudioSearchPlan = { searchQuery?: string; alternateQuery?: string; clarification?: string };
+export type StudioSearchPlan = { searchQuery: string; alternateQuery?: string };
 
 export async function requestStudioSfxIntent(
   studioDescription: string, intentMode: 'search' | 'generate', options: { duration?: number; signal?: AbortSignal } = {},
@@ -28,10 +28,9 @@ export async function resolveStudioSearchQuery(value: string, signal: AbortSigna
   const direct = exactStudioSearchQuery(value);
   if (direct) return { searchQuery: direct };
   const result = await requestStudioSfxIntent(value, 'search', { signal });
-  if (result.clarification) return { clarification: result.clarification };
-  const searchQuery = exactStudioSearchQuery(result.searchQuery || '');
-  if (!searchQuery) throw new Error('未能提炼到可用的英文检索词，请补充主要声源或动作。');
   const alternateQuery = exactStudioSearchQuery(result.alternateQuery || '') || undefined;
+  const searchQuery = exactStudioSearchQuery(result.searchQuery || '') || alternateQuery;
+  if (!searchQuery) throw new Error('未能提炼到可用的英文检索词，请补充主要声源或动作。');
   return { searchQuery, alternateQuery: alternateQuery?.toLowerCase() !== searchQuery.toLowerCase() ? alternateQuery : undefined };
 }
 

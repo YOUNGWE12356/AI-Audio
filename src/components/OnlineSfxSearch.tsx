@@ -81,12 +81,11 @@ export default function OnlineSfxSearch() {
       if (!prepared) {
         prepared = await resolveStudioSearchQuery(trimmedQuery, current.signal);
         current.signal.throwIfAborted();
-        if (prepared.clarification) { setMessage(prepared.clarification); return; }
         preparedSearches.current.set(queryKey, prepared);
       }
       current.signal.throwIfAborted();
       const continued = searchHistory.current.key === queryKey;
-      const english = continued ? searchHistory.current.usedQuery : prepared.searchQuery!;
+      const english = continued ? searchHistory.current.usedQuery : prepared.searchQuery;
       setSearchQuery(english); setMessage('正在搜索音效…');
       const page = continued ? searchHistory.current.nextPage : 1;
       const batch = continued ? searchHistory.current.nextBatch : 1;

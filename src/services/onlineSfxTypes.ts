@@ -8,6 +8,14 @@ export const ONLINE_SFX_SOURCES = [
 ] as const;
 
 export const ONLINE_SFX_MAX_RESULTS = 100;
+export const ONLINE_SFX_GROUP_WEIGHTS = [0.3, 0.3, 0.4] as const;
+
+export function onlineSfxGroupIndex(source?: string) {
+  if (source === ONLINE_SFX_SOURCES[0].name) return 0;
+  if (ONLINE_SFX_SOURCES.slice(1, 4).some(catalog => catalog.name === source)) return 1;
+  return 2;
+}
+
 export const ONLINE_SFX_BATCH_COMPANY_POINTS = 1;
 export const ONLINE_SFX_PRICING_VERSION = 'company-v2-online-sfx-batch';
 
