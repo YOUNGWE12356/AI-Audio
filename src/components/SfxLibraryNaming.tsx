@@ -44,6 +44,7 @@ function useNaming({ sources, onApply, onBusyChange, disabled = false }: Omit<Pr
   const currentSuggestions = candidates.filter(source => suggestions[source.id]?.originalFileName === source.fileName);
   const suggestedIds = new Set(currentSuggestions.map(source => source.id));
   const pending = candidates.filter(source => !suggestedIds.has(source.id));
+  const hasPendingErrors = pending.some(source => Boolean(errors[source.id]));
   const changes = currentSuggestions.map(source => suggestions[source.id]);
   const locked = disabled || busy || applying;
 
@@ -55,6 +56,8 @@ function useNaming({ sources, onApply, onBusyChange, disabled = false }: Omit<Pr
     setError('');
     setNotice('');
     setProgress({ done: 0, total: pending.length });
+    let succeeded = 0;
+    let processed = 0;
     try {
       for (let start = 0; start < pending.length; start += 20) {
         if (stop.current || !active.current) break;
@@ -66,6 +69,7 @@ function useNaming({ sources, onApply, onBusyChange, disabled = false }: Omit<Pr
           })));
           if (!active.current) return;
           const byId = new Map(result.map(item => [item.id, item]));
+          succeeded += batch.filter(source => byId.get(source.id)?.fileName).length;
           setSuggestions(current => {
             const next = { ...current };
             batch.forEach(source => {
@@ -81,7 +85,7 @@ function useNaming({ sources, onApply, onBusyChange, disabled = false }: Omit<Pr
             const next = { ...current };
             batch.forEach(source => {
               if (byId.get(source.id)?.fileName) delete next[source.id];
-              else next[source.id] = '未返回命名建议，可重试。';
+              else next[source.id] = '未返回合规建议，已保留原名。';
             });
             return next;
           });
@@ -90,7 +94,13 @@ function useNaming({ sources, onApply, onBusyChange, disabled = false }: Omit<Pr
           const message = cause instanceof Error ? cause.message : '命名失败，请重试。';
           setErrors(current => ({ ...current, ...Object.fromEntries(batch.map(source => [source.id, message])) }));
         }
-        if (active.current) setProgress({ done: Math.min(start + batch.length, pending.length), total: pending.length });
+        processed += batch.length;
+        setProgress({ done: processed, total: pending.length });
+      }
+      if (active.current) {
+        const remaining = pending.length - succeeded;
+        const applyHint = changes.length + succeeded > 0 ? '可先确认已有建议。' : '';
+        setNotice(`本次生成 ${succeeded} 项建议。${applyHint}${remaining ? `还有 ${remaining} 项待处理，保留原名。` : ''}`);
       }
     } finally {
       running.current = false;
@@ -107,7 +117,7 @@ function useNaming({ sources, onApply, onBusyChange, disabled = false }: Omit<Pr
       if (active.current) {
         setSuggestions({});
         setErrors({});
-        setNotice(`已应用 ${changes.length} 项命名，未勾选文件保持原名。`);
+        setNotice(`已应用 ${changes.length} 项命名。`);
       }
     } catch (cause) {
       if (active.current) setError(cause instanceof Error ? cause.message : '应用失败，请重试。');
@@ -119,7 +129,7 @@ function useNaming({ sources, onApply, onBusyChange, disabled = false }: Omit<Pr
   return {
     mode, setMode, sources, sourceById, selected, excluded, setExcluded, suggestions, setSuggestions,
     errors, error, setError, notice, setNotice, busy, applying, progress, candidates,
-    pending, changes, locked, generate, apply, stop,
+    pending, hasPendingErrors, changes, locked, generate, apply, stop,
     discard: () => { setSuggestions({}); setErrors({}); setError(''); setNotice('已放弃建议，文件名未修改。'); },
   };
 }
@@ -157,7 +167,7 @@ export function SfxLibraryNamingControls() {
         <button type="button" onClick={() => void naming.generate()} disabled={naming.locked || !naming.pending.length}
           className="ml-auto flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400">
           {naming.busy ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-          {naming.busy ? `正在生成 ${naming.progress.done}/${naming.progress.total}` : Object.keys(naming.errors).length ? '重试未完成项' : '生成命名建议'}
+          {naming.busy ? `正在生成 · 已处理 ${naming.progress.done}/${naming.progress.total}` : naming.hasPendingErrors ? '重试未完成项' : '生成命名建议'}
         </button>
         {naming.busy && <button type="button" onClick={() => { naming.stop.current = true; naming.setNotice('当前批次完成后停止。'); }}
           className="text-xs font-bold text-slate-600">停止后续批次</button>}

@@ -4813,11 +4813,20 @@ async function startServer() {
 
   app.post('/api/ai/optimize-metadata', asyncRoute(async (req, res) => {
     const items = req.body?.items;
-    if (!Array.isArray(items)) {
-      return res.status(400).json({ error: 'items must be an array' });
+    if (!Array.isArray(items)
+      || items.some(item => typeof item?.id !== 'string' || !item.id
+        || typeof item.originalName !== 'string' || !item.originalName.trim())
+      || new Set(items.map(item => item.id)).size !== items.length) {
+      return res.status(400).json({ code: 'SFX_NAMING_INVALID_INPUT' });
     }
-    const optimizedItems = await optimizeImportMetadata(items);
-    return res.json({ items: optimizedItems });
+    try {
+      return res.json({ items: await optimizeImportMetadata(items) });
+    } catch (error) {
+      const failure = error as { status?: number; code?: string };
+      if (!failure?.status || !failure.code?.startsWith('SFX_NAMING_')) throw error;
+      logSafeError('sfx-library.naming-failed', error);
+      return res.status(failure.status).json({ code: failure.code });
+    }
   }));
 
   app.post('/api/ai/translate', asyncRoute(async (req, res) => {

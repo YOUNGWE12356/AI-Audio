@@ -1,5 +1,11 @@
 /** Safe, public request errors. Unknown 429s must not trigger paid fallback. */
 export const REQUEST_LIMIT_MESSAGES: Record<string, string> = {
+  SFX_NAMING_INVALID_INPUT: '命名文件列表无效，请重新选择文件。',
+  SFX_NAMING_INVALID_RESULT: 'AI 未返回合规的命名建议。原名已保留，可补充文件名描述后重试。',
+  SFX_NAMING_TIMEOUT: 'AI 命名等待超时。原名已保留，可重试未完成项。',
+  SFX_NAMING_BUSY: 'AI 命名服务繁忙，请稍后重试。',
+  SFX_NAMING_UNAVAILABLE: 'AI 命名服务暂不可用，请联系管理员检查 AI 网关。',
+  SFX_NAMING_UPSTREAM: 'AI 命名服务未能返回结果。可重试，或保留原名入库。',
   COMPANY_POINTS_EXCEEDED: '个人积分不足，请联系管理员追加额度。',
   API_RATE_LIMIT: '平台请求过于频繁，请稍后重试。',
   REQUEST_CONCURRENCY_LIMIT: '平台处理任务较多，请等待当前任务完成。',

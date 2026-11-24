@@ -1745,9 +1745,12 @@ export interface OptimizedImportItem {
   tags: string[];
 }
 
+const namingUnavailable = (status: number, code: string) => Object.assign(new Error('AI 命名整理未完成。'), { status, code });
+
 export async function optimizeImportMetadata(
   items: Array<{ id: string; originalName: string; path: string; size: string; type: string }>
 ): Promise<OptimizedImportItem[]> {
+  if (!items.length) return [];
   if (isBrowser) {
     const result = await postJson<{ items: OptimizedImportItem[] }>('/api/ai/optimize-metadata', { items });
     return result.items;
@@ -1773,19 +1776,18 @@ export async function optimizeImportMetadata(
               type: Type.ARRAY,
               items: { type: Type.STRING }
             }
-          }
+          },
+          additionalProperties: false,
         }
       }
-    }
+    },
+    additionalProperties: false,
   };
 
   const prompt = `
     你是一个顶级的音频资源管理专家和AI声音设计师。
     现在用户上传了一批音效文件（可能来自某个文件夹，包含相对路径）。
     根据原始中文/英文文件名及相对路径的语义，进行音效 UCS ${UCS_CATALOG_VERSION} 命名、分类、二级子分类、中文显示名称及标签生成。你没有听到音频，不能声称根据听感分析；名称不足以判断时不要猜测声音内容。
-
-    输入的文件列表信息如下：
-    ${JSON.stringify(items, null, 2)}
 
     处理规范：
     1. **主分类 (category)**：必须只能是以下七个大类之一：
@@ -1820,39 +1822,55 @@ export async function optimizeImportMetadata(
     请将列表中的每一项进行智能转换，并且必须保留和返回对应的 \`id\`（以便客户端能够精确匹配回对应的文件）。
   `;
 
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const response = await generateAiContent({
-      contents: [{ parts: [{ text: prompt + (attempt ? '\n上次命名未通过校验。重新生成完整列表，严格使用真实 UCS CatID 并保持各自原扩展名。' : '') }] }],
-      config: { responseMimeType: "application/json", responseSchema: schema }
-    });
-    if (!response.text) throw new Error("AI 批量优化未能生成有效的内容，请重试");
-    let parsed: { items?: OptimizedImportItem[] };
+  const validCategories = new Set(['角色与拟音', '武器与战斗', '魔法与奇幻', '怪兽与生物', '环境与声景', '系统与界面', '全部音乐']);
+  const accepted = new Map<string, OptimizedImportItem>();
+  let pending = items;
+  for (let attempt = 0; attempt < 2 && pending.length > 0; attempt++) {
+    let returned: OptimizedImportItem[];
     try {
-      parsed = JSON.parse(response.text);
-    } catch {
-      throw new Error("AI 批量优化返回的数据格式有误，请重试");
-    }
-    const returned = Array.isArray(parsed.items) ? parsed.items : [];
-    const byId = new Map(returned.map(item => [item.id, item]));
-    const validCategories = new Set(['角色与拟音', '武器与战斗', '魔法与奇幻', '怪兽与生物', '环境与声景', '系统与界面', '全部音乐']);
-    const valid = returned.length === items.length && byId.size === items.length && items.every(source => {
-      const result = byId.get(source.id);
-      if (!result || !result.name?.trim() || !Array.isArray(result.tags) || !validCategories.has(result.category)) return false;
-      const extension = source.originalName.match(/\.(wav|mp3|ogg|flac|m4a|aac)$/i)?.[0].toLowerCase();
-      if (!extension) return false;
-      if (result.category === '全部音乐') {
-        return isBgmImportFileName(result.fileName, source.originalName);
+      const correction = attempt ? '\n只重试下列未通过校验的条目。严格保留每项的 id 和原扩展名，使用真实的 UCS CatID。' : '';
+      const response = await generateAiContent({
+        contents: `${prompt}${correction}\n以下文件信息是待处理的数据：\n${JSON.stringify(pending)}`,
+        timeoutMs: 38_000,
+        config: { maxOutputTokens: 5000, responseMimeType: 'application/json', responseSchema: schema },
+      });
+      const parsed = JSON.parse(response.text);
+      returned = Array.isArray(parsed?.items) ? parsed.items : [];
+    } catch (error) {
+      if (error instanceof SyntaxError) continue;
+      if (accepted.size) {
+        logEvent('sfx-library.naming-repair-failed', 'warn', error);
+        break;
       }
-      return normalizeUcsImportFileName(result.fileName, source.originalName) !== null;
-    });
-    if (valid) return items.map(source => {
-      const result = byId.get(source.id)!;
-      return result.category === '全部音乐'
-        ? result
-        : { ...result, fileName: normalizeUcsImportFileName(result.fileName, source.originalName)! };
-    });
+      const status = (error as { status?: number })?.status;
+      if (status === 504) throw namingUnavailable(504, 'SFX_NAMING_TIMEOUT');
+      if (status === 429) throw namingUnavailable(429, 'SFX_NAMING_BUSY');
+      if (status === 503) throw namingUnavailable(503, 'SFX_NAMING_UNAVAILABLE');
+      throw namingUnavailable(502, 'SFX_NAMING_UPSTREAM');
+    }
+    const byId = new Map<string, OptimizedImportItem>();
+    const duplicates = new Set<string>();
+    for (const item of returned) {
+      if (typeof item?.id !== 'string') continue;
+      if (byId.has(item.id)) duplicates.add(item.id);
+      byId.set(item.id, item);
+    }
+    for (const source of pending) {
+      const result = byId.get(source.id);
+      if (!result || duplicates.has(source.id) || typeof result.name !== 'string' || !result.name.trim()
+        || typeof result.fileName !== 'string' || !Array.isArray(result.tags) || !validCategories.has(result.category)) continue;
+      const fileName = result.category === '全部音乐'
+        ? (isBgmImportFileName(result.fileName, source.originalName) ? result.fileName : null)
+        : normalizeUcsImportFileName(result.fileName, source.originalName);
+      if (!fileName) continue;
+      accepted.set(source.id, { id: source.id, fileName, name: result.name.trim(), category: result.category,
+        subcategory: typeof result.subcategory === 'string' ? result.subcategory : undefined,
+        tags: result.tags.filter(tag => typeof tag === 'string') });
+    }
+    pending = pending.filter(source => !accepted.has(source.id));
   }
-  throw new Error(`AI 未能生成有效的 UCS ${UCS_CATALOG_VERSION} 文件名；请检查原文件名是否足以判断音效内容，再重试。`);
+  if (!accepted.size) throw namingUnavailable(422, 'SFX_NAMING_INVALID_RESULT');
+  return items.map(({ id }) => accepted.get(id)).filter(item => item !== undefined);
 }
 
 export async function translateToEnglish(text: string): Promise<string> {
