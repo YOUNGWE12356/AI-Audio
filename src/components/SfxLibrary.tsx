@@ -64,6 +64,7 @@ import {
 import { scoreSfxSearchCandidate } from '../services/sfxSearchLexicon';
 import { prepareSfxLibraryArchive } from '../services/sfxLibraryArchiveClient';
 import { displaySfxLibraryFileName } from '../utils/sfxLibraryFileName';
+import { summarizeSfxLibrarySize } from '../utils/sfxLibrarySize';
 import { LibraryRevisionConflict, SfxLibrarySync, type LibrarySnapshot, type LibrarySyncStatus } from '../services/sfxLibrarySync';
 
 interface ImportItem {
@@ -1033,6 +1034,14 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
   const assetStats = serverAssetStats && serverAssetStats.total === localAssetStats.total
     ? serverAssetStats
     : localAssetStats;
+
+  const librarySize = useMemo(() => canModifyLibrary ? summarizeSfxLibrarySize(sounds) : null, [canModifyLibrary, sounds]);
+  let librarySizeLabel = libraryLoadError ? '读取失败' : '读取中';
+  if (librarySize && isServerLibraryReady) {
+    const allSizesUnknown = librarySize.unknownCount > 0 && librarySize.unknownCount === sounds.length;
+    const estimatePrefix = librarySize.estimated ? '约 ' : '';
+    librarySizeLabel = allSizesUnknown ? '未知' : `${estimatePrefix}${librarySize.formatted}`;
+  }
 
   const refreshAudioAssetIndex = async () => {
     setIsRefreshingAssetIndex(true);
@@ -3157,6 +3166,7 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
           duration: item.duration,
           format: (item.type === 'MP3' || item.type === 'OGG' || item.type === 'WAV') ? item.type as 'WAV' | 'MP3' | 'OGG' : 'WAV',
           size: item.size,
+          sizeBytes: item.originalFile?.size,
           sampleRate: '48.0 kHz',
           channels: Math.random() > 0.4 ? 'Stereo' : 'Mono',
           designer: 'AD_Design (音效师)',
@@ -3435,6 +3445,18 @@ export default function SfxLibrary({ assistantSearchQuery = '', assistantCategor
                   <p className="font-bold text-slate-400">音乐</p>
                 </div>
               </div>
+
+              {librarySize && (
+                <div className="mt-2 border-t border-emerald-100 pt-2 text-[10px]">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-bold text-slate-600">文件总大小</span>
+                    <span className="font-mono font-black text-emerald-700">{librarySizeLabel}</span>
+                  </div>
+                  {isServerLibraryReady && librarySize.unknownCount > 0 && (
+                    <p className="mt-1 text-slate-500">{librarySize.unknownCount} 个文件大小未知，未计入</p>
+                  )}
+                </div>
+              )}
 
               {assetStats.topTags.length > 0 && (
                 <div className="mt-2 flex flex-wrap gap-1">

@@ -29,6 +29,7 @@ export interface SoundEffect {
   duration: number; // in seconds
   format: 'WAV' | 'OGG' | 'MP3';
   size: string;
+  sizeBytes?: number;
   sampleRate: string;
   channels: 'Mono' | 'Stereo';
   designer: string;
