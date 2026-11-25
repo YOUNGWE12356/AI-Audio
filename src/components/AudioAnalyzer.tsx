@@ -28,6 +28,11 @@ export { estimateKey, estimateMusicalMode } from '../utils/audioMetrics';
 
 type AnalysisItemStatus = 'pending' | 'analyzing' | 'done' | 'error';
 
+const formatAnalysisLoudness = (value?: number | null) => {
+  if (value === null) return '低于门限';
+  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(1)} LUFS` : '—';
+};
+
 interface AnalysisQueueItem {
   id: string;
   file: File;
@@ -376,11 +381,11 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
                 return (
                   <div
                     key={item.id}
-                    className={`rounded-2xl border bg-white p-3 transition-all ${
+                    className={`@container rounded-2xl border bg-white p-3 transition-all ${
                       isActive ? 'border-emerald-300 shadow-sm shadow-emerald-600/10' : 'border-slate-200'
                     }`}
                   >
-                    <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                    <div className="flex flex-col gap-3 @min-[800px]:flex-row @min-[800px]:items-center">
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
                           <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[10px] font-black text-slate-500">
@@ -402,7 +407,7 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
                         )}
                       </div>
 
-                      <div className="grid grid-cols-2 gap-2 text-[10px] sm:grid-cols-6 lg:min-w-[650px]">
+                      <div className="grid min-w-0 grid-cols-2 gap-2 text-[10px] @min-[420px]:grid-cols-4 @min-[620px]:grid-cols-7 @min-[800px]:w-[70%]">
                         <div className={`flex items-center justify-center rounded-xl border px-2 py-1.5 font-black ${statusClass}`}>
                           {item.status === 'analyzing' && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
                           {statusText}
@@ -414,6 +419,10 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
                         <div className="rounded-xl border border-slate-100 bg-slate-50 px-2 py-1.5 text-center">
                           <p className="font-bold text-slate-400">Key</p>
                           <p className="truncate font-black text-slate-800">{item.result?.key.name || '-'}</p>
+                        </div>
+                        <div className="rounded-xl border border-slate-100 bg-slate-50 px-2 py-1.5 text-center">
+                          <p className="font-bold text-slate-400">响度</p>
+                          <p className="whitespace-nowrap font-black tabular-nums text-slate-800">{formatAnalysisLoudness(item.result?.integratedLufs)}</p>
                         </div>
                         <div className="rounded-xl border border-slate-100 bg-slate-50 px-2 py-1.5 text-center">
                           <p className="font-bold text-slate-400">Mode</p>
@@ -469,7 +478,7 @@ export default function AudioAnalyzer({ initialFiles = [] }: AudioAnalyzerProps)
               <MetricCard label="调式 Mode" value="重新分析后生成" hint="旧分析结果未包含调式，请重新点击开始分析。" />
             )}
             <MetricCard label="时长 / 规格" value={formatTime(result.duration)} hint={`${result.sampleRate.toLocaleString()} Hz · ${result.channels} 声道`} />
-            <MetricCard label="响度 / 峰值" value={`${result.audioProfile.rmsDb.toFixed(1)} dB`} hint={`Peak ${result.audioProfile.peakDb.toFixed(1)} dBFS · DR ${result.audioProfile.dynamicRangeDb.toFixed(1)} dB`} />
+            <MetricCard label="响度 / 峰值" value={formatAnalysisLoudness(result.integratedLufs)} hint={`RMS ${result.audioProfile.rmsDb.toFixed(1)} dBFS · Peak ${result.audioProfile.peakDb.toFixed(1)} dBFS · DR ${result.audioProfile.dynamicRangeDb.toFixed(1)} dB`} />
             <MetricCard label="底噪 RMS" value={`${result.audioProfile.noiseFloorRmsDb.toFixed(1)} dBFS`} hint="按最低 10% 能量帧估算，越低越干净。" />
             <MetricCard label="信噪比 SNR" value={`${result.audioProfile.snrDb.toFixed(1)} dB`} hint={result.audioProfile.snrDb >= 36 ? '较干净，适合二次制作。' : '偏低时建议先做降噪或修复。'} />
           </div>

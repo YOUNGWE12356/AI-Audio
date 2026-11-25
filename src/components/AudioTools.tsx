@@ -42,6 +42,7 @@ import { useNativeAssistantTool } from '../services/useNativeAssistantTool';
 import { uploadNativeToolOutput } from '../services/assistantToolWorkspace';
 import { usePreparedAssistantTool } from '../services/usePreparedAssistantTool';
 import { FACTORY_LOUDNESS_PRESETS } from '../services/audioFactoryPresets';
+import { applyFactoryGain, FACTORY_GAIN_MAX_DB, FACTORY_GAIN_MIN_DB, FACTORY_METER_SAMPLE_RATE, measureFactoryLoudness, measureFactoryPeak, planFactoryGain, type FactoryLoudnessMeasurement, type FactoryLoudnessMode, type FactoryLoudnessSettings } from '../services/audioFactoryLoudness';
 import type { SeparationWorkspaceOperation } from '../services/assistantSeparationWorkspace';
 import { applyBatchRenameRules, getRenamePreviewOperations } from '../utils/batchRename';
 import type { RenameCaseMode, RenameOperation, RenameRules, RenameRuleType } from '../utils/batchRename';
@@ -63,16 +64,13 @@ interface FactoryConversionResult {
   url?: string;
   error?: string;
   loudness?: FactoryLoudnessInfo;
+  sourceFile?: File;
 }
 
 interface FactoryLoudnessInfo {
-  beforeLufs: number;
-  afterLufs: number;
-  targetLufs: number;
+  afterLufs: number | null;
   requestedGainDb: number;
   appliedGainDb: number;
-  peakCeilingDb: number;
-  peakDb: number;
 }
 
 type FactoryAudioFormat = 'mp3' | 'wav' | 'ogg' | 'flac' | 'aac' | 'm4a';
@@ -89,7 +87,6 @@ interface RenamePreviewItem {
   statusLabel: string;
 }
 
-const MIN_ANALYSIS_DB = -80;
 const AUDIO_TOOLS_SUBNAV_MIN_WIDTH = 64;
 const AUDIO_TOOLS_SUBNAV_COMPACT_WIDTH = 176;
 const AUDIO_TOOLS_SUBNAV_DEFAULT_WIDTH = 184;
@@ -115,12 +112,13 @@ const DEFAULT_RENAME_RULES: RenameRules = {
   normalizeFileName: true,
 };
 
-async function decodeAudioOnServer(file: File, audioCtx: AudioContext): Promise<AudioBuffer> {
+async function decodeAudioOnServer(file: File, audioCtx: AudioContext, signal?: AbortSignal): Promise<AudioBuffer> {
   const formData = new FormData();
   formData.append('media', file, file.name);
   const response = await fetch('/api/audio/decode', {
     method: 'POST',
     body: formData,
+    signal,
   });
   if (!response.ok) {
     const contentType = response.headers.get('content-type') || '';
@@ -139,104 +137,25 @@ const getFactoryMimeType = (format: FactoryAudioFormat) => {
   return 'application/octet-stream';
 };
 
-async function decodeAudioWithFallback(file: File, arrayBuffer: ArrayBuffer, audioCtx: AudioContext): Promise<AudioBuffer> {
+async function decodeFactoryFile(file: File, signal?: AbortSignal): Promise<AudioBuffer> {
+  const Context = window.AudioContext || (window as any).webkitAudioContext;
+  const audioCtx = new Context({ sampleRate: FACTORY_METER_SAMPLE_RATE }) as AudioContext;
   const isVideo = file.type.startsWith('video/') || /\.(mp4|mov|mkv|avi|webm)$/i.test(file.name);
-  if (isVideo) return decodeAudioOnServer(file, audioCtx);
-
   try {
-    const decoded = await new Promise<AudioBuffer>((resolve, reject) => {
-      audioCtx.decodeAudioData(
-        arrayBuffer.slice(0), // copy arrayBuffer as decodeAudioData will neuter it
-        (buffer) => resolve(buffer),
-        (err) => reject(err)
-      );
-    });
-    return decoded;
-  } catch (err) {
-    console.warn('Standard decodeAudioData failed, attempting server-side audio decoding.', err);
-    return decodeAudioOnServer(file, audioCtx);
-  }
-}
-
-function linearToDb(value: number): number {
-  if (!Number.isFinite(value) || value <= 0) return MIN_ANALYSIS_DB;
-  return Math.max(MIN_ANALYSIS_DB, 20 * Math.log10(value));
-}
-
-function dbToLinear(db: number): number {
-  return 10 ** (db / 20);
-}
-
-function analyzeAudioLoudness(buffer: AudioBuffer) {
-  let sumSquares = 0;
-  let peak = 0;
-  let sampleCount = 0;
-
-  for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
-    const data = buffer.getChannelData(channel);
-    sampleCount += data.length;
-    for (let index = 0; index < data.length; index += 1) {
-      const sample = data[index];
-      sumSquares += sample * sample;
-      const abs = Math.abs(sample);
-      if (abs > peak) peak = abs;
+    signal?.throwIfAborted();
+    if (!isVideo) {
+      const bytes = await file.arrayBuffer();
+      signal?.throwIfAborted();
+      try {
+        return await audioCtx.decodeAudioData(bytes);
+      } catch {
+        signal?.throwIfAborted();
+      }
     }
+    return await decodeAudioOnServer(file, audioCtx, signal);
+  } finally {
+    await audioCtx.close();
   }
-
-  const rms = sampleCount > 0 ? Math.sqrt(sumSquares / sampleCount) : 0;
-
-  return {
-    lufs: linearToDb(rms),
-    peak,
-    peakDb: linearToDb(peak),
-  };
-}
-
-function normalizeAudioBuffer(
-  sourceBuffer: AudioBuffer,
-  targetLufs: number,
-  peakCeilingDb: number,
-): { buffer: AudioBuffer; loudness: FactoryLoudnessInfo } {
-  const before = analyzeAudioLoudness(sourceBuffer);
-  const requestedGainDb = targetLufs - before.lufs;
-  const requestedGainLinear = dbToLinear(requestedGainDb);
-  const peakCeilingLinear = dbToLinear(peakCeilingDb);
-
-  let appliedGainLinear = requestedGainLinear;
-  const projectedPeak = before.peak * requestedGainLinear;
-  if (before.peak > 0 && projectedPeak > peakCeilingLinear) {
-    appliedGainLinear = peakCeilingLinear / before.peak;
-  }
-
-  const outputBuffer = new AudioBuffer({
-    length: sourceBuffer.length,
-    numberOfChannels: sourceBuffer.numberOfChannels,
-    sampleRate: sourceBuffer.sampleRate,
-  });
-
-  for (let channel = 0; channel < sourceBuffer.numberOfChannels; channel += 1) {
-    const input = sourceBuffer.getChannelData(channel);
-    const output = outputBuffer.getChannelData(channel);
-    for (let index = 0; index < input.length; index += 1) {
-      output[index] = Math.max(-1, Math.min(1, input[index] * appliedGainLinear));
-    }
-  }
-
-  const after = analyzeAudioLoudness(outputBuffer);
-  const appliedGainDb = linearToDb(appliedGainLinear);
-
-  return {
-    buffer: outputBuffer,
-    loudness: {
-      beforeLufs: before.lufs,
-      afterLufs: after.lufs,
-      targetLufs,
-      requestedGainDb,
-      appliedGainDb,
-      peakCeilingDb,
-      peakDb: after.peakDb,
-    },
-  };
 }
 
 function convertFactoryChannels(source: AudioBuffer, mode: FactoryChannelMode): AudioBuffer {
@@ -260,6 +179,21 @@ function convertFactoryChannels(source: AudioBuffer, mode: FactoryChannelMode): 
     output.getChannelData(1).set(right);
   }
   return output;
+}
+
+type FactorySourceLoudness = {
+  original: FactoryLoudnessMeasurement;
+  mono: FactoryLoudnessMeasurement;
+  stereo: FactoryLoudnessMeasurement;
+};
+
+function measureFactorySource(buffer: AudioBuffer): FactorySourceLoudness {
+  const original = measureFactoryLoudness(buffer);
+  return {
+    original,
+    mono: buffer.numberOfChannels === 1 ? original : measureFactoryLoudness(convertFactoryChannels(buffer, 'mono')),
+    stereo: buffer.numberOfChannels === 2 ? original : measureFactoryLoudness(convertFactoryChannels(buffer, 'stereo')),
+  };
 }
 
 interface AudioToolsProps {
@@ -352,8 +286,8 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
     return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
   };
 
-  const formatLufs = (value: number): string => {
-    if (!Number.isFinite(value) || value <= MIN_ANALYSIS_DB + 0.1) return '静音';
+  const formatLufs = (value: number | null): string => {
+    if (value === null || !Number.isFinite(value)) return '低于测量门限';
     return `${value.toFixed(1)} LUFS`;
   };
 
@@ -497,7 +431,13 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
   const [factorySampleRate, setFactorySampleRate] = useState<number>(44100);
   const [factoryChannelMode, setFactoryChannelMode] = useState<FactoryChannelMode>('stereo');
   const [factoryBitrate, setFactoryBitrate] = useState<number>(128); // for MP3
-  const [factoryNormalizeEnabled, setFactoryNormalizeEnabled] = useState<boolean>(false);
+  const [factoryLoudnessMode, setFactoryLoudnessMode] = useState<FactoryLoudnessMode>('original');
+  const [factoryGainInput, setFactoryGainInput] = useState('3');
+  const factoryGainDb = Number(factoryGainInput);
+  const factoryGainValid = factoryGainInput.trim() !== '' && Number.isFinite(factoryGainDb)
+    && factoryGainDb >= FACTORY_GAIN_MIN_DB && factoryGainDb <= FACTORY_GAIN_MAX_DB;
+  const factoryNormalizeEnabled = factoryLoudnessMode === 'normalize';
+  const setFactoryNormalizeEnabled = (enabled: boolean) => setFactoryLoudnessMode(enabled ? 'normalize' : 'original');
   const [factoryTargetLufs, setFactoryTargetLufs] = useState<number>(-16);
   const [factoryPeakCeilingDb, setFactoryPeakCeilingDb] = useState<number>(-1);
   const [factoryStatus, setFactoryStatus] = useState<string>('');
@@ -505,6 +445,45 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
   const [factoryProgress, setFactoryProgress] = useState<number>(0);
   const [factoryError, setFactoryError] = useState<string | null>(null);
   const [factoryResults, setFactoryResults] = useState<FactoryConversionResult[]>([]);
+  const [factoryMeasurements, setFactoryMeasurements] = useState<Map<File, FactorySourceLoudness | 'error'>>(() => new Map());
+  const measurementCache = useRef(new WeakMap<File, FactorySourceLoudness | 'error'>());
+  const factoryLoudnessSettings: FactoryLoudnessSettings = {
+    mode: factoryLoudnessMode,
+    gainDb: factoryGainDb,
+    targetLufs: Math.max(-45, Math.min(-6, factoryTargetLufs)),
+    peakCeilingDb: Math.max(-6, Math.min(0, factoryPeakCeilingDb)),
+  };
+
+  useEffect(() => {
+    if (activeSubTab !== 'factory' || !factoryFiles.length || factoryLoading) return;
+    const controller = new AbortController();
+    const cache = measurementCache.current;
+    const next = new Map<File, FactorySourceLoudness | 'error'>();
+    for (const file of factoryFiles) {
+      const existing = cache.get(file);
+      if (existing) next.set(file, existing);
+    }
+    setFactoryMeasurements(new Map(next));
+    void (async () => {
+      for (const file of factoryFiles) {
+        if (controller.signal.aborted) return;
+        if (next.has(file)) continue;
+        let measurement: FactorySourceLoudness | 'error';
+        try {
+          const decoded = await decodeFactoryFile(file, controller.signal);
+          if (controller.signal.aborted) return;
+          measurement = measureFactorySource(decoded);
+        } catch {
+          if (controller.signal.aborted) return;
+          measurement = 'error';
+        }
+        cache.set(file, measurement);
+        next.set(file, measurement);
+        setFactoryMeasurements(new Map(next));
+      }
+    })();
+    return () => controller.abort();
+  }, [activeSubTab, factoryFiles, factoryLoading]);
   const [pendingWorkstationImport, setPendingWorkstationImport] = useState<{ id: string; files: File[]; separateTracks?: boolean } | null>(null);
   const [assistantAnalysisFiles, setAssistantAnalysisFiles] = useState<File[]>([]);
   const assistantFactorySubmitRef = useRef<string | null>(null);
@@ -589,8 +568,8 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
     if (assistantAudioRequest.targetBitrate !== undefined) {
       setFactoryBitrate(assistantAudioRequest.targetBitrate);
     }
+    setFactoryLoudnessMode(assistantAudioRequest.targetLufs !== undefined ? 'normalize' : 'original');
     if (assistantAudioRequest.targetLufs !== undefined) {
-      setFactoryNormalizeEnabled(true);
       setFactoryTargetLufs(assistantAudioRequest.targetLufs);
     }
     if (assistantAudioRequest.targetFormat) {
@@ -626,10 +605,8 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
   const factoryAudioUrl = primaryFactoryResult?.url || null;
   const factoryBlob = primaryFactoryResult?.blob || null;
   const factoryOriginalDuration = primaryFactoryResult?.duration || null;
-  const primaryFactoryLoudnessLimited = Boolean(
-    primaryFactoryResult?.loudness
-    && primaryFactoryResult.loudness.requestedGainDb > primaryFactoryResult.loudness.appliedGainDb + 0.1
-    && primaryFactoryResult.loudness.afterLufs < primaryFactoryResult.loudness.targetLufs - 0.2,
+  const factoryResultsByFile = new Map<File | undefined, FactoryConversionResult>(
+    factoryResults.map(result => [result.sourceFile, result] as const),
   );
 
   const sendFactoryResultToWorkstation = () => {
@@ -672,33 +649,6 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
     results.forEach((item) => {
       if (item.url) URL.revokeObjectURL(item.url);
     });
-  };
-
-  const updatePrimaryFactoryResult = (patch: Partial<FactoryConversionResult> | null) => {
-    if (patch === null) {
-      revokeFactoryResultUrls(factoryResults);
-      setFactoryResults([]);
-      return;
-    }
-    setFactoryResults((prev) => {
-      const base = prev[0] || {
-        id: factoryFile ? `${factoryFile.name}-${factoryFile.size}-${factoryFile.lastModified}` : `converted-${Date.now()}`,
-        sourceName: factoryFile?.name || 'converted-audio',
-        sourceRelativePath: factoryFile ? getFactoryFilePath(factoryFile) : undefined,
-        sourceSize: factoryFile?.size || 0,
-        sourceType: factoryFile?.type || 'unknown',
-      };
-      return [{ ...base, ...patch }, ...prev.slice(1)];
-    });
-  };
-
-  const setFactoryFile = (file: File | null) => {
-    setFactoryFiles(file ? [file] : []);
-  };
-  const setFactoryAudioUrl = (url: string | null) => updatePrimaryFactoryResult(url ? { url } : null);
-  const setFactoryBlob = (blob: Blob | null) => updatePrimaryFactoryResult(blob ? { blob } : null);
-  const setFactoryOriginalDuration = (duration: number | null) => {
-    if (duration !== null) updatePrimaryFactoryResult({ duration });
   };
 
   // ==========================================================
@@ -749,6 +699,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
   );
 
   const handleFactoryFilesChange = (files: FileList | File[]) => {
+    if (factoryLoading) return;
     const selectedFiles = Array.from(files).filter(isFactorySupportedFile);
     if (selectedFiles.length === 0) {
       setFactoryError('请选择音频/视频文件，或包含音频/视频的文件夹。');
@@ -771,43 +722,34 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
       throw new Error(`${factoryFormat.toUpperCase()} 格式编码暂未接入，请先选择 MP3、WAV 或 OGG。`);
     }
 
-    onStepProgress(0.15, `正在读取：${file.name}`);
-    const arrayBuffer = await file.arrayBuffer();
-
     onStepProgress(0.35, `正在解码：${file.name}`);
-    const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
-    const audioCtx = new AudioContext();
-    let decodedBuffer: AudioBuffer;
-    try {
-      decodedBuffer = await decodeAudioWithFallback(file, arrayBuffer, audioCtx);
-    } finally {
-      await audioCtx.close();
-    }
-
-    let processingBuffer = decodedBuffer;
-    let loudness: FactoryLoudnessInfo | undefined;
-    if (factoryNormalizeEnabled) {
-      onStepProgress(0.52, `正在统一响度至 ${factoryTargetLufs.toFixed(1)} LUFS：${file.name}`);
-      const normalized = normalizeAudioBuffer(decodedBuffer, factoryTargetLufs, factoryPeakCeilingDb);
-      processingBuffer = normalized.buffer;
-      loudness = normalized.loudness;
-    }
+    const decodedBuffer = await decodeFactoryFile(file, signal);
+    signal?.throwIfAborted();
+    const cached = measurementCache.current.get(file);
+    const source = cached && cached !== 'error' ? cached : measureFactorySource(decodedBuffer);
+    measurementCache.current.set(file, source);
+    setFactoryMeasurements(previous => new Map(previous).set(file, source));
 
     onStepProgress(0.68, `正在重采样至 ${factorySampleRate.toLocaleString()} Hz：${file.name}`);
-    const resampledBuffer = await resampleAudioBuffer(processingBuffer, factorySampleRate);
-    const outputBuffer = convertFactoryChannels(resampledBuffer, factoryChannelMode);
+    const channelBuffer = convertFactoryChannels(decodedBuffer, factoryChannelMode);
+    const outputBuffer = await resampleAudioBuffer(channelBuffer, factorySampleRate);
+    const gain = planFactoryGain({ ...source[factoryChannelMode], peak: measureFactoryPeak(outputBuffer) }, factoryLoudnessSettings);
+    applyFactoryGain(outputBuffer, gain.appliedGainDb);
 
     onStepProgress(0.85, `正在封装为 ${factoryFormat.toUpperCase()}：${file.name}`);
+    let afterLufs: number | null = null;
     const finalBlob = await encodeFactoryAudio(outputBuffer, file.name, {
       format: factoryFormat as 'wav' | 'mp3' | 'ogg',
       sampleRate: factorySampleRate,
       bitrate: factoryBitrate,
       channelMode: factoryChannelMode,
       signal,
+      onDecodedOutput: decoded => { afterLufs = measureFactoryLoudness(decoded).lufs; },
     });
 
     return {
       id: `${file.name}-${file.size}-${file.lastModified}`,
+      sourceFile: file,
       sourceName: file.name,
       sourceRelativePath: getFactoryFilePath(file),
       sourceSize: file.size,
@@ -816,22 +758,12 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
       channels: outputBuffer.numberOfChannels as 1 | 2,
       blob: finalBlob,
       url: URL.createObjectURL(finalBlob),
-      loudness,
+      loudness: { afterLufs, requestedGainDb: gain.requestedGainDb, appliedGainDb: gain.appliedGainDb },
     };
   };
 
-  const handleFactoryFileChange = (file: File) => {
-    if (!file) return;
-    setFactoryFile(file);
-    setFactoryError(null);
-    setFactoryAudioUrl(null);
-    setFactoryBlob(null);
-    setFactoryOriginalDuration(null);
-    setFactoryStatus('文件已载入格式工厂，请调整下方属性，然后点击“开始格式转换”。');
-  };
-
   const handleFactorySubmit = async (options: { signal?: AbortSignal; assistant?: boolean } = {}) => {
-    if (!factoryFile) return;
+    if (!factoryFile || factoryLoading || (factoryLoudnessMode === 'gain' && !factoryGainValid)) return;
     const assistantRequestId = assistantFactoryRunningRequestRef.current;
 
     if (factoryFiles.length >= 1) {
@@ -858,6 +790,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
           } catch (err: any) {
             nextResults.push({
               id: `${file.name}-${file.size}-${file.lastModified}-error`,
+              sourceFile: file,
               sourceName: file.name,
               sourceRelativePath: getFactoryFilePath(file),
               sourceSize: file.size,
@@ -895,86 +828,6 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
         }
       }
       return;
-    }
-
-    setFactoryLoading(true);
-    setFactoryError(null);
-    setFactoryAudioUrl(null);
-    setFactoryBlob(null);
-    setFactoryProgress(10);
-    setFactoryStatus('正在读取多媒体文件二进制流...');
-
-    try {
-      const reader = new FileReader();
-      
-      const fileDataLoaded = new Promise<ArrayBuffer>((resolve, reject) => {
-        reader.onload = (e) => {
-          if (e.target?.result instanceof ArrayBuffer) {
-            resolve(e.target.result);
-          } else {
-            reject(new Error('无法读取文件内容。'));
-          }
-        };
-        reader.onerror = () => reject(new Error('文件读取出错。'));
-      });
-
-      reader.readAsArrayBuffer(factoryFile);
-      const arrayBuffer = await fileDataLoaded;
-
-      setFactoryProgress(30);
-      setFactoryStatus(`正在使用高级核心解码音视频通道 (当前采样率: ${factorySampleRate} Hz)...`);
-
-      const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
-      const audioCtx = new AudioContext();
-      
-      let decodedBuffer: AudioBuffer;
-      try {
-        decodedBuffer = await decodeAudioWithFallback(factoryFile, arrayBuffer, audioCtx);
-      } catch (err: any) {
-        throw new Error(err.message || '音视频解码失败，请确认文件格式是否受您的浏览器直接播放支持。');
-      } finally {
-        await audioCtx.close();
-      }
-
-      setFactoryOriginalDuration(decodedBuffer.duration);
-      setFactoryProgress(50);
-      setFactoryStatus(`重采样处理：将原始声道重新对齐至 ${factorySampleRate.toLocaleString()} Hz...`);
-
-      // Resample to user selected Sample Rate
-      const resampledBuffer = await resampleAudioBuffer(decodedBuffer, factorySampleRate);
-      const outputBuffer = convertFactoryChannels(resampledBuffer, factoryChannelMode);
-
-      setFactoryProgress(75);
-      setFactoryStatus(`正在封装成指定格式: [${factoryFormat.toUpperCase()}] ...`);
-
-      let finalBlob: Blob;
-      if (factoryFormat === 'wav' || factoryFormat === 'mp3' || factoryFormat === 'ogg') {
-        finalBlob = await encodeFactoryAudio(outputBuffer, factoryFile.name, {
-          format: factoryFormat,
-          sampleRate: factorySampleRate,
-          bitrate: factoryBitrate,
-          channelMode: factoryChannelMode,
-          signal: options.signal,
-        });
-      } else {
-        throw new Error(`${factoryFormat.toUpperCase()} 格式编码暂未接入，请先选择 MP3、WAV 或 OGG。`);
-      }
-
-      setFactoryProgress(100);
-      setFactoryStatus(`转换成功！已完美转化为高兼容性 [${factoryFormat.toUpperCase()}] 目标媒体。`);
-      
-      const url = URL.createObjectURL(finalBlob);
-      setFactoryAudioUrl(url);
-      setFactoryBlob(finalBlob);
-
-    } catch (err: any) {
-      console.error(err);
-      const errMsg = err.message || '转换出错，请重新核对音频选项。';
-      setFactoryError(errMsg);
-      setFactoryStatus(errMsg);
-      setFactoryProgress(0);
-    } finally {
-      setFactoryLoading(false);
     }
   };
 
@@ -2238,7 +2091,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
               <div>
                 <h3 className="text-sm font-bold text-slate-800">格式转换、压缩、音量标准化</h3>
                 <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
-                  支持批量格式转换、音频压缩、采样率/比特率调整，并可统一目标响度。
+                  支持批量转换、压缩、统一响度和整体音量调整。
                 </p>
               </div>
 
@@ -2351,7 +2204,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
               </div>
 
               {/* Conversion Config */}
-              <div className="bg-slate-50 border border-slate-150 p-5 rounded-2xl space-y-4">
+              <fieldset disabled={factoryLoading} className="min-w-0 bg-slate-50 border border-slate-150 p-5 rounded-2xl space-y-4">
                 <div className="flex items-center gap-2 mb-1.5">
                   <Settings className="w-4 h-4 text-emerald-600" />
                   <span className="text-xs font-bold text-slate-700">格式转换高级属性设定</span>
@@ -2458,7 +2311,8 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                       </div>
                       <button
                         type="button"
-                        onClick={() => setFactoryNormalizeEnabled((prev) => !prev)}
+                        aria-pressed={factoryNormalizeEnabled}
+                        onClick={() => setFactoryNormalizeEnabled(!factoryNormalizeEnabled)}
                         className={`rounded-full px-3 py-1.5 text-[10px] font-black transition-all ${
                           factoryNormalizeEnabled
                             ? 'bg-emerald-600 text-white shadow-sm shadow-emerald-600/20'
@@ -2499,8 +2353,8 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
 
                     <p className="rounded-lg bg-slate-50 px-3 py-2 text-[10px] font-semibold text-slate-500">
                       {factoryNormalizeEnabled
-                        ? '当前会按所选 LUFS 统一响度；再次点击已选中的预设，可切回“使用音频本身音量”。'
-                        : '当前使用音频本身音量，不做响度统一。点击任意预设或自定义 LUFS 后再启用。'}
+                        ? '每个文件会分别调整到所选目标响度，实际增益受峰值上限约束。'
+                        : '选择预设或修改目标 LUFS，即可启用响度统一。'}
                     </p>
 
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -2514,9 +2368,8 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                             max={-6}
                             step={0.5}
                             value={factoryTargetLufs}
-                            onFocus={() => setFactoryNormalizeEnabled(true)}
                             onChange={(e) => {
-                              const nextValue = Number(e.target.value);
+                              const nextValue = e.target.valueAsNumber;
                               if (Number.isFinite(nextValue)) {
                                 setFactoryNormalizeEnabled(true);
                                 setFactoryTargetLufs(nextValue);
@@ -2528,7 +2381,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                         </div>
                       </div>
                       <div className="space-y-1.5">
-                        <label className={`text-[10px] font-bold uppercase tracking-wider block ${factoryNormalizeEnabled ? 'text-slate-500' : 'text-slate-400'}`}>峰值上限保护</label>
+                        <label className="text-[10px] font-bold uppercase tracking-wider block text-slate-500">峰值上限保护（两种模式通用）</label>
                         <div className={`flex items-center rounded-xl border px-3 transition-colors ${factoryNormalizeEnabled ? 'border-slate-200 bg-slate-50' : 'border-slate-100 bg-slate-50/60'}`}>
                           <input
                             type="number"
@@ -2537,11 +2390,9 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                             max={0}
                             step={0.1}
                             value={factoryPeakCeilingDb}
-                            onFocus={() => setFactoryNormalizeEnabled(true)}
                             onChange={(e) => {
-                              const nextValue = Number(e.target.value);
+                              const nextValue = e.target.valueAsNumber;
                               if (Number.isFinite(nextValue)) {
-                                setFactoryNormalizeEnabled(true);
                                 setFactoryPeakCeilingDb(nextValue);
                               }
                             }}
@@ -2551,16 +2402,46 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                         </div>
                       </div>
                       <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] text-slate-500 leading-relaxed">
-                        当前模式：<span className="font-black text-slate-800">{factoryNormalizeEnabled ? `${factoryTargetLufs.toFixed(1)} LUFS` : '使用原音量'}</span>
+                        当前模式：<span className="font-black text-slate-800">{factoryNormalizeEnabled ? `${factoryLoudnessSettings.targetLufs.toFixed(1)} LUFS` : factoryLoudnessMode === 'gain' ? '整体音量调整' : '使用原音量'}</span>
                         <br />
-                        峰值保护：<span className={`font-black ${factoryNormalizeEnabled ? 'text-slate-800' : 'text-slate-400'}`}>{factoryNormalizeEnabled ? `不超过 ${factoryPeakCeilingDb.toFixed(1)} dBFS` : '未启用'}</span>
+                        峰值保护：<span className="font-black">{factoryLoudnessMode === 'original' ? '未启用' : `${factoryLoudnessSettings.peakCeilingDb.toFixed(1)} dBFS`}</span>
                       </div>
                     </div>
                   </div>
 
+                  <section aria-label="整体音量调整" className="md:col-span-2 rounded-2xl border border-emerald-100 bg-white p-4 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <h4 className="text-xs font-bold text-slate-700">整体音量调整 (dB)</h4>
+                      <button type="button" aria-pressed={factoryLoudnessMode === 'gain'}
+                        onClick={() => setFactoryLoudnessMode(mode => mode === 'gain' ? 'original' : 'gain')}
+                        className={`rounded-full px-3 py-1.5 text-[10px] font-black ${factoryLoudnessMode === 'gain' ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                        {factoryLoudnessMode === 'gain' ? '已启用整体音量调整' : '启用整体音量调整'}
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {[-6, -3, 0, 3, 6].map(gain => (
+                        <button key={gain} type="button" aria-pressed={factoryLoudnessMode === 'gain' && factoryGainDb === gain}
+                          onClick={() => { setFactoryGainInput(String(gain)); setFactoryLoudnessMode('gain'); }}
+                          className={`rounded-lg border px-2 py-1.5 text-[10px] font-bold ${factoryLoudnessMode === 'gain' && factoryGainDb === gain ? 'border-emerald-400 bg-emerald-50 text-emerald-800' : 'border-slate-200 text-slate-600 hover:border-emerald-300'}`}>
+                          {gain > 0 ? '+' : ''}{gain} dB
+                        </button>
+                      ))}
+                      <label className="flex items-center gap-2 rounded-lg border border-slate-200 px-2 py-1 text-[10px] font-bold text-slate-600">
+                        自定义增益
+                        <input type="number" min={FACTORY_GAIN_MIN_DB} max={FACTORY_GAIN_MAX_DB} step="any" value={factoryGainInput}
+                          aria-invalid={factoryLoudnessMode === 'gain' && !factoryGainValid}
+                          onChange={event => { setFactoryGainInput(event.target.value); setFactoryLoudnessMode('gain'); }}
+                          className="w-14 rounded bg-slate-50 p-1 text-xs text-slate-800 focus-visible:outline-emerald-500" /> dB
+                      </label>
+                    </div>
+                    <p className="text-[10px] text-slate-500">正值调大，负值调小。每个文件使用相同的设定增益，达到峰值上限时会自动降低增益。</p>
+                    {factoryLoudnessMode === 'gain' && !factoryGainValid && (
+                      <p role="alert" className="text-[10px] font-semibold text-rose-700">请输入 {FACTORY_GAIN_MIN_DB} 至 +{FACTORY_GAIN_MAX_DB} dB。</p>
+                    )}
+                  </section>
                 </div>
 
-              </div>
+              </fieldset>
 
 
               {/* Progress and status */}
@@ -2594,7 +2475,7 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
               {/* Convert Button */}
               <button
                 type="button"
-                disabled={!factoryFile || factoryLoading}
+                disabled={!factoryFile || factoryLoading || (factoryLoudnessMode === 'gain' && !factoryGainValid)}
                 onClick={() => void handleFactorySubmit()}
                 className="w-full h-11 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 text-white disabled:text-slate-400 font-bold text-xs rounded-xl shadow-lg shadow-emerald-600/15 disabled:shadow-none transition-all flex items-center justify-center gap-2 cursor-pointer border border-emerald-700/10"
               >
@@ -2614,7 +2495,37 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
           </div>
 
           {/* Result Panel Side */}
-          <div className="space-y-5">
+          <div className="min-w-0 space-y-5">
+            <section aria-label="响度对照" className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm space-y-3">
+              <h3 className="flex items-center gap-2 text-sm font-bold text-slate-800"><BarChart3 className="h-4 w-4 text-emerald-600" />响度对照</h3>
+              {!factoryFiles.length ? (
+                <p className="text-xs text-slate-500">选择文件后自动测量响度。</p>
+              ) : (
+                <div className="max-h-96 space-y-2 overflow-y-auto">
+                  {factoryFiles.map((file, index) => {
+                    const source = factoryMeasurements.get(file);
+                    const result = factoryResultsByFile.get(file);
+                    const preview = source && source !== 'error' && (factoryLoudnessMode !== 'gain' || factoryGainValid)
+                      ? planFactoryGain(source[factoryChannelMode], factoryLoudnessSettings) : null;
+                    const limited = preview && preview.appliedGainDb < preview.requestedGainDb - 0.05;
+                    const outputLimited = result?.loudness && result.loudness.appliedGainDb < result.loudness.requestedGainDb - 0.05;
+                    return (
+                      <div key={index} className="rounded-xl border border-slate-100 bg-slate-50 p-2.5 text-[11px]">
+                        <p className="truncate pb-1 font-bold text-slate-800" title={getFactoryFilePath(file)}>{file.name}</p>
+                        <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-slate-600">
+                          <dt>原始响度</dt><dd className="text-right font-semibold">{source === 'error' ? '读取失败' : source ? formatLufs(source.original.lufs) : '测量中…'}</dd>
+                          <dt>预估响度</dt><dd className="text-right font-semibold text-emerald-700">{preview ? formatLufs(preview.estimatedLufs) : '—'}</dd>
+                          <dt>最近输出实测</dt><dd className="text-right font-semibold">{result?.loudness ? formatLufs(result.loudness.afterLufs) : result?.error ? '转换失败' : '—'}</dd>
+                        </dl>
+                        {limited && <p className="mt-1.5 text-amber-800">峰值保护 · 预计增益 {formatSignedDb(preview.appliedGainDb)}</p>}
+                        {outputLimited && <p className="mt-1 text-amber-800">峰值保护 · 最近输出增益 {formatSignedDb(result.loudness.appliedGainDb)}</p>}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {factoryFiles.length > 0 && <p className="text-[10px] leading-relaxed text-slate-500">预估会随设置更新。输出响度以转换后的文件为准，极短音效的读数供参考。</p>}
+            </section>
             <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-5">
               <h3 className="text-sm font-bold text-slate-800">音频转换结果</h3>
               
@@ -2667,35 +2578,6 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                           <span className="font-bold text-slate-800">{factoryOriginalDuration.toFixed(1)} 秒</span>
                         </div>
                       )}
-                      {primaryFactoryResult?.loudness && (
-                        <div className="space-y-2 border-t border-slate-100/50 pt-2">
-                          <div className="grid grid-cols-2 gap-2">
-                            <div className="rounded-lg bg-white/70 px-2 py-1.5">
-                              <span className="block text-[9px] text-slate-400">原始响度</span>
-                              <span className="font-bold text-slate-800">{formatLufs(primaryFactoryResult.loudness.beforeLufs)}</span>
-                            </div>
-                            <div className="rounded-lg bg-white/70 px-2 py-1.5">
-                              <span className="block text-[9px] text-slate-400">处理后 / 目标</span>
-                              <span className="font-bold text-slate-800">
-                                {formatLufs(primaryFactoryResult.loudness.afterLufs)} / {primaryFactoryResult.loudness.targetLufs.toFixed(1)}
-                              </span>
-                            </div>
-                            <div className="rounded-lg bg-white/70 px-2 py-1.5">
-                              <span className="block text-[9px] text-slate-400">实际增益</span>
-                              <span className="font-bold text-slate-800">{formatSignedDb(primaryFactoryResult.loudness.appliedGainDb)}</span>
-                            </div>
-                            <div className="rounded-lg bg-white/70 px-2 py-1.5">
-                              <span className="block text-[9px] text-slate-400">峰值上限</span>
-                              <span className="font-bold text-slate-800">{primaryFactoryResult.loudness.peakCeilingDb.toFixed(1)} dBFS</span>
-                            </div>
-                          </div>
-                          {primaryFactoryLoudnessLimited && (
-                            <p className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10px] font-semibold leading-relaxed text-amber-800">
-                              受峰值上限保护限制，处理后响度未达到目标值；试听确认后再下载，避免误用。
-                            </p>
-                          )}
-                        </div>
-                      )}
                     </div>
                   </div>
 
@@ -2724,15 +2606,6 @@ export default function AudioTools({ assistantAudioRequest = null, onAssistantTa
                                   {item.duration ? ` · ${item.duration.toFixed(1)} 秒` : ''}
                                   {item.blob ? ` · 输出 ${formatBytes(item.blob.size)}` : ''}
                                 </p>
-                                {item.loudness && (
-                                  <p className="mt-1 rounded-lg bg-white/70 px-2 py-1 text-[10px] font-semibold text-slate-600">
-                                    响度 {formatLufs(item.loudness.beforeLufs)} → {formatLufs(item.loudness.afterLufs)}
-                                    {' · '}
-                                    目标 {item.loudness.targetLufs.toFixed(1)} LUFS
-                                    {' · '}
-                                    增益 {formatSignedDb(item.loudness.appliedGainDb)}
-                                  </p>
-                                )}
                                 {item.error && <p className="mt-1 text-[10px] text-rose-600">{item.error}</p>}
                               </div>
                               {item.blob && (

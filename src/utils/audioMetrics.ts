@@ -5,6 +5,7 @@ export interface AnalyzerResult {
   duration: number;
   sampleRate: number;
   channels: number;
+  integratedLufs?: number | null;
   bpm: {
     value: number;
     confidence: Confidence;

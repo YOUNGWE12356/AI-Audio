@@ -1,4 +1,5 @@
 import { encodeWav } from './audioEncoderService';
+import { FACTORY_METER_SAMPLE_RATE } from './audioFactoryLoudness';
 
 type FactoryEncodingOptions = {
   format: 'wav' | 'mp3' | 'ogg';
@@ -6,6 +7,7 @@ type FactoryEncodingOptions = {
   bitrate: number;
   channelMode: 'mono' | 'stereo';
   signal?: AbortSignal;
+  onDecodedOutput?: (decoded: AudioBuffer) => void;
 };
 
 function peakOf(buffer: AudioBuffer) {
@@ -20,11 +22,16 @@ function peakOf(buffer: AudioBuffer) {
 }
 
 /** Decode the actual encoded file before exposing it as a successful result. */
-export async function validateFactoryAudioOutput(source: AudioBuffer, blob: Blob, signal?: AbortSignal) {
+export async function validateFactoryAudioOutput(
+  source: AudioBuffer,
+  blob: Blob,
+  signal?: AbortSignal,
+  onDecodedOutput?: (decoded: AudioBuffer) => void,
+) {
   signal?.throwIfAborted();
   if (!blob.size) throw new Error('编码结果为空，未生成可试听音频。');
   const Context = window.AudioContext || (window as any).webkitAudioContext;
-  const context = new Context();
+  const context = onDecodedOutput ? new Context({ sampleRate: FACTORY_METER_SAMPLE_RATE }) : new Context();
   try {
     const decoded = await context.decodeAudioData(await blob.arrayBuffer());
     signal?.throwIfAborted();
@@ -37,6 +44,7 @@ export async function validateFactoryAudioOutput(source: AudioBuffer, blob: Blob
     if (peakOf(source) > 1 / 32768 && outputPeak < 1e-7) {
       throw new Error('编码后音频意外变成静音，未交付该结果。请重新转换。');
     }
+    onDecodedOutput?.(decoded);
   } finally {
     await context.close();
   }
@@ -64,6 +72,6 @@ export async function encodeFactoryAudio(source: AudioBuffer, sourceName: string
     }
     output = await response.blob();
   }
-  await validateFactoryAudioOutput(source, output, options.signal);
+  await validateFactoryAudioOutput(source, output, options.signal, options.onDecodedOutput);
   return output;
 }

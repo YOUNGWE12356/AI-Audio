@@ -1,5 +1,6 @@
 import { analyzeDecodedAudio, type AnalyzerResult } from '../utils/audioMetrics';
 import { createAudioEvidence } from '../utils/audioEvidence';
+import { FACTORY_METER_SAMPLE_RATE, measureFactoryLoudness } from './audioFactoryLoudness';
 
 export async function extractLocalAudioEvidence(file: File, signal?: AbortSignal) {
   signal?.throwIfAborted();
@@ -18,10 +19,10 @@ export async function extractLocalAudioEvidence(file: File, signal?: AbortSignal
   return createAudioEvidence(result, buffer.duration);
 }
 
-export async function decodeAudioFile(file: File) {
+export async function decodeAudioFile(file: File, sampleRate?: number) {
   const arrayBuffer = await file.arrayBuffer();
   const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-  const audioCtx = new AudioContextClass();
+  const audioCtx = sampleRate ? new AudioContextClass({ sampleRate }) : new AudioContextClass();
   try {
     return await audioCtx.decodeAudioData(arrayBuffer.slice(0));
   } finally {
@@ -126,10 +127,11 @@ const requestGlobalMusicAnalysis = async (
 export async function analyzeAudioFile(file: File, options: { signal?: AbortSignal; semantic?: boolean; onStage?: (stage: string) => void } = {}): Promise<AnalyzerResult> {
   options.signal?.throwIfAborted();
   options.onStage?.('读取和解码音频');
-  const buffer = await decodeAudioFile(file);
+  const buffer = await decodeAudioFile(file, FACTORY_METER_SAMPLE_RATE);
   options.signal?.throwIfAborted();
   options.onStage?.('计算 BPM、调性和音频指标');
   const localResult = analyzeDecodedAudio(buffer, file.name);
+  localResult.integratedLufs = measureFactoryLoudness(buffer).lufs;
   options.signal?.throwIfAborted();
   if (options.semantic === false) return { ...localResult, semanticSkipped: true };
   try {
